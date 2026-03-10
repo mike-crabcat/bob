@@ -1,0 +1,117 @@
+"""HTTP routes for task management."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Response, status
+
+from cyborg.dependencies import get_task_service
+from cyborg.models import (
+    TaskCreate,
+    TaskFailureRequest,
+    TaskHistoryResponse,
+    TaskResponse,
+    TaskRetryRequest,
+    TaskStatus,
+    TaskStepCreate,
+    TaskStepResponse,
+    TaskUpdate,
+)
+from cyborg.services.task_service import TaskService
+
+
+router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
+
+
+@router.get("", response_model=list[TaskResponse])
+async def list_tasks(
+    status: TaskStatus | None = None,
+    parent_id: UUID | None = None,
+    service: TaskService = Depends(get_task_service),
+) -> list[TaskResponse]:
+    return await service.list_tasks(status=status, parent_id=str(parent_id) if parent_id else None)
+
+
+@router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
+async def create_task(
+    payload: TaskCreate,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.create_task(payload)
+
+
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task(task_id: UUID, service: TaskService = Depends(get_task_service)) -> TaskResponse:
+    return await service.get_task(str(task_id))
+
+
+@router.put("/{task_id}", response_model=TaskResponse)
+async def update_task(
+    task_id: UUID,
+    payload: TaskUpdate,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.update_task(str(task_id), payload)
+
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task(task_id: UUID, service: TaskService = Depends(get_task_service)) -> Response:
+    await service.delete_task(str(task_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{task_id}/start", response_model=TaskResponse)
+async def start_task(task_id: UUID, service: TaskService = Depends(get_task_service)) -> TaskResponse:
+    return await service.start_task(str(task_id))
+
+
+@router.post("/{task_id}/complete", response_model=TaskResponse)
+async def complete_task(task_id: UUID, service: TaskService = Depends(get_task_service)) -> TaskResponse:
+    return await service.complete_task(str(task_id))
+
+
+@router.post("/{task_id}/fail", response_model=TaskResponse)
+async def fail_task(
+    task_id: UUID,
+    payload: TaskFailureRequest,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.fail_task(str(task_id), payload)
+
+
+@router.post("/{task_id}/retry", response_model=TaskResponse)
+async def retry_task(
+    task_id: UUID,
+    payload: TaskRetryRequest,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.retry_task(str(task_id), payload)
+
+
+@router.get("/{task_id}/steps", response_model=list[TaskStepResponse])
+async def list_steps(task_id: UUID, service: TaskService = Depends(get_task_service)) -> list[TaskStepResponse]:
+    return await service.list_steps(str(task_id))
+
+
+@router.post("/{task_id}/steps", response_model=TaskStepResponse, status_code=status.HTTP_201_CREATED)
+async def upsert_step(
+    task_id: UUID,
+    payload: TaskStepCreate,
+    service: TaskService = Depends(get_task_service),
+) -> TaskStepResponse:
+    return await service.upsert_step(str(task_id), payload)
+
+
+@router.post("/{task_id}/subtasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
+async def create_subtask(
+    task_id: UUID,
+    payload: TaskCreate,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.create_subtask(str(task_id), payload)
+
+
+@router.get("/{task_id}/history", response_model=list[TaskHistoryResponse])
+async def list_history(task_id: UUID, service: TaskService = Depends(get_task_service)) -> list[TaskHistoryResponse]:
+    return await service.list_history(str(task_id))
