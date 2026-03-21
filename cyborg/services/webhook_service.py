@@ -59,7 +59,7 @@ class WebhookConfig:
 
 class WebhookPayload:
     """Standard webhook payload format."""
-    
+
     def __init__(
         self,
         event: str,
@@ -69,6 +69,7 @@ class WebhookPayload:
         result_summary: str | None = None,
         session_key: str | None = None,
         metadata: dict[str, Any] | None = None,
+        cyborg_service_url: str | None = None,
     ) -> None:
         self.event = event
         self.project_id = project_id
@@ -77,11 +78,12 @@ class WebhookPayload:
         self.result_summary = result_summary
         self.session_key = session_key
         self.metadata = metadata or {}
+        self.cyborg_service_url = cyborg_service_url
         self.timestamp = utcnow().isoformat()
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert payload to dictionary."""
-        return {
+        payload = {
             "event": self.event,
             "timestamp": self.timestamp,
             "project_id": self.project_id,
@@ -91,14 +93,31 @@ class WebhookPayload:
             "session_key": self.session_key,
             "metadata": self.metadata,
         }
+        # Include Cyborg service URL in metadata for callbacks
+        if self.cyborg_service_url:
+            payload["cyborg_service_url"] = self.cyborg_service_url
+        return payload
 
 
 class WebhookService(BaseService):
     """Service for managing and delivering webhooks."""
     
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, cyborg_service_url: str | None = None) -> None:
         super().__init__(db)
+        self._cyborg_service_url = cyborg_service_url
         self._http_client: Any | None = None
+
+    @property
+    def cyborg_service_url(self) -> str | None:
+        """Get the Cyborg service URL, falling back to settings if not provided."""
+        if self._cyborg_service_url is not None:
+            return self._cyborg_service_url
+        # Try to get from database settings
+        from cyborg.config import Settings
+        settings = getattr(self.db, "settings", None)
+        if isinstance(settings, Settings):
+            return settings.resolved_public_url
+        return None
     
     async def _get_http_client(self) -> Any:
         """Lazy-load HTTP client."""
@@ -253,11 +272,14 @@ class WebhookService(BaseService):
         result_summary: str | None = None,
         session_key: str | None = None,
         metadata: dict[str, Any] | None = None,
+        cyborg_service_url: str | None = None,
     ) -> list[str]:
         """Trigger a webhook event.
-        
+
         Returns list of delivery IDs created.
         """
+        # Use instance URL if not explicitly provided
+        resolved_url = cyborg_service_url or self.cyborg_service_url
         payload = WebhookPayload(
             event=event,
             project_id=project_id,
@@ -266,6 +288,7 @@ class WebhookService(BaseService):
             result_summary=result_summary,
             session_key=session_key,
             metadata=metadata,
+            cyborg_service_url=resolved_url,
         )
         
         # Get all active configs that subscribe to this event

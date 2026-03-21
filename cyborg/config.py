@@ -174,6 +174,7 @@ class Settings:
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
     notification_dispatch_interval_seconds: float = 60.0
+    public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
 
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.expanduser()
@@ -182,6 +183,13 @@ class Settings:
             self.db_path = self.data_dir / "cyborg.db"
         else:
             self.db_path = self.db_path.expanduser()
+
+    @property
+    def resolved_public_url(self) -> str:
+        """Get the public URL, falling back to host:port if not set."""
+        if self.public_url:
+            return self.public_url.rstrip("/")
+        return f"http://{self.host}:{self.port}"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -240,6 +248,7 @@ class Settings:
             timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "15")),
             session_key_prefix=os.getenv("CYBORG_OPENCLAW_SESSION_KEY_PREFIX") or None,
         )
+        public_url = os.getenv("CYBORG_PUBLIC_URL", "")
 
         return cls(
             host=host,
@@ -252,6 +261,7 @@ class Settings:
             webhooks=webhooks,
             openclaw=openclaw,
             notification_dispatch_interval_seconds=notification_dispatch_interval_seconds,
+            public_url=public_url,
         )
 
     def ensure_directories(self) -> None:

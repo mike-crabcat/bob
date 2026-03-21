@@ -689,6 +689,34 @@ curl http://127.0.0.1:8420/openclaw/context.json
 uv run pytest
 ```
 
+The default suite is Cyborg-side and does not require a live OpenClaw model or channel transport.
+
+OpenClaw live acceptance tests are separate and opt-in. They exercise a real OpenClaw gateway/model against Cyborg's reasoning prompts and synthetic task-assignment sessions without using real WhatsApp delivery.
+
+Required environment:
+
+- `OPENCLAW_ACCEPTANCE=1` or `--openclaw-live`
+- `OPENCLAW_ACCEPTANCE_GATEWAY_URL`
+- `OPENCLAW_ACCEPTANCE_GATEWAY_TOKEN`
+- optional: `OPENCLAW_ACCEPTANCE_AGENT_ID`
+
+Fallback environment variables:
+
+- `CYBORG_OPENCLAW_GATEWAY_URL`
+- `CYBORG_OPENCLAW_TOKEN`
+- `CYBORG_OPENCLAW_AGENT_ID`
+
+Run the live acceptance suite:
+
+```bash
+uv run pytest tests/openclaw_acceptance -m openclaw_live --openclaw-live -q
+```
+
+Notes:
+
+- These tests use synthetic OpenClaw sessions and `chat.send` / `chat.history`. They do not verify real WhatsApp or group transport.
+- Failures write artifacts under `.pytest_cache/openclaw_acceptance/` for prompt, gateway, and history debugging.
+
 ## Data Storage
 
 - Database: `~/.local/share/cyborg/cyborg.db`

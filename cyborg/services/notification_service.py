@@ -41,7 +41,13 @@ class NotificationService(BaseService):
 
     def _get_openclaw_service(self) -> OpenClawHookService:
         if self._openclaw_service is None:
-            self._openclaw_service = OpenClawHookService(self.db)
+            # Get the public URL from settings if available
+            from cyborg.config import Settings
+            settings = getattr(self.db, "settings", None)
+            public_url = ""
+            if isinstance(settings, Settings):
+                public_url = settings.resolved_public_url
+            self._openclaw_service = OpenClawHookService(self.db, cyborg_service_url=public_url)
         return self._openclaw_service
 
     async def list_notifications(

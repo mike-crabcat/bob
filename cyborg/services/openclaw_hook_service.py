@@ -27,9 +27,15 @@ class OpenClawHookService(BaseService):
     GATEWAY_SCOPES = ["operator.write"]
     BOOTSTRAP_TIMEOUT_SECONDS = 60.0
 
-    def __init__(self, db: Database, routing_service: SessionRouteService | None = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        routing_service: SessionRouteService | None = None,
+        cyborg_service_url: str | None = None,
+    ) -> None:
         super().__init__(db)
         self._routing_service = routing_service
+        self._cyborg_service_url = cyborg_service_url
 
     @property
     def routing_service(self) -> SessionRouteService:
@@ -43,6 +49,11 @@ class OpenClawHookService(BaseService):
         if isinstance(current, Settings):
             return current.openclaw
         return Settings.from_env().openclaw
+
+    @property
+    def cyborg_service_url(self) -> str | None:
+        """Return the Cyborg service URL for callbacks."""
+        return self._cyborg_service_url
 
     def is_configured(self) -> bool:
         return self.settings.enabled
@@ -383,7 +394,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "minimal",
+            "thinking": "off",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -406,6 +417,13 @@ class OpenClawHookService(BaseService):
                 f"Notification ID: {notification['id']}",
             ]
         )
+        if self.cyborg_service_url:
+            parts.extend(
+                [
+                    "",
+                    f"Cyborg Service: {self.cyborg_service_url}",
+                ]
+            )
         return "\n".join(part for part in parts if part is not None)
 
     def _render_task_assignment_prompt(
@@ -471,8 +489,25 @@ class OpenClawHookService(BaseService):
                 "- Do not mention Cyborg, hidden setup, task IDs, notification IDs, or internal routing.",
                 "- Treat the next user reply in this session as work on this task.",
                 "- If the answer is incomplete, ask one focused follow-up at a time.",
-                '- Once the task is answered, complete the Cyborg task with the exact answer using: cyborg task complete <task-id> --result-summary "<answer>".',
-                '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/complete with JSON {"result_summary":"<answer>"}.',
+            ]
+        )
+        # Include API completion instructions with service URL
+        if self.cyborg_service_url:
+            lines.extend(
+                [
+                    f'- Once the task is answered, complete the task by calling: cyborg task complete <task-id> --result-summary "<answer>"',
+                    f'- Or use the HTTP API: POST {self.cyborg_service_url}/api/v1/tasks/<task-id>/complete with JSON {{"result_summary":"<answer>"}}',
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    '- Once the task is answered, complete the Cyborg task with the exact answer using: cyborg task complete <task-id> --result-summary "<answer>".',
+                    '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/complete with JSON {"result_summary":"<answer>"}.',
+                ]
+            )
+        lines.extend(
+            [
                 "- Keep the tone natural for the channel and recipient.",
             ]
         )

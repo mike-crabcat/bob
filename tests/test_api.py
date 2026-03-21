@@ -1026,7 +1026,7 @@ def test_task_assignment_notifications_dispatch_via_derived_target_dm_session(tm
         assert assignment_params["to"] == "+61400111222"
         assert assignment_params["sessionKey"] == "agent:main:whatsapp:direct:+61400111222"
         assert assignment_params["idempotencyKey"] == assignment["id"]
-        assert assignment_params["thinking"] == "minimal"
+        assert assignment_params["thinking"] == "off"
         assert "You are responsible for handling this task in the current session." in str(assignment_params["message"])
         assert "Send one concise natural message now" in str(assignment_params["message"])
 

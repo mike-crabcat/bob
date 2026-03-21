@@ -40,6 +40,7 @@ class ProjectExecutionService(BaseService):
         self._task_service = task_service
         self._webhook_service = webhook_service
         self._project_spec_service: ProjectSpecService | None = None
+        self._reasoning_service = None
 
     @property
     def task_service(self) -> Any:
@@ -61,6 +62,15 @@ class ProjectExecutionService(BaseService):
         if self._project_spec_service is None:
             self._project_spec_service = ProjectSpecService(self.db)
         return self._project_spec_service
+
+    @property
+    def reasoning_service(self) -> Any:
+        """Lazy-load OpenClaw reasoning service."""
+        if self._reasoning_service is None:
+            from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+
+            self._reasoning_service = OpenClawReasoningService(self.db)
+        return self._reasoning_service
 
     async def _sync_notifications(self, project_id: str, *, immediate: bool = False) -> None:
         await NotificationService(self.db).sync_project_state(project_id, immediate=immediate)
@@ -139,8 +149,9 @@ class ProjectExecutionService(BaseService):
         return await self._build_project_response(await self._get_project_row(project_id))
 
     async def evaluate_and_complete(self, project_id: str) -> ProjectResponse | None:
-        """Evaluate success criteria and auto-complete project if all criteria met.
-        
+        """
+        Evaluate success criteria using OpenClaw reasoning and auto-complete project if all criteria met.
+
         Returns the completed project if auto-completed, None otherwise.
         """
         project = await self._get_project_row(project_id)
@@ -148,7 +159,7 @@ class ProjectExecutionService(BaseService):
             return None
 
         success_criteria = self._parse_success_criteria(project.get("success_criteria"))
-        
+
         if not success_criteria:
             # No criteria defined, can't auto-complete
             return None
@@ -156,17 +167,30 @@ class ProjectExecutionService(BaseService):
         if await self._project_has_open_tasks(project_id):
             return None
 
-        context, _met_criteria, unmet_criteria = await self._evaluate_criteria(project_id, success_criteria)
+        # Use OpenClaw reasoning service for semantic evaluation
+        try:
+            evaluation = await self.reasoning_service.evaluate_success_criteria(project_id)
+        except Exception as e:
+            # Log error but fall back to rule-based evaluation
+            import logging
+            logging.error(f"OpenClaw evaluation failed for project {project_id}, falling back to rule-based: {e}")
+            context, _met_criteria, unmet_criteria = await self._evaluate_criteria(project_id, success_criteria)
+            evaluation = {
+                "all_met": len(unmet_criteria) == 0,
+                "met_criteria": [c.description for c in _met_criteria],
+                "unmet_criteria": [c.description for c in unmet_criteria],
+                "reasoning": "Rule-based evaluation (OpenClaw unavailable)",
+            }
 
-        if not unmet_criteria:
+        if evaluation.get("all_met"):
             # Generate conclusion
-            conclusion = await self._generate_conclusion(project_id, project, success_criteria)
-            
+            conclusion = await self._generate_conclusion_from_evaluation(project_id, project, evaluation)
+
             # Close the project
             now = utcnow().isoformat()
             await self.db.execute(
                 """
-                UPDATE projects 
+                UPDATE projects
                 SET state = ?, closed_at = ?, conclusion = ?
                 WHERE id = ? AND deleted_at IS NULL
                 """,
@@ -177,7 +201,11 @@ class ProjectExecutionService(BaseService):
             await self._add_journal_entry(
                 project_id,
                 JournalEntryType.MILESTONE,
-                f"Project auto-completed. All success criteria met.\n\n{conclusion}",
+                f"Project auto-completed based on OpenClaw evaluation.\n\n{evaluation.get('reasoning', '')}\n\n{conclusion}",
+                {
+                    "evaluation": evaluation,
+                    "all_met_criteria": evaluation.get("met_criteria", []),
+                },
             )
 
             await self._sync_notifications(project_id, immediate=False)
@@ -187,7 +215,11 @@ class ProjectExecutionService(BaseService):
             )
             return await self._build_project_response(await self._get_project_row(project_id))
 
-        await self._generate_follow_up_tasks(project_id, project, unmet_criteria, context)
+        # Generate follow-up tasks for unmet criteria
+        unmet = evaluation.get("unmet_criteria", [])
+        if unmet:
+            await self._generate_follow_up_tasks_llm(project_id, project, unmet, evaluation)
+
         return None
 
     async def _get_project_ids_for_task(self, task_id: str) -> list[str]:
@@ -338,12 +370,19 @@ class ProjectExecutionService(BaseService):
             ),
         )
 
+        # Convert stats to integers (SQLite returns strings)
+        total = int(task_stats["total"]) if task_stats and task_stats["total"] else 0
+        completed = int(task_stats["completed"]) if task_stats and task_stats["completed"] else 0
+        failed = int(task_stats["failed"]) if task_stats and task_stats["failed"] else 0
+        blocked = int(task_stats["blocked"]) if task_stats and task_stats["blocked"] else 0
+        open_count = int(task_stats["open_count"]) if task_stats and task_stats["open_count"] else 0
+
         context = {
-            "task_count": task_stats["total"] if task_stats else 0,
-            "completed_task_count": task_stats["completed"] if task_stats else 0,
-            "failed_task_count": task_stats["failed"] if task_stats else 0,
-            "blocked_task_count": task_stats["blocked"] if task_stats else 0,
-            "open_task_count": task_stats["open_count"] if task_stats else 0,
+            "task_count": total,
+            "completed_task_count": completed,
+            "failed_task_count": failed,
+            "blocked_task_count": blocked,
+            "open_task_count": open_count,
             "project_state": project["state"],
         }
 
@@ -568,6 +607,154 @@ class ProjectExecutionService(BaseService):
                 },
             )
         return created_task_ids
+
+    async def _generate_conclusion_from_evaluation(
+        self,
+        project_id: str,
+        project: dict[str, Any],
+        evaluation: dict[str, Any],
+    ) -> str:
+        """Generate project conclusion from OpenClaw evaluation."""
+        lines = [
+            f"## Project Conclusion: {project['title']}",
+            "",
+            f"**Aim:** {project.get('aim', 'N/A')}",
+            "",
+            "**Evaluation:**",
+            evaluation.get('reasoning', 'Project completed successfully.'),
+            "",
+            "**Success Criteria Met:**",
+        ]
+
+        for criterion in evaluation.get("met_criteria", []):
+            lines.append(f"  ✅ {criterion}")
+
+        lines.extend([
+            "",
+            "**Outcome:**",
+            f"{project.get('aim', 'The project')} has been successfully completed.",
+            "",
+        ])
+
+        # Get completed tasks for summary
+        tasks = await self.db.fetch_all(
+            """
+            SELECT t.title, t.completed_at
+            FROM tasks AS t
+            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
+            WHERE pt.project_id = ? AND t.status = ? AND t.deleted_at IS NULL
+            ORDER BY t.completed_at ASC
+            """,
+            (project_id, TaskStatus.COMPLETED.value),
+        )
+
+        if tasks:
+            lines.append("**Accomplishments:**")
+            for task in tasks:
+                lines.append(f"  - {task['title']}")
+            lines.append("")
+
+        # Get journal milestones
+        milestones = await self.db.fetch_all(
+            """
+            SELECT content, created_at
+            FROM project_journal_entries
+            WHERE project_id = ? AND entry_type = ?
+            ORDER BY created_at ASC
+            """,
+            (project_id, JournalEntryType.MILESTONE.value),
+        )
+
+        if milestones:
+            lines.append("**Key Milestones:**")
+            for milestone in milestones:
+                lines.append(f"  - {milestone['content'][:100]}...")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    async def _generate_follow_up_tasks_llm(
+        self,
+        project_id: str,
+        project: dict[str, Any],
+        unmet_criteria: list[str],
+        evaluation: dict[str, Any],
+    ) -> None:
+        """
+        Generate follow-up tasks using OpenClaw reasoning.
+
+        This replaces the template-based approach with LLM-generated tasks.
+        """
+        try:
+            # Use reasoning service to generate contextual follow-up tasks
+            task_suggestions = await self.reasoning_service.generate_follow_up_tasks(
+                project_id,
+                unmet_criteria,
+            )
+
+            if not task_suggestions:
+                # Fallback to template-based generation
+                logging.warning("OpenClaw generated no follow-up tasks for project %s", project_id)
+                return
+
+            project_metadata = json_loads(project.get("metadata"), {})
+            created_task_ids: list[str] = []
+
+            for task_data in task_suggestions:
+                # Create task with LLM-generated content
+                task_payload = TaskCreate(
+                    title=task_data.get("title", "Follow-up task")[:200],
+                    description=task_data.get("description", ""),
+                    plan=task_data.get("plan", ""),
+                    priority=TaskPriority.HIGH,
+                    project_ids=[project_id],
+                    metadata={
+                        **project_metadata,
+                        "auto_created_by_project": True,
+                        "autonomy_reason": "unmet_success_criteria",
+                        "autonomy_method": "llm_generated",
+                        "evaluation": evaluation,
+                    },
+                )
+
+                task = await self.task_service.create_task(task_payload)
+                created_task_ids.append(str(task.id))
+
+            if created_task_ids:
+                await self._add_journal_entry(
+                    project_id,
+                    JournalEntryType.DECISION,
+                    f"Generated {len(created_task_ids)} LLM-based follow-up tasks for unmet criteria:\n" +
+                    "\n".join(f"  - {c}" for c in unmet_criteria),
+                    {
+                        "autonomy_action": "llm_follow_up_generated",
+                        "created_task_ids": created_task_ids,
+                        "unmet_criteria": unmet_criteria,
+                        "evaluation": evaluation,
+                    },
+                )
+
+        except Exception as e:
+            # Log error and fall back to template-based
+            import logging
+            logging.error(f"LLM follow-up generation failed for project {project_id}: {e}")
+
+            # Fall back to template-based generation
+            # Convert criteria strings to SuccessCriterion objects
+            success_criteria = self._parse_success_criteria(project.get("success_criteria"))
+            unmet_criterion_objects = [
+                c for c in success_criteria
+                if c.description in unmet_criteria or c.check in unmet_criteria
+            ]
+
+            if unmet_criterion_objects:
+                context, _met_criteria, _unmet_criteria = await self._evaluate_criteria(project_id, success_criteria)
+                await self._generate_follow_up_tasks(
+                    project_id,
+                    project,
+                    unmet_criterion_objects,
+                    context,
+                )
 
     def _build_follow_up_task_title(self, criterion: SuccessCriterion) -> str:
         return f"Advance project criterion: {criterion.description}"[:200]
