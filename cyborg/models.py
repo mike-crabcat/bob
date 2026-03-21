@@ -71,13 +71,15 @@ def _validate_cron_token(token: str, lower: int, upper: int) -> None:
 class CyborgModel(BaseModel):
     """Shared model configuration."""
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True, use_enum_values=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 class TaskStatus(StrEnum):
+    PLANNING = "planning"
     PENDING = "pending"
     ACTIVE = "active"
     PAUSED = "paused"
+    BLOCKED = "blocked"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -87,6 +89,16 @@ class TaskPriority(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+class TaskTargetSessionKind(StrEnum):
+    GROUP = "group"
+    DM = "dm"
+
+
+class SessionRouteKind(StrEnum):
+    GROUP = "group"
+    DM = "dm"
 
 
 class TaskStepStatus(StrEnum):
@@ -103,6 +115,58 @@ class ProjectState(StrEnum):
     CLOSED = "closed"
 
 
+class ProjectSpecStatus(StrEnum):
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class PlanStep(CyborgModel):
+    """A single step in a project execution plan."""
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1)
+    criteria: str = Field(min_length=1, description="Criteria to determine if this step is satisfied")
+    order: int = Field(ge=0, description="Execution order (0-based)")
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("title must not be blank")
+        return stripped
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("description must not be blank")
+        return stripped
+
+
+class SuccessCriterion(CyborgModel):
+    """A criterion for determining if a project's aim has been achieved."""
+    check: str = Field(min_length=1, description="Expression or condition to evaluate (e.g., 'endpoint_count > 10')")
+    description: str = Field(min_length=1, description="Human-readable description of what this checks")
+
+    @field_validator("check")
+    @classmethod
+    def check_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("check must not be blank")
+        return stripped
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("description must not be blank")
+        return stripped
+
+
 class JournalEntryType(StrEnum):
     NOTE = "note"
     MILESTONE = "milestone"
@@ -115,6 +179,33 @@ class EventStatus(StrEnum):
     TENTATIVE = "tentative"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
+
+
+class NotificationEntityType(StrEnum):
+    TASK = "task"
+    PROJECT = "project"
+    EVENT = "event"
+
+
+class NotificationType(StrEnum):
+    NEEDS_INPUT = "needs_input"
+    EVENT_REMINDER = "event_reminder"
+    TASK_ASSIGNMENT = "task_assignment"
+    TASK_RESULT = "task_result"
+    PROJECT_RESULT = "project_result"
+
+
+class NotificationStatus(StrEnum):
+    PENDING = "pending"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED = "resolved"
+
+
+class NotificationDeliveryStatus(StrEnum):
+    PENDING = "pending"
+    SENDING = "sending"
+    DELIVERED = "delivered"
+    FAILED = "failed"
 
 
 class RecipientType(StrEnum):
@@ -154,13 +245,67 @@ class RetryConfig(CyborgModel):
         return self
 
 
-class EntityRef(CyborgModel):
+class TaskTargetSession(CyborgModel):
+    channel: Literal["whatsapp"]
+    kind: TaskTargetSessionKind
+    session_key: str | None = None
+    chat_id: str | None = None
+    contact_id: UUID | None = None
+
+    @field_validator("session_key", "chat_id")
+    @classmethod
+    def optional_strings_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("target session values must not be blank")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "TaskTargetSession":
+        if self.kind == TaskTargetSessionKind.GROUP:
+            if self.session_key is None and self.chat_id is None:
+                raise ValueError("group target_session requires session_key or chat_id")
+            if self.contact_id is not None:
+                raise ValueError("group target_session cannot include contact_id")
+        if self.kind == TaskTargetSessionKind.DM:
+            if self.contact_id is None:
+                raise ValueError("dm target_session requires contact_id")
+            if self.session_key is not None:
+                raise ValueError("dm target_session cannot include session_key")
+            if self.chat_id is not None:
+                raise ValueError("dm target_session cannot include chat_id")
+        return self
+
+
+def _normalize_task_metadata(value: MetadataDict | None) -> MetadataDict | None:
+    if value is None:
+        return value
+    normalized = dict(value)
+    target_session = normalized.get("target_session")
+    if target_session is None:
+        return normalized
+    if not isinstance(target_session, dict):
+        raise ValueError("metadata.target_session must be an object")
+    normalized["target_session"] = TaskTargetSession.model_validate(target_session).model_dump(
+        mode="json",
+        exclude_none=True,
+    )
+    return normalized
+
+
+class EntityRef(BaseModel):
     """Common identity model."""
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     id: UUID
 
 
-class SoftDeleteFields(CyborgModel):
+class SoftDeleteFields(BaseModel):
+    """Soft delete tracking fields."""
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
     deleted_at: datetime | None = None
 
 
@@ -169,7 +314,7 @@ class TaskFields(CyborgModel):
     description: str | None = None
     requested_by: str | None = Field(default=None, max_length=200)
     plan: str | None = None
-    status: TaskStatus = TaskStatus.PENDING
+    status: TaskStatus = TaskStatus.PLANNING
     priority: TaskPriority = TaskPriority.MEDIUM
     parent_id: UUID | None = None
     retry_config: RetryConfig | None = None
@@ -177,6 +322,8 @@ class TaskFields(CyborgModel):
     recurrence_rule: str | None = None
     next_run_at: datetime | None = None
     metadata: MetadataDict = Field(default_factory=dict)
+    blocked_reason: str | None = None
+    blocked_resume_instructions: str | None = None
 
     @field_validator("title")
     @classmethod
@@ -186,12 +333,27 @@ class TaskFields(CyborgModel):
             raise ValueError("title must not be blank")
         return stripped
 
+    @field_validator("plan")
+    @classmethod
+    def plan_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("plan must not be blank")
+        return stripped
+
     @field_validator("recurrence_rule")
     @classmethod
     def validate_recurrence_rule(cls, value: str | None) -> str | None:
         if value is None:
             return value
         return validate_cron_expression(value)
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, value: MetadataDict) -> MetadataDict:
+        return _normalize_task_metadata(value) or {}
 
     @model_validator(mode="after")
     def validate_recurrence(self) -> "TaskFields":
@@ -203,6 +365,7 @@ class TaskFields(CyborgModel):
 
 
 class TaskCreate(TaskFields):
+    plan: str = Field(min_length=1)
     project_ids: list[UUID] = Field(default_factory=list)
 
 
@@ -220,6 +383,8 @@ class TaskUpdate(CyborgModel):
     next_run_at: datetime | None = None
     metadata: MetadataDict | None = None
     project_ids: list[UUID] | None = None
+    blocked_reason: str | None = None
+    blocked_resume_instructions: str | None = None
 
     @field_validator("title")
     @classmethod
@@ -238,13 +403,24 @@ class TaskUpdate(CyborgModel):
             return value
         return validate_cron_expression(value)
 
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, value: MetadataDict | None) -> MetadataDict | None:
+        return _normalize_task_metadata(value)
+
 
 class TaskResponse(TaskFields, EntityRef, SoftDeleteFields):
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    result: str | None = None
     project_ids: list[UUID] = Field(default_factory=list)
+    blocked_at: datetime | None = None
+    current_plan_id: UUID | None = None
+    notification_count: int = 0
+    last_notification_at: datetime | None = None
+    needs_input_since: datetime | None = None
 
 
 class TaskStepFields(CyborgModel):
@@ -292,16 +468,145 @@ class TaskFailureRequest(CyborgModel):
     result: str | None = None
 
 
+class TaskBlockRequest(CyborgModel):
+    """Request to block a task waiting for user input.
+
+    Both reason and resume_instructions are required to ensure the task can be
+    resumed without relying on conversational context.
+    """
+    reason: str = Field(min_length=1, description="Why the task is blocked")
+    resume_instructions: str = Field(min_length=1, description="Full instructions on how to resume this task when unblocked")
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reason must not be blank")
+        return stripped
+
+    @field_validator("resume_instructions")
+    @classmethod
+    def resume_instructions_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("resume_instructions must not be blank")
+        return stripped
+
+
+class TaskUnblockRequest(CyborgModel):
+    """Request to unblock a task and resume work."""
+    notes: str | None = Field(default=None, description="Optional notes about why the task is being unblocked")
+
+
 class TaskRetryRequest(CyborgModel):
     details: MetadataDict = Field(default_factory=dict)
+
+
+# Plan versioning models
+
+
+class PlanStatus(StrEnum):
+    DRAFT = "draft"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class PlanFields(CyborgModel):
+    """Base fields for plan versions."""
+    task_id: UUID
+    version_number: int = Field(ge=1)
+    content: str = Field(min_length=1)
+    status: PlanStatus = PlanStatus.DRAFT
+    feedback: str | None = None
+    is_current: bool = False
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("content must not be blank")
+        return stripped
+
+
+class PlanCreate(CyborgModel):
+    """Request to create a new plan version."""
+    content: str = Field(min_length=1, description="The plan content")
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("content must not be blank")
+        return stripped
+
+
+class PlanSubmitRequest(CyborgModel):
+    """Request to submit a plan for approval."""
+    content: str = Field(min_length=1, description="The plan content to submit")
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("content must not be blank")
+        return stripped
+
+
+class PlanApproveRequest(CyborgModel):
+    """Request to approve a plan."""
+    approver: str = Field(min_length=1, description="Name of the person approving the plan")
+
+    @field_validator("approver")
+    @classmethod
+    def approver_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("approver must not be blank")
+        return stripped
+
+
+class PlanRejectRequest(CyborgModel):
+    """Request to reject a plan with feedback."""
+    feedback: str = Field(min_length=1, description="Reason for rejection")
+
+    @field_validator("feedback")
+    @classmethod
+    def feedback_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("feedback must not be blank")
+        return stripped
+
+
+class PlanResponse(PlanFields, EntityRef):
+    """Response model for a plan version."""
+    created_at: datetime
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+
+
+class PlanListResponse(CyborgModel):
+    """Response for listing plans."""
+    task_id: UUID
+    plans: list[PlanResponse]
+    current_plan_id: UUID | None = None
 
 
 class ProjectFields(CyborgModel):
     title: str = Field(min_length=1, max_length=200)
     description: str | None = None
     aim: str | None = None
+    method: str | None = None
     state: ProjectState = ProjectState.PLANNING
     conclusion: str | None = None
+    plan: list[PlanStep] = Field(default_factory=list)
+    success_criteria: list[SuccessCriterion] = Field(default_factory=list)
+    auto_execute: bool = Field(default=False, description="Whether to auto-execute when project becomes active")
 
     @field_validator("title")
     @classmethod
@@ -312,17 +617,40 @@ class ProjectFields(CyborgModel):
         return stripped
 
 
-class ProjectCreate(ProjectFields):
+class ProjectCreate(CyborgModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    aim: str | None = None
+    method: str | None = None
+    state: ProjectState = ProjectState.PLANNING
+    conclusion: str | None = None
+    plan: list[PlanStep] = Field(default_factory=list)
+    success_criteria: list[SuccessCriterion] = Field(default_factory=list)
+    auto_execute: bool = Field(default=False)
     task_ids: list[UUID] = Field(default_factory=list)
+    metadata: MetadataDict = Field(default_factory=dict)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("title must not be blank")
+        return stripped
 
 
 class ProjectUpdate(CyborgModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     aim: str | None = None
+    method: str | None = None
     state: ProjectState | None = None
     conclusion: str | None = None
+    plan: list[PlanStep] | None = None
+    success_criteria: list[SuccessCriterion] | None = None
+    auto_execute: bool | None = None
     task_ids: list[UUID] | None = None
+    metadata: MetadataDict | None = None
 
     @field_validator("title")
     @classmethod
@@ -335,12 +663,93 @@ class ProjectUpdate(CyborgModel):
         return stripped
 
 
-class ProjectResponse(ProjectFields, EntityRef, SoftDeleteFields):
+class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
+    title: str
+    description: str | None = None
+    aim: str | None = None
+    method: str | None = None
+    state: ProjectState
+    conclusion: str | None = None
+    plan: list[PlanStep] = Field(default_factory=list)
+    success_criteria: list[SuccessCriterion] = Field(default_factory=list)
+    auto_execute: bool = False
+    subagent_session_key: str | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+    blocked_reason: str | None = None
+    blocked_resume_instructions: str | None = None
     created_at: datetime
     started_at: datetime | None = None
     paused_at: datetime | None = None
     closed_at: datetime | None = None
     task_ids: list[UUID] = Field(default_factory=list)
+    current_spec_id: UUID | None = None
+    latest_spec_id: UUID | None = None
+    latest_spec_status: ProjectSpecStatus | None = None
+    notification_count: int = 0
+    last_notification_at: datetime | None = None
+    needs_input_since: datetime | None = None
+
+
+class ProjectSpecFields(CyborgModel):
+    aim: str = Field(min_length=1)
+    method: str = Field(min_length=1)
+    plan: list[PlanStep] = Field(default_factory=list)
+    success_criteria: list[SuccessCriterion] = Field(min_length=1)
+
+    @field_validator("aim", "method")
+    @classmethod
+    def project_spec_text_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+
+class ProjectSpecSubmitRequest(ProjectSpecFields):
+    pass
+
+
+class ProjectSpecApproveRequest(CyborgModel):
+    approver: str = Field(min_length=1, max_length=200)
+
+    @field_validator("approver")
+    @classmethod
+    def approver_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("approver must not be blank")
+        return stripped
+
+
+class ProjectSpecRejectRequest(CyborgModel):
+    feedback: str = Field(min_length=1)
+
+    @field_validator("feedback")
+    @classmethod
+    def feedback_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("feedback must not be blank")
+        return stripped
+
+
+class ProjectSpecResponse(ProjectSpecFields, EntityRef):
+    project_id: UUID
+    version_number: int = Field(ge=1)
+    status: ProjectSpecStatus
+    feedback: str | None = None
+    created_at: datetime
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+    is_current: bool = False
+
+
+class ProjectSpecListResponse(CyborgModel):
+    project_id: UUID
+    specs: list[ProjectSpecResponse]
+    current_spec_id: UUID | None = None
+    latest_spec_id: UUID | None = None
+    latest_spec_status: ProjectSpecStatus | None = None
 
 
 class ProjectCloseRequest(CyborgModel):
@@ -375,6 +784,7 @@ class CalendarFields(CyborgModel):
     description: str | None = None
     color: str | None = None
     is_default: bool = False
+    metadata: MetadataDict = Field(default_factory=dict)
 
     @field_validator("name")
     @classmethod
@@ -403,6 +813,7 @@ class CalendarUpdate(CyborgModel):
     description: str | None = None
     color: str | None = None
     is_default: bool | None = None
+    metadata: MetadataDict | None = None
 
     @field_validator("name")
     @classmethod
@@ -545,6 +956,8 @@ class TaskContextItem(CyborgModel):
     status: TaskStatus
     priority: TaskPriority
     updated_at: datetime
+    parent_project_id: UUID | None = None
+    parent_project_title: str | None = None
 
 
 class ProjectContextItem(CyborgModel):
@@ -587,6 +1000,179 @@ class ContextProjectsResponse(CyborgModel):
 class ContextCalendarResponse(CyborgModel):
     generated_at: datetime
     events: list[EventContextItem]
+
+
+# Contact models
+
+
+class ContactFields(CyborgModel):
+    name: str = Field(min_length=1, max_length=255)
+    phone_number: str = Field(min_length=1, max_length=50)
+    email: str | None = Field(default=None, max_length=255)
+    whatsapp_groups: list[str] = Field(default_factory=list)
+    metadata: MetadataDict = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+    @field_validator("phone_number")
+    @classmethod
+    def phone_number_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("phone_number must not be blank")
+        return stripped
+
+
+class ContactCreate(ContactFields):
+    pass
+
+
+class ContactUpdate(CyborgModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    phone_number: str | None = Field(default=None, min_length=1, max_length=50)
+    email: str | None = Field(default=None, max_length=255)
+    whatsapp_groups: list[str] | None = None
+    metadata: MetadataDict | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+    @field_validator("phone_number")
+    @classmethod
+    def phone_number_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("phone_number must not be blank")
+        return stripped
+
+
+class ContactResponse(ContactFields, EntityRef, SoftDeleteFields):
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionRouteFields(CyborgModel):
+    channel: Literal["whatsapp"]
+    session_key: str = Field(min_length=1, max_length=255)
+    kind: SessionRouteKind
+    chat_id: str | None = None
+    contact_id: UUID | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+
+    @field_validator("session_key", "chat_id")
+    @classmethod
+    def route_strings_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("route values must not be blank")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_route_shape(self) -> "SessionRouteFields":
+        if self.kind == SessionRouteKind.GROUP:
+            if self.chat_id is None:
+                raise ValueError("group session routes require chat_id")
+            if self.contact_id is not None:
+                raise ValueError("group session routes cannot include contact_id")
+        if self.kind == SessionRouteKind.DM:
+            if self.contact_id is None:
+                raise ValueError("dm session routes require contact_id")
+            if self.chat_id is not None:
+                raise ValueError("dm session routes cannot include chat_id")
+        return self
+
+
+class SessionRouteCreate(SessionRouteFields):
+    pass
+
+
+class SessionRouteUpdate(CyborgModel):
+    chat_id: str | None = None
+    contact_id: UUID | None = None
+    metadata: MetadataDict | None = None
+    is_active: bool | None = None
+
+    @field_validator("chat_id")
+    @classmethod
+    def update_chat_id_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("chat_id must not be blank")
+        return stripped
+
+
+class SessionRouteResponse(SessionRouteFields, EntityRef, SoftDeleteFields):
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResolvedSessionRoute(CyborgModel):
+    channel: Literal["whatsapp"]
+    kind: SessionRouteKind
+    to: str
+    session_key: str | None = None
+    chat_id: str | None = None
+    contact_id: UUID | None = None
+    contact_name: str | None = None
+    phone_number: str | None = None
+    route_source: str | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+
+
+class NotificationResponse(CyborgModel, EntityRef):
+    entity_type: NotificationEntityType
+    entity_id: UUID
+    notification_type: NotificationType
+    status: NotificationStatus
+    delivery_status: NotificationDeliveryStatus = NotificationDeliveryStatus.PENDING
+    delivery_attempt_count: int = 0
+    last_delivery_at: datetime | None = None
+    last_delivery_error: str | None = None
+    next_delivery_at: datetime | None = None
+    title: str
+    message: str
+    metadata: MetadataDict = Field(default_factory=dict)
+    sequence_number: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    acknowledged_at: datetime | None = None
+    acknowledged_by: str | None = None
+    resolved_at: datetime | None = None
+    source_updated_at: str | None = None
+
+
+class NotificationAcknowledgeRequest(CyborgModel):
+    acknowledged_by: str | None = Field(default=None, max_length=200)
+
+    @field_validator("acknowledged_by")
+    @classmethod
+    def acknowledged_by_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("acknowledged_by must not be blank")
+        return stripped
 
 
 class HealthResponse(CyborgModel):

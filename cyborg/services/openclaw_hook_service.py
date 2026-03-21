@@ -1,0 +1,489 @@
+"""Direct OpenClaw gateway delivery for Cyborg notifications."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import timedelta
+import json
+import shutil
+from typing import Any
+from uuid import uuid4
+
+from cyborg import __version__
+from cyborg.config import OpenClawHookSettings, Settings
+from cyborg.database import Database
+from cyborg.models import NotificationDeliveryStatus, NotificationType
+from cyborg.services.base import BaseService, utcnow
+from cyborg.services.session_route_service import SessionRouteService
+
+
+class OpenClawHookService(BaseService):
+    """Send Cyborg notifications to OpenClaw via the gateway RPC surface."""
+
+    MAX_RETRY_DELAY = timedelta(hours=6)
+    GATEWAY_PROTOCOL_VERSION = 3
+    GATEWAY_CLIENT_ID = "gateway-client"
+    GATEWAY_CLIENT_MODE = "backend"
+    GATEWAY_SCOPES = ["operator.write"]
+    BOOTSTRAP_TIMEOUT_SECONDS = 60.0
+
+    def __init__(self, db: Database, routing_service: SessionRouteService | None = None) -> None:
+        super().__init__(db)
+        self._routing_service = routing_service
+
+    @property
+    def routing_service(self) -> SessionRouteService:
+        if self._routing_service is None:
+            self._routing_service = SessionRouteService(self.db)
+        return self._routing_service
+
+    @property
+    def settings(self) -> OpenClawHookSettings:
+        current = getattr(self.db, "settings", None)
+        if isinstance(current, Settings):
+            return current.openclaw
+        return Settings.from_env().openclaw
+
+    def is_configured(self) -> bool:
+        return self.settings.enabled
+
+    async def dispatch_notification(self, notification: dict[str, Any]) -> None:
+        route = await self.routing_service.resolve_notification_route(notification.get("metadata", {}))
+        if route is None:
+            raise ValueError("No delivery route could be resolved for the notification")
+
+        route_data = route.model_dump(mode="json")
+        target_session_key = await self._resolve_delivery_session_key(notification)
+        if self._should_use_task_assignment_agent(notification, target_session_key):
+            await self._send_gateway_request(
+                "agent",
+                self._build_task_assignment_agent_params(notification, route_data, target_session_key),
+                expect_final=True,
+                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+            )
+            return
+
+        visible_session_key = target_session_key or self._resolve_visible_session_key(route_data)
+
+        await self._send_gateway_request(
+            "send",
+            self._build_send_params(
+                notification,
+                route_data,
+                session_key=visible_session_key,
+            ),
+        )
+
+    async def mark_delivery_success(self, notification_id: str, *, timestamp: str | None = None) -> None:
+        now = timestamp or utcnow().isoformat()
+        await self.db.execute(
+            """
+            UPDATE notifications
+            SET delivery_status = ?, last_delivery_at = ?, last_delivery_error = NULL, next_delivery_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                NotificationDeliveryStatus.DELIVERED.value,
+                now,
+                now,
+                notification_id,
+            ),
+        )
+
+    async def mark_delivery_failure(self, notification_id: str, attempt_count: int, error: str, *, timestamp: str | None = None) -> None:
+        now = utcnow()
+        if timestamp is not None:
+            now = type(now).fromisoformat(timestamp)
+        delay = timedelta(minutes=min(360, max(1, 2 ** max(attempt_count - 1, 0))))
+        if delay > self.MAX_RETRY_DELAY:
+            delay = self.MAX_RETRY_DELAY
+        next_retry = (now + delay).isoformat()
+        await self.db.execute(
+            """
+            UPDATE notifications
+            SET delivery_status = ?, last_delivery_error = ?, next_delivery_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                NotificationDeliveryStatus.FAILED.value,
+                error,
+                next_retry,
+                now.isoformat(),
+                notification_id,
+            ),
+        )
+
+    async def close(self) -> None:
+        return None
+
+    async def _resolve_delivery_session_key(self, notification: dict[str, Any]) -> str | None:
+        if self._is_target_task_assignment(notification):
+            session_key = await self.routing_service.resolve_target_session_key(notification.get("metadata", {}))
+            if session_key is None:
+                raise ValueError("Task assignment delivery requires a resolvable target OpenClaw session key")
+            return session_key
+
+        return None
+
+    def _resolve_visible_session_key(self, route: dict[str, Any]) -> str | None:
+        session_key = route.get("session_key")
+        if isinstance(session_key, str) and session_key.strip():
+            return session_key.strip()
+        return None
+
+    async def _send_gateway_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        expect_final: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        openclaw_bin = shutil.which("openclaw")
+        if openclaw_bin:
+            return await self._send_gateway_request_via_cli(
+                openclaw_bin,
+                method,
+                params,
+                expect_final=expect_final,
+                timeout_seconds=timeout_seconds,
+            )
+        return await self._send_gateway_request_via_websocket(
+            method,
+            params,
+            expect_final=expect_final,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def _send_gateway_request_via_cli(
+        self,
+        openclaw_bin: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        expect_final: bool,
+        timeout_seconds: float | None,
+    ) -> dict[str, Any]:
+        timeout = timeout_seconds or self.settings.timeout_seconds
+        command = [
+            openclaw_bin,
+            "gateway",
+            "call",
+            method,
+            "--json",
+            "--params",
+            json.dumps(params),
+            "--timeout",
+            str(int(timeout * 1000)),
+        ]
+        if expect_final:
+            command.append("--expect-final")
+        gateway_url = self.settings.resolved_gateway_url
+        gateway_token = self.settings.resolved_gateway_token
+        if gateway_url:
+            command.extend(["--url", gateway_url])
+        if gateway_token:
+            command.extend(["--token", gateway_token])
+
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout + 5,
+            )
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(f"OpenClaw gateway CLI timed out calling {method}") from exc
+
+        if process.returncode != 0:
+            error_text = stderr.decode().strip() or stdout.decode().strip() or f"exit {process.returncode}"
+            raise RuntimeError(f"OpenClaw gateway CLI failed calling {method}: {error_text}")
+
+        output = stdout.decode().strip()
+        if not output:
+            return {}
+        payload = json.loads(output)
+        return payload if isinstance(payload, dict) else {"payload": payload}
+
+    async def _send_gateway_request_via_websocket(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        expect_final: bool,
+        timeout_seconds: float | None,
+    ) -> dict[str, Any]:
+        gateway_url = self.settings.resolved_gateway_url
+        if not gateway_url:
+            raise RuntimeError("OpenClaw gateway URL is not configured")
+
+        import websockets
+
+        timeout = timeout_seconds or self.settings.timeout_seconds
+        connect_id = str(uuid4())
+        request_id = str(uuid4())
+        async with websockets.connect(
+            gateway_url,
+            open_timeout=timeout,
+            close_timeout=timeout,
+            max_size=1_048_576,
+        ) as websocket:
+            await self._await_gateway_challenge(websocket, timeout_seconds=timeout)
+
+            connect_params = self._build_gateway_connect_params()
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "req",
+                        "id": connect_id,
+                        "method": "connect",
+                        "params": connect_params,
+                    }
+                )
+            )
+            await self._await_gateway_response(websocket, connect_id, timeout_seconds=timeout)
+
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "req",
+                        "id": request_id,
+                        "method": method,
+                        "params": params,
+                    }
+                )
+            )
+            return await self._await_gateway_response(
+                websocket,
+                request_id,
+                timeout_seconds=timeout,
+                expect_final=expect_final,
+            )
+
+    def _build_gateway_connect_params(self) -> dict[str, Any]:
+        connect_params: dict[str, Any] = {
+            "minProtocol": self.GATEWAY_PROTOCOL_VERSION,
+            "maxProtocol": self.GATEWAY_PROTOCOL_VERSION,
+            "client": {
+                "id": self.GATEWAY_CLIENT_ID,
+                "displayName": "Cyborg",
+                "version": __version__,
+                "platform": "python",
+                "mode": self.GATEWAY_CLIENT_MODE,
+                "instanceId": str(uuid4()),
+            },
+            "role": "operator",
+            "scopes": self.GATEWAY_SCOPES,
+            "caps": [],
+            "commands": [],
+            "permissions": {},
+            "userAgent": f"cyborg/{__version__}",
+        }
+        gateway_token = self.settings.resolved_gateway_token
+        if gateway_token:
+            connect_params["auth"] = {"token": gateway_token}
+        return connect_params
+
+    async def _await_gateway_challenge(self, websocket: Any, *, timeout_seconds: float) -> None:
+        timeout = timeout_seconds
+        while True:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"OpenClaw gateway returned invalid JSON: {raw!r}") from exc
+
+            if frame.get("type") != "event":
+                if frame.get("type") == "res" and frame.get("ok") is False:
+                    error = frame.get("error")
+                    if isinstance(error, dict):
+                        message = error.get("message") or json.dumps(error)
+                    else:
+                        message = str(error)
+                    raise RuntimeError(f"OpenClaw gateway connect challenge failed: {message}")
+                continue
+
+            if frame.get("event") != "connect.challenge":
+                continue
+
+            payload = frame.get("payload")
+            nonce = payload.get("nonce") if isinstance(payload, dict) else None
+            if not isinstance(nonce, str) or not nonce.strip():
+                raise RuntimeError("OpenClaw gateway connect challenge missing nonce")
+            return None
+
+    async def _await_gateway_response(
+        self,
+        websocket: Any,
+        expected_id: str,
+        *,
+        timeout_seconds: float,
+        expect_final: bool = False,
+    ) -> dict[str, Any]:
+        timeout = timeout_seconds
+        while True:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"OpenClaw gateway returned invalid JSON: {raw!r}") from exc
+
+            if frame.get("type") == "event":
+                # Pre-connect challenges and background events are not relevant here.
+                continue
+            if frame.get("type") != "res" or frame.get("id") != expected_id:
+                continue
+            payload = frame.get("payload")
+            if expect_final and isinstance(payload, dict) and payload.get("status") == "accepted":
+                continue
+            if frame.get("ok") is True:
+                return payload if isinstance(payload, dict) else {"payload": payload}
+
+            error = frame.get("error")
+            if isinstance(error, dict):
+                message = error.get("message") or json.dumps(error)
+            else:
+                message = str(error)
+            raise RuntimeError(f"OpenClaw gateway {expected_id} failed: {message}")
+
+    def _build_send_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        *,
+        session_key: str | None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "channel": route["channel"],
+            "to": route["to"],
+            "message": self._render_message(notification),
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        if session_key:
+            params["sessionKey"] = session_key
+        return params
+
+    def _build_task_assignment_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": self._render_task_assignment_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "minimal",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
+
+    def _render_message(self, notification: dict[str, Any]) -> str:
+        parts = [notification["title"], "", notification["message"]]
+        if notification.get("entity_type") == "task" and notification.get("metadata", {}).get("parent_project_title"):
+            parts.extend(
+                [
+                    "",
+                    f"Project: {notification['metadata']['parent_project_title']}",
+                ]
+            )
+        parts.extend(
+            [
+                "",
+                f"Notification ID: {notification['id']}",
+            ]
+        )
+        return "\n".join(part for part in parts if part is not None)
+
+    def _render_task_assignment_prompt(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> str:
+        metadata = notification.get("metadata", {})
+        target_session = metadata.get("target_session")
+        lines = [
+            "Cyborg task assignment for this session.",
+            "",
+            "You are responsible for handling this task in the current session.",
+            "Use the user's replies here as task input, ask focused follow-up questions if needed,",
+            "and complete or fail the Cyborg task once you have a clear answer.",
+            "This turn should send the first natural user-facing message to the recipient.",
+            "",
+            f"Task ID: {metadata.get('task_id') or notification.get('entity_id')}",
+            f"Notification ID: {notification['id']}",
+            f"Session Key: {session_key}",
+            f"Task: {notification['title']}",
+            "",
+            "Task brief:",
+            notification["message"],
+        ]
+        if metadata.get("parent_project_title"):
+            lines.extend(
+                [
+                    "",
+                    f"Parent project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
+                ]
+            )
+        if metadata.get("requested_by"):
+            lines.extend(["", f"Requested by: {metadata['requested_by']}"])
+        if metadata.get("session_key") or metadata.get("chat_id"):
+            lines.extend(
+                [
+                    "",
+                    "Source session:",
+                    f"- channel: {metadata.get('channel') or 'unknown'}",
+                    f"- session_key: {metadata.get('session_key') or 'unknown'}",
+                    f"- chat_id: {metadata.get('chat_id') or 'unknown'}",
+                ]
+            )
+        if isinstance(target_session, dict):
+            lines.extend(
+                [
+                    "",
+                    "Target session:",
+                    f"- kind: {target_session.get('kind') or 'unknown'}",
+                    f"- session_key: {session_key}",
+                    f"- recipient: {route.get('to') or 'unknown'}",
+                ]
+            )
+            if route.get("contact_name"):
+                lines.append(f"- contact_name: {route['contact_name']}")
+        lines.extend(
+            [
+                "",
+                "Instructions:",
+                "- Send one concise natural message now that asks the first question needed to progress the task.",
+                "- Do not mention Cyborg, hidden setup, task IDs, notification IDs, or internal routing.",
+                "- Treat the next user reply in this session as work on this task.",
+                "- If the answer is incomplete, ask one focused follow-up at a time.",
+                '- Once the task is answered, complete the Cyborg task with the exact answer using: cyborg task complete <task-id> --result-summary "<answer>".',
+                '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/complete with JSON {"result_summary":"<answer>"}.',
+                "- Keep the tone natural for the channel and recipient.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _is_target_task_assignment(self, notification: dict[str, Any]) -> bool:
+        metadata = notification.get("metadata", {})
+        return (
+            notification.get("notification_type") == NotificationType.TASK_ASSIGNMENT.value
+            and metadata.get("delivery_route") == "target"
+        )
+
+    def _should_use_task_assignment_agent(self, notification: dict[str, Any], session_key: str | None) -> bool:
+        return self._is_target_task_assignment(notification) and bool(session_key)

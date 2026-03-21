@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 import sqlite3
 from pathlib import Path
 from typing import AsyncIterator
@@ -15,7 +17,10 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ServiceError
 from cyborg.models import HealthResponse
-from cyborg.routers import calendars, context, projects, tasks
+from cyborg.routers import calendars, contacts, context, notifications, openclaw, plans, project_specs, projects, session_routes, tasks, webhooks
+
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -33,11 +38,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         await database.connect()
         await database.apply_migrations()
+        database.settings = resolved_settings
         app.state.settings = resolved_settings
         app.state.db = database
+        stop_event = asyncio.Event()
+        notification_worker = asyncio.create_task(
+            _notification_loop(
+                database,
+                interval_seconds=resolved_settings.notification_dispatch_interval_seconds,
+                stop_event=stop_event,
+            )
+        )
         try:
             yield
         finally:
+            stop_event.set()
+            notification_worker.cancel()
+            try:
+                await notification_worker
+            except asyncio.CancelledError:
+                pass
             await database.close()
 
     app = FastAPI(
@@ -70,10 +90,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(tasks.router)
     app.include_router(projects.router)
+    app.include_router(project_specs.router)
     app.include_router(calendars.router)
     app.include_router(context.router)
+    app.include_router(notifications.router)
+    app.include_router(openclaw.router)
+    app.include_router(plans.router)
+    app.include_router(session_routes.router)
+    app.include_router(webhooks.router, prefix="/api/v1/webhooks")
+    app.include_router(contacts.router, prefix="/api/v1")
 
     return app
 
 
 app = create_app()
+
+
+async def _notification_loop(database: Database, *, interval_seconds: float, stop_event: asyncio.Event) -> None:
+    """Periodically sync and dispatch notifications without relying on client polling."""
+
+    if interval_seconds <= 0:
+        await stop_event.wait()
+        return
+
+    from cyborg.services.notification_service import NotificationService
+
+    service = NotificationService(database)
+    while not stop_event.is_set():
+        try:
+            await service.process_due_notifications()
+        except Exception:
+            # Notification processing is best-effort and must not take down the API.
+            logger.exception("Notification processing failed")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            continue

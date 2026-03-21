@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from aiosqlite import Connection
 
 from cyborg.database import Database
-from cyborg.exceptions import NotFoundError
+from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
+    ProjectSpecSubmitRequest,
     ProjectCloseRequest,
     ProjectCreate,
     ProjectJournalEntryCreate,
@@ -19,7 +23,22 @@ from cyborg.models import (
     ProjectUpdate,
     TaskResponse,
 )
+from cyborg.services.notification_service import NotificationService
 from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
+from cyborg.services.project_spec_service import ProjectSpecService
+
+
+def _slugify(text: str) -> str:
+    """Convert text to a URL-friendly slug."""
+    # Convert to lowercase
+    text = text.lower()
+    # Replace non-alphanumeric characters with hyphens
+    text = re.sub(r'[^a-z0-9]+', '-', text)
+    # Remove leading/trailing hyphens
+    text = text.strip('-')
+    # Collapse multiple hyphens
+    text = re.sub(r'-+', '-', text)
+    return text
 
 
 class ProjectService(BaseService):
@@ -27,6 +46,16 @@ class ProjectService(BaseService):
 
     def __init__(self, db: Database) -> None:
         super().__init__(db)
+        self._project_spec_service: ProjectSpecService | None = None
+
+    @property
+    def project_spec_service(self) -> ProjectSpecService:
+        if self._project_spec_service is None:
+            self._project_spec_service = ProjectSpecService(self.db)
+        return self._project_spec_service
+
+    async def _sync_notifications(self, project_id: str, *, immediate: bool = False) -> None:
+        await NotificationService(self.db).sync_project_state(project_id, immediate=immediate)
 
     async def list_projects(self, *, state: ProjectState | None = None) -> list[ProjectResponse]:
         query = "SELECT * FROM projects WHERE deleted_at IS NULL"
@@ -38,46 +67,93 @@ class ProjectService(BaseService):
         rows = await self.db.fetch_all(query, tuple(params))
         projects = []
         for row in rows:
-            row["task_ids"] = await self._get_task_ids(row["id"])
-            projects.append(ProjectResponse.model_validate(row))
+            projects.append(ProjectResponse.model_validate(await self._decode_project_row(row)))
         return projects
 
     async def get_project(self, project_id: str) -> ProjectResponse:
         row = await self._get_project_row(project_id)
-        row["task_ids"] = await self._get_task_ids(project_id)
-        return ProjectResponse.model_validate(row)
+        return ProjectResponse.model_validate(await self._decode_project_row(row))
 
     async def create_project(self, payload: ProjectCreate) -> ProjectResponse:
+        if payload.state == ProjectState.ACTIVE:
+            raise ConflictError("Projects cannot be created directly in 'active' state. Create the project, submit a spec, approve it, then start or execute it.")
+
         project_id = str(uuid4())
         now = utcnow().isoformat()
+        spec_payload = self._build_spec_payload(
+            aim=payload.aim,
+            method=payload.method,
+            plan=payload.plan,
+            success_criteria=payload.success_criteria,
+        )
         async with self.db.connection(write=True) as connection:
             await self._validate_task_ids(connection, payload.task_ids)
             await connection.execute(
                 """
                 INSERT INTO projects (
-                    id, title, description, aim, state, created_at, started_at, paused_at, closed_at, conclusion, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL)
+                    id, title, description, aim, method, state, plan, success_criteria, auto_execute,
+                    created_at, started_at, paused_at, closed_at, conclusion, deleted_at, metadata, current_spec_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL)
                 """,
                 (
                     project_id,
                     payload.title,
                     payload.description,
                     payload.aim,
+                    payload.method,
                     payload.state.value,
+                    json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan else None,
+                    json_dumps([c.model_dump(mode="json") for c in payload.success_criteria]) if payload.success_criteria else None,
+                    1 if payload.auto_execute else 0,
                     now,
                     payload.conclusion,
+                    json_dumps(payload.metadata),
                 ),
             )
             await self._replace_task_links(connection, project_id, payload.task_ids)
-        return await self.get_project(project_id)
+        if spec_payload is not None:
+            await self.project_spec_service.submit_spec(project_id, spec_payload)
+        else:
+            await self._sync_notifications(project_id, immediate=payload.state == ProjectState.PLANNING)
+        project = await self.get_project(project_id)
+        await self._update_summary_md(project)
+        return project
 
     async def update_project(self, project_id: str, payload: ProjectUpdate) -> ProjectResponse:
-        await self._get_project_row(project_id)
+        existing = await self._get_project_row(project_id)
         values = payload.model_dump(exclude_unset=True, mode="json")
         task_ids = values.pop("task_ids", None)
-        if not values and task_ids is None:
+        raw_aim = values.pop("aim", None)
+        raw_method = values.pop("method", None)
+        raw_plan = values.pop("plan", None)
+        raw_success_criteria = values.pop("success_criteria", None)
+        spec_payload = self._build_spec_payload(
+            aim=raw_aim,
+            method=raw_method,
+            plan=raw_plan,
+            success_criteria=raw_success_criteria,
+        )
+        if spec_payload is None:
+            if raw_aim is not None:
+                values["aim"] = raw_aim
+            if raw_method is not None:
+                values["method"] = raw_method
+            if raw_plan is not None:
+                values["plan"] = json_dumps(raw_plan)
+            if raw_success_criteria is not None:
+                values["success_criteria"] = json_dumps(raw_success_criteria)
+        
+        # Convert plan and success_criteria to JSON
+        if "auto_execute" in values and values["auto_execute"] is not None:
+            values["auto_execute"] = 1 if values["auto_execute"] else 0
+        if "metadata" in values and values["metadata"] is not None:
+            values["metadata"] = json_dumps(values["metadata"])
+            
+        if not values and task_ids is None and spec_payload is None:
             return await self.get_project(project_id)
 
+        if values.get("state") == ProjectState.ACTIVE.value:
+            await self.project_spec_service.ensure_project_ready_for_execution(project_id)
         if values.get("state") == ProjectState.ACTIVE.value and "started_at" not in values:
             values["started_at"] = utcnow().isoformat()
         if values.get("state") == ProjectState.PAUSED.value and "paused_at" not in values:
@@ -93,7 +169,14 @@ class ProjectService(BaseService):
             if task_ids is not None:
                 await self._validate_task_ids(connection, task_ids)
                 await self._replace_task_links(connection, project_id, task_ids)
-        return await self.get_project(project_id)
+        if spec_payload is not None:
+            await self.project_spec_service.submit_spec(project_id, spec_payload)
+        else:
+            immediate_notification = values.get("state") == ProjectState.PLANNING.value and existing["state"] != ProjectState.PLANNING.value
+            await self._sync_notifications(project_id, immediate=immediate_notification)
+        project = await self.get_project(project_id)
+        await self._update_summary_md(project)
+        return project
 
     async def delete_project(self, project_id: str) -> None:
         await self._get_project_row(project_id)
@@ -102,6 +185,7 @@ class ProjectService(BaseService):
             "UPDATE projects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
             (now, project_id),
         )
+        await self._sync_notifications(project_id, immediate=False)
 
     async def start_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.ACTIVE)
@@ -120,6 +204,7 @@ class ProjectService(BaseService):
             """,
             (ProjectState.CLOSED.value, now, payload.conclusion, project_id),
         )
+        await self._sync_notifications(project_id, immediate=False)
         return await self.get_project(project_id)
 
     async def list_journal(self, project_id: str) -> list[ProjectJournalEntryResponse]:
@@ -155,6 +240,9 @@ class ProjectService(BaseService):
         )
         row = await self.db.fetch_one("SELECT * FROM project_journal_entries WHERE id = ?", (entry_id,))
         decoded = self.decode_json_fields(row, "metadata")
+        # Update summary after adding journal entry
+        project = await self.get_project(project_id)
+        await self._update_summary_md(project)
         return ProjectJournalEntryResponse.model_validate(decoded)
 
     async def list_project_tasks(self, project_id: str) -> list[TaskResponse]:
@@ -179,6 +267,8 @@ class ProjectService(BaseService):
 
     async def _transition_project(self, project_id: str, state: ProjectState) -> ProjectResponse:
         await self._get_project_row(project_id)
+        if state == ProjectState.ACTIVE:
+            await self.project_spec_service.ensure_project_ready_for_execution(project_id)
         now = utcnow().isoformat()
         updates: dict[str, Any] = {"state": state.value}
         if state == ProjectState.ACTIVE:
@@ -190,6 +280,7 @@ class ProjectService(BaseService):
             f"UPDATE projects SET {assignments} WHERE id = ? AND deleted_at IS NULL",
             tuple(updates.values()) + (project_id,),
         )
+        await self._sync_notifications(project_id, immediate=False)
         return await self.get_project(project_id)
 
     async def _get_project_row(self, project_id: str) -> dict[str, Any]:
@@ -197,6 +288,37 @@ class ProjectService(BaseService):
         if row is None:
             raise NotFoundError(f"Project '{project_id}' was not found")
         return row
+
+    async def _decode_project_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        decoded = dict(row)
+        decoded["task_ids"] = await self._get_task_ids(decoded["id"])
+        decoded["plan"] = json_loads(decoded.get("plan"), [])
+        decoded["success_criteria"] = json_loads(decoded.get("success_criteria"), [])
+        decoded["auto_execute"] = bool(decoded.get("auto_execute", 0))
+        decoded["metadata"] = json_loads(decoded.get("metadata"), {})
+        decoded = await self.project_spec_service.populate_project_spec_fields(decoded)
+        return decoded
+
+    def _build_spec_payload(
+        self,
+        *,
+        aim: str | None,
+        method: str | None,
+        plan: list[Any] | None,
+        success_criteria: list[Any] | None,
+    ) -> ProjectSpecSubmitRequest | None:
+        if aim is None and method is None and plan is None and success_criteria is None:
+            return None
+        if not aim or not method or not success_criteria:
+            return None
+        return ProjectSpecSubmitRequest.model_validate(
+            {
+                "aim": aim,
+                "method": method,
+                "plan": plan or [],
+                "success_criteria": success_criteria,
+            }
+        )
 
     async def _get_task_ids(self, project_id: str) -> list[str]:
         rows = await self.db.fetch_all(
@@ -247,3 +369,125 @@ class ProjectService(BaseService):
             (task_id,),
         )
         return [row["project_id"] for row in rows]
+
+    async def _update_summary_md(self, project: ProjectResponse) -> None:
+        """Generate and write a SUMMARY.md file for the project.
+
+        This creates a human-readable markdown report of the project including
+        metadata, journal entries, and linked tasks.
+        """
+        # Build the summary content
+        lines: list[str] = []
+
+        # Header
+        lines.append(f"# {project.title}")
+        lines.append("")
+
+        # Metadata section
+        lines.append("## Project Metadata")
+        lines.append("")
+        lines.append(f"- **ID:** `{project.id}`")
+        lines.append(f"- **State:** {project.state.value}")
+        if project.aim:
+            lines.append(f"- **Aim:** {project.aim}")
+        if project.method:
+            lines.append(f"- **Method:** {project.method}")
+        if project.description:
+            lines.append(f"- **Description:** {project.description}")
+        lines.append(f"- **Created:** {project.created_at}")
+        if project.started_at:
+            lines.append(f"- **Started:** {project.started_at}")
+        if project.paused_at:
+            lines.append(f"- **Paused:** {project.paused_at}")
+        if project.closed_at:
+            lines.append(f"- **Closed:** {project.closed_at}")
+        if project.conclusion:
+            lines.append(f"- **Conclusion:** {project.conclusion}")
+        lines.append(f"- **Auto Execute:** {'Yes' if project.auto_execute else 'No'}")
+        lines.append("")
+
+        # Linked tasks section (fetch early for plan progress calculation)
+        lines.append("## Linked Tasks")
+        lines.append("")
+
+        tasks = await self.list_project_tasks(str(project.id))
+        if tasks:
+            for task in tasks:
+                lines.append(f"### {task.title}")
+                lines.append("")
+                lines.append(f"- **ID:** `{task.id}`")
+                lines.append(f"- **Status:** {task.status.value}")
+                lines.append(f"- **Priority:** {task.priority.value}")
+                if task.description:
+                    lines.append(f"- **Description:** {task.description}")
+                if task.requested_by:
+                    lines.append(f"- **Requested By:** {task.requested_by}")
+                lines.append(f"- **Created:** {task.created_at}")
+                if task.completed_at:
+                    lines.append(f"- **Completed:** {task.completed_at}")
+                lines.append("")
+        else:
+            lines.append("*No linked tasks.*")
+            lines.append("")
+
+        # Plan progress section
+        if project.plan:
+            lines.append("## Plan Progress")
+            lines.append("")
+            
+            # Count completed tasks for progress
+            completed_count = 0
+            for task in tasks:
+                if task.status.value == "completed":
+                    completed_count += 1
+            
+            for i, step in enumerate(project.plan):
+                status = "✅" if i < completed_count else ("🔄" if i == completed_count else "⏳")
+                lines.append(f"{status} **Step {i + 1}:** {step.title}")
+                lines.append(f"   - {step.description}")
+                lines.append(f"   - *Criteria:* {step.criteria}")
+                lines.append("")
+            
+            lines.append(f"**Progress:** {completed_count}/{len(project.plan)} steps completed")
+            lines.append("")
+
+        # Success criteria section
+        if project.success_criteria:
+            lines.append("## Success Criteria")
+            lines.append("")
+            for criterion in project.success_criteria:
+                lines.append(f"- **{criterion.description}**")
+                lines.append(f"  - Check: `{criterion.check}`")
+            lines.append("")
+
+        # Journal entries section
+        lines.append("## Journal Entries")
+        lines.append("")
+
+        journal_entries = await self.list_journal(str(project.id))
+        if journal_entries:
+            # Sort chronologically (oldest first)
+            for entry in reversed(journal_entries):
+                lines.append(f"### {entry.entry_type.value.title()} - {entry.created_at}")
+                lines.append("")
+                lines.append(entry.content)
+                if entry.metadata:
+                    lines.append("")
+                    lines.append("**Metadata:**")
+                    for key, value in entry.metadata.items():
+                        lines.append(f"- `{key}`: {value}")
+                lines.append("")
+        else:
+            lines.append("*No journal entries yet.*")
+            lines.append("")
+
+        # Write the file
+        content = "\n".join(lines)
+        slug = _slugify(project.title)
+        summary_path = Path(f"/home/mike/.openclaw/workspace/projects/{slug}/SUMMARY.md")
+
+        # Ensure directory exists
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write the file (complete replacement)
+        summary_path.write_text(content, encoding="utf-8")

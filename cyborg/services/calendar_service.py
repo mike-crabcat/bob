@@ -21,7 +21,7 @@ from cyborg.models import (
     EventStatus,
     EventUpdate,
 )
-from cyborg.services.base import BaseService, utcnow
+from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
 
 
 class CalendarService(BaseService):
@@ -34,11 +34,11 @@ class CalendarService(BaseService):
         rows = await self.db.fetch_all(
             "SELECT * FROM calendars WHERE deleted_at IS NULL ORDER BY is_default DESC, name ASC"
         )
-        return [CalendarResponse.model_validate(row) for row in rows]
+        return [CalendarResponse.model_validate(self._decode_calendar_row(row)) for row in rows]
 
     async def get_calendar(self, calendar_id: str) -> CalendarResponse:
         row = await self._get_calendar_row(calendar_id)
-        return CalendarResponse.model_validate(row)
+        return CalendarResponse.model_validate(self._decode_calendar_row(row))
 
     async def create_calendar(self, payload: CalendarCreate) -> CalendarResponse:
         calendar_id = str(uuid4())
@@ -48,8 +48,8 @@ class CalendarService(BaseService):
                 await connection.execute("UPDATE calendars SET is_default = 0 WHERE deleted_at IS NULL")
             await connection.execute(
                 """
-                INSERT INTO calendars (id, name, description, color, is_default, created_at, deleted_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                INSERT INTO calendars (id, name, description, color, is_default, metadata, created_at, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     calendar_id,
@@ -57,6 +57,7 @@ class CalendarService(BaseService):
                     payload.description,
                     payload.color,
                     int(payload.is_default),
+                    json_dumps(payload.metadata),
                     now,
                 ),
             )
@@ -67,6 +68,8 @@ class CalendarService(BaseService):
         values = payload.model_dump(exclude_unset=True, mode="json")
         if not values:
             return await self.get_calendar(calendar_id)
+        if "metadata" in values and values["metadata"] is not None:
+            values["metadata"] = json_dumps(values["metadata"])
 
         assignments = ", ".join(f"{field} = ?" for field in values)
         params = tuple(values.values()) + (calendar_id,)
@@ -246,6 +249,10 @@ class CalendarService(BaseService):
         row = await self.db.fetch_one("SELECT * FROM calendars WHERE id = ? AND deleted_at IS NULL", (calendar_id,))
         if row is None:
             raise NotFoundError(f"Calendar '{calendar_id}' was not found")
+        return row
+
+    def _decode_calendar_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["metadata"] = json_loads(row.get("metadata"), {})
         return row
 
     async def _get_event_row(self, event_id: str) -> dict[str, Any]:

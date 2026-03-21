@@ -5,9 +5,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import asyncio
 from pathlib import Path
+import re
 from typing import Any
 
 import aiosqlite
+
+
+_MIGRATION_PREFIX_RE = re.compile(r"^(\d+)")
 
 
 class Database:
@@ -17,6 +21,7 @@ class Database:
         self.db_path = db_path
         self.schema_dir = schema_dir
         self.pool_size = max(pool_size, 1)
+        self.settings: Any | None = None
         self._queue: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue()
         self._connections: list[aiosqlite.Connection] = []
         self._write_lock = asyncio.Lock()
@@ -99,7 +104,7 @@ class Database:
             applied = {row["name"] for row in await cursor.fetchall()}
             await cursor.close()
 
-            for schema_file in sorted(self.schema_dir.glob("*.sql")):
+            for schema_file in sorted(self.schema_dir.glob("*.sql"), key=_migration_sort_key):
                 if schema_file.name in applied:
                     continue
                 await connection.executescript(schema_file.read_text(encoding="utf-8"))
@@ -146,3 +151,12 @@ class Database:
 
         row = await self.fetch_one("SELECT 1 AS ok")
         return bool(row and row["ok"] == 1)
+
+
+def _migration_sort_key(path: Path) -> tuple[int, str]:
+    """Sort migrations by leading numeric prefix before falling back to filename."""
+
+    match = _MIGRATION_PREFIX_RE.match(path.name)
+    if match is None:
+        return (10**9, path.name)
+    return (int(match.group(1)), path.name)

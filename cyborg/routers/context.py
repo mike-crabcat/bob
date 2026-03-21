@@ -34,9 +34,30 @@ async def context_summary(database: Database = Depends(get_database)) -> Context
     )
     active_task_rows = await database.fetch_all(
         """
-        SELECT id, title, status, priority, updated_at
-        FROM tasks
-        WHERE deleted_at IS NULL AND status IN ('active', 'pending', 'paused')
+        SELECT
+            t.id,
+            t.title,
+            t.status,
+            t.priority,
+            t.updated_at,
+            (
+                SELECT p.id
+                FROM project_tasks AS pt
+                INNER JOIN projects AS p ON p.id = pt.project_id
+                WHERE pt.task_id = t.id AND p.deleted_at IS NULL
+                ORDER BY p.created_at ASC, p.id ASC
+                LIMIT 1
+            ) AS parent_project_id,
+            (
+                SELECT p.title
+                FROM project_tasks AS pt
+                INNER JOIN projects AS p ON p.id = pt.project_id
+                WHERE pt.task_id = t.id AND p.deleted_at IS NULL
+                ORDER BY p.created_at ASC, p.id ASC
+                LIMIT 1
+            ) AS parent_project_title
+        FROM tasks AS t
+        WHERE deleted_at IS NULL AND status IN ('planning', 'active', 'pending', 'paused')
         ORDER BY CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -81,9 +102,30 @@ async def context_tasks(database: Database = Depends(get_database)) -> ContextTa
     generated_at = utcnow()
     rows = await database.fetch_all(
         """
-        SELECT id, title, status, priority, updated_at
-        FROM tasks
-        WHERE deleted_at IS NULL AND status IN ('active', 'pending', 'paused')
+        SELECT
+            t.id,
+            t.title,
+            t.status,
+            t.priority,
+            t.updated_at,
+            (
+                SELECT p.id
+                FROM project_tasks AS pt
+                INNER JOIN projects AS p ON p.id = pt.project_id
+                WHERE pt.task_id = t.id AND p.deleted_at IS NULL
+                ORDER BY p.created_at ASC, p.id ASC
+                LIMIT 1
+            ) AS parent_project_id,
+            (
+                SELECT p.title
+                FROM project_tasks AS pt
+                INNER JOIN projects AS p ON p.id = pt.project_id
+                WHERE pt.task_id = t.id AND p.deleted_at IS NULL
+                ORDER BY p.created_at ASC, p.id ASC
+                LIMIT 1
+            ) AS parent_project_title
+        FROM tasks AS t
+        WHERE deleted_at IS NULL AND status IN ('planning', 'active', 'pending', 'paused')
         ORDER BY CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2

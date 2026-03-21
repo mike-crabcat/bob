@@ -5,9 +5,11 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
+from pydantic import BaseModel, model_validator
 
 from cyborg.dependencies import get_task_service
 from cyborg.models import (
+    TaskBlockRequest,
     TaskCreate,
     TaskFailureRequest,
     TaskHistoryResponse,
@@ -16,6 +18,7 @@ from cyborg.models import (
     TaskStatus,
     TaskStepCreate,
     TaskStepResponse,
+    TaskUnblockRequest,
     TaskUpdate,
 )
 from cyborg.services.task_service import TaskService
@@ -66,9 +69,24 @@ async def start_task(task_id: UUID, service: TaskService = Depends(get_task_serv
     return await service.start_task(str(task_id))
 
 
+class TaskCompleteRequest(BaseModel):
+    result_summary: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_result_alias(cls, value: object) -> object:
+        if isinstance(value, dict) and "result_summary" not in value and "result" in value:
+            return {**value, "result_summary": value["result"]}
+        return value
+
+
 @router.post("/{task_id}/complete", response_model=TaskResponse)
-async def complete_task(task_id: UUID, service: TaskService = Depends(get_task_service)) -> TaskResponse:
-    return await service.complete_task(str(task_id))
+async def complete_task(
+    task_id: UUID,
+    payload: TaskCompleteRequest | None = None,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.complete_task(str(task_id), payload.result_summary if payload else None)
 
 
 @router.post("/{task_id}/fail", response_model=TaskResponse)
@@ -87,6 +105,24 @@ async def retry_task(
     service: TaskService = Depends(get_task_service),
 ) -> TaskResponse:
     return await service.retry_task(str(task_id), payload)
+
+
+@router.post("/{task_id}/block", response_model=TaskResponse)
+async def block_task(
+    task_id: UUID,
+    payload: TaskBlockRequest,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.block_task(str(task_id), payload)
+
+
+@router.post("/{task_id}/unblock", response_model=TaskResponse)
+async def unblock_task(
+    task_id: UUID,
+    payload: TaskUnblockRequest | None = None,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.unblock_task(str(task_id), payload or TaskUnblockRequest())
 
 
 @router.get("/{task_id}/steps", response_model=list[TaskStepResponse])
