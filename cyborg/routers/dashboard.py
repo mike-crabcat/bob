@@ -792,15 +792,33 @@ async def chart_reasoning_latency(
     db: Database = Depends(get_database),
 ) -> dict[str, Any]:
     """Get reasoning latency over time for charts."""
-    # This would query from structured logs
-    # For now, return mock data
     now = datetime.now(timezone.utc)
     labels = []
     data = []
+
+    # Get reasoning requests from structured logs
     for i in range(hours):
         t = now - timedelta(hours=(hours - 1 - i))
-        labels.append(t.strftime("%H:00"))
-        data.append(1500 + (i * 100) + (i % 4) * 300)
+        hour_label = t.strftime("%H:00")
+
+        # Get duration for reasoning requests in this hour
+        result = await db.fetch_one(
+            """
+            SELECT AVG(duration_seconds) as avg_duration,
+                   COUNT(*) as count
+            FROM structured_logs
+            WHERE event_type = 'reasoning_request'
+              AND timestamp >= ?
+              AND timestamp < ?
+            """,
+            (t.strftime("%Y-%m-%dT%H:00:00"), (t + timedelta(hours=1)).strftime("%Y-%m-%dT%H:00:00"))
+        )
+
+        if result:
+            avg_ms = int((result["avg_duration"] or 0) * 1000)
+            data.append(avg_ms if result["count"] > 0 else 0)
+
+        labels.append(hour_label)
 
     return {"labels": labels, "data": data}
 
@@ -819,6 +837,61 @@ async def chart_task_breakdown(db: Database = Depends(get_database)) -> dict[str
 
     return {
         "labels": [r["status"] for r in result],
+        "data": [r["count"] for r in result],
+    }
+
+
+@router.get("/api/chart/health-distribution")
+async def chart_health_distribution(db: Database = Depends(get_database)) -> dict[str, Any]:
+    """Get health distribution for charts."""
+    result = await db.fetch_all(
+        """
+        SELECT
+            CASE
+                WHEN health_score >= 0.8 THEN 'low'
+                WHEN health_score >= 0.5 THEN 'medium'
+                WHEN health_score >= 0.3 OR (health_score < 0.5 AND health_score >= 0) THEN 'high'
+                WHEN health_score < 0.3 OR health_score IS NULL THEN 'critical'
+                ELSE 'unknown'
+            END as risk_level,
+            COUNT(*) as count
+        FROM latest_project_health
+        INNER JOIN projects p ON p.id = h.project_id
+        WHERE p.deleted_at IS NULL
+        GROUP BY risk_level
+        """,
+    )
+
+    return {
+        "labels": ["Low Risk", "Medium Risk", "High Risk", "Critical"],
+        "data": [0, 0, 0, 0],
+    }
+
+
+@router.get("/api/chart/log-events")
+async def chart_log_events(db: Database = Depends(get_database), hours: int = 24) -> dict[str, Any]:
+    """Get log event counts for charts."""
+    result = await db.fetch_all(
+        """
+        SELECT
+            CASE
+                WHEN event_type = 'reasoning_request' THEN 'reasoning'
+                WHEN event_type = 'autonomy_decision' THEN 'autonomy'
+                WHEN event_type = 'health_check' THEN 'health'
+                WHEN event_type = 'function_call' THEN 'function'
+                WHEN event_type = 'error' THEN 'error'
+                ELSE 'other'
+            END as category,
+            COUNT(*) as count
+        FROM structured_logs
+        WHERE timestamp > datetime('now', '-' || str(hours) || ' hours')
+        GROUP BY category
+        """,
+    )
+
+    categories = [r["category"] for r in result]
+    return {
+        "labels": categories,
         "data": [r["count"] for r in result],
     }
 
