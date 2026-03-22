@@ -604,7 +604,7 @@ async def logs(
         request,
         {
             "version": settings.version,
-            "logs": mock_logs * 5,  # Duplicate for demo
+            "logs": logs,
             "stats": stats,
             "last_log_time": datetime.now(timezone.utc).isoformat(),
             "pending_count": 0,
