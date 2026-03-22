@@ -387,5 +387,5 @@ class SessionRouteService(BaseService):
         return decoded
 
     def _build_whatsapp_dm_session_key(self, phone_number: str) -> str:
-        agent_id = (self.settings.openclaw.agent_id or "main").strip() or "main"
-        return f"agent:{agent_id}:whatsapp:direct:{phone_number}"
+        # OpenClaw uses format: whatsapp:direct:{phone_number}
+        return f"whatsapp:direct:{phone_number}"
