@@ -381,6 +381,13 @@ async def project_detail(
     project_data["completed_tasks"] = task_counts["completed"] if task_counts else 0
     project_data["total_tasks"] = task_counts["total"] if task_counts else 0
 
+    # Parse success_criteria JSON if present
+    if project_data.get("success_criteria"):
+        try:
+            project_data["success_criteria"] = json.loads(project_data["success_criteria"])
+        except (json.JSONDecodeError, TypeError):
+            project_data["success_criteria"] = []
+
     return _render_template(
         "dashboard/project_detail.html",
         request,
