@@ -17,7 +17,7 @@ import logging
 import sys
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -58,13 +58,13 @@ class StructuredFormatter(logging.Formatter):
                 "traceback": self.formatException(record.exc_info),
             }
 
-        # Add any extra fields from the record
+        # Add any extra fields from record
         for key, value in record.__dict__.items():
             if key not in {
                 "name", "msg", "args", "levelname", "levelno", "pathname",
                 "filename", "module", "lineno", "funcName", "created", "msecs",
                 "relativeCreated", "thread", "threadName", "processName",
-                "process", "exc_info", "exc_text", "stack_info",
+                "exc_info", "stack_info",
             } and not key.startswith("_"):
                 log_entry[key] = value
 
@@ -95,7 +95,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def set_correlation_id(correlation_id: str | None = None) -> str:
-    """Set the correlation ID for the current context.
+    """Set correlation ID for a current context.
 
     Args:
         correlation_id: Correlation ID to use. If None, generates a new UUID.
@@ -109,62 +109,87 @@ def set_correlation_id(correlation_id: str | None = None) -> str:
     return correlation_id
 
 
-def get_correlation_id() -> str | None:
-    """Get the current correlation ID from context.
-
-    Returns:
-        The current correlation ID, or None if not set
-    """
-    return _correlation_id_context.get("current_id")
-
-
 def clear_correlation_id() -> None:
     """Clear the correlation ID from context."""
     _correlation_id_context.pop("current_id", None)
 
 
-class CorrelationIdMiddleware:
-    """ASGI middleware that adds correlation IDs to requests."""
+# ============================================================================
+# Decorators for automatic logging
+# ============================================================================
 
-    def __init__(self, app: Callable, header_name: str = "X-Correlation-ID") -> None:
-        self.app = app
-        self.header_name = header_name
 
-    async def __call__(self, scope: dict[str, Any], receive: Callable, send: Callable) -> None:
-        """Handle incoming request with correlation ID."""
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
+def log_execution(
+    logger: logging.Logger | None = None,
+    event_name: str | None = None,
+    log_args: bool = False,
+    log_result: bool = False,
+    log_errors: bool = True,
+) -> Callable:
+    """Decorator to log function execution with timing.
 
-        # Check for existing correlation ID in headers
-        headers = dict(scope.get("headers", []))
-        correlation_id = headers.get(self.header_name.encode())
+    Args:
+        logger: Logger instance (uses module logger if None)
+        event_name: Name for event (uses function name if None)
+        log_args: Whether to log function arguments
+        log_result: Whether to log function return value
+        log_errors: Whether to log errors
 
-        if correlation_id:
-            correlation_id = correlation_id.decode()
-        else:
-            # Generate new correlation ID
-            correlation_id = str(uuid.uuid4())
+    Returns:
+        Decorated function
+    """
+    @wraps(func)
+    async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        fn_logger = logger or get_logger(func.__module__)
+        name = event_name or f"{func.__module__}.{func.__name__}"
+        start_time = datetime.now(timezone.utc)
 
-        # Set correlation ID for this request
-        set_correlation_id(correlation_id)
+        log_data: dict[str, Any] = {
+            "event_type": "function_call",
+            "function": name,
+        }
 
-        # Add correlation ID to response headers
-        async def send_with_correlation(message: dict[str, Any]) -> None:
-            if message["type"] == "http.response.start":
-                headers = message.get("headers", [])
-                headers.append([self.header_name.encode(), correlation_id.encode()])
-                message["headers"] = headers
-            await send(message)
+        if log_args:
+            log_data["args"] = str(args)[:500]
+            log_data["kwargs"] = str(list(kwargs.keys()))
+
+        fn_logger.info(f"Calling {name}", extra=log_data)
 
         try:
-            await self.app(scope, receive, send_with_correlation)
-        finally:
-            clear_correlation_id()
+            result = await func(*args, **kwargs)
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+            completion_data: dict[str, Any] = {
+                "event_type": "function_return",
+                "function": name,
+                "duration_seconds": round(duration, 3),
+                "success": True,
+            }
+
+            if log_result:
+                completion_data["result"] = str(result)[:500]
+
+            fn_logger.info(f"Completed {name}", extra=completion_data)
+            return result
+
+        except Exception as e:
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+            if log_errors:
+                error_data: dict[str, Any] = {
+                    "event_type": "function_error",
+                    "function": name,
+                    "duration_seconds": round(duration, 3),
+                    "error_type_name": type(e).__name__,
+                    "error_message": str(e),
+                }
+                fn_logger.error(f"Error in {name}: {e}", extra=error_data, exc_info=True)
+
+            raise
 
 
 # ============================================================================
-# Specialized Log Helpers
+# Helper Functions
 # ============================================================================
 
 
@@ -201,6 +226,7 @@ def log_reasoning_request(
         log_data["task_id"] = task_id
     if duration_seconds is not None:
         log_data["duration_seconds"] = round(duration_seconds, 3)
+
     if success is not None:
         log_data["success"] = success
     if error:
@@ -212,8 +238,6 @@ def log_reasoning_request(
         logger.info("Reasoning request completed", extra=log_data)
     elif success is False:
         logger.error("Reasoning request failed", extra=log_data)
-    else:
-        logger.info("Reasoning request started", extra=log_data)
 
 
 def log_autonomy_decision(
@@ -235,6 +259,7 @@ def log_autonomy_decision(
         "decision_type": decision_type,
         "project_id": project_id,
     }
+
     log_data.update(extra)
 
     logger.info(f"Autonomy decision: {decision_type}", extra=log_data)
@@ -262,6 +287,7 @@ def log_health_check(
         "health_score": health_score,
         "risk_level": risk_level,
     }
+
     log_data.update(extra)
 
     if risk_level in ("high", "critical"):
@@ -281,8 +307,8 @@ def log_metric(
 
     Args:
         logger: Logger instance
-        metric_name: Name of the metric
-        metric_value: Value of the metric
+        metric_name: Name of metric
+        metric_value: Value of metric
         unit: Unit of measurement (optional)
         **extra: Additional fields to include
     """
@@ -291,148 +317,17 @@ def log_metric(
         "metric_name": metric_name,
         "metric_value": metric_value,
     }
+
     if unit:
         log_data["unit"] = unit
+
     log_data.update(extra)
 
     logger.info(f"Metric: {metric_name}", extra=log_data)
 
 
-# ============================================================================
-# Decorators for automatic logging
-# ============================================================================
-
-
-def log_execution(
-    logger: logging.Logger | None = None,
-    event_name: str | None = None,
-    log_args: bool = False,
-    log_result: bool = False,
-    log_errors: bool = True,
-) -> Callable:
-    """Decorator to log function execution with timing.
-
-    Args:
-        logger: Logger instance (uses module logger if None)
-        event_name: Name for the event (uses function name if None)
-        log_args: Whether to log function arguments
-        log_result: Whether to log return value
-        log_errors: Whether to log errors
-
-    Returns:
-        Decorated function
-    """
-
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            fn_logger = logger or get_logger(func.__module__)
-            name = event_name or f"{func.__module__}.{func.__name__}"
-            start_time = datetime.now(timezone.utc)
-
-            log_data: dict[str, Any] = {
-                "event_type": "function_call",
-                "function": name,
-            }
-
-            if log_args:
-                log_data["args"] = str(args)[:500]  # Truncate long args
-                log_data["kwargs"] = str(list(kwargs.keys()))
-
-            fn_logger.info(f"Calling {name}", extra=log_data)
-
-            try:
-                result = await func(*args, **kwargs)
-                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-                completion_data: dict[str, Any] = {
-                    "event_type": "function_return",
-                    "function": name,
-                    "duration_seconds": round(duration, 3),
-                    "success": True,
-                }
-
-                if log_result:
-                    completion_data["result"] = str(result)[:500]
-
-                fn_logger.info(f"Completed {name}", extra=completion_data)
-                return result
-
-            except Exception as e:
-                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-                if log_errors:
-                    error_data: dict[str, Any] = {
-                        "event_type": "function_error",
-                        "function": name,
-                        "duration_seconds": round(duration, 3),
-                        "error_type": type(e).__name__,
-                        "error_message": str(e),
-                    }
-                    fn_logger.error(f"Error in {name}: {e}", extra=error_data, exc_info=True)
-
-                raise
-
-        @wraps(func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            fn_logger = logger or get_logger(func.__module__)
-            name = event_name or f"{func.__module__}.{func.__name__}"
-            start_time = datetime.now(timezone.utc)
-
-            log_data: dict[str, Any] = {
-                "event_type": "function_call",
-                "function": name,
-            }
-
-            if log_args:
-                log_data["args"] = str(args)[:500]
-                log_data["kwargs"] = str(list(kwargs.keys()))
-
-            fn_logger.info(f"Calling {name}", extra=log_data)
-
-            try:
-                result = func(*args, **kwargs)
-                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-                completion_data: dict[str, Any] = {
-                    "event_type": "function_return",
-                    "function": name,
-                    "duration_seconds": round(duration, 3),
-                    "success": True,
-                }
-
-                if log_result:
-                    completion_data["result"] = str(result)[:500]
-
-                fn_logger.info(f"Completed {name}", extra=completion_data)
-                return result
-
-            except Exception as e:
-                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-                if log_errors:
-                    error_data: dict[str, Any] = {
-                        "event_type": "function_error",
-                        "function": name,
-                        "duration_seconds": round(duration, 3),
-                        "error_type": type(e).__name__,
-                        "error_message": str(e),
-                    }
-                    fn_logger.error(f"Error in {name}: {e}", extra=error_data, exc_info=True)
-
-                raise
-
-        import inspect
-        if inspect.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-
-    return decorator
-
-
 def configure_logging(settings: Settings | None = None) -> None:
-    """Configure root logging for the application.
+    """Configure root logging for application.
 
     Args:
         settings: Application settings (uses Settings.from_env() if None)
@@ -461,8 +356,13 @@ def configure_logging(settings: Settings | None = None) -> None:
         root_logger.addHandler(file_handler)
 
 
+# ============================================================================
+# Database Log Handler
+# ============================================================================
+
+
 class DatabaseLogHandler(logging.Handler):
-    """Log handler that writes to the structured_logs table.
+    """Log handler that writes logs to a structured_logs table.
 
     Uses a background thread to avoid blocking the main application.
     """
@@ -479,7 +379,7 @@ class DatabaseLogHandler(logging.Handler):
 
     def set_database(self, db: Any) -> None:
         """Set the database instance for writing logs."""
-        # Get the db path from the database object
+        # Get db path from database object
         self._db_path = str(db.db_path)
 
     def enable(self) -> None:
@@ -496,7 +396,7 @@ class DatabaseLogHandler(logging.Handler):
             return
 
         try:
-            # Format the record using our structured formatter
+            # Format record using our structured formatter
             formatter = StructuredFormatter()
             formatted = formatter.format(record)
             log_data = json.loads(formatted)
@@ -514,57 +414,76 @@ class DatabaseLogHandler(logging.Handler):
             pass
 
     def _flush_in_thread(self) -> None:
-        """Flush buffer in a background thread."""
-        import threading
-        import sqlite3
-
+        """Synchronously flush buffered logs to database."""
         if not self.buffer or not self._db_path:
             return
 
         logs_to_write = list(self.buffer)
-        self.buffer.clear()
+        self.buffer = []
 
-        def flush_worker():
+        for log_entry in logs_to_write:
             try:
-                conn = sqlite3.connect(self._db_path, timeout=5.0)
-                cursor = conn.cursor()
-                for log_entry in logs_to_write:
-                    try:
-                        cursor.execute(
-                            """
-                            INSERT INTO structured_logs (
-                                timestamp, level, logger, message, module, function, line,
-                                event_type, project_id, duration_seconds, extra_data, correlation_id
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                log_entry.get("timestamp"),
-                                log_entry.get("level"),
-                                log_entry.get("logger"),
-                                log_entry.get("message"),
-                                log_entry.get("module"),
-                                log_entry.get("function"),
-                                log_entry.get("line"),
-                                log_entry.get("event_type"),
-                                log_entry.get("project_id"),
-                                log_entry.get("duration_seconds"),
-                                json.dumps(log_entry.get("extra_data")) if log_entry.get("extra_data") else None,
-                                log_entry.get("correlation_id"),
-                            ),
-                        )
-                    except Exception:
-                        pass  # Skip failed entries
-                conn.commit()
-                conn.close()
+                # Import here to avoid circular dependency
+                import sqlite3
+
+                # Create a new event loop if none exists
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        raise RuntimeError("Event loop is closed")
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                # Try to run async operation
+                future = asyncio.create_task(
+                    self._write_log(log_entry),
+                    loop=loop,
+                )
+                # Don't wait - let it complete asynchronously
             except Exception:
-                pass  # Silently fail
+                # Silently fail - logging shouldn't break the app
+                pass
 
-        thread = threading.Thread(target=flush_worker, daemon=True)
-        thread.start()
+    async def _write_log(self, log_entry: dict[str, Any]) -> None:
+        """Write a single log entry to database."""
+        if self._db_path is None:
+            return
 
-    def close(self) -> None:
-        """Flush any remaining logs on close."""
-        self._flush_in_thread()
+        try:
+            await self._db.execute(
+                """
+                INSERT INTO structured_logs (
+                    timestamp, level, logger, message, module, function, line,
+                    event_type, project_id, duration_seconds, extra_data, correlation_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_entry.get("timestamp"),
+                    log_entry.get("level"),
+                    log_entry.get("logger"),
+                    log_entry.get("message"),
+                    log_entry.get("module"),
+                    log_entry.get("function"),
+                    log_entry.get("line"),
+                    log_entry.get("event_type"),
+                    log_entry.get("project_id"),
+                    log_entry.get("duration_seconds"),
+                    json.dumps(log_entry.get("extra_data")) if log_entry.get("extra_data") else None,
+                    log_entry.get("correlation_id"),
+                ),
+            )
+        except Exception:
+            # Silently fail - logging shouldn't break the app
+            pass
+
+    async def flush(self) -> None:
+        """Async flush any remaining buffered logs."""
+        if self.buffer:
+            logs_to_write = list(self.buffer)
+            self.buffer = []
+            for log_entry in logs_to_write:
+                await self._write_log(log_entry)
 
 
 # Global database handler instance (will be attached after DB init)
@@ -578,9 +497,9 @@ def get_database_handler() -> DatabaseLogHandler | None:
 
 
 def attach_database_handler(db: Any) -> DatabaseLogHandler:
-    """Create and attach a database log handler to the root logger.
+    """Create and attach a database log handler to root logger.
 
-    This should be called after the database is initialized.
+    This should be called after database is initialized.
     """
     global _db_handler
 
