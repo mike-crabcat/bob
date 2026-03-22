@@ -462,22 +462,25 @@ def configure_logging(settings: Settings | None = None) -> None:
 
 
 class DatabaseLogHandler(logging.Handler):
-    """Async log handler that writes to the structured_logs table.
+    """Log handler that writes to the structured_logs table.
 
-    This handler buffers logs and writes them asynchronously to avoid
-    blocking the main application during logging.
+    Uses a background thread to avoid blocking the main application.
     """
 
-    def __init__(self, buffer_size: int = 100):
+    def __init__(self, buffer_size: int = 50):
         super().__init__()
         self.buffer: list[dict[str, Any]] = []
         self.buffer_size = buffer_size
-        self._db: Any = None
+        self._db_path: str | None = None
         self._enabled = True
+        self._flush_lock = False
+        import threading
+        self._lock = threading.Lock()
 
     def set_database(self, db: Any) -> None:
         """Set the database instance for writing logs."""
-        self._db = db
+        # Get the db path from the database object
+        self._db_path = str(db.db_path)
 
     def enable(self) -> None:
         """Enable log writing to database."""
@@ -488,8 +491,8 @@ class DatabaseLogHandler(logging.Handler):
         self._enabled = False
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Buffer a log record for async writing."""
-        if not self._enabled or self._db is None:
+        """Buffer a log record for writing."""
+        if not self._enabled or self._db_path is None:
             return
 
         try:
@@ -498,87 +501,70 @@ class DatabaseLogHandler(logging.Handler):
             formatted = formatter.format(record)
             log_data = json.loads(formatted)
 
-            # Add to buffer
-            self.buffer.append(log_data)
+            # Add to buffer (thread-safe)
+            with self._lock:
+                self.buffer.append(log_data)
 
-            # Flush if buffer is full
-            if len(self.buffer) >= self.buffer_size:
-                self._flush_sync()
+                # Flush if buffer is full
+                if len(self.buffer) >= self.buffer_size:
+                    self._flush_in_thread()
+
         except Exception:
             # Don't let logging errors break the application
             pass
 
-    def _flush_sync(self) -> None:
-        """Synchronously flush buffered logs to database."""
-        if not self.buffer or self._db is None:
+    def _flush_in_thread(self) -> None:
+        """Flush buffer in a background thread."""
+        import threading
+        import sqlite3
+
+        if not self.buffer or not self._db_path:
             return
 
-        logs_to_write = self.buffer
-        self.buffer = []
+        logs_to_write = list(self.buffer)
+        self.buffer.clear()
 
-        for log_entry in logs_to_write:
+        def flush_worker():
             try:
-                # Import here to avoid circular dependency
-                import asyncio
-
-                # Create a new event loop if none exists
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_closed():
-                        raise RuntimeError("Event loop is closed")
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-
-                # Try to run the async operation
-                future = asyncio.create_task(
-                    self._write_log(log_entry),
-                    loop=loop,
-                )
-                # Don't wait - let it complete asynchronously
+                conn = sqlite3.connect(self._db_path, timeout=5.0)
+                cursor = conn.cursor()
+                for log_entry in logs_to_write:
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO structured_logs (
+                                timestamp, level, logger, message, module, function, line,
+                                event_type, project_id, duration_seconds, extra_data, correlation_id
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                log_entry.get("timestamp"),
+                                log_entry.get("level"),
+                                log_entry.get("logger"),
+                                log_entry.get("message"),
+                                log_entry.get("module"),
+                                log_entry.get("function"),
+                                log_entry.get("line"),
+                                log_entry.get("event_type"),
+                                log_entry.get("project_id"),
+                                log_entry.get("duration_seconds"),
+                                json.dumps(log_entry.get("extra_data")) if log_entry.get("extra_data") else None,
+                                log_entry.get("correlation_id"),
+                            ),
+                        )
+                    except Exception:
+                        pass  # Skip failed entries
+                conn.commit()
+                conn.close()
             except Exception:
-                # Silently fail - logging shouldn't break the app
-                pass
+                pass  # Silently fail
 
-    async def _write_log(self, log_entry: dict[str, Any]) -> None:
-        """Write a single log entry to the database."""
-        if self._db is None:
-            return
+        thread = threading.Thread(target=flush_worker, daemon=True)
+        thread.start()
 
-        try:
-            await self._db.execute(
-                """
-                INSERT INTO structured_logs (
-                    timestamp, level, logger, message, module, function, line,
-                    event_type, project_id, duration_seconds, extra_data, correlation_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    log_entry.get("timestamp"),
-                    log_entry.get("level"),
-                    log_entry.get("logger"),
-                    log_entry.get("message"),
-                    log_entry.get("module"),
-                    log_entry.get("function"),
-                    log_entry.get("line"),
-                    log_entry.get("event_type"),
-                    log_entry.get("project_id"),
-                    log_entry.get("duration_seconds"),
-                    json.dumps(log_entry.get("extra_data")) if log_entry.get("extra_data") else None,
-                    log_entry.get("correlation_id"),
-                ),
-            )
-        except Exception:
-            # Silently fail - logging shouldn't break the app
-            pass
-
-    async def flush(self) -> None:
-        """Async flush any remaining buffered logs."""
-        if self.buffer:
-            logs_to_write = self.buffer
-            self.buffer = []
-            for log_entry in logs_to_write:
-                await self._write_log(log_entry)
+    def close(self) -> None:
+        """Flush any remaining logs on close."""
+        self._flush_in_thread()
 
 
 # Global database handler instance (will be attached after DB init)

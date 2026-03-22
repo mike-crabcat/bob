@@ -538,66 +538,86 @@ async def logs(
     """Structured log viewer."""
     settings = _get_settings()
 
-    # Build query
-    query = "SELECT * FROM structured_logs"
-    conditions = []
-    params = []
-
-    if level:
-        conditions.append("level = ?")
-        params.append(level.upper())
-    if event_type:
-        conditions.append("event_type = ?")
-        params.append(event_type)
-    if project_id:
-        conditions.append("project_id = ?")
-        params.append(project_id)
-
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-
-    query += " ORDER BY timestamp DESC LIMIT 500"
-
-    rows = await db.fetch_all(query, tuple(params))
-
-    # Format logs for template
-    logs = []
-    for row in rows:
-        logs.append({
-            "timestamp": row.get("timestamp", "")[:19].replace("T", " "),
-            "level": row["level"],
-            "logger": row.get("logger", ""),
-            "message": row["message"],
-            "event_type": row.get("event_type"),
-            "project_id": row.get("project_id"),
-            "duration_seconds": row.get("duration_seconds"),
-            "extra_data": row.get("extra_data"),
-        })
-
-    # Calculate stats from actual data
-    stats_rows = await db.fetch_all(
-        """
-        SELECT
-            level,
-            event_type,
-            COUNT(*) as count
-        FROM structured_logs
-        WHERE timestamp > datetime('now', '-24 hours')
-        GROUP BY level, event_type
-        """
+    # Check if table exists and has data
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='structured_logs'"
     )
 
+    logs = []
     stats = {"error": 0, "warning": 0, "info": 0, "reasoning": 0}
-    for row in stats_rows:
-        level = row["level"]
-        if level == "ERROR":
-            stats["error"] += row["count"]
-        elif level == "WARNING":
-            stats["warning"] += row["count"]
-        elif level == "INFO":
-            stats["info"] += row["count"]
-        if row.get("event_type") == "reasoning_request":
-            stats["reasoning"] += row["count"]
+
+    if table_exists:
+        # Build query
+        query = "SELECT * FROM structured_logs"
+        conditions = []
+        params = []
+
+        if level:
+            conditions.append("level = ?")
+            params.append(level.upper())
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if project_id:
+            conditions.append("project_id = ?")
+            params.append(project_id)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY timestamp DESC LIMIT 500"
+
+        rows = await db.fetch_all(query, tuple(params))
+
+        # Format logs for template
+        for row in rows:
+            logs.append({
+                "timestamp": row.get("timestamp", "")[:19].replace("T", " "),
+                "level": row["level"],
+                "logger": row.get("logger", ""),
+                "message": row["message"],
+                "event_type": row.get("event_type"),
+                "project_id": row.get("project_id"),
+                "duration_seconds": row.get("duration_seconds"),
+                "extra_data": row.get("extra_data"),
+            })
+
+        # Calculate stats from actual data
+        stats_rows = await db.fetch_all(
+            """
+            SELECT
+                level,
+                event_type,
+                COUNT(*) as count
+            FROM structured_logs
+            WHERE timestamp > datetime('now', '-24 hours')
+            GROUP BY level, event_type
+            """
+        )
+
+        for row in stats_rows:
+            level_val = row["level"]
+            if level_val == "ERROR":
+                stats["error"] += row["count"]
+            elif level_val == "WARNING":
+                stats["warning"] += row["count"]
+            elif level_val == "INFO":
+                stats["info"] += row["count"]
+            if row.get("event_type") == "reasoning_request":
+                stats["reasoning"] += row["count"]
+
+    # Show empty state message if no logs
+    if not logs:
+        logs = [{
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "level": "INFO",
+            "logger": "cyborg.dashboard",
+            "message": "No logs yet. Logs will appear here once structured logging captures events.",
+            "event_type": None,
+            "project_id": None,
+            "duration_seconds": None,
+            "extra_data": None,
+        }]
 
     return _render_template(
         "dashboard/logs.html",
@@ -722,6 +742,7 @@ async def tasks(
 # ============================================================================
 
 @router.get("/events")
+@router.get("/logs/stream")
 async def dashboard_events(request: Request) -> StreamingResponse:
     """Server-Sent Events endpoint for real-time dashboard updates."""
 
