@@ -608,25 +608,92 @@ curl -X POST http://localhost:8420/api/v1/planning/projects/abc-123/refine-strat
 
 ---
 
-### Phase 4: Learning & Health Services (PENDING)
+### ✅ Phase 4: Learning & Health Services (COMPLETED)
 
-**Goals:** Implement services using the database schemas already created
+**Status:** All services, API endpoints, and CLI commands implemented
 
-**Tasks:**
-- [ ] Create `cyborg/services/learning_service.py`
-  - [ ] Extract insights after project completion
-  - [ ] Store in `project_insights` table
-  - [ ] Query similar projects for context
-- [ ] Create `cyborg/services/health_monitor_service.py`
-  - [ ] Periodic health checks (cron/scheduled)
-  - [ ] Store in `project_health_checks` table
-  - [ ] Alert on high/critical risks
-- [ ] Create `cyborg/routers/health.py` with endpoints
-  - [ ] `GET /api/v1/health/scan` - Scan all projects
-  - [ ] `GET /api/v1/projects/{id}/health` - Get project health
-- [ ] Create `cyborg/routers/learning.py` with endpoints
-  - [ ] `POST /api/v1/projects/{id}/extract-insights`
-  - [ ] `GET /api/v1/learning/similar-projects`
+**Completed:**
+- [x] Create `cyborg/services/learning_service.py`
+  - [x] Extract insights after project completion
+  - [x] Store in `project_insights` table
+  - [x] Query similar projects for context
+- [x] Create `cyborg/services/health_monitor_service.py`
+  - [x] Project health analysis with scoring
+  - [x] Store in `project_health_checks` table
+  - [x] Alert on high/critical risks
+- [x] Create `cyborg/routers/health.py` with endpoints
+  - [x] `GET /api/v1/health/scan` - Scan all projects
+  - [x] `GET /api/v1/health/projects-needing-attention` - Get at-risk projects
+  - [x] `GET /api/v1/health/projects/{id}/health` - Get project health
+  - [x] `GET /api/v1/health/projects/{id}/health/latest` - Get latest check
+- [x] Create `cyborg/routers/learning.py` with endpoints
+  - [x] `POST /api/v1/learning/projects/{id}/extract-insights`
+  - [x] `GET /api/v1/learning/similar-projects` - Find similar projects
+  - [x] `GET /api/v1/learning/insights/active` - Get applicable insights
+  - [x] `POST /api/v1/learning/suggest-criteria` - Suggest success criteria
+- [x] Add CLI commands for health monitoring
+  - [x] `cyborg health scan` - Scan all projects for health issues
+  - [x] `cyborg health analyze --project <id>` - Analyze specific project
+  - [x] `cyborg health projects-needing-attention` - List at-risk projects
+  - [x] `cyborg health latest --project <id>` - Get latest health check
+- [x] Add CLI commands for learning
+  - [x] `cyborg learning extract-insights --project <id>` - Extract insights
+  - [x] `cyborg learning similar-projects --aim "..."` - Find similar projects
+  - [x] `cyborg learning active-insights` - Get applicable insights
+  - [x] `cyborg learning suggest-criteria --aim "..."` - Suggest criteria
+
+**Files Created:**
+- `cyborg/services/learning_service.py` - Full learning service with insight extraction and similar project queries
+- `cyborg/services/health_monitor_service.py` - Health monitoring with scoring and risk assessment
+- `cyborg/routers/health.py` - Health API endpoints
+- `cyborg/routers/learning.py` - Learning API endpoints
+
+**Files Modified:**
+- `cyborg/main.py` - Added health and learning router imports and inclusions
+- `cyborg/cli.py` - Added health_app and learning_app with full CLI commands
+
+**Health Scoring:**
+- Score: 0.0-1.0 (higher = healthier)
+- Risk levels: low, medium, high, critical
+- Factors: task completion rate, blocked tasks, failed tasks, active tasks
+- AI-powered recommendations via OpenClaw
+
+**Learning Features:**
+- Insight extraction from completed projects
+- Similar project discovery by aim/method
+- Success criteria suggestion based on past projects
+- Active insights from successful/partial outcomes
+
+**Usage Examples:**
+
+```bash
+# CLI: Scan all projects for health issues
+cyborg health scan --include-healthy
+
+# CLI: Get projects needing attention
+cyborg health projects-needing-attention --limit 10
+
+# CLI: Analyze specific project health
+cyborg health analyze --project abc-123 --save
+
+# CLI: Extract insights from completed project
+cyborg learning extract-insights --project abc-123 --force
+
+# CLI: Find similar projects
+cyborg learning similar-projects --aim "Launch customer feedback sprint"
+
+# CLI: Get active insights
+cyborg learning active-insights --category planning
+
+# CLI: Suggest success criteria
+cyborg learning suggest-criteria --aim "Launch customer feedback sprint" --method "Interview customers"
+
+# API: Health scan
+curl http://localhost:8420/api/v1/health/scan
+
+# API: Extract insights
+curl -X POST http://localhost:8420/api/v1/learning/projects/abc-123/extract-insights
+```
 
 ---
 
@@ -1124,8 +1191,8 @@ metadata = {
 - **Created:** 2025-01-21
 - **Author:** Generated via Cyborg planning
 - **Last Updated:** 2025-03-22
-- **Status:** Active implementation (~60% complete)
-- **Next Review:** After Phase 4 completion
+- **Status:** Active implementation (~70% complete)
+- **Next Review:** After Phase 5 completion
 
 ## Progress Summary
 
@@ -1136,14 +1203,14 @@ metadata = {
 | Phase 2.5: E2E Testing Infrastructure | ✅ Complete | 100% |
 | Acceptance Test Suite | ✅ Complete (Codex) | 100% |
 | Phase 3: Planning & Strategy APIs | ✅ Complete | 100% |
-| Phase 4: Learning & Health Services | ⏳ Pending | 0% |
+| Phase 4: Learning & Health Services | ✅ Complete | 100% |
 | Phase 5: Monitoring & Observability | ⏳ Pending | 0% |
 | Phase 6: Polish & Production | ⏳ Pending | 0% |
 
-**Overall: ~60% Complete**
+**Overall: ~70% Complete**
 
-Core autonomy features are implemented and tested. Planning APIs and CLI commands are now available.
+Core autonomy features are implemented and tested. Planning APIs, health monitoring, and learning services are now available.
 Remaining work focuses on:
-- Service layer implementations (Learning, HealthMonitor)
-- Production monitoring and observability
+- Production monitoring and observability (metrics, structured logging)
 - Documentation updates and polish
+- Performance optimization and production deployment

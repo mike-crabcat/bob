@@ -554,9 +554,12 @@ async def test_openclaw_unavailable_stalls_project(db: Database):
     ):
         # Project should fall back to rule-based evaluation
         # and still be able to complete if simple criteria match
-
+        result = await execution_service.evaluate_and_complete(
+            project_id=project_id,
+            result_summary="Completed via fallback"
+        )
         # This verifies the fallback works
-        # Project should still complete if rule-based evaluation passes
+        assert result is not None
 
 
 @pytest.mark.asyncio
