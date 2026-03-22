@@ -65,10 +65,23 @@ class OpenClawHookService(BaseService):
 
         route_data = route.model_dump(mode="json")
         target_session_key = await self._resolve_delivery_session_key(notification)
+
+        # Task assignments and plan approvals use the agent method with detailed prompt
         if self._should_use_task_assignment_agent(notification, target_session_key):
             await self._send_gateway_request(
                 "agent",
                 self._build_task_assignment_agent_params(notification, route_data, target_session_key),
+                expect_final=True,
+                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+            )
+            return
+
+        # Needs input notifications (plan approvals, etc.) also use agent method for context
+        if notification.get("notification_type") == "needs_input":
+            session_key = target_session_key or self._resolve_visible_session_key(route_data)
+            await self._send_gateway_request(
+                "agent",
+                self._build_needs_input_agent_params(notification, route_data, session_key),
                 expect_final=True,
                 timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
             )
@@ -402,6 +415,28 @@ class OpenClawHookService(BaseService):
             params["agentId"] = self.settings.agent_id
         return params
 
+    def _build_needs_input_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        """Build agent params for needs_input notifications (plan approvals, etc.)"""
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": self._render_needs_input_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "verbose",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
+
     def _render_message(self, notification: dict[str, Any]) -> str:
         parts = [notification["title"], "", notification["message"]]
         if notification.get("entity_type") == "task" and notification.get("metadata", {}).get("parent_project_title"):
@@ -511,6 +546,68 @@ class OpenClawHookService(BaseService):
                 "- Keep the tone natural for the channel and recipient.",
             ]
         )
+        return "\n".join(lines)
+
+    def _render_needs_input_prompt(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> str:
+        """Render prompt for needs_input notifications (plan approvals, etc.)"""
+        metadata = notification.get("metadata", {})
+        lines = [
+            "Cyborg notification: approval or input needed.",
+            "",
+            "The user needs to review and respond to a Cyborg request.",
+            "Your task is to:",
+            "1. Show thinking about what needs approval",
+            "2. Present the request clearly to the user",
+            "3. Help them understand what action is needed",
+            "",
+            f"Notification ID: {notification['id']}",
+            f"Type: {notification.get('notification_type', 'unknown')}",
+            "",
+            f"Request: {notification['title']}",
+            "",
+            notification["message"],
+        ]
+        if metadata.get("task_id"):
+            lines.extend([
+                "",
+                f"Task ID: {metadata['task_id']}",
+            ])
+        if metadata.get("parent_project_title"):
+            lines.extend([
+                "",
+                f"Project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
+            ])
+        if metadata.get("blocked_reason"):
+            lines.extend([
+                "",
+                f"Blocked reason: {metadata['blocked_reason']}",
+            ])
+        if metadata.get("blocked_resume_instructions"):
+            lines.extend([
+                "",
+                f"Resume instructions: {metadata['blocked_resume_instructions']}",
+            ])
+        lines.extend([
+            "",
+            "Instructions:",
+            "- Send a natural message to the recipient asking for the needed approval/input.",
+            "- Include relevant details from the request above.",
+            "- Do not mention Cyborg internal details like notification IDs unless necessary.",
+            "- Keep the tone appropriate for the channel (WhatsApp DM).",
+        ])
+        # Include instructions for how to respond
+        if metadata.get("task_id"):
+            task_id = metadata['task_id']
+            lines.extend([
+                "",
+                f"Once the user approves, respond to this notification by calling: cyborg task plan approve {task_id}",
+                f"Or use the HTTP API: PUT /api/v1/tasks/{task_id}/plan with plan approval details.",
+            ])
         return "\n".join(lines)
 
     def _is_target_task_assignment(self, notification: dict[str, Any]) -> bool:
