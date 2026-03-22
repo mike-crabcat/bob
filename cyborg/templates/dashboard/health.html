@@ -1,0 +1,123 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Health - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">
+        <span class="neon-text">Project</span> Health Monitor
+    </h1>
+    <p class="text-text-secondary">Real-time health status and risk assessment</p>
+</div>
+
+<!-- Health Summary -->
+<div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-8">
+    <div class="glass-card neon-border-green rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-green">{{ healthy_count }}</div>
+        <div class="text-text-muted text-sm mt-1">Healthy Projects</div>
+    </div>
+    <div class="glass-card rounded-xl p-5 border-accent-orange/30">
+        <div class="text-3xl font-bold font-mono-data text-accent-orange">{{ medium_risk_count }}</div>
+        <div class="text-text-muted text-sm mt-1">Medium Risk</div>
+    </div>
+    <div class="glass-card neon-border-pink rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-red">{{ high_risk_count }}</div>
+        <div class="text-text-muted text-sm mt-1">High/Critical Risk</div>
+    </div>
+    <div class="glass-card neon-border rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-cyan">{{ avg_health_score }}%</div>
+        <div class="text-text-muted text-sm mt-1">Avg Health Score</div>
+    </div>
+</div>
+
+<!-- At-Risk Projects -->
+<div class="glass-card neon-border-pink rounded-xl overflow-hidden">
+    <div class="p-6 border-b border-accent-pink/20">
+        <h2 class="text-lg font-semibold flex items-center gap-2">
+            <span class="text-accent-pink">▲</span>
+            Projects Requiring Attention
+        </h2>
+    </div>
+    <div class="overflow-x-auto">
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-accent-cyan/10">
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">PROJECT</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">HEALTH SCORE</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">RISK LEVEL</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">ISSUES</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">LAST CHECKED</th>
+                    <th class="text-right p-4 text-text-secondary text-sm font-medium">ACTIONS</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for project in at_risk_projects %}
+                <tr class="border-b border-accent-cyan/5 hover:bg-accent-cyan/5 transition-colors">
+                    <td class="p-4">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-lg bg-bg-elevated flex items-center justify-center text-accent-red">
+                                ▲
+                            </div>
+                            <div>
+                                <a href="/dashboard/projects/{{ project.id }}" class="font-medium hover:text-accent-cyan transition-colors">
+                                    {{ project.title or 'Untitled Project' }}
+                                </a>
+                                <div class="text-xs text-text-muted font-mono-data">{{ project.id[:8] }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="p-4">
+                        <div class="flex items-center gap-2">
+                            <div class="w-16 h-2 bg-bg-elevated rounded-full overflow-hidden">
+                                <div class="h-full rounded-full bg-accent-red"
+                                     style="width: {{ (project.health_score * 100)|int }}%"></div>
+                            </div>
+                            <span class="text-sm font-mono-data text-accent-red">
+                                {{ (project.health_score * 100)|int }}%
+                            </span>
+                        </div>
+                    </td>
+                    <td class="p-4">
+                        <span class="px-2 py-1 text-xs rounded
+                            {% if project.risk_level == 'critical' %}bg-accent-red text-white
+                            {% elif project.risk_level == 'high' %}bg-accent-orange text-accent-orange
+                            {% else %}bg-accent-orange/30 text-accent-orange{% endif %}">
+                            {{ project.risk_level|upper }}
+                        </span>
+                    </td>
+                    <td class="p-4">
+                        <div class="text-sm text-text-secondary">
+                            {% if project.blocked_tasks > 0 %}
+                            <div>◈ {{ project.blocked_tasks }} blocked task(s)</div>
+                            {% endif %}
+                            {% if project.failed_tasks > 0 %}
+                            <div>✖ {{ project.failed_tasks }} failed task(s)</div>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td class="p-4">
+                        <div class="text-sm text-text-secondary">
+                            {{ project.last_checked|relative_time if project.last_checked else 'Never' }}
+                        </div>
+                    </td>
+                    <td class="p-4 text-right">
+                        <a href="/dashboard/projects/{{ project.id }}" class="px-4 py-2 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors text-sm">
+                            View Details
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if not at_risk_projects %}
+<div class="glass-card neon-border-green rounded-xl p-12 text-center">
+    <div class="text-4xl mb-4 text-accent-green">✓</div>
+    <h3 class="text-xl font-semibold mb-2 text-accent-green">All Systems Healthy</h3>
+    <p class="text-text-muted">No projects require attention at this time</p>
+</div>
+{% endif %}
+{% endblock %}

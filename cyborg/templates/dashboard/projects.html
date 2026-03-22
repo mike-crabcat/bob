@@ -1,0 +1,195 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Projects - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div>
+        <h1 class="text-3xl font-bold mb-2">
+            <span class="neon-text">Projects</span>
+        </h1>
+        <p class="text-text-secondary">Manage and monitor all projects</p>
+    </div>
+    <div class="flex items-center gap-3">
+        <div class="relative">
+            <input type="text" placeholder="Search projects..."
+                   class="w-64 px-4 py-2 pl-10 bg-bg-card border border-accent-cyan/20 rounded-lg text-text-primary placeholder-text-muted focus:outline-none focus:border-accent-cyan/50">
+            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted">◕</span>
+        </div>
+        <a href="/dashboard/projects?status=active" class="px-4 py-2 bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/20 transition-colors">
+            + New Project
+        </a>
+    </div>
+</div>
+
+<!-- Filters -->
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex flex-wrap items-center gap-4">
+        <span class="text-text-secondary text-sm">Filter by:</span>
+        <div class="flex gap-2">
+            <a href="/dashboard/projects" class="filter-btn px-3 py-1.5 text-sm rounded {% if not filter_status %}bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border border-accent-cyan/10 hover:border-accent-cyan/30{% endif %} transition-colors">
+                All
+            </a>
+            <a href="/dashboard/projects?status=active" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_status == 'active' %}bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border border-accent-cyan/10 hover:border-accent-cyan/30{% endif %} transition-colors">
+                Active
+            </a>
+            <a href="/dashboard/projects?status=completed" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_status == 'completed' %}bg-accent-green/20 text-accent-green border border-accent-green/30{% else %}bg-bg-card text-text-secondary border border-accent-cyan/10 hover:border-accent-cyan/30{% endif %} transition-colors">
+                Completed
+            </a>
+            <a href="/dashboard/projects?status=blocked" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_status == 'blocked' %}bg-accent-red/20 text-accent-red border border-accent-red/30{% else %}bg-bg-card text-text-secondary border border-accent-cyan/10 hover:border-accent-cyan/30{% endif %} transition-colors">
+                Blocked
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- Status Summary -->
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+    <div class="glass-card rounded-lg p-4 text-center">
+        <div class="text-2xl font-bold font-mono-data text-accent-cyan">{{ stats.total }}</div>
+        <div class="text-text-muted text-xs mt-1">TOTAL</div>
+    </div>
+    <div class="glass-card rounded-lg p-4 text-center">
+        <div class="text-2xl font-bold font-mono-data text-accent-green">{{ stats.active }}</div>
+        <div class="text-text-muted text-xs mt-1">ACTIVE</div>
+    </div>
+    <div class="glass-card rounded-lg p-4 text-center">
+        <div class="text-2xl font-bold font-mono-data text-accent-pink">{{ stats.completed }}</div>
+        <div class="text-text-muted text-xs mt-1">COMPLETED</div>
+    </div>
+    <div class="glass-card rounded-lg p-4 text-center">
+        <div class="text-2xl font-bold font-mono-data text-accent-orange">{{ stats.blocked }}</div>
+        <div class="text-text-muted text-xs mt-1">BLOCKED</div>
+    </div>
+</div>
+
+<!-- Projects Grid -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <!-- Project List -->
+    <div class="lg:col-span-2">
+        <div class="glass-card neon-border rounded-xl overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-accent-cyan/10">
+                            <th class="text-left p-4 text-text-secondary text-sm font-medium">PROJECT</th>
+                            <th class="text-left p-4 text-text-secondary text-sm font-medium">STATUS</th>
+                            <th class="text-left p-4 text-text-secondary text-sm font-medium">HEALTH</th>
+                            <th class="text-left p-4 text-text-secondary text-sm font-medium">TASKS</th>
+                            <th class="text-left p-4 text-text-secondary text-sm font-medium">UPDATED</th>
+                            <th class="text-right p-4 text-text-secondary text-sm font-medium">ACTIONS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for project in projects %}
+                        <tr class="border-b border-accent-cyan/5 hover:bg-accent-cyan/5 transition-colors" data-project-id="{{ project.id }}">
+                            <td class="p-4">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-bg-elevated flex items-center justify-center text-accent-cyan">
+                                        {% if project.state == 'active' %}◈
+                                        {% elif project.state == 'completed' %}✓
+                                        {% elif project.state == 'blocked' %}✖
+                                        {% else %}◇{% endif %}
+                                    </div>
+                                    <div>
+                                        <a href="/dashboard/projects/{{ project.id }}" class="font-medium hover:text-accent-cyan transition-colors">
+                                            {{ project.title or 'Untitled Project' }}
+                                        </a>
+                                        <div class="text-xs text-text-muted font-mono-data">{{ project.id[:8] }}</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="p-4">
+                                {% if project.state == 'active' %}
+                                <span class="status-info px-2 py-1 text-xs rounded">ACTIVE</span>
+                                {% elif project.state == 'completed' %}
+                                <span class="status-success px-2 py-1 text-xs rounded">COMPLETED</span>
+                                {% elif project.state == 'blocked' %}
+                                <span class="status-error px-2 py-1 text-xs rounded">BLOCKED</span>
+                                {% else %}
+                                <span class="px-2 py-1 text-xs rounded bg-bg-elevated text-text-muted">{{ project.state|upper }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="p-4">
+                                {% if project.health_score is not none %}
+                                <div class="flex items-center gap-2">
+                                    <div class="w-16 h-2 bg-bg-elevated rounded-full overflow-hidden">
+                                        <div class="h-full rounded-full {% if project.health_score >= 0.8 %}bg-accent-green{% elif project.health_score >= 0.5 %}bg-accent-orange{% else %}bg-accent-red{% endif %}"
+                                             style="width: {{ (project.health_score * 100)|int }}%"></div>
+                                    </div>
+                                    <span class="text-xs font-mono-data {% if project.health_score >= 0.8 %}text-accent-green{% elif project.health_score >= 0.5 %}text-accent-orange{% else %}text-accent-red{% endif %}">
+                                        {{ (project.health_score * 100)|int }}%
+                                    </span>
+                                </div>
+                                {% else %}
+                                <span class="text-text-muted text-xs">—</span>
+                                {% endif %}
+                            </td>
+                            <td class="p-4">
+                                <div class="text-sm">
+                                    <span class="text-accent-cyan font-mono-data">{{ project.completed_tasks or 0 }}</span>
+                                    <span class="text-text-muted">/</span>
+                                    <span class="text-text-secondary">{{ project.total_tasks or 0 }}</span>
+                                </div>
+                                <div class="text-xs text-text-muted">tasks</div>
+                            </td>
+                            <td class="p-4">
+                                <div class="text-sm text-text-secondary">
+                                    {{ project.created_at|relative_time }}
+                                </div>
+                            </td>
+                            <td class="p-4 text-right">
+                                <div class="flex items-center justify-end gap-2">
+                                    <a href="/dashboard/projects/{{ project.id }}" class="p-2 text-text-secondary hover:text-accent-cyan transition-colors">
+                                        <span class="text-lg">◕</span>
+                                    </a>
+                                    {% if project.state == 'active' %}
+                                    <button class="p-2 text-text-secondary hover:text-accent-green transition-colors" title="Pause">
+                                        <span class="text-lg">❚❚</span>
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if not projects %}
+<!-- Empty State -->
+<div class="glass-card neon-border rounded-xl p-12 text-center">
+    <div class="text-4xl mb-4">◈</div>
+    <h3 class="text-xl font-semibold mb-2">No projects found</h3>
+    <p class="text-text-muted mb-6">Create your first project to get started</p>
+    <a href="/dashboard/projects?status=active" class="inline-block px-6 py-3 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors">
+        + Create Project
+    </a>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Add search functionality
+const searchInput = document.querySelector('input[placeholder="Search projects..."]');
+if (searchInput) {
+    searchInput.addEventListener('input', function(e) {
+        const query = e.target.value.toLowerCase();
+        document.querySelectorAll('tr[data-project-id]').forEach(row => {
+            const title = row.querySelector('a[href*="/dashboard/projects/"]').textContent.toLowerCase();
+            const id = row.dataset.projectId.toLowerCase();
+            if (title.includes(query) || id.includes(query)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,96 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Tasks - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">
+        <span class="neon-text">Tasks</span>
+    </h1>
+    <p class="text-text-secondary">All tasks across projects</p>
+</div>
+
+<!-- Filters -->
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex flex-wrap items-center gap-4">
+        <span class="text-text-secondary text-sm">Filter by:</span>
+        <div class="flex gap-2">
+            <a href="/dashboard/tasks" class="px-3 py-1.5 text-sm rounded bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30">All</a>
+            <a href="/dashboard/tasks?status=pending" class="px-3 py-1.5 text-sm rounded bg-bg-card text-text-secondary border border-accent-cyan/10">Pending</a>
+            <a href="/dashboard/tasks?status=active" class="px-3 py-1.5 text-sm rounded bg-bg-card text-text-secondary border border-accent-cyan/10">Active</a>
+            <a href="/dashboard/tasks?status=completed" class="px-3 py-1.5 text-sm rounded bg-bg-card text-text-secondary border border-accent-cyan/10">Completed</a>
+        </div>
+    </div>
+</div>
+
+<!-- Tasks Table -->
+<div class="glass-card neon-border rounded-xl overflow-hidden">
+    <div class="overflow-x-auto">
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-accent-cyan/10">
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">TASK</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">STATUS</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">PRIORITY</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">PROJECT</th>
+                    <th class="text-left p-4 text-text-secondary text-sm font-medium">CREATED</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in tasks[:50] %}
+                <tr class="border-b border-accent-cyan/5 hover:bg-accent-cyan/5 transition-colors">
+                    <td class="p-4">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 rounded bg-bg-elevated flex items-center justify-center text-xs">
+                                {% if task.status == 'completed' %}✓
+                                {% elif task.status == 'active' %}◈
+                                {% elif task.status == 'failed' %}✖
+                                {% elif task.status == 'blocked' %}❚
+                                {% else %}○{% endif %}
+                            </div>
+                            <div>
+                                <div class="font-medium">{{ task.title or 'Untitled Task' }}</div>
+                                <div class="text-xs text-text-muted font-mono-data">{{ task.id[:8] }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="p-4">
+                        <span class="px-2 py-1 text-xs rounded
+                            {% if task.status == 'completed' %}bg-accent-green/20 text-accent-green
+                            {% elif task.status == 'active' %}bg-accent-cyan/20 text-accent-cyan
+                            {% elif task.status == 'failed' %}bg-accent-red/20 text-accent-red
+                            {% elif task.status == 'blocked' %}bg-accent-orange/20 text-accent-orange
+                            {% else %}bg-bg-elevated text-text-muted{% endif %}">
+                            {{ task.status|upper }}
+                        </span>
+                    </td>
+                    <td class="p-4">
+                        <span class="text-xs text-accent-pink">{{ task.priority or 'normal' }}</span>
+                    </td>
+                    <td class="p-4">
+                        {% if task.project_id %}
+                        <a href="/dashboard/projects/{{ task.project_id }}" class="text-accent-cyan text-sm hover:underline">
+                            {{ task.project_id[:8] }}
+                        </a>
+                        {% else %}
+                        <span class="text-text-muted text-xs">—</span>
+                        {% endif %}
+                    </td>
+                    <td class="p-4">
+                        <span class="text-text-secondary text-sm">{{ task.created_at|relative_time if task.created_at else '' }}</span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if not tasks %}
+<div class="glass-card neon-border rounded-xl p-12 text-center">
+    <div class="text-4xl mb-4">○</div>
+    <h3 class="text-xl font-semibold mb-2">No tasks found</h3>
+</div>
+{% endif %}
+{% endblock %}

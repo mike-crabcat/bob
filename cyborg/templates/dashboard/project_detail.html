@@ -1,0 +1,191 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}{{ project.title or 'Project' }} - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div>
+        <a href="/dashboard/projects" class="text-accent-cyan text-sm hover:underline mb-2">← Back to Projects</a>
+        <h1 class="text-3xl font-bold">
+            {{ project.title or 'Untitled Project' }}
+        </h1>
+        <div class="flex items-center gap-3 mt-1">
+            <span class="font-mono-data text-sm text-text-muted">{{ project.id }}</span>
+            {% if project.state == 'active' %}
+            <span class="status-info px-2 py-1 text-xs rounded">ACTIVE</span>
+            {% elif project.state == 'closed' %}
+            <span class="status-success px-2 py-1 text-xs rounded">COMPLETED</span>
+            {% endif %}
+            {% if project.auto_execute %}
+            <span class="text-xs text-accent-purple">◈ Auto-execute</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="flex gap-2">
+        <a href="#" class="px-4 py-2 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors text-sm">
+            Edit Project
+        </a>
+    </div>
+</div>
+
+<!-- Project Overview Cards -->
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+    <div class="glass-card neon-border rounded-xl p-5">
+        <div class="text-text-secondary text-sm mb-1">PROGRESS</div>
+        <div class="text-2xl font-bold font-mono-data">
+            {% if project.total_tasks > 0 %}
+            {{ (project.completed_tasks / project.total_tasks * 100)|int }}%
+            {% else %}
+            0%
+            {% endif %}
+        </div>
+        <div class="progress-bar mt-2">
+            <div class="progress-bar-fill" style="width: {% if project.total_tasks > 0 %}{{ (project.completed_tasks / project.total_tasks * 100)|int }}{% else %}0{% endif %}%"></div>
+        </div>
+        <div class="text-text-muted text-xs mt-2">{{ project.completed_tasks or 0 }}/{{ project.total_tasks or 0 }} tasks completed</div>
+    </div>
+
+    <div class="glass-card neon-border rounded-xl p-5">
+        <div class="text-text-secondary text-sm mb-1">HEALTH SCORE</div>
+        <div class="text-2xl font-bold font-mono-data {% if health_checks and health_checks[0].health_score >= 0.8 %}text-accent-green{% elif health_checks and health_checks[0].health_score >= 0.5 %}text-accent-orange{% else %}text-accent-red{% endif %}">
+            {% if health_checks and health_checks[0].health_score is not none %}
+            {{ (health_checks[0].health_score * 100)|int }}%
+            {% else %}
+            N/A
+            {% endif %}
+        </div>
+        <div class="text-text-muted text-xs mt-2">
+            {% if health_checks and health_checks[0].risk_level %}
+            {{ health_checks[0].risk_level|upper }} RISK
+            {% else %}
+            Not checked
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="glass-card neon-border rounded-xl p-5">
+        <div class="text-text-secondary text-sm mb-1">CREATED</div>
+        <div class="text-2xl font-bold font-mono-data">
+            {{ project.created_at[:10] if project.created_at else '' }}
+        </div>
+        <div class="text-text-muted text-xs mt-2">
+            {{ project.created_at|relative_time if project.created_at else '' }}
+        </div>
+    </div>
+</div>
+
+<!-- Project Details -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <!-- Aim & Method -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-cyan">◈</span>
+            Project Definition
+        </h2>
+        <div class="space-y-4">
+            <div>
+                <div class="text-text-secondary text-sm mb-1">AIM</div>
+                <div class="text-text-primary">{{ project.aim or 'Not specified' }}</div>
+            </div>
+            {% if project.method %}
+            <div>
+                <div class="text-text-secondary text-sm mb-1">METHOD</div>
+                <div class="text-text-primary">{{ project.method }}</div>
+            </div>
+            {% endif %}
+            {% if project.conclusion %}
+            <div>
+                <div class="text-text-secondary text-sm mb-1">CONCLUSION</div>
+                <div class="text-text-primary">{{ project.conclusion }}</div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Success Criteria -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-green">✓</span>
+            Success Criteria
+        </h2>
+        {% if project.success_criteria %}
+        <div class="space-y-2">
+            {% for criterion in project.success_criteria %}
+            <div class="flex items-center gap-2 p-2 bg-bg-card rounded">
+                <span class="text-accent-green">○</span>
+                <span class="text-sm flex-1">{{ criterion.check }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-text-muted text-sm">No success criteria defined</div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Tasks -->
+<div class="glass-card neon-border rounded-xl p-6 mb-8">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-purple">◇</span>
+        Tasks
+    </h2>
+    <div class="space-y-2">
+        {% for task in tasks[:10] %}
+        <div class="p-3 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors">
+            <div class="w-8 h-8 rounded flex items-center justify-center text-sm
+                {% if task.status == 'completed' %}bg-accent-green/20 text-accent-green
+                {% elif task.status == 'active' %}bg-accent-cyan/20 text-accent-cyan
+                {% elif task.status == 'failed' %}bg-accent-red/20 text-accent-red
+                {% else %}bg-bg-elevated text-text-muted{% endif %}">
+                {% if task.status == 'completed' %}✓
+                {% elif task.status == 'active' %}◈
+                {% elif task.status == 'failed' %}✖
+                {% else %}○{% endif %}
+            </div>
+            <div class="flex-1">
+                <div class="text-sm font-medium">{{ task.title or 'Untitled Task' }}</div>
+                <div class="text-xs text-text-muted font-mono-data">{{ task.id[:8] }}</div>
+            </div>
+            <span class="text-xs px-2 py-1 rounded bg-bg-elevated text-text-muted">
+                {{ task.status|upper }}
+            </span>
+        </div>
+        {% else %}
+        <div class="text-text-muted text-sm">No tasks found</div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Journal Timeline -->
+<div class="glass-card neon-border rounded-xl p-6">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-pink">◈</span>
+        Journal & Activity
+    </h2>
+    <div class="space-y-4">
+        {% for entry in journal[:20] %}
+        <div class="flex gap-4">
+            <div class="flex flex-col items-center">
+                <div class="w-3 h-3 rounded-full
+                    {% if entry.entry_type == 'MILESTONE' %}bg-accent-green
+                    {% elif entry.entry_type == 'DECISION' %}bg-accent-pink
+                    {% elif entry.entry_type == 'BLOCKER' %}bg-accent-red
+                    {% elif entry.entry_type == 'NOTE' %}bg-accent-cyan
+                    {% else %}bg-bg-elevated{% endif %}"></div>
+                <div class="w-px flex-1 bg-accent-cyan/10"></div>
+            </div>
+            <div class="flex-1 pb-4">
+                <div class="text-xs text-text-muted mb-1">{{ entry.created_at|relative_time }}</div>
+                <div class="text-sm">
+                    <span class="text-accent-cyan">{{ entry.entry_type }}</span>
+                    <span class="text-text-primary ml-2">{{ entry.content[:200] }}</span>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="text-text-muted text-sm">No journal entries</div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
