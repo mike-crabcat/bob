@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 from typing import Any
 from uuid import uuid4
@@ -11,6 +12,21 @@ from cyborg.database import Database
 from cyborg.models import ProjectState, TaskStatus
 from cyborg.services.base import BaseService, utcnow
 from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+
+
+logger = logging.getLogger(__name__)
+
+# Lazy import structured logging helpers
+_structured_logger = None
+
+
+def _get_structured_logger():
+    """Lazy import structured logging helpers."""
+    global _structured_logger
+    if _structured_logger is None:
+        from cyborg.structured_logging import get_logger as _get_logger
+        _structured_logger = _get_logger(__name__)
+    return _structured_logger
 
 
 class HealthMonitorService(BaseService):
@@ -212,6 +228,8 @@ class HealthMonitorService(BaseService):
         check_type: str = "triggered",
     ) -> dict[str, Any]:
         """Save a health check record to the database."""
+        from cyborg.structured_logging import log_health_check
+
         check_id = str(uuid4())
 
         await self.db.execute(
@@ -232,6 +250,16 @@ class HealthMonitorService(BaseService):
                 risk_level in ("high", "critical"),
                 utcnow().isoformat(),
             ),
+        )
+
+        # Log health check result
+        log_health_check(
+            _get_structured_logger(),
+            project_id,
+            health_score,
+            risk_level,
+            check_type=check_type,
+            recommendations_count=len(recommendations) if recommendations else 0,
         )
 
         return {

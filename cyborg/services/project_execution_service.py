@@ -8,6 +8,7 @@ criteria are met.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 from uuid import uuid4
@@ -30,6 +31,21 @@ from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.webhook_service import WebhookEvent, WebhookService
+
+
+logger = logging.getLogger(__name__)
+
+# Lazy import structured logging helpers
+_structured_logger = None
+
+
+def _get_structured_logger():
+    """Lazy import structured logging helpers."""
+    global _structured_logger
+    if _structured_logger is None:
+        from cyborg.structured_logging import get_logger as _get_logger
+        _structured_logger = _get_logger(__name__)
+    return _structured_logger
 
 
 class ProjectExecutionService(BaseService):
@@ -154,6 +170,8 @@ class ProjectExecutionService(BaseService):
 
         Returns the completed project if auto-completed, None otherwise.
         """
+        from cyborg.structured_logging import log_autonomy_decision
+
         project = await self._get_project_row(project_id)
         if not project or project["state"] != ProjectState.ACTIVE.value:
             return None
@@ -172,8 +190,15 @@ class ProjectExecutionService(BaseService):
             evaluation = await self.reasoning_service.evaluate_success_criteria(project_id)
         except Exception as e:
             # Log error but fall back to rule-based evaluation
-            import logging
-            logging.error(f"OpenClaw evaluation failed for project {project_id}, falling back to rule-based: {e}")
+            logger.error(f"OpenClaw evaluation failed for project {project_id}, falling back to rule-based: {e}")
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "evaluation_failed",
+                project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                fallback="rule_based",
+            )
             context, _met_criteria, unmet_criteria = await self._evaluate_criteria(project_id, success_criteria)
             evaluation = {
                 "all_met": len(unmet_criteria) == 0,
@@ -208,6 +233,15 @@ class ProjectExecutionService(BaseService):
                 },
             )
 
+            # Log auto-completion decision
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "project_auto_completed",
+                project_id,
+                met_criteria_count=len(evaluation.get("met_criteria", [])),
+                conclusion=conclusion[:200],
+            )
+
             await self._sync_notifications(project_id, immediate=False)
             await NotificationService(self.db).create_project_result_notification(
                 project_id,
@@ -218,6 +252,13 @@ class ProjectExecutionService(BaseService):
         # Generate follow-up tasks for unmet criteria
         unmet = evaluation.get("unmet_criteria", [])
         if unmet:
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "follow_up_tasks_initiated",
+                project_id,
+                unmet_criteria_count=len(unmet),
+                unmet_criteria=unmet[:3],  # Log first 3
+            )
             await self._generate_follow_up_tasks_llm(project_id, project, unmet, evaluation)
 
         return None

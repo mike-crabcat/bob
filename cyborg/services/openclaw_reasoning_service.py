@@ -6,6 +6,7 @@ import json
 import logging
 import ast
 import re
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -14,8 +15,19 @@ from cyborg.models import PlanStep, SuccessCriterion
 from cyborg.services.base import BaseService
 from cyborg.services.context_builder import ContextBuilder, ContextScope
 
-
 logger = logging.getLogger(__name__)
+
+# Import structured logging helpers (lazy import to avoid circular dependency)
+_structured_logger = None
+
+
+def _get_structured_logger():
+    """Lazy import structured logging helpers."""
+    global _structured_logger
+    if _structured_logger is None:
+        from cyborg.structured_logging import get_logger as _get_logger
+        _structured_logger = _get_logger(__name__)
+    return _structured_logger
 
 
 class OpenClawReasoningService(BaseService):
@@ -71,6 +83,8 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_PLAN,
+            reasoning_type="plan_generation",
+            project_id=reference_project_id,
         )
 
         return self._parse_plan_response(response)
@@ -98,6 +112,8 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_EVALUATION,
+            reasoning_type="criteria_evaluation",
+            project_id=project_id,
         )
 
         return self._parse_evaluation_response(response)
@@ -126,6 +142,9 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_REFINEMENT,
+            reasoning_type="strategy_refinement",
+            project_id=project_id,
+            task_id=trigger_task_id,
         )
 
         return self._parse_refinement_response(response)
@@ -150,6 +169,8 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_LEARNING,
+            reasoning_type="learning_extraction",
+            project_id=project_id,
         )
 
         return self._parse_learning_response(response)
@@ -176,9 +197,11 @@ class OpenClawReasoningService(BaseService):
             "SELECT project_id FROM project_tasks WHERE task_id = ?",
             (task_id,)
         )
+        project_id_from_task = None
         if project_links:
+            project_id_from_task = project_links[0]["project_id"]
             project_context = await self.context_builder.build_project_context(
-                project_id=project_links[0]["project_id"],
+                project_id=project_id_from_task,
                 scope=ContextScope.MINIMAL,
                 focus_reasoning="task_planning",
             )
@@ -189,6 +212,9 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="text",
             timeout=self.TIMEOUT_DEFAULT,
+            reasoning_type="task_planning",
+            task_id=task_id,
+            project_id=project_id_from_task,
         )
 
         return response.strip()
@@ -213,6 +239,8 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_EVALUATION,
+            reasoning_type="health_analysis",
+            project_id=project_id,
         )
 
         return self._parse_health_analysis_response(response)
@@ -238,6 +266,8 @@ class OpenClawReasoningService(BaseService):
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_PLAN,
+            reasoning_type="follow_up_generation",
+            project_id=project_id,
         )
 
         return self._parse_follow_up_tasks_response(response)
@@ -248,17 +278,29 @@ class OpenClawReasoningService(BaseService):
         response_format: str = "text",
         timeout: int = 30,
         session_key: str | None = None,
+        reasoning_type: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
     ) -> str:
         """
         Call OpenClaw gateway for reasoning.
 
         Uses a separate internal session for reasoning (not user-facing).
         """
+        from cyborg.structured_logging import log_reasoning_request
 
         # Use a dedicated reasoning session
         reasoning_session = session_key or "cyborg:reasoning"
 
         if not self.openclaw_service.is_configured():
+            log_reasoning_request(
+                _get_structured_logger(),
+                reasoning_type or "unknown",
+                project_id=project_id,
+                task_id=task_id,
+                success=False,
+                error="OpenClaw not configured",
+            )
             raise RuntimeError("OpenClaw reasoning is not configured")
 
         # Build gateway params
@@ -275,6 +317,19 @@ class OpenClawReasoningService(BaseService):
         if response_format == "json":
             params["message"] += "\n\nIMPORTANT: Respond with valid JSON only. No markdown formatting, no code blocks, no explanation outside the JSON."
 
+        # Track timing
+        start_time = datetime.now(timezone.utc)
+
+        # Log request start
+        log_reasoning_request(
+            _get_structured_logger(),
+            reasoning_type or "unknown",
+            project_id=project_id,
+            task_id=task_id,
+            timeout_seconds=timeout,
+            response_format=response_format,
+        )
+
         # Call gateway
         try:
             response = await self.openclaw_service._send_gateway_request(
@@ -284,10 +339,37 @@ class OpenClawReasoningService(BaseService):
                 timeout_seconds=timeout,
             )
 
-            return self._extract_response_text(response)
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            response_text = self._extract_response_text(response)
+
+            # Log success
+            log_reasoning_request(
+                _get_structured_logger(),
+                reasoning_type or "unknown",
+                project_id=project_id,
+                task_id=task_id,
+                duration_seconds=duration,
+                success=True,
+                response_length=len(response_text),
+            )
+
+            return response_text
 
         except Exception as e:
-            # Log and raise
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+            # Log failure
+            log_reasoning_request(
+                _get_structured_logger(),
+                reasoning_type or "unknown",
+                project_id=project_id,
+                task_id=task_id,
+                duration_seconds=duration,
+                success=False,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+
             logger.error("OpenClaw reasoning call failed: %s", e)
             raise RuntimeError(f"OpenClaw reasoning failed: {e}") from e
 

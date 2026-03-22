@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from aiosqlite import Connection
@@ -10,6 +11,21 @@ from cyborg.database import Database
 from cyborg.models import JournalEntryType, ProjectState, TaskStatus
 from cyborg.services.base import BaseService, utcnow, json_dumps, json_loads
 from cyborg.services.notification_service import NotificationService
+
+
+logger = logging.getLogger(__name__)
+
+# Lazy import structured logging helpers
+_structured_logger = None
+
+
+def _get_structured_logger():
+    """Lazy import structured logging helpers."""
+    global _structured_logger
+    if _structured_logger is None:
+        from cyborg.structured_logging import get_logger as _get_logger
+        _structured_logger = _get_logger(__name__)
+    return _structured_logger
 
 
 DEPENDENCY_BLOCKED_PREFIX = "Waiting for dependency task"
@@ -232,6 +248,8 @@ class ProjectAutonomyService(BaseService):
         3. Auto-apply refinements (based on design decision)
         4. Record decisions in journal
         """
+        from cyborg.structured_logging import log_autonomy_decision
+
         project = await self.db.fetch_one(
             "SELECT id, state, auto_execute, metadata FROM projects WHERE id = ? AND deleted_at IS NULL",
             (project_id,),
@@ -244,10 +262,24 @@ class ProjectAutonomyService(BaseService):
         # Check if project has auto-refinement enabled (default: yes)
         metadata = json_loads(project.get("metadata"), {})
         if metadata.get("auto_refine", True) is False:
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "refinement_skipped",
+                project_id,
+                reason="auto_refine disabled in metadata",
+                trigger_task_id=completed_task_id,
+            )
             return
 
         # Trigger strategy refinement
         try:
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "refinement_started",
+                project_id,
+                trigger_task_id=completed_task_id,
+            )
+
             refinement = await self.reasoning_service.refine_project_strategy(
                 project_id,
                 completed_task_id,
@@ -260,14 +292,34 @@ class ProjectAutonomyService(BaseService):
                 refinement,
             )
 
+            # Log the refinement decision
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "refinement_completed",
+                project_id,
+                trigger_task_id=completed_task_id,
+                should_refine=refinement.get("should_refine", False),
+                suggested_changes_count=len(refinement.get("suggested_changes", [])),
+                risks_identified_count=len(refinement.get("risks_identified", [])),
+            )
+
             # Auto-apply refinements if suggested (design decision: auto-accept)
             if refinement.get("should_refine"):
                 await self._apply_refinements(project_id, refinement, completed_task_id)
 
         except Exception as e:
             # Log but don't fail - refinement is optional
-            import logging
-            logging.error(f"Strategy refinement failed for project {project_id}: {e}")
+            logger.error(f"Strategy refinement failed for project {project_id}: {e}")
+
+            # Log structured error
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "refinement_failed",
+                project_id,
+                trigger_task_id=completed_task_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
 
             # Record failure in journal
             await self._add_journal_entry(
@@ -330,6 +382,7 @@ class ProjectAutonomyService(BaseService):
         Based on design decision: refinements are auto-accepted.
         This modifies the project plan, creates/removes tasks, or changes priorities.
         """
+        from cyborg.structured_logging import log_autonomy_decision
         from uuid import uuid4
         from cyborg.services.task_service import TaskService
         from cyborg.models import TaskCreate, TaskPriority
@@ -386,6 +439,16 @@ class ProjectAutonomyService(BaseService):
                 JournalEntryType.MILESTONE,
                 f"Applied {len(changes_applied)} refinement changes:\n" + "\n".join(f"  - {c}" for c in changes_applied),
                 {"changes_applied": changes_applied, "refinement": refinement},
+            )
+
+            # Log the applied refinements
+            log_autonomy_decision(
+                _get_structured_logger(),
+                "refinement_applied",
+                project_id,
+                trigger_task_id=trigger_task_id,
+                changes_count=len(changes_applied),
+                changes_applied=changes_applied[:5],  # Limit logged changes
             )
 
     async def _add_journal_entry(

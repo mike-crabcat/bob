@@ -169,7 +169,9 @@ class Settings:
     data_dir: Path = Path("~/.local/share/cyborg")
     config_dir: Path = Path("~/.config/cyborg")
     db_path: Path | None = None
+    log_path: Path | None = None
     log_level: str = "info"
+    debug: bool = False
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
@@ -183,6 +185,8 @@ class Settings:
             self.db_path = self.data_dir / "cyborg.db"
         else:
             self.db_path = self.db_path.expanduser()
+        if self.log_path is not None:
+            self.log_path = self.log_path.expanduser()
 
     @property
     def resolved_public_url(self) -> str:
@@ -205,6 +209,11 @@ class Settings:
         pool_size = int(os.getenv("CYBORG_DB_POOL_SIZE", str(DEFAULT_POOL_SIZE)))
         log_level = os.getenv("CYBORG_LOG_LEVEL", "info")
         notification_dispatch_interval_seconds = float(os.getenv("CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS", "60"))
+
+        # Logging settings
+        log_path_value = os.getenv("CYBORG_LOG_PATH")
+        log_path = Path(log_path_value).expanduser() if log_path_value else None
+        debug = os.getenv("CYBORG_DEBUG", "").lower() in ("true", "1", "yes", "on")
 
         # Parse webhook configuration from environment
         webhooks: dict[str, WebhookConfig] = {}
@@ -256,7 +265,9 @@ class Settings:
             data_dir=data_dir,
             config_dir=config_dir,
             db_path=db_path,
+            log_path=log_path,
             log_level=log_level,
+            debug=debug,
             pool_size=pool_size,
             webhooks=webhooks,
             openclaw=openclaw,

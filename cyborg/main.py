@@ -18,6 +18,7 @@ from cyborg.database import Database
 from cyborg.exceptions import ServiceError
 from cyborg.models import HealthResponse
 from cyborg.routers import calendars, contacts, context, health, learning, notifications, openclaw, plans, planning, project_specs, projects, session_routes, tasks, webhooks
+from cyborg.structured_logging import configure_logging, CorrelationIdMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
 
     resolved_settings = settings or Settings.from_env()
+
+    # Configure structured logging
+    configure_logging(resolved_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -60,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass
             await database.close()
 
+    # Create FastAPI app
     app = FastAPI(
         title="Cyborg Data Service",
         version=__version__,
@@ -67,6 +72,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+
+    # Add correlation ID middleware
+    app.add_middleware(CorrelationIdMiddleware)
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
