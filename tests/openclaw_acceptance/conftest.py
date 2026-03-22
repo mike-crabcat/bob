@@ -436,16 +436,34 @@ class OpenClawLiveHarness:
         )
 
     def response_text(self, response: dict[str, Any], *, session_key: str | None = None) -> str:
+        result = response.get("result")
+        if isinstance(result, dict):
+            payloads = result.get("payloads")
+            if isinstance(payloads, list):
+                payload_text = "\n".join(
+                    str(item.get("text", "")).strip()
+                    for item in payloads
+                    if isinstance(item, dict) and str(item.get("text", "")).strip()
+                ).strip()
+                if payload_text:
+                    return payload_text
+            for key in ("content", "text", "message"):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        payloads = response.get("payloads")
+        if isinstance(payloads, list):
+            payload_text = "\n".join(
+                str(item.get("text", "")).strip()
+                for item in payloads
+                if isinstance(item, dict) and str(item.get("text", "")).strip()
+            ).strip()
+            if payload_text:
+                return payload_text
         for key in ("content", "text", "message", "summary"):
             value = response.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-        result = response.get("result")
-        if isinstance(result, dict):
-            for key in ("content", "text", "message", "summary"):
-                value = result.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
         if session_key:
             history = self.fetch_history(session_key)
             for message in reversed(history.get("messages", [])):

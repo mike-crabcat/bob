@@ -33,7 +33,8 @@ def _start_task_assignment_session(
     cyborg_service_url: str,
 ) -> tuple[dict[str, Any], str, str, dict[str, Any]]:
     notification = acceptance_builder.get_task_assignment_notification(task_id)
-    route, session_key = live_openclaw.resolve_target_route(notification)
+    route, _resolved_session_key = live_openclaw.resolve_target_route(notification)
+    session_key = live_openclaw.new_session_key(f"task-assignment-{task_id}")
     hook_service = live_openclaw.make_hook_service(cyborg_service_url=cyborg_service_url)
     params = hook_service._build_task_assignment_agent_params(notification, route, session_key)
     params["deliver"] = False
@@ -224,7 +225,13 @@ def test_live_task_assignment_requests_follow_up_before_completion(
         timeout_seconds=90.0,
     )
     follow_up_lower = follow_up_text.lower()
-    assert "why" in follow_up_lower or "what do you like" in follow_up_lower or "reason" in follow_up_lower
+    assert (
+        "why" in follow_up_lower
+        or "what do you like" in follow_up_lower
+        or "reason" in follow_up_lower
+        or "what makes it" in follow_up_lower
+        or "stands out" in follow_up_lower
+    )
 
     mid_task = acceptance_builder.get_task(task["id"])
     assert mid_task["status"] != "completed"

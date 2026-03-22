@@ -17,7 +17,7 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ServiceError
 from cyborg.models import HealthResponse
-from cyborg.routers import calendars, contacts, context, notifications, openclaw, plans, project_specs, projects, session_routes, tasks, webhooks
+from cyborg.routers import calendars, contacts, context, notifications, openclaw, plans, planning, project_specs, projects, session_routes, tasks, webhooks
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(notifications.router)
     app.include_router(openclaw.router)
     app.include_router(plans.router)
+    app.include_router(planning.router)
     app.include_router(session_routes.router)
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")

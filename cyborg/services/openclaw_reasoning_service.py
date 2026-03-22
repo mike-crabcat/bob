@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import ast
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -25,10 +27,10 @@ class OpenClawReasoningService(BaseService):
 
     # Default timeouts for different reasoning types (seconds)
     TIMEOUT_PLAN = 60
-    TIMEOUT_EVALUATION = 45
-    TIMEOUT_REFINEMENT = 60
-    TIMEOUT_LEARNING = 60
-    TIMEOUT_DEFAULT = 30
+    TIMEOUT_EVALUATION = 60
+    TIMEOUT_REFINEMENT = 90
+    TIMEOUT_LEARNING = 75
+    TIMEOUT_DEFAULT = 60
 
     def __init__(self, db: Database):
         super().__init__(db)
@@ -282,13 +284,7 @@ class OpenClawReasoningService(BaseService):
                 timeout_seconds=timeout,
             )
 
-            # Extract the agent's response
-            if isinstance(response, dict):
-                content = response.get("content") or response.get("text") or response.get("message")
-                if content:
-                    return str(content)
-
-            return str(response)
+            return self._extract_response_text(response)
 
         except Exception as e:
             # Log and raise
@@ -675,7 +671,7 @@ class OpenClawReasoningService(BaseService):
     def _parse_plan_response(self, response: str) -> list[dict[str, Any]]:
         """Parse JSON plan response."""
         try:
-            data = json.loads(response)
+            data = self._load_json_payload(response)
             if isinstance(data, dict) and "steps" in data:
                 return data["steps"]
             if isinstance(data, list):
@@ -688,7 +684,7 @@ class OpenClawReasoningService(BaseService):
     def _parse_evaluation_response(self, response: str) -> dict[str, Any]:
         """Parse JSON evaluation response."""
         try:
-            return json.loads(response)
+            return self._load_json_payload(response)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse evaluation response: %s", e)
             return {
@@ -701,7 +697,7 @@ class OpenClawReasoningService(BaseService):
     def _parse_refinement_response(self, response: str) -> dict[str, Any]:
         """Parse JSON refinement response."""
         try:
-            return json.loads(response)
+            return self._load_json_payload(response)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse refinement response: %s", e)
             return {
@@ -715,7 +711,7 @@ class OpenClawReasoningService(BaseService):
     def _parse_learning_response(self, response: str) -> list[dict[str, Any]]:
         """Parse JSON learning response."""
         try:
-            data = json.loads(response)
+            data = self._load_json_payload(response)
             if isinstance(data, dict) and "insights" in data:
                 return data["insights"]
             if isinstance(data, list):
@@ -728,7 +724,7 @@ class OpenClawReasoningService(BaseService):
     def _parse_health_analysis_response(self, response: str) -> dict[str, Any]:
         """Parse JSON health analysis response."""
         try:
-            return json.loads(response)
+            return self._load_json_payload(response)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse health analysis response: %s", e)
             return {
@@ -745,7 +741,7 @@ class OpenClawReasoningService(BaseService):
         """Parse JSON follow-up task suggestions."""
 
         try:
-            data = json.loads(response)
+            data = self._load_json_payload(response)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse follow-up task response: %s", e)
             return []
@@ -795,3 +791,87 @@ class OpenClawReasoningService(BaseService):
             ]
         )
         return "\n".join(lines)
+
+    def _extract_response_text(self, response: Any) -> str:
+        """Extract the most useful text payload from an OpenClaw gateway response."""
+
+        if isinstance(response, str):
+            return response.strip()
+
+        if isinstance(response, dict):
+            result = response.get("result")
+            if isinstance(result, dict):
+                payload_text = self._extract_payload_text(result.get("payloads"))
+                if payload_text:
+                    return payload_text
+                for key in ("content", "text", "message"):
+                    value = result.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+
+            payload_text = self._extract_payload_text(response.get("payloads"))
+            if payload_text:
+                return payload_text
+
+            for key in ("content", "text", "message"):
+                value = response.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+            for key in ("summary",):
+                value = response.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        return str(response)
+
+    def _extract_payload_text(self, payloads: Any) -> str:
+        """Extract text from OpenClaw payload arrays."""
+
+        if not isinstance(payloads, list):
+            return ""
+        parts: list[str] = []
+        for item in payloads:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n".join(parts).strip()
+
+    def _load_json_payload(self, response: str) -> Any:
+        """Load JSON from a strict or lightly wrapped model response."""
+
+        candidates: list[str] = []
+        stripped = response.strip()
+        if not stripped:
+            raise json.JSONDecodeError("empty response", response, 0)
+
+        candidates.append(stripped)
+        fenced = re.findall(r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE)
+        candidates.extend(block.strip() for block in fenced if block.strip())
+
+        first_object = stripped.find("{")
+        first_array = stripped.find("[")
+        starts = [index for index in (first_object, first_array) if index != -1]
+        if starts:
+            start = min(starts)
+            candidates.append(stripped[start:].strip())
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+            try:
+                value = ast.literal_eval(candidate)
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(value, (dict, list)):
+                return value
+
+        raise json.JSONDecodeError("unable to parse JSON payload", response, 0)

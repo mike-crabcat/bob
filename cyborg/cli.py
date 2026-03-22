@@ -36,6 +36,7 @@ event_app = typer.Typer(help="Event operations")
 context_app = typer.Typer(help="Context operations")
 webhook_app = typer.Typer(help="Webhook operations")
 openclaw_app = typer.Typer(help="OpenClaw integration operations")
+planning_app = typer.Typer(help="AI-powered project planning")
 
 app.add_typer(task_app, name="task")
 task_app.add_typer(plan_app, name="plan")
@@ -49,6 +50,7 @@ app.add_typer(event_app, name="event")
 app.add_typer(context_app, name="context")
 app.add_typer(webhook_app, name="webhook")
 app.add_typer(openclaw_app, name="openclaw")
+app.add_typer(planning_app, name="planning")
 
 
 def _service_file_path() -> Path:
@@ -1583,6 +1585,122 @@ def project_delete(project_id: Annotated[str, typer.Argument(help="Project ID")]
 
     _api_call("DELETE", f"/api/v1/projects/{project_id}")
     typer.echo(f"Project deleted: {project_id}")
+
+
+# ============================================================================
+# Planning Commands (AI-powered project planning)
+# ============================================================================
+
+
+@planning_app.command("generate")
+def planning_generate(
+    aim: Annotated[str, typer.Option("--aim", "-a", help="What the project aims to accomplish")],
+    method: Annotated[str, typer.Option("--method", "-m", help="How the project will be executed")] = "",
+    success_criteria: Annotated[list[str], typer.Option("--success-criteria", "-s", "-c", help="Success criteria")] = [],
+    reference_project_id: Annotated[str, typer.Option("--reference-project", "-r", help="Optional project ID to reference")] = "",
+) -> None:
+    """Generate a project plan using AI reasoning via OpenClaw.
+
+    Example:
+      cyborg planning generate --aim "Launch a customer feedback sprint" --method "Interview customers, cluster themes, summarize top actions"
+    """
+
+    payload: dict[str, Any] = {
+        "aim": aim,
+        "method": method or None,
+        "success_criteria": success_criteria,
+        "reference_project_id": reference_project_id or None,
+    }
+
+    try:
+        response = _api_call("POST", "/api/v1/planning/generate-plan", payload)
+    except (HTTPError, URLError) as e:
+        typer.echo(f"Error generating plan: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = response.get("data", response)
+    steps = result.get("steps", [])
+
+    typer.echo(f"Generated {len(steps)} step plan:")
+    typer.echo()
+
+    for step in steps:
+        typer.echo(f"  {step['order'] + 1}. {step['title']}")
+        if step.get("description"):
+            typer.echo(f"     {step['description']}")
+        if step.get("criteria"):
+            typer.echo(f"     ✓ {step['criteria']}")
+        typer.echo()
+
+    reasoning = result.get("reasoning", "")
+    if reasoning:
+        typer.echo(f"Reasoning: {reasoning}")
+
+
+@planning_app.command("refine")
+def planning_refine(
+    project_id: Annotated[str, typer.Option("--project", "-p", help="Project ID")],
+    trigger_task_id: Annotated[str, typer.Option("--task", "-t", help="Task ID that triggered refinement")] = "",
+    trigger_reason: Annotated[str, typer.Option("--reason", "-r", help="Reason for refinement (task_completion, failure, manual)")] = "manual",
+) -> None:
+    """Trigger strategy refinement analysis for a project.
+
+    Uses OpenClaw reasoning to analyze project state and suggest strategic adjustments.
+
+    Example:
+      cyborg planning refine --project abc-123 --task def-456
+    """
+
+    if not project_id:
+        typer.echo("Error: --project is required", err=True)
+        raise typer.Exit(1)
+
+    payload: dict[str, Any] = {
+        "trigger_task_id": trigger_task_id or None,
+        "trigger_reason": trigger_reason,
+        "force_refresh": False,
+    }
+
+    try:
+        response = _api_call("POST", f"/api/v1/planning/projects/{project_id}/refine-strategy", payload)
+    except (HTTPError, URLError) as e:
+        typer.echo(f"Error refining strategy: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = response.get("data", response)
+
+    should_refine = result.get("should_refine", False)
+    reasoning = result.get("reasoning", "")
+    suggested_changes = result.get("suggested_changes", [])
+    risks = result.get("risks_identified", [])
+
+    typer.echo(f"Strategy Refinement for project {project_id}")
+    typer.echo()
+
+    if should_refine:
+        typer.echo("  ⚠️  Refinement RECOMMENDED")
+    else:
+        typer.echo("  ✓  No refinement needed")
+
+    typer.echo()
+    typer.echo(f"Reasoning: {reasoning}")
+    typer.echo()
+
+    if suggested_changes:
+        typer.echo("Suggested Changes:")
+        for change in suggested_changes:
+            typer.echo(f"  - {change}")
+        typer.echo()
+
+    if risks:
+        typer.echo("Risks Identified:")
+        for risk in risks:
+            typer.echo(f"  - {risk}")
+        typer.echo()
+
+    applied_at = result.get("applied_at")
+    if applied_at:
+        typer.echo(f"Applied at: {applied_at}")
 
 
 @contact_app.command("create")

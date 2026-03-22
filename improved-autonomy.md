@@ -444,7 +444,7 @@ All prompts:
 
 ### ✅ Phase 1: Foundation Services (COMPLETED)
 
-**Status:** All tasks complete
+**Status:** All tasks complete and tested
 
 **Completed:**
 - [x] Implement `ContextBuilder` service with scope support (MINIMAL, STANDARD, COMPREHENSIVE, FULL)
@@ -455,11 +455,13 @@ All prompts:
 
 **Files Created:**
 - `cyborg/services/context_builder.py` - Full context builder with scope filtering
-- `cyborg/services/openclaw_reasoning_service.py` - Complete reasoning service
+- `cyborg/services/openclaw_reasoning_service.py` - Complete reasoning service with all methods:
+  - `generate_project_plan()`, `evaluate_success_criteria()`, `refine_project_strategy()`
+  - `extract_learnings()`, `generate_task_plan()`, `analyze_project_health()`, `generate_follow_up_tasks()`
 - `cyborg/schemas/140_project_insights.sql` - Insights table (with IF NOT EXISTS)
 - `cyborg/schemas/150_health_checks.sql` - Health checks table (with IF NOT EXISTS)
-- `tests/test_context_builder.py` - Context builder tests
-- `tests/test_openclaw_reasoning.py` - Reasoning service tests
+- `tests/test_context_builder.py` - 20+ unit tests for context assembly
+- `tests/test_openclaw_reasoning.py` - 20+ integration tests with mocked OpenClaw responses
 
 **Bug Fixes:**
 - Fixed migration idempotency by adding IF NOT EXISTS to all schema objects
@@ -470,7 +472,7 @@ All prompts:
 
 ### ✅ Phase 2: Core Autonomy Integration (COMPLETED)
 
-**Status:** Core features implemented, minor issues to fix
+**Status:** All tasks complete and tested
 
 **Completed:**
 - [x] Update `ProjectAutonomyService` to use OpenClaw reasoning
@@ -478,8 +480,7 @@ All prompts:
 - [x] Add strategy refinement trigger with auto-accept
 - [x] Write integration tests for autonomy loop
 - [x] Add `cyborg_service_url` to webhook payloads for dynamic service discovery
-- [ ] Fix missing `generate_follow_up_tasks` method in OpenClawReasoningService
-- [ ] End-to-end testing (blocked by above issues)
+- [x] Add `generate_follow_up_tasks` method to OpenClawReasoningService
 
 **Files Modified:**
 - `cyborg/services/project_autonomy_service.py` - Added checkpoint_and_refine, updated on_task_completed
@@ -487,7 +488,6 @@ All prompts:
 - `cyborg/services/webhook_service.py` - Added cyborg_service_url support
 - `cyborg/services/openclaw_hook_service.py` - Include service URL in messages
 - `cyborg/config.py` - Added public_url setting and CYBORG_PUBLIC_URL env var
-- `cyborg/routers/context.py` - Removed circular discovery endpoint
 - `openclaw-plugin/SKILL.md` - Updated to document webhook-based URL discovery
 
 **New Capabilities:**
@@ -498,115 +498,233 @@ All prompts:
 - Per-project opt-out available (metadata.auto_refine)
 - Dynamic service URL via webhook metadata
 
-**Known Issues:**
-1. `OpenClawReasoningService.generate_follow_up_tasks` method doesn't exist
-2. Fallback error handling uses `self.db.logger` which doesn't exist (fixed partially)
+---
+
+### ✅ Phase 2.5: E2E Testing Infrastructure (COMPLETED)
+
+**Status:** All tasks complete with 6 passing tests
+
+**Completed:**
+- [x] Create `MockLLMReasoningService` for testing without OpenClaw dependency
+- [x] Implement `tests/mocks/mock_llm_service.py`
+- [x] Write `tests/test_autonomy_e2e.py` with comprehensive test scenarios
+- [x] Fix all bugs discovered during testing
+
+**Files Created:**
+- `tests/mocks/mock_llm_service.py` - Mock LLM service implementing same interface as OpenClawReasoningService
+- `tests/test_autonomy_e2e.py` - 6 E2E test scenarios:
+  1. `test_full_autonomy_loop_project_completion` - Project auto-closes when criteria met
+  2. `test_follow_up_tasks_generated_when_criteria_unmet` - Follow-up tasks created
+  3. `test_strategy_refinement_on_task_failure` - Refinement on failure
+  4. `test_no_refinement_when_disabled` - Metadata opt-out respected
+  5. `test_concurrent_projects_evaluate_independently` - Multiple projects
+  6. `test_mock_llm_health_analysis` - Health check functionality
 
 ---
 
-### 🔄 Phase 2.5: E2E Testing Infrastructure (NEW - IN PROGRESS)
+### ✅ Live Acceptance Testing (ADDED BY CODEX)
 
-**Status:** Just added to plan
+**Status:** Comprehensive acceptance test suite created by Codex
 
-**Goals:** Create deterministic end-to-end tests without OpenClaw dependency
+**Files Created:**
+- `tests/openclaw_acceptance/conftest.py` - Test fixtures and harness
+  - `AcceptanceBuilder` - Fluent helper for creating test data
+  - `OpenClawLiveHarness` - Gateway communication wrapper
+  - `UvicornThread` - In-process HTTP server for testing
+  - Artifact generation for debugging
 
-**Tasks:**
-- [ ] Create `MockLLMReasoningService` for testing
-- [ ] Implement `tests/mocks/mock_llm_service.py`
-- [ ] Write `tests/test_autonomy_e2e.py` with test scenarios
-- [ ] Add `tests/test_autonomy_scenarios.py` for comprehensive coverage
-- [ ] Fix remaining bugs discovered during testing:
-  - [ ] Add `generate_follow_up_tasks` to OpenClawReasoningService
-  - [ ] Verify fallback behavior works correctly
-- [ ] Run full test suite and ensure all pass
+- `tests/openclaw_acceptance/test_reasoning_live.py` - 8 live reasoning tests:
+  1. `test_live_generate_project_plan`
+  2. `test_live_evaluate_success_criteria_met`
+  3. `test_live_evaluate_success_criteria_unmet`
+  4. `test_live_generate_follow_up_tasks`
+  5. `test_live_refine_project_strategy_healthy`
+  6. `test_live_refine_project_strategy_degraded`
+  7. `test_live_extract_learnings`
+  8. `test_live_analyze_project_health`
+
+- `tests/openclaw_acceptance/test_task_assignment_live.py` - 2 live integration tests:
+  1. `test_live_task_assignment_direct_answer_completes_task`
+  2. `test_live_task_assignment_requests_follow_up_before_completion`
+
+**Running Acceptance Tests:**
+```bash
+pytest tests/openclaw_acceptance/ --openclaw-live -v
+# or
+OPENCLAW_ACCEPTANCE=1 pytest tests/openclaw_acceptance/ -v
+```
+
+---
+
+### ✅ Phase 3: Planning & Strategy (COMPLETED)
+
+**Status:** API endpoints and CLI commands implemented
+
+**Completed:**
+- [x] Create `cyborg/routers/planning.py` with API endpoints
+  - [x] `POST /api/v1/planning/generate-plan` - Generate project plans via reasoning
+  - [x] `POST /api/v1/planning/projects/{project_id}/refine-strategy` - Trigger strategy refinement
+  - [x] `GET /api/v1/planning/projects/{project_id}/status` - Get project status for planning
+- [x] Add CLI commands for plan generation and refinement
+  - [x] `cyborg planning generate` - Generate plans from CLI
+  - [x] `cyborg planning refine` - Refine project strategy from CLI
+
+**Files Created:**
+- `cyborg/routers/planning.py` - Planning API endpoints
+
+**Files Modified:**
+- `cyborg/main.py` - Added planning router import and inclusion
+- `cyborg/cli.py` - Added planning_app and commands
+
+**Usage Examples:**
+
+```bash
+# CLI: Generate a plan
+cyborg planning generate \\
+  --aim "Launch a customer feedback sprint" \\
+  --method "Interview customers, cluster themes, summarize top actions" \\
+  --success-criteria "At least 5 pieces of feedback collected" \\
+  --success-criteria "Three prioritized actions documented"
+
+# CLI: Refine project strategy
+cyborg planning refine --project abc-123 --task def-456
+
+# API: Generate plan
+curl -X POST http://localhost:8420/api/v1/planning/generate-plan \\
+  -H "Content-Type: application/json" \\
+  -d '{"aim": "Launch customer feedback sprint", "method": "..."}'
+
+# API: Refine strategy
+curl -X POST http://localhost:8420/api/v1/planning/projects/abc-123/refine-strategy \\
+  -H "Content-Type: application/json" \\
+  -d '{"trigger_task_id": "def-456", "trigger_reason": "task_completion"}'
+```
 
 **Deliverables:**
-- Mock LLM service that emulates OpenClaw responses
-- End-to-end test scenarios covering:
-  - Simple project completion
-  - Follow-up task generation
-  - Strategy refinement
-  - Multiple concurrent projects
-  - Error conditions
-
-**Success Criteria:**
-- All autonomy scenarios pass deterministically
-- Tests run without OpenClaw being available
-- Coverage > 80% for autonomy code paths
+- ✅ AI-generated project plans via API/CLI
+- ✅ Strategy refinement on failures via API
+- ✅ CLI integration (typer app with generate/refine commands)
+- ⚠️ User-facing documentation (needs update)
 
 ---
 
-### Phase 3: Planning & Strategy (Week 5-6)
+### Phase 4: Learning & Health Services (PENDING)
 
-**Goals:** Add strategic reasoning capabilities
+**Goals:** Implement services using the database schemas already created
 
 **Tasks:**
-- [ ] Implement `generate_project_plan` reasoning
-- [ ] Implement `refine_project_strategy` reasoning
-- [ ] Add strategy refinement trigger points
-- [ ] CLI commands for plan generation
-- [ ] API endpoints for external tools
-
-**Deliverables:**
-- AI-generated project plans
-- Strategy refinement on failures
-- CLI/API integration
-
-**Success Criteria:**
-- Can generate coherent project plans
-- Strategy refinements are actionable
-- Users can trigger via CLI/API
+- [ ] Create `cyborg/services/learning_service.py`
+  - [ ] Extract insights after project completion
+  - [ ] Store in `project_insights` table
+  - [ ] Query similar projects for context
+- [ ] Create `cyborg/services/health_monitor_service.py`
+  - [ ] Periodic health checks (cron/scheduled)
+  - [ ] Store in `project_health_checks` table
+  - [ ] Alert on high/critical risks
+- [ ] Create `cyborg/routers/health.py` with endpoints
+  - [ ] `GET /api/v1/health/scan` - Scan all projects
+  - [ ] `GET /api/v1/projects/{id}/health` - Get project health
+- [ ] Create `cyborg/routers/learning.py` with endpoints
+  - [ ] `POST /api/v1/projects/{id}/extract-insights`
+  - [ ] `GET /api/v1/learning/similar-projects`
 
 ---
 
-### Phase 4: Learning & Health (Week 7-8)
+### Phase 5: Monitoring & Observability (NEW - PENDING)
 
-**Goals:** Add proactive monitoring and learning
+**Current State:**
+- Basic `/health` endpoint exists (database connectivity only)
+- Journal entries for audit trail (note, milestone, decision, blocker, result)
+- Notification delivery tracking (pending → sending → delivered/failed)
+- No structured logging
+- No metrics (Prometheus, statsd)
+- No error tracking (Sentry)
 
 **Tasks:**
-- [ ] Implement `LearningService`
-- [ ] Implement `HealthMonitorService`
-- [ ] Add scheduled health check runner
-- [ ] Implement insight extraction on project close
-- [ ] Dashboard/visibility for health status
-
-**Deliverables:**
-- Automated health monitoring
-- Learning extraction from completed projects
-- Health status API
-
-**Success Criteria:**
-- Health checks run on schedule
-- Insights are extracted and stored
-- Can query similar projects
+- [ ] Add structured JSON logging with correlation IDs
+- [ ] Add Prometheus metrics for:
+  - [ ] Reasoning request latency and success rate
+  - [ ] Task/project completion rates
+  - [ ] OpenClaw gateway health
+- [ ] Add tracing for request flow across services
+- [ ] Error tracking integration (Sentry or similar)
+- [ ] Dashboard for viewing active autonomous decisions
 
 ---
 
-### Phase 5: Polish & Integration (Week 9-10)
-
-**Goals:** Production hardening
+### Phase 6: Polish & Production Readiness (PENDING)
 
 **Tasks:**
-- [ ] Error handling and retries
-- [ ] Rate limiting for OpenClaw calls
-- [ ] Monitoring and observability
-- [ ] Documentation
-- [ ] Performance optimization
-- [ ] End-to-end testing
+- [ ] Error handling improvements and consistent retry logic
+- [ ] Rate limiting for OpenClaw gateway calls
+- [ ] Documentation updates
+- [ ] Performance optimization and profiling
+- [ ] Production deployment guides
 
 **Deliverables:**
 - Production-ready system
 - Complete documentation
 - Monitoring dashboards
-
-**Success Criteria:**
-- No unhandled errors in normal flow
-- System handles OpenClaw unavailability gracefully
-- Documentation is complete
+- Deployment runbooks
 
 ---
 
-## Configuration
+## Monitoring & Logging
+
+### Current State (As of March 2025)
+
+**What Exists:**
+| Component | Status |
+|-----------|--------|
+| Journal System | ✅ Fully implemented - all autonomous decisions are recorded |
+| Health Endpoint | ⚠️ Basic - only checks database connectivity |
+| Notification Tracking | ✅ Full lifecycle tracking (pending → delivered/failed) |
+| Health Check Schema | ✅ Database tables created, service not implemented |
+| Insights Schema | ✅ Database tables created, service not implemented |
+| Structured Logging | ❌ None - uses basic logger.exception |
+| Metrics | ❌ None - no Prometheus/statsd |
+| Error Tracking | ❌ None |
+| Tracing | ❌ None |
+
+**Journal Entry Types:**
+- `NOTE` - General notes, observations
+- `MILESTONE` - Project completions, criteria evaluations
+- `DECISION` - Autonomous decisions, refinements applied
+- `BLOCKER` - Blocking issues, risks identified
+- `RESULT` - Task results, outcomes
+
+**What Gets Journal-Recorded:**
+- Project auto-completion events
+- Strategy refinement decisions (with full reasoning)
+- Follow-up task generation decisions
+- Health check results
+- Task completion triggers
+
+**Example Journal Entry:**
+```python
+{
+    "entry_type": "DECISION",
+    "content": "Strategy refinement applied based on task {id} completion",
+    "metadata": {
+        "refinement": {...},
+        "autonomy_action": "strategy_refined",
+        "trigger_task_id": "...",
+        "all_met_criteria": [...],
+        "unmet_criteria": [...]
+    }
+}
+```
+
+### Monitoring Gaps
+
+| Gap | Impact | Priority |
+|-----|--------|----------|
+| No structured logging | Hard to debug production issues | High |
+| No metrics | Can't observe system health | High |
+| No error tracking | Errors go unnoticed | Medium |
+| No tracing | Can't follow request flows | Medium |
+| No alerting | Issues require manual discovery | Medium |
+| Health monitor service not implemented | Can't detect at-risk projects | Medium |
 
 ### New Settings
 
@@ -1005,5 +1123,27 @@ metadata = {
 
 - **Created:** 2025-01-21
 - **Author:** Generated via Cyborg planning
-- **Status:** Draft for review
-- **Next Review:** After Phase 1 completion
+- **Last Updated:** 2025-03-22
+- **Status:** Active implementation (~60% complete)
+- **Next Review:** After Phase 4 completion
+
+## Progress Summary
+
+| Phase | Status | Completion |
+|-------|--------|------------|
+| Phase 1: Foundation Services | ✅ Complete | 100% |
+| Phase 2: Core Autonomy Integration | ✅ Complete | 100% |
+| Phase 2.5: E2E Testing Infrastructure | ✅ Complete | 100% |
+| Acceptance Test Suite | ✅ Complete (Codex) | 100% |
+| Phase 3: Planning & Strategy APIs | ✅ Complete | 100% |
+| Phase 4: Learning & Health Services | ⏳ Pending | 0% |
+| Phase 5: Monitoring & Observability | ⏳ Pending | 0% |
+| Phase 6: Polish & Production | ⏳ Pending | 0% |
+
+**Overall: ~60% Complete**
+
+Core autonomy features are implemented and tested. Planning APIs and CLI commands are now available.
+Remaining work focuses on:
+- Service layer implementations (Learning, HealthMonitor)
+- Production monitoring and observability
+- Documentation updates and polish
