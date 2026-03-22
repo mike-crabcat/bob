@@ -133,7 +133,6 @@ class OpenClawHookSettings:
     wake_mode: str = "now"
     timeout_seconds: float = 15.0
     session_key_prefix: str | None = None
-    default_contact_id: str | None = None  # Fallback contact for unrouted notifications
 
     @property
     def hooks_enabled(self) -> bool:
@@ -258,7 +257,6 @@ class Settings:
             wake_mode=os.getenv("CYBORG_OPENCLAW_WAKE_MODE", "now"),
             timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "15")),
             session_key_prefix=os.getenv("CYBORG_OPENCLAW_SESSION_KEY_PREFIX") or None,
-            default_contact_id=os.getenv("CYBORG_DEFAULT_CONTACT_ID") or None,
         )
         public_url = os.getenv("CYBORG_PUBLIC_URL", "")
 

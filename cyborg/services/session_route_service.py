@@ -261,14 +261,16 @@ class SessionRouteService(BaseService):
         if route is not None:
             return route
 
-        # Fallback to default contact if configured
-        default_contact_id = self.settings.openclaw.default_contact_id
-        if default_contact_id:
+        # Fallback to default contact from database
+        default_contact = await self.db.fetch_one(
+            "SELECT id FROM contacts WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1"
+        )
+        if default_contact:
             self.logger.info(
-                f"No route found in metadata, using default contact fallback: {default_contact_id}"
+                f"No route found in metadata, using default contact fallback: {default_contact['id']}"
             )
             return await self._resolve_contact_route(
-                default_contact_id,
+                default_contact["id"],
                 session_key=None,
                 route_source="default_contact",
             )

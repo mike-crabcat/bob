@@ -1866,6 +1866,48 @@ def contact_by_whatsapp_group(
     _print_contact_table(contacts)
 
 
+@contact_app.command("set-default")
+def contact_set_default(
+    contact_id: Annotated[str, typer.Argument(help="Contact ID to set as default")],
+) -> None:
+    """Set a contact as the default for notifications."""
+
+    contact = _api_call("PUT", f"/api/v1/contacts/{contact_id}/set-default", {})["data"]
+    typer.echo(f"Default contact set: {contact['name']}")
+    typer.echo(f"ID: {contact['id']}")
+    typer.echo(f"Phone: {contact['phone_number']}")
+
+
+@contact_app.command("get-default")
+def contact_get_default(
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Get the current default contact for notifications."""
+
+    try:
+        contact = _api_call("GET", "/api/v1/contacts/default")["data"]
+    except _HTTPError as e:
+        if e.response.status_code == 404:
+            typer.echo("No default contact configured.")
+            return
+        raise
+
+    if format == "json":
+        _echo_json(contact)
+        return
+    typer.echo(f"ID: {contact['id']}")
+    typer.echo(f"Name: {contact['name']}")
+    typer.echo(f"Phone: {contact['phone_number']}")
+
+
+@contact_app.command("clear-default")
+def contact_clear_default() -> None:
+    """Clear the default contact."""
+
+    _api_call("DELETE", "/api/v1/contacts/default")
+    typer.echo("Default contact cleared.")
+
+
 @session_route_app.command("create")
 def session_route_create(
     session_key: Annotated[str, typer.Argument(help="Logical session key")],
