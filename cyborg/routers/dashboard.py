@@ -531,50 +531,73 @@ async def reject_approval(
 async def logs(
     request: Request,
     db: Database = Depends(get_database),
+    level: str | None = None,
+    event_type: str | None = None,
+    project_id: str | None = None,
 ) -> Response:
     """Structured log viewer."""
     settings = _get_settings()
 
-    # For now, return a placeholder logs page
-    # In production, this would query from actual log storage
-    mock_logs = [
-        {
-            "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-            "level": "INFO",
-            "logger": "cyborg.services.openclaw_reasoning_service",
-            "message": "Reasoning request completed",
-            "event_type": "reasoning_request",
-            "project_id": None,
-            "duration_seconds": 2.3,
-            "extra_data": None,
-        },
-        {
-            "timestamp": (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%H:%M:%S"),
-            "level": "INFO",
-            "logger": "cyborg.services.project_execution_service",
-            "message": "Project abc-123 auto-completed based on criteria evaluation",
-            "event_type": "autonomy_decision",
-            "project_id": "abc-123",
-            "extra_data": None,
-        },
-        {
-            "timestamp": (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%H:%M:%S"),
-            "level": "WARNING",
-            "logger": "cyborg.services.health_monitor_service",
-            "message": "Health check: project def-456 has degraded to high risk",
-            "event_type": "health_check",
-            "project_id": "def-456",
-            "extra_data": None,
-        },
-    ]
+    # Build query
+    query = "SELECT * FROM structured_logs"
+    conditions = []
+    params = []
 
-    # Calculate stats
-    stats = {
-        "error": 1,
-        "warning": 3,
-        "info": 45,
-        "reasoning": 12,
-    }
+    if level:
+        conditions.append("level = ?")
+        params.append(level.upper())
+    if event_type:
+        conditions.append("event_type = ?")
+        params.append(event_type)
+    if project_id:
+        conditions.append("project_id = ?")
+        params.append(project_id)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY timestamp DESC LIMIT 500"
+
+    rows = await db.fetch_all(query, tuple(params))
+
+    # Format logs for template
+    logs = []
+    for row in rows:
+        logs.append({
+            "timestamp": row.get("timestamp", "")[:19].replace("T", " "),
+            "level": row["level"],
+            "logger": row.get("logger", ""),
+            "message": row["message"],
+            "event_type": row.get("event_type"),
+            "project_id": row.get("project_id"),
+            "duration_seconds": row.get("duration_seconds"),
+            "extra_data": row.get("extra_data"),
+        })
+
+    # Calculate stats from actual data
+    stats_rows = await db.fetch_all(
+        """
+        SELECT
+            level,
+            event_type,
+            COUNT(*) as count
+        FROM structured_logs
+        WHERE timestamp > datetime('now', '-24 hours')
+        GROUP BY level, event_type
+        """
+    )
+
+    stats = {"error": 0, "warning": 0, "info": 0, "reasoning": 0}
+    for row in stats_rows:
+        level = row["level"]
+        if level == "ERROR":
+            stats["error"] += row["count"]
+        elif level == "WARNING":
+            stats["warning"] += row["count"]
+        elif level == "INFO":
+            stats["info"] += row["count"]
+        if row.get("event_type") == "reasoning_request":
+            stats["reasoning"] += row["count"]
 
     return _render_template(
         "dashboard/logs.html",

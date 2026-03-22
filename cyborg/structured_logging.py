@@ -459,3 +459,153 @@ def configure_logging(settings: Settings | None = None) -> None:
         file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(StructuredFormatter())
         root_logger.addHandler(file_handler)
+
+
+class DatabaseLogHandler(logging.Handler):
+    """Async log handler that writes to the structured_logs table.
+
+    This handler buffers logs and writes them asynchronously to avoid
+    blocking the main application during logging.
+    """
+
+    def __init__(self, buffer_size: int = 100):
+        super().__init__()
+        self.buffer: list[dict[str, Any]] = []
+        self.buffer_size = buffer_size
+        self._db: Any = None
+        self._enabled = True
+
+    def set_database(self, db: Any) -> None:
+        """Set the database instance for writing logs."""
+        self._db = db
+
+    def enable(self) -> None:
+        """Enable log writing to database."""
+        self._enabled = True
+
+    def disable(self) -> None:
+        """Disable log writing to database."""
+        self._enabled = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Buffer a log record for async writing."""
+        if not self._enabled or self._db is None:
+            return
+
+        try:
+            # Format the record using our structured formatter
+            formatter = StructuredFormatter()
+            formatted = formatter.format(record)
+            log_data = json.loads(formatted)
+
+            # Add to buffer
+            self.buffer.append(log_data)
+
+            # Flush if buffer is full
+            if len(self.buffer) >= self.buffer_size:
+                self._flush_sync()
+        except Exception:
+            # Don't let logging errors break the application
+            pass
+
+    def _flush_sync(self) -> None:
+        """Synchronously flush buffered logs to database."""
+        if not self.buffer or self._db is None:
+            return
+
+        logs_to_write = self.buffer
+        self.buffer = []
+
+        for log_entry in logs_to_write:
+            try:
+                # Import here to avoid circular dependency
+                import asyncio
+
+                # Create a new event loop if none exists
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        raise RuntimeError("Event loop is closed")
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                # Try to run the async operation
+                future = asyncio.create_task(
+                    self._write_log(log_entry),
+                    loop=loop,
+                )
+                # Don't wait - let it complete asynchronously
+            except Exception:
+                # Silently fail - logging shouldn't break the app
+                pass
+
+    async def _write_log(self, log_entry: dict[str, Any]) -> None:
+        """Write a single log entry to the database."""
+        if self._db is None:
+            return
+
+        try:
+            await self._db.execute(
+                """
+                INSERT INTO structured_logs (
+                    timestamp, level, logger, message, module, function, line,
+                    event_type, project_id, duration_seconds, extra_data, correlation_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_entry.get("timestamp"),
+                    log_entry.get("level"),
+                    log_entry.get("logger"),
+                    log_entry.get("message"),
+                    log_entry.get("module"),
+                    log_entry.get("function"),
+                    log_entry.get("line"),
+                    log_entry.get("event_type"),
+                    log_entry.get("project_id"),
+                    log_entry.get("duration_seconds"),
+                    json.dumps(log_entry.get("extra_data")) if log_entry.get("extra_data") else None,
+                    log_entry.get("correlation_id"),
+                ),
+            )
+        except Exception:
+            # Silently fail - logging shouldn't break the app
+            pass
+
+    async def flush(self) -> None:
+        """Async flush any remaining buffered logs."""
+        if self.buffer:
+            logs_to_write = self.buffer
+            self.buffer = []
+            for log_entry in logs_to_write:
+                await self._write_log(log_entry)
+
+
+# Global database handler instance (will be attached after DB init)
+_db_handler: DatabaseLogHandler | None = None
+
+
+def get_database_handler() -> DatabaseLogHandler | None:
+    """Get the global database log handler."""
+    global _db_handler
+    return _db_handler
+
+
+def attach_database_handler(db: Any) -> DatabaseLogHandler:
+    """Create and attach a database log handler to the root logger.
+
+    This should be called after the database is initialized.
+    """
+    global _db_handler
+
+    if _db_handler is None:
+        _db_handler = DatabaseLogHandler()
+
+    _db_handler.set_database(db)
+
+    # Add to root logger if not already added
+    root_logger = logging.getLogger()
+    if _db_handler not in root_logger.handlers:
+        root_logger.addHandler(_db_handler)
+
+    return _db_handler

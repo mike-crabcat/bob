@@ -45,6 +45,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.settings = resolved_settings
         app.state.settings = resolved_settings
         app.state.db = database
+
+        # Attach database log handler for structured logging
+        from cyborg.structured_logging import attach_database_handler
+        attach_database_handler(database)
+
         stop_event = asyncio.Event()
         notification_worker = asyncio.create_task(
             _notification_loop(
