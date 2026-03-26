@@ -280,11 +280,74 @@ async def get_contacts_by_whatsapp_group(
         "SELECT * FROM contacts WHERE deleted_at IS NULL",
         (),
     )
-    
+
     matching_contacts = []
     for row in rows:
         whatsapp_groups = json.loads(row["whatsapp_groups"]) if row["whatsapp_groups"] else []
         if group_id in whatsapp_groups:
             matching_contacts.append(_row_to_contact(row))
-    
+
     return matching_contacts
+
+
+@router.get("/default", response_model=ContactResponse)
+async def get_default_contact(
+    database: Database = Depends(get_database),
+) -> ContactResponse:
+    """Get the current default contact for notifications."""
+    row = await database.fetch_one(
+        "SELECT * FROM contacts WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1",
+        (),
+    )
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No default contact configured",
+        )
+
+    return _row_to_contact(row)
+
+
+@router.put("/{contact_id}/set-default", response_model=ContactResponse)
+async def set_default_contact(
+    contact_id: UUID,
+    database: Database = Depends(get_database),
+) -> ContactResponse:
+    """Set a contact as the default for notifications."""
+    # Check if contact exists
+    existing = await database.fetch_one(
+        "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
+        (str(contact_id),),
+    )
+
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact {contact_id} not found",
+        )
+
+    # Set as default (trigger will unset others)
+    await database.execute(
+        "UPDATE contacts SET is_default = 1 WHERE id = ?",
+        (str(contact_id),),
+    )
+
+    row = await database.fetch_one(
+        "SELECT * FROM contacts WHERE id = ?",
+        (str(contact_id),),
+    )
+    return _row_to_contact(row)
+
+
+@router.delete("/default", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_default_contact(
+    database: Database = Depends(get_database),
+) -> Response:
+    """Clear the default contact."""
+    await database.execute(
+        "UPDATE contacts SET is_default = 0 WHERE is_default = 1",
+        (),
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

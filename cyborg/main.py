@@ -17,7 +17,8 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ServiceError
 from cyborg.models import HealthResponse
-from cyborg.routers import calendars, contacts, context, notifications, openclaw, plans, project_specs, projects, session_routes, tasks, webhooks
+from cyborg.routers import calendars, contacts, context, dashboard, health, learning, notifications, openclaw, plans, planning, project_specs, projects, session_routes, tasks, webhooks
+from cyborg.structured_logging import configure_logging, CorrelationIdMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
 
     resolved_settings = settings or Settings.from_env()
+
+    # Configure structured logging
+    configure_logging(resolved_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -41,6 +45,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.settings = resolved_settings
         app.state.settings = resolved_settings
         app.state.db = database
+
+        # Attach database log handler for structured logging
+        from cyborg.structured_logging import attach_database_handler
+        attach_database_handler(database)
+
         stop_event = asyncio.Event()
         notification_worker = asyncio.create_task(
             _notification_loop(
@@ -60,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass
             await database.close()
 
+    # Create FastAPI app
     app = FastAPI(
         title="Cyborg Data Service",
         version=__version__,
@@ -67,6 +77,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+
+    # Add correlation ID middleware
+    app.add_middleware(CorrelationIdMiddleware)
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
@@ -96,9 +109,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(notifications.router)
     app.include_router(openclaw.router)
     app.include_router(plans.router)
+    app.include_router(planning.router)
+    app.include_router(health.router)
+    app.include_router(learning.router)
     app.include_router(session_routes.router)
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
+    app.include_router(dashboard.router)  # Web dashboard
 
     return app
 

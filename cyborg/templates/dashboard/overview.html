@@ -1,0 +1,355 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Overview - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">
+        <span class="neon-text">System</span> Overview
+    </h1>
+    <p class="text-text-secondary">Real-time monitoring and system status</p>
+</div>
+
+<!-- Stats Grid -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+    <!-- System Health -->
+    <div class="glass-card neon-border-green rounded-xl p-5 card-hover">
+        <div class="flex items-center justify-between mb-3">
+            <span class="text-text-secondary text-sm">SYSTEM HEALTH</span>
+            <span class="text-accent-green text-lg">●</span>
+        </div>
+        <div class="text-3xl font-bold font-mono-data text-accent-green">{{ system_health_score }}%</div>
+        <div class="text-text-muted text-sm mt-1">{{ system_health_status }}</div>
+    </div>
+
+    <!-- Active Projects -->
+    <div class="glass-card neon-border rounded-xl p-5 card-hover">
+        <div class="flex items-center justify-between mb-3">
+            <span class="text-text-secondary text-sm">ACTIVE PROJECTS</span>
+            <span class="text-accent-cyan">◈</span>
+        </div>
+        <div class="text-3xl font-bold font-mono-data">{{ active_projects_count }}</div>
+        <div class="text-text-muted text-sm mt-1">{{ projects_in_progress }} in progress</div>
+    </div>
+
+    <!-- Pending Approvals -->
+    <div class="glass-card neon-border-pink rounded-xl p-5 card-hover">
+        <div class="flex items-center justify-between mb-3">
+            <span class="text-text-secondary text-sm">PENDING APPROVALS</span>
+            <span class="text-accent-pink">⚡</span>
+        </div>
+        <div class="text-3xl font-bold font-mono-data text-accent-pink">{{ pending_approvals_count }}</div>
+        <div class="text-text-muted text-sm mt-1">{{ urgent_approvals }} urgent</div>
+    </div>
+
+    <!-- At-Risk Projects -->
+    <div class="glass-card rounded-xl p-5 card-hover {% if at_risk_count > 0 %}neon-border-pink{% else %}border-accent-orange/30{% endif %}">
+        <div class="flex items-center justify-between mb-3">
+            <span class="text-text-secondary text-sm">AT-RISK</span>
+            <span class="{% if at_risk_count > 0 %}text-accent-red{% else %}text-accent-orange{% endif %}">▲</span>
+        </div>
+        <div class="text-3xl font-bold font-mono-data {% if at_risk_count > 0 %}text-accent-red{% else %}text-accent-orange{% endif %}">{{ at_risk_count }}</div>
+        <div class="text-text-muted text-sm mt-1">projects need attention</div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <!-- Project Status Distribution -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-cyan">◇</span>
+            Project Status Distribution
+        </h2>
+        <div class="chart-container" style="height: 250px;">
+            <canvas id="projectStatusChart"></canvas>
+        </div>
+    </div>
+
+    <!-- Reasoning Latency -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-purple">◈</span>
+            Reasoning Latency (24h)
+        </h2>
+        <div class="chart-container" style="height: 250px;">
+            <canvas id="latencyChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Activity & Approvals Row -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+    <!-- Recent Activity -->
+    <div class="lg:col-span-2 glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-green">◇</span>
+            Recent Activity
+            <span class="text-xs text-accent-cyan animate-pulse ml-2">● LIVE</span>
+        </h2>
+        <div class="space-y-2 max-h-80 overflow-y-auto" id="activity-feed"
+             hx-ext="sse,sse-connect"
+             sse-connect="/dashboard/events"
+             sse-swap="message">
+            {% for activity in recent_activities %}
+            <div class="log-entry p-3 rounded-lg bg-bg-card/50">
+                <div class="flex items-center gap-3">
+                    <span class="font-mono-data text-xs text-text-muted">{{ activity.timestamp }}</span>
+                    <span class="activity-icon">{% if activity.type == 'completion' %}✓{% elif activity.type == 'refinement' %}◈{% elif activity.type == 'health' %}▲{% elif activity.type == 'error' %}✖{% else %}●{% endif %}</span>
+                    <span class="flex-1 text-sm">{{ activity.message }}</span>
+                    {% if activity.project_id %}
+                    <a href="/dashboard/projects/{{ activity.project_id }}" class="text-accent-cyan text-xs hover:underline">view</a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Quick Approvals -->
+    <div class="glass-card neon-border-pink rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-pink">⚡</span>
+            Pending Approvals
+        </h2>
+        <div class="space-y-3">
+            {% if pending_approval_items %}
+                {% for approval in pending_approval_items[:5] %}
+                <div class="p-3 rounded-lg bg-bg-card/50 border border-accent-pink/20 hover:border-accent-pink/40 transition-colors">
+                    <div class="flex items-center gap-2 mb-2">
+                        <span class="status-info text-xs px-2 py-0.5 rounded">{{ approval.type }}</span>
+                        {% if approval.priority == 'urgent' %}
+                        <span class="text-xs text-accent-red">URGENT</span>
+                        {% endif %}
+                    </div>
+                    <div class="text-sm font-medium mb-1">{{ approval.title }}</div>
+                    <div class="text-xs text-text-muted mb-3">{{ approval.description|truncate(80) }}</div>
+                    <div class="flex gap-2">
+                        <button hx-post="/dashboard/approve/{{ approval.id }}"
+                                hx-target="#approval-{{ approval.id }}"
+                                class="flex-1 px-3 py-1.5 text-xs bg-accent-green/20 text-accent-green rounded hover:bg-accent-green/30 transition-colors">
+                            Approve
+                        </button>
+                        <button hx-post="/dashboard/reject/{{ approval.id }}"
+                                hx-target="#approval-{{ approval.id }}"
+                                class="flex-1 px-3 py-1.5 text-xs bg-accent-red/20 text-accent-red rounded hover:bg-accent-red/30 transition-colors">
+                            Reject
+                        </button>
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="text-center py-8 text-text-muted">
+                    <div class="text-2xl mb-2">✓</div>
+                    <div>No pending approvals</div>
+                </div>
+            {% endif %}
+        </div>
+        {% if pending_approvals_count > 5 %}
+        <a href="/dashboard/approvals" class="block mt-4 text-center text-sm text-accent-cyan hover:underline">
+            View all {{ pending_approvals_count }} approvals →
+        </a>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Bottom Row -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Tasks by Status -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-cyan">◇</span>
+            Tasks by Status
+        </h2>
+        <div class="chart-container" style="height: 180px;">
+            <canvas id="taskStatusChart"></canvas>
+        </div>
+    </div>
+
+    <!-- Health Distribution -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-purple">▲</span>
+            Project Health Distribution
+        </h2>
+        <div class="chart-container" style="height: 180px;">
+            <canvas id="healthDistributionChart"></canvas>
+        </div>
+    </div>
+
+    <!-- Log Event Types -->
+    <div class="glass-card neon-border rounded-xl p-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <span class="text-accent-green">◈</span>
+            Log Events (24h)
+        </h2>
+        <div class="chart-container" style="height: 180px;">
+            <canvas id="logEventsChart"></canvas>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Chart.js configuration
+const chartColors = {
+    cyan: '#00f0ff',
+    pink: '#ff00ff',
+    purple: '#b026ff',
+    green: '#00ff9f',
+    orange: '#ff6b00',
+    red: '#ff0055',
+    gray: '#3a3a4a',
+};
+
+const chartConfig = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+        legend: {
+            position: 'bottom',
+            labels: {
+                color: '#9898a0',
+                usePointStyle: true,
+                padding: 15,
+            }
+        }
+    },
+    scales: {
+        x: {
+            grid: { color: 'rgba(0, 240, 255, 0.05)' },
+            ticks: { color: '#9898a0' }
+        },
+        y: {
+            grid: { color: 'rgba(0, 240, 255, 0.05)' },
+            ticks: { color: '#9898a0' },
+            beginAtZero: true
+        }
+    }
+};
+
+// Project Status Donut Chart
+new Chart(document.getElementById('projectStatusChart'), {
+    type: 'doughnut',
+    data: {
+        labels: ['Active', 'Completed', 'Blocked', 'Paused'],
+        datasets: [{
+            data: {{ project_status_data|safe }},
+            backgroundColor: [chartColors.cyan, chartColors.green, chartColors.red, chartColors.orange],
+            borderColor: '#12121a',
+            borderWidth: 2,
+            hoverOffset: 10
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { position: 'bottom', labels: { color: '#9898a0' } }
+        },
+        cutout: '65%'
+    }
+});
+
+// Reasoning Latency Line Chart
+new Chart(document.getElementById('latencyChart'), {
+    type: 'line',
+    data: {
+        labels: {{ latency_labels|safe }},
+        datasets: [{
+            label: 'Latency (ms)',
+            data: {{ latency_data|safe }},
+            borderColor: chartColors.purple,
+            backgroundColor: 'rgba(178, 38, 255, 0.1)',
+            fill: true,
+            tension: 0.4,
+            pointBackgroundColor: chartColors.purple,
+            pointBorderColor: '#12121a',
+            pointBorderWidth: 2,
+            pointRadius: 3
+        }]
+    },
+    options: chartConfig
+});
+
+// Task Status Bar Chart
+new Chart(document.getElementById('taskStatusChart'), {
+    type: 'bar',
+    data: {
+        labels: ['Pending', 'Active', 'Completed', 'Failed', 'Blocked'],
+        datasets: [{
+            label: 'Tasks',
+            data: {{ task_status_data|safe }},
+            backgroundColor: [
+                'rgba(154, 154, 166, 0.5)',
+                chartColors.cyan,
+                chartColors.green,
+                chartColors.red,
+                chartColors.orange
+            ],
+            borderColor: [
+                '#6b7280',
+                chartColors.cyan,
+                chartColors.green,
+                chartColors.red,
+                chartColors.orange
+            ],
+            borderWidth: 1,
+            borderRadius: 4
+        }]
+    },
+    options: {
+        ...chartConfig,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } }
+    }
+});
+
+// Health Distribution Pie Chart
+new Chart(document.getElementById('healthDistributionChart'), {
+    type: 'pie',
+    data: {
+        labels: ['Low Risk', 'Medium Risk', 'High Risk', 'Critical'],
+        datasets: [{
+            data: {{ health_distribution_data|safe }},
+            backgroundColor: [chartColors.green, chartColors.orange, chartColors.red, '#ff0055'],
+            borderColor: '#12121a',
+            borderWidth: 2
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } }
+    }
+});
+
+// Log Events Bar Chart
+new Chart(document.getElementById('logEventsChart'), {
+    type: 'bar',
+    data: {
+        labels: ['reasoning_request', 'autonomy_decision', 'health_check', 'function_call', 'error'],
+        datasets: [{
+            label: 'Events',
+            data: {{ log_events_data|safe }},
+            backgroundColor: [
+                'rgba(0, 240, 255, 0.5)',
+                'rgba(255, 0, 255, 0.5)',
+                'rgba(178, 38, 255, 0.5)',
+                'rgba(0, 255, 159, 0.5)',
+                'rgba(255, 0, 85, 0.5)'
+            ],
+            borderColor: [chartColors.cyan, chartColors.pink, chartColors.purple, chartColors.green, chartColors.red],
+            borderWidth: 1,
+            borderRadius: 4
+        }]
+    },
+    options: {
+        ...chartConfig,
+        plugins: { legend: { display: false } }
+    }
+});
+</script>
+{% endblock %}

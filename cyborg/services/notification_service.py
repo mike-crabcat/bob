@@ -41,7 +41,13 @@ class NotificationService(BaseService):
 
     def _get_openclaw_service(self) -> OpenClawHookService:
         if self._openclaw_service is None:
-            self._openclaw_service = OpenClawHookService(self.db)
+            # Get the public URL from settings if available
+            from cyborg.config import Settings
+            settings = getattr(self.db, "settings", None)
+            public_url = ""
+            if isinstance(settings, Settings):
+                public_url = settings.resolved_public_url
+            self._openclaw_service = OpenClawHookService(self.db, cyborg_service_url=public_url)
         return self._openclaw_service
 
     async def list_notifications(
@@ -433,12 +439,18 @@ class NotificationService(BaseService):
         elif latest_plan and latest_plan["status"] == PlanStatus.PENDING_APPROVAL.value:
             title = f"Task plan awaiting approval: {row['title']}"
             message = "The task is waiting for plan approval before it can move to pending."
+            # Include the plan content for approval
+            if row.get("plan"):
+                message += f"\n\nProposed plan:\n{row['plan']}"
         else:
             title = f"Task needs planning: {row['title']}"
             message = "The task still needs a usable approved plan before it can start."
 
         if parent_project is not None:
             message += f"\n\nProject: {parent_project['title']} ({parent_project['id']})"
+
+        # Include task ID for reference
+        message += f"\n\nTask ID: {row['id']}"
 
         metadata = {
             **task_metadata,

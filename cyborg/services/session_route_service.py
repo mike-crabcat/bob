@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
 
 class SessionRouteService(BaseService):
     """Persist and resolve channel/session routing for outbound delivery."""
+
+    logger = logging.getLogger(__name__)
 
     def __init__(self, db: Database) -> None:
         super().__init__(db)
@@ -253,7 +256,29 @@ class SessionRouteService(BaseService):
     async def resolve_notification_route(self, metadata: dict[str, Any]) -> ResolvedSessionRoute | None:
         if metadata.get("delivery_route") == "target":
             return await self.resolve_target_metadata(metadata)
-        return await self.resolve_source_metadata(metadata)
+
+        route = await self.resolve_source_metadata(metadata)
+        if route is not None:
+            return route
+
+        # Fallback to default contact from database
+        default_contact = await self.db.fetch_one(
+            "SELECT id FROM contacts WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1"
+        )
+        if default_contact:
+            self.logger.info(
+                f"No route found in metadata, using default contact fallback: {default_contact['id']}"
+            )
+            return await self._resolve_contact_route(
+                default_contact["id"],
+                session_key=None,
+                route_source="default_contact",
+            )
+
+        self.logger.warning(
+            f"No notification route could be resolved from metadata: {metadata.get('delivery_route')}"
+        )
+        return None
 
     async def resolve_target_session_key(self, metadata: dict[str, Any]) -> str | None:
         target_session = metadata.get("target_session")
@@ -362,5 +387,5 @@ class SessionRouteService(BaseService):
         return decoded
 
     def _build_whatsapp_dm_session_key(self, phone_number: str) -> str:
-        agent_id = (self.settings.openclaw.agent_id or "main").strip() or "main"
-        return f"agent:{agent_id}:whatsapp:direct:{phone_number}"
+        # OpenClaw uses format: whatsapp:direct:{phone_number}
+        return f"whatsapp:direct:{phone_number}"

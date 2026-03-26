@@ -169,11 +169,15 @@ class Settings:
     data_dir: Path = Path("~/.local/share/cyborg")
     config_dir: Path = Path("~/.config/cyborg")
     db_path: Path | None = None
+    log_path: Path | None = None
     log_level: str = "info"
+    debug: bool = False
+    version: str = "0.1.0"  # Application version
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
     notification_dispatch_interval_seconds: float = 60.0
+    public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
 
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.expanduser()
@@ -182,6 +186,15 @@ class Settings:
             self.db_path = self.data_dir / "cyborg.db"
         else:
             self.db_path = self.db_path.expanduser()
+        if self.log_path is not None:
+            self.log_path = self.log_path.expanduser()
+
+    @property
+    def resolved_public_url(self) -> str:
+        """Get the public URL, falling back to host:port if not set."""
+        if self.public_url:
+            return self.public_url.rstrip("/")
+        return f"http://{self.host}:{self.port}"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -197,6 +210,11 @@ class Settings:
         pool_size = int(os.getenv("CYBORG_DB_POOL_SIZE", str(DEFAULT_POOL_SIZE)))
         log_level = os.getenv("CYBORG_LOG_LEVEL", "info")
         notification_dispatch_interval_seconds = float(os.getenv("CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS", "60"))
+
+        # Logging settings
+        log_path_value = os.getenv("CYBORG_LOG_PATH")
+        log_path = Path(log_path_value).expanduser() if log_path_value else None
+        debug = os.getenv("CYBORG_DEBUG", "").lower() in ("true", "1", "yes", "on")
 
         # Parse webhook configuration from environment
         webhooks: dict[str, WebhookConfig] = {}
@@ -240,6 +258,7 @@ class Settings:
             timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "15")),
             session_key_prefix=os.getenv("CYBORG_OPENCLAW_SESSION_KEY_PREFIX") or None,
         )
+        public_url = os.getenv("CYBORG_PUBLIC_URL", "")
 
         return cls(
             host=host,
@@ -247,11 +266,14 @@ class Settings:
             data_dir=data_dir,
             config_dir=config_dir,
             db_path=db_path,
+            log_path=log_path,
             log_level=log_level,
+            debug=debug,
             pool_size=pool_size,
             webhooks=webhooks,
             openclaw=openclaw,
             notification_dispatch_interval_seconds=notification_dispatch_interval_seconds,
+            public_url=public_url,
         )
 
     def ensure_directories(self) -> None:

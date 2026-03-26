@@ -45,3 +45,7 @@ packages = ["cyborg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "openclaw_live: exercises a real OpenClaw gateway/model and is skipped by default",
+  "asyncio: marks coroutine-style tests that require explicit async support",
+]

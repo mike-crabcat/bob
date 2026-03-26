@@ -62,25 +62,6 @@ async def list_webhooks(
     ]
 
 
-@router.get("/{config_id}")
-async def get_webhook(
-    config_id: str,
-    service: WebhookService = Depends(get_webhook_service),
-) -> dict[str, Any]:
-    """Get a webhook configuration by ID."""
-    config = await service.get_config(config_id)
-    if not config:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    return {
-        "id": config.id,
-        "name": config.name,
-        "url": config.url,
-        "events": config.events,
-        "retry_count": config.retry_count,
-        "is_active": config.is_active,
-    }
-
-
 @router.get("/by-name/{name}")
 async def get_webhook_by_name(
     name: str,
@@ -201,3 +182,22 @@ async def process_pending_deliveries(
     """Process all pending deliveries that are due for retry."""
     count = await service.process_pending_deliveries()
     return {"processed": count}
+
+
+@router.get("/{config_id}")
+async def get_webhook(
+    config_id: str,
+    service: WebhookService = Depends(get_webhook_service),
+) -> dict[str, Any]:
+    """Get a webhook configuration by ID."""
+    config = await service.get_config(config_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {
+        "id": config.id,
+        "name": config.name,
+        "url": config.url,
+        "events": config.events,
+        "retry_count": config.retry_count,
+        "is_active": config.is_active,
+    }

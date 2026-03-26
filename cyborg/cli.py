@@ -36,6 +36,9 @@ event_app = typer.Typer(help="Event operations")
 context_app = typer.Typer(help="Context operations")
 webhook_app = typer.Typer(help="Webhook operations")
 openclaw_app = typer.Typer(help="OpenClaw integration operations")
+planning_app = typer.Typer(help="AI-powered project planning")
+health_app = typer.Typer(help="Project health monitoring")
+learning_app = typer.Typer(help="Project insights and learning")
 
 app.add_typer(task_app, name="task")
 task_app.add_typer(plan_app, name="plan")
@@ -49,6 +52,9 @@ app.add_typer(event_app, name="event")
 app.add_typer(context_app, name="context")
 app.add_typer(webhook_app, name="webhook")
 app.add_typer(openclaw_app, name="openclaw")
+app.add_typer(planning_app, name="planning")
+app.add_typer(health_app, name="health")
+app.add_typer(learning_app, name="learning")
 
 
 def _service_file_path() -> Path:
@@ -1585,6 +1591,122 @@ def project_delete(project_id: Annotated[str, typer.Argument(help="Project ID")]
     typer.echo(f"Project deleted: {project_id}")
 
 
+# ============================================================================
+# Planning Commands (AI-powered project planning)
+# ============================================================================
+
+
+@planning_app.command("generate")
+def planning_generate(
+    aim: Annotated[str, typer.Option("--aim", "-a", help="What the project aims to accomplish")],
+    method: Annotated[str, typer.Option("--method", "-m", help="How the project will be executed")] = "",
+    success_criteria: Annotated[list[str], typer.Option("--success-criteria", "-s", "-c", help="Success criteria")] = [],
+    reference_project_id: Annotated[str, typer.Option("--reference-project", "-r", help="Optional project ID to reference")] = "",
+) -> None:
+    """Generate a project plan using AI reasoning via OpenClaw.
+
+    Example:
+      cyborg planning generate --aim "Launch a customer feedback sprint" --method "Interview customers, cluster themes, summarize top actions"
+    """
+
+    payload: dict[str, Any] = {
+        "aim": aim,
+        "method": method or None,
+        "success_criteria": success_criteria,
+        "reference_project_id": reference_project_id or None,
+    }
+
+    try:
+        response = _api_call("POST", "/api/v1/planning/generate-plan", payload)
+    except (HTTPError, URLError) as e:
+        typer.echo(f"Error generating plan: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = response.get("data", response)
+    steps = result.get("steps", [])
+
+    typer.echo(f"Generated {len(steps)} step plan:")
+    typer.echo()
+
+    for step in steps:
+        typer.echo(f"  {step['order'] + 1}. {step['title']}")
+        if step.get("description"):
+            typer.echo(f"     {step['description']}")
+        if step.get("criteria"):
+            typer.echo(f"     ✓ {step['criteria']}")
+        typer.echo()
+
+    reasoning = result.get("reasoning", "")
+    if reasoning:
+        typer.echo(f"Reasoning: {reasoning}")
+
+
+@planning_app.command("refine")
+def planning_refine(
+    project_id: Annotated[str, typer.Option("--project", "-p", help="Project ID")],
+    trigger_task_id: Annotated[str, typer.Option("--task", "-t", help="Task ID that triggered refinement")] = "",
+    trigger_reason: Annotated[str, typer.Option("--reason", "-r", help="Reason for refinement (task_completion, failure, manual)")] = "manual",
+) -> None:
+    """Trigger strategy refinement analysis for a project.
+
+    Uses OpenClaw reasoning to analyze project state and suggest strategic adjustments.
+
+    Example:
+      cyborg planning refine --project abc-123 --task def-456
+    """
+
+    if not project_id:
+        typer.echo("Error: --project is required", err=True)
+        raise typer.Exit(1)
+
+    payload: dict[str, Any] = {
+        "trigger_task_id": trigger_task_id or None,
+        "trigger_reason": trigger_reason,
+        "force_refresh": False,
+    }
+
+    try:
+        response = _api_call("POST", f"/api/v1/planning/projects/{project_id}/refine-strategy", payload)
+    except (HTTPError, URLError) as e:
+        typer.echo(f"Error refining strategy: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = response.get("data", response)
+
+    should_refine = result.get("should_refine", False)
+    reasoning = result.get("reasoning", "")
+    suggested_changes = result.get("suggested_changes", [])
+    risks = result.get("risks_identified", [])
+
+    typer.echo(f"Strategy Refinement for project {project_id}")
+    typer.echo()
+
+    if should_refine:
+        typer.echo("  ⚠️  Refinement RECOMMENDED")
+    else:
+        typer.echo("  ✓  No refinement needed")
+
+    typer.echo()
+    typer.echo(f"Reasoning: {reasoning}")
+    typer.echo()
+
+    if suggested_changes:
+        typer.echo("Suggested Changes:")
+        for change in suggested_changes:
+            typer.echo(f"  - {change}")
+        typer.echo()
+
+    if risks:
+        typer.echo("Risks Identified:")
+        for risk in risks:
+            typer.echo(f"  - {risk}")
+        typer.echo()
+
+    applied_at = result.get("applied_at")
+    if applied_at:
+        typer.echo(f"Applied at: {applied_at}")
+
+
 @contact_app.command("create")
 def contact_create(
     name: Annotated[str, typer.Argument(help="Contact name")],
@@ -1742,6 +1864,48 @@ def contact_by_whatsapp_group(
         typer.echo("No contacts found.")
         return
     _print_contact_table(contacts)
+
+
+@contact_app.command("set-default")
+def contact_set_default(
+    contact_id: Annotated[str, typer.Argument(help="Contact ID to set as default")],
+) -> None:
+    """Set a contact as the default for notifications."""
+
+    contact = _api_call("PUT", f"/api/v1/contacts/{contact_id}/set-default", {})["data"]
+    typer.echo(f"Default contact set: {contact['name']}")
+    typer.echo(f"ID: {contact['id']}")
+    typer.echo(f"Phone: {contact['phone_number']}")
+
+
+@contact_app.command("get-default")
+def contact_get_default(
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Get the current default contact for notifications."""
+
+    try:
+        contact = _api_call("GET", "/api/v1/contacts/default")["data"]
+    except _HTTPError as e:
+        if e.response.status_code == 404:
+            typer.echo("No default contact configured.")
+            return
+        raise
+
+    if format == "json":
+        _echo_json(contact)
+        return
+    typer.echo(f"ID: {contact['id']}")
+    typer.echo(f"Name: {contact['name']}")
+    typer.echo(f"Phone: {contact['phone_number']}")
+
+
+@contact_app.command("clear-default")
+def contact_clear_default() -> None:
+    """Clear the default contact."""
+
+    _api_call("DELETE", "/api/v1/contacts/default")
+    typer.echo("Default contact cleared.")
 
 
 @session_route_app.command("create")
@@ -2453,6 +2617,353 @@ def openclaw_context(
         _echo_json(_api_call("GET", "/openclaw/context.json")["data"])
         return
     raise typer.BadParameter("format must be either 'text' or 'json'")
+
+
+# ============================================================================
+# Health Commands
+# ============================================================================
+
+
+@health_app.command("scan")
+def health_scan(
+    include_healthy: Annotated[bool, typer.Option("--include-healthy", help="Include healthy projects in results")] = False,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (table, json)")] = "table",
+) -> None:
+    """Scan all active projects for health issues.
+
+    Returns projects with health assessments, sorted by risk level.
+    """
+
+    result = _api_call("GET", f"/api/v1/health/scan{_query_string(include_healthy=include_healthy)}")["data"]
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    typer.echo(f"Scanned {result['scanned_count']}/{result['total_projects']} active projects")
+    typer.echo(f"Timestamp: {result['timestamp']}")
+    typer.echo()
+
+    if not result["projects"]:
+        typer.echo("No projects found.")
+        return
+
+    # Sort by risk level
+    risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    projects = sorted(result["projects"], key=lambda p: (risk_order.get(p["risk_level"], 2), -p["health_score"]))
+
+    typer.echo(f"{'Project ID':<36} {'Title':<30} {'Score':<6} {'Risk'}")
+    typer.echo("-" * 90)
+
+    for p in projects:
+        title = (p.get("project_title") or "")[:28]
+        score = f"{p.get('health_score', 0):.2f}"
+        risk = p.get("risk_level", "unknown")
+        risk_emoji = {
+            "low": "✓",
+            "medium": "⚠",
+            "high": "⚠⚠",
+            "critical": "🚨",
+        }.get(risk, "?")
+        typer.echo(f"{p['project_id']:<36} {title:<30} {score:<6} {risk_emoji} {risk}")
+
+
+@health_app.command("analyze")
+def health_analyze(
+    project_id: Annotated[str, typer.Option("--project", "-p", help="Project ID")],
+    save: Annotated[bool, typer.Option("--save", "-s", help="Save the health check to database")] = False,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Get health analysis for a specific project."""
+
+    if not project_id:
+        raise typer.BadParameter("--project is required")
+
+    result = _api_call("GET", f"/api/v1/health/projects/{project_id}/health{_query_string(save_check=save)}")["data"]
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    typer.echo(f"Health Analysis for Project: {result['project_id']}")
+    if result.get("project_title"):
+        typer.echo(f"Title: {result['project_title']}")
+    typer.echo()
+
+    risk = result["risk_level"]
+    risk_emoji = {"low": "✓", "medium": "⚠", "high": "⚠⚠", "critical": "🚨"}.get(risk, "?")
+    typer.echo(f"Health Score: {result['health_score']:.2f}/1.0")
+    typer.echo(f"Risk Level: {risk_emoji} {risk.upper()}")
+    typer.echo()
+
+    # Indicators
+    indicators = result.get("indicators", {})
+    if indicators:
+        typer.echo("Indicators:")
+        for key, value in indicators.items():
+            if key == "blocker_details" and value:
+                typer.echo(f"  Blocked Tasks:")
+                for blocker in value:
+                    reason = blocker.get("reason") or "No reason provided"
+                    typer.echo(f"    - {blocker['task_title']}: {reason}")
+            elif isinstance(value, (int, float)):
+                typer.echo(f"  {key}: {value}")
+            elif isinstance(value, float):
+                typer.echo(f"  {key}: {value:.2%}")
+        typer.echo()
+
+    # Recommendations
+    recommendations = result.get("recommendations", [])
+    if recommendations:
+        typer.echo("Recommendations:")
+        for rec in recommendations:
+            priority = rec.get("priority", "info").upper()
+            action = rec.get("action", "No action specified")
+            reason = rec.get("reason", "")
+            typer.echo(f"  [{priority}] {action}")
+            if reason:
+                typer.echo(f"      Reason: {reason}")
+        typer.echo()
+
+    if result.get("analysis_timestamp"):
+        typer.echo(f"Analyzed at: {result['analysis_timestamp']}")
+
+
+@health_app.command("projects-needing-attention")
+def health_projects_needing_attention(
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Maximum projects to return")] = 20,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (table, json)")] = "table",
+) -> None:
+    """Get projects that need attention (high/critical risk or alerts).
+
+    Returns projects sorted by urgency.
+    """
+
+    projects = _api_call("GET", f"/api/v1/health/projects-needing-attention{_query_string(limit=limit)}")["data"]
+
+    if format == "json":
+        _echo_json(projects)
+        return
+
+    if not projects:
+        typer.echo("No projects need attention right now.")
+        return
+
+    typer.echo(f"Found {len(projects)} project(s) needing attention")
+    typer.echo()
+
+    typer.echo(f"{'Project ID':<36} {'Title':<30} {'State':<10} {'Score'}")
+    typer.echo("-" * 100)
+
+    for p in projects:
+        title = p.get("title", "")[:28]
+        state = p.get("state", "")[:8]
+        score = f"{p.get('health_score', 0):.2f}"
+        alert = " 🚨" if p.get("alert_triggered") else ""
+        typer.echo(f"{p['project_id']:<36} {title:<30} {state:<10} {score}{alert}")
+
+
+@health_app.command("latest")
+def health_latest(
+    project_id: Annotated[str, typer.Option("--project", "-p", help="Project ID")],
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Get the most recent health check for a project."""
+
+    if not project_id:
+        raise typer.BadParameter("--project is required")
+
+    result = _api_call("GET", f"/api/v1/health/projects/{project_id}/health/latest")["data"]
+
+    if "detail" in result and "No health checks found" in result["detail"]:
+        typer.echo(f"No health checks found for project {project_id}")
+        return
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    typer.echo(f"Latest Health Check for Project: {result['project_id']}")
+    typer.echo(f"Check Type: {result.get('check_type', 'unknown')}")
+    typer.echo(f"Health Score: {result.get('health_score', 0):.2f}/1.0")
+    typer.echo(f"Risk Level: {result.get('risk_level', 'unknown').upper()}")
+    typer.echo(f"Alert Triggered: {'Yes' if result.get('alert_triggered') else 'No'}")
+    typer.echo(f"Checked at: {result.get('created_at', 'unknown')}")
+    typer.echo()
+
+    if result.get("recommendations"):
+        typer.echo("Recommendations:")
+        for rec in result.get("recommendations", []):
+            typer.echo(f"  - {rec}")
+
+
+# ============================================================================
+# Learning Commands
+# ============================================================================
+
+
+@learning_app.command("extract-insights")
+def learning_extract_insights(
+    project_id: Annotated[str, typer.Option("--project", "-p", help="Project ID")],
+    force: Annotated[bool, typer.Option("--force", "-f", help="Extract even if project is young")] = False,
+    format: Annotated[str, typer.Option("--format", help="Output format (text, json)")] = "text",
+) -> None:
+    """Extract and store insights from a completed project.
+
+    Uses OpenClaw reasoning to analyze the project and identify learnings.
+    """
+
+    if not project_id:
+        raise typer.BadParameter("--project is required")
+
+    payload = {"force": force}
+    result = _api_call("POST", f"/api/v1/learning/projects/{project_id}/extract-insights", payload)["data"]
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    typer.echo(f"Extracted {result['insights_extracted']} insight(s) from project {project_id}")
+    typer.echo()
+
+    insights = result.get("insights", [])
+    if insights:
+        for i, insight in enumerate(insights, 1):
+            typer.echo(f"{i}. {insight.get('category', 'Uncategorized')}")
+            typer.echo(f"   {insight.get('insight', 'No insight text')}")
+            if insight.get("applicability_pattern"):
+                typer.echo(f"   Applies to: {insight['applicability_pattern']}")
+            typer.echo()
+
+
+@learning_app.command("similar-projects")
+def learning_similar_projects(
+    aim: Annotated[str, typer.Option("--aim", "-a", help="Project aim to match against")],
+    method: Annotated[Optional[str], typer.Option("--method", "-m", help="Project method to match")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Maximum projects to return")] = 5,
+    min_outcome: Annotated[Optional[str], typer.Option("--outcome", help="Filter by outcome: success, failure, partial")] = None,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (table, json)")] = "table",
+) -> None:
+    """Find projects similar to the given aim/method.
+
+    Returns projects with their insights, ordered by relevance.
+    """
+
+    if not aim:
+        raise typer.BadParameter("--aim is required")
+
+    result = _api_call(
+        "GET",
+        f"/api/v1/learning/similar-projects{_query_string(aim=aim, method=method, limit=limit, min_outcome=min_outcome)}",
+    )["data"]
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    typer.echo(f"Found {result['total_found']} similar project(s)")
+    typer.echo()
+
+    if not result["projects"]:
+        typer.echo("No similar projects found.")
+        return
+
+    for i, project in enumerate(result["projects"], 1):
+        typer.echo(f"{i}. {project.get('title', 'Untitled')} [{project['id'][:8]}]")
+        typer.echo(f"   Aim: {project.get('aim', '')[:60]}")
+        if project.get("method"):
+            typer.echo(f"   Method: {project['method'][:60]}")
+        typer.echo(f"   Outcome: {project.get('outcome', 'unknown').upper()}")
+        if project.get("insights"):
+            typer.echo(f"   Insights: {len(project['insights'])} available")
+        typer.echo()
+
+
+@learning_app.command("active-insights")
+def learning_active_insights(
+    category: Annotated[Optional[str], typer.Option("--category", "-c", help="Filter by insight category")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Maximum insights to return")] = 50,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Get active (successful/partial) insights that can be applied to new projects.
+
+    Insights are extracted from completed successful projects.
+    """
+
+    result = _api_call(
+        "GET",
+        f"/api/v1/learning/insights/active{_query_string(category=category, limit=limit)}",
+    )["data"]
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    typer.echo(f"Found {result['total']} active insight(s)")
+    typer.echo()
+
+    if not result["insights"]:
+        typer.echo("No active insights found.")
+        return
+
+    # Group by category
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for insight in result["insights"]:
+        cat = insight.get("category", "General")
+        if cat not in by_category:
+            by_category[cat] = []
+        by_category[cat].append(insight)
+
+    for category, insights in sorted(by_category.items()):
+        typer.echo(f"[{category}]")
+        for insight in insights:
+            typer.echo(f"  - {insight.get('insight', 'No insight text')}")
+            if insight.get("applicability_pattern"):
+                typer.echo(f"    Applies to: {insight['applicability_pattern']}")
+        typer.echo()
+
+
+@learning_app.command("suggest-criteria")
+def learning_suggest_criteria(
+    aim: Annotated[str, typer.Option("--aim", "-a", help="Project aim to match against")],
+    method: Annotated[Optional[str], typer.Option("--method", "-m", help="Project method to match")] = None,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Suggest success criteria based on similar successful projects.
+
+    Returns criteria from similar past projects.
+    """
+
+    if not aim:
+        raise typer.BadParameter("--aim is required")
+
+    result = _api_call(
+        "GET",
+        f"/api/v1/learning/suggest-criteria{_query_string(aim=aim, method=method)}",
+    )["data"]
+
+    if format == "json":
+        _echo_json(result)
+        return
+
+    criteria = result.get("criteria", [])
+
+    if not criteria:
+        typer.echo("No similar projects found to suggest criteria.")
+        return
+
+    typer.echo(f"Suggested success criteria based on {len(criteria)} similar project(s)")
+    typer.echo()
+
+    for i, criterion in enumerate(criteria, 1):
+        source = criterion.get("source_project_title", "Unknown project")
+        typer.echo(f"{i}. {criterion.get('criterion', 'No criterion text')}")
+        typer.echo(f"   Source: {source}")
+        if criterion.get("met"):
+            typer.echo(f"   ✓ This criterion was met")
+        else:
+            typer.echo(f"   ✗ This criterion was NOT met")
+        typer.echo()
 
 
 def main() -> int:
