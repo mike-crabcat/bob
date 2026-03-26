@@ -673,7 +673,50 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks/process-pending
 
 ## OpenClaw Integration
 
-Fetch OpenClaw-formatted context:
+### Option 1: OpenClaw Plugin (Recommended)
+
+For automatic, reliable context injection, use the **OpenClaw Context Plugin** instead of manual API calls. The plugin injects Cyborg context directly into OpenClaw's context engine, providing:
+
+- Automatic context injection on every session
+- No external tool calls needed
+- Token-aware context assembly
+- Built-in caching to reduce Cyborg service load
+
+**Install the Plugin:**
+
+```bash
+# Copy the plugin to OpenClaw extensions directory
+cp -r ~/.openclaw/workspace/projects/cyborg/openclaw-plugin ~/.openclaw/extensions/cyborg-context
+
+# Restart OpenClaw gateway
+systemctl --user restart openclaw-gateway.service
+```
+
+**Configure the Plugin (optional):**
+
+Add to `~/.config/openclaw/openclaw.json5`:
+
+```json5
+{
+  plugins: {
+    cyborgContext: {
+      enabled: true,
+      cyborgUrl: "http://127.0.0.1:8420",
+      includeProjects: true,
+      includeTasks: true,
+      includeEvents: true,
+      cacheTtlSeconds: 300,
+      maxTokens: 2000
+    }
+  }
+}
+```
+
+See `openclaw-plugin/README.md` for full plugin documentation.
+
+### Option 2: Manual Context API
+
+For manual access or debugging, fetch context directly:
 
 ```bash
 # Plain text

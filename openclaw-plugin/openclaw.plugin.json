@@ -1,0 +1,82 @@
+{
+  "id": "cyborg-context",
+  "name": "Cyborg Context",
+  "description": "Inject Bob's Cyborg context (projects, tasks, events) into conversations as a native context engine",
+  "version": "0.1.0",
+  "main": "index.ts",
+  "license": "MIT",
+  "author": "Mike",
+  "openclaw": {
+    "extensions": [
+      "context-engine"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "cyborgUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8420"
+      },
+      "includeProjects": {
+        "type": "boolean",
+        "default": true
+      },
+      "includeTasks": {
+        "type": "boolean",
+        "default": true
+      },
+      "includeEvents": {
+        "type": "boolean",
+        "default": true
+      },
+      "cacheTtlSeconds": {
+        "type": "integer",
+        "default": 300,
+        "minimum": 0,
+        "description": "How long to cache Cyborg context before refetching (default: 5 minutes)"
+      },
+      "maxTokens": {
+        "type": "integer",
+        "default": 2000,
+        "minimum": 0,
+        "description": "Maximum tokens to allocate for Cyborg context (default: 2000)"
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enable Cyborg Context Injection",
+      "help": "When enabled, Bob's active projects, tasks, and events are automatically injected into conversation context"
+    },
+    "cyborgUrl": {
+      "label": "Cyborg Service URL",
+      "help": "URL of the Cyborg service (default: http://127.0.0.1:8420)"
+    },
+    "includeProjects": {
+      "label": "Include Projects",
+      "help": "Include active projects in injected context"
+    },
+    "includeTasks": {
+      "label": "Include Tasks",
+      "help": "Include active tasks in injected context"
+    },
+    "includeEvents": {
+      "label": "Include Events",
+      "help": "Include upcoming events in injected context"
+    },
+    "cacheTtlSeconds": {
+      "label": "Cache TTL",
+      "help": "Time in seconds to cache Cyborg context before refetching (default: 300)"
+    },
+    "maxTokens": {
+      "label": "Max Tokens",
+      "help": "Maximum tokens to allocate for Cyborg context (default: 2000)"
+    }
+  }
+}

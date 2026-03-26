@@ -513,4 +513,30 @@ def attach_database_handler(db: Any) -> DatabaseLogHandler:
     if _db_handler not in root_logger.handlers:
         root_logger.addHandler(_db_handler)
 
-    return _db_handler
+
+class CorrelationIdMiddleware:
+    """Starlette middleware to add correlation IDs to requests."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            # Generate or extract correlation ID
+            headers = dict(scope.get("headers", []))
+            correlation_id = headers.get(b"x-correlation-id", b"").decode() or str(uuid.uuid4())
+
+            # Store in context
+            _correlation_id_context["correlation_id"] = correlation_id
+
+            # Add to response headers
+            async def send_with_header(message):
+                if message["type"] == "http.response.start":
+                    headers_list = list(message.get("headers", []))
+                    headers_list.append((b"x-correlation-id", correlation_id.encode()))
+                    message["headers"] = headers_list
+                await send(message)
+
+            await self.app(scope, receive, send_with_header)
+        else:
+            await self.app(scope, receive, send)
