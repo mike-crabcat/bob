@@ -8,7 +8,7 @@
     <h1 class="text-3xl font-bold mb-2">
         <span class="neon-text-pink">Pending</span> Approvals
     </h1>
-    <p class="text-text-secondary">Review and approve autonomous decisions</p>
+    <p class="text-text-secondary">Review queued approval items and then complete the actual workflow through the linked project or CLI/API.</p>
 </div>
 
 <!-- Stats Row -->
@@ -48,8 +48,17 @@
             <a href="/dashboard/approvals?type=task_creation" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'task_creation' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
                 Task Creation
             </a>
+            <a href="/dashboard/approvals?type=follow_up_tasks" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'follow_up_tasks' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Follow-up Tasks
+            </a>
         </div>
     </div>
+</div>
+
+<div class="glass-card rounded-xl p-4 mb-6 border border-accent-cyan/20">
+    <p class="text-sm text-text-secondary">
+        Dashboard approvals are read-only summaries. They do not directly invoke task-plan or project-spec approval services.
+    </p>
 </div>
 
 <!-- Approval Items -->
@@ -103,19 +112,16 @@
 
             <!-- Actions -->
             <div class="flex flex-row lg:flex-col gap-3 lg:w-48">
-                <button hx-post="/dashboard/approve/{{ approval.id }}"
-                        hx-target="#approval-{{ approval.id }}"
-                        hx-indicator="#spinner-{{ approval.id }}"
-                        class="flex-1 px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
-                    ✓ Approve
-                </button>
-                <button hx-post="/dashboard/reject/{{ approval.id }}"
-                        hx-target="#approval-{{ approval.id }}"
-                        hx-indicator="#spinner-{{ approval.id }}"
-                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
-                    ✖ Reject
-                </button>
-                <div id="spinner-{{ approval.id }}" class="spinner hidden htmx-indicator mx-auto"></div>
+                {% if approval.review_href %}
+                <a href="{{ approval.review_href }}"
+                   class="flex-1 px-4 py-2.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors font-medium text-center">
+                    Review Context
+                </a>
+                {% endif %}
+                <a href="/dashboard/approvals"
+                   class="flex-1 px-4 py-2.5 bg-bg-card text-text-secondary border border-accent-cyan/20 rounded-lg hover:border-accent-cyan/40 transition-colors font-medium text-center">
+                    Queue Details
+                </a>
             </div>
         </div>
     </div>

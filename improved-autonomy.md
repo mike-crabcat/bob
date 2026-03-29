@@ -797,7 +797,6 @@ curl -X POST http://localhost:8420/api/v1/learning/projects/abc-123/extract-insi
 - `cyborg/templates/dashboard/project_detail.html` - Individual project view
 - `cyborg/templates/dashboard/approvals.html` - Approval queue with HTMX actions
 - `cyborg/templates/dashboard/logs.html` - Log viewer with filtering
-- `cyborg/templates/dashboard/tasks.html` - Task list view
 - `cyborg/templates/dashboard/health.html` - Health monitoring view
 - `cyborg/schemas/160_approvals.sql` - Approvals table for workflow
 

@@ -329,14 +329,11 @@
 
                     <!-- Navigation -->
                     <nav class="hidden md:flex items-center gap-6">
-                        <a href="/dashboard" class="nav-link text-sm {% if request.path == '/dashboard' %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
+                        <a href="/dashboard" class="nav-link text-sm {% if request.path in ['/dashboard', '/dashboard/'] %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
                             Overview
                         </a>
                         <a href="/dashboard/projects" class="nav-link text-sm {% if '/projects' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
                             Projects
-                        </a>
-                        <a href="/dashboard/tasks" class="nav-link text-sm {% if '/tasks' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
-                            Tasks
                         </a>
                         <a href="/dashboard/approvals" class="nav-link text-sm {% if '/approvals' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
                             Approvals
@@ -360,6 +357,26 @@
                         </div>
                     </div>
                 </div>
+
+                <nav class="md:hidden pb-3 overflow-x-auto whitespace-nowrap">
+                    <div class="flex items-center gap-2 min-w-max">
+                        <a href="/dashboard" class="px-3 py-1.5 rounded-full text-sm border {% if request.path in ['/dashboard', '/dashboard/'] %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
+                            Overview
+                        </a>
+                        <a href="/dashboard/projects" class="px-3 py-1.5 rounded-full text-sm border {% if '/projects' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
+                            Projects
+                        </a>
+                        <a href="/dashboard/approvals" class="px-3 py-1.5 rounded-full text-sm border {% if '/approvals' in request.path %}bg-accent-pink/20 text-accent-pink border-accent-pink/30{% else %}bg-bg-card text-text-secondary border-accent-pink/10{% endif %}">
+                            Approvals{% if pending_count > 0 %} ({{ pending_count }}){% endif %}
+                        </a>
+                        <a href="/dashboard/logs" class="px-3 py-1.5 rounded-full text-sm border {% if '/logs' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
+                            Logs
+                        </a>
+                        <a href="/dashboard/health" class="px-3 py-1.5 rounded-full text-sm border {% if '/health' in request.path %}bg-accent-orange/20 text-accent-orange border-accent-orange/30{% else %}bg-bg-card text-text-secondary border-accent-orange/10{% endif %}">
+                            Health
+                        </a>
+                    </div>
+                </nav>
             </div>
         </header>
 
@@ -400,9 +417,9 @@
             Chart.defaults.font.family = "'Inter', sans-serif";
         }
 
-        // SSE connection for real-time updates
+        // Placeholder for HTMX extension initialization
         document.body.addEventListener('htmx:load', function() {
-            // Auto-connect SSE for elements with hx-ext="sse"
+            // HTMX extensions can hook into page load here if needed.
         });
 
         // Global error handler for HTMX

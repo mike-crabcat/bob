@@ -1,7 +1,7 @@
 """Dashboard router for the Cyborg web interface.
 
-Provides a self-hosted cyberpunk-themed dashboard with real-time monitoring,
-project management, approvals workflow, and log viewing.
+Provides a self-hosted cyberpunk-themed dashboard for workflow monitoring,
+project management, approvals review, and log viewing.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from starlette.responses import StreamingResponse
 from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.dependencies import get_database
-from cyborg.models import ProjectState
+from cyborg.models import ProjectState, TaskStatus
 
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -32,89 +32,174 @@ def _get_settings() -> Settings:
     return Settings.from_env()
 
 
+async def _get_pending_approval_count(db: Database) -> int:
+    """Return the current number of pending dashboard approvals."""
+    row = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM approvals WHERE status = 'pending'",
+    )
+    return int(row["count"]) if row and row["count"] else 0
+
+
+def _approval_review_href(approval_type: str | None, entity_id: str | None) -> str | None:
+    """Return the best dashboard review link for an approval item."""
+    if not entity_id:
+        return None
+    if approval_type in {"project_plan", "strategy_refinement", "follow_up_tasks"}:
+        return f"/dashboard/projects/{entity_id}"
+    return None
+
+
 @router.get("/", response_class=HTMLResponse)
 async def overview(
     request: Request,
     db: Database = Depends(get_database),
 ) -> Response:
-    """Dashboard overview with system stats and charts."""
+    """Workflow overview with real project, approval, and notification data."""
     settings = _get_settings()
 
-    # Get system stats
-    active_projects = await db.fetch_all(
-        "SELECT COUNT(*) as count FROM projects WHERE state = ? AND deleted_at IS NULL",
-        (ProjectState.ACTIVE.value,),
+    project_stats = await db.fetch_one(
+        """
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as planning,
+            SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as active,
+            SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as paused,
+            SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as closed
+        FROM projects
+        WHERE deleted_at IS NULL
+        """,
+        (
+            ProjectState.PLANNING.value,
+            ProjectState.ACTIVE.value,
+            ProjectState.PAUSED.value,
+            ProjectState.CLOSED.value,
+        ),
     )
-    active_count = active_projects[0]["count"] if active_projects else 0
+    planning_count = int(project_stats["planning"]) if project_stats and project_stats["planning"] else 0
+    active_count = int(project_stats["active"]) if project_stats and project_stats["active"] else 0
+    paused_count = int(project_stats["paused"]) if project_stats and project_stats["paused"] else 0
+    closed_count = int(project_stats["closed"]) if project_stats and project_stats["closed"] else 0
 
-    completed_projects = await db.fetch_all(
-        "SELECT COUNT(*) as count FROM projects WHERE state = ? AND deleted_at IS NULL",
-        (ProjectState.CLOSED.value,),
-    )
-    completed_count = completed_projects[0]["count"] if completed_projects else 0
-
-    pending_approvals = await db.fetch_all(
-        "SELECT COUNT(*) as count FROM approvals WHERE status = 'pending'",
-    )
-    pending_count = pending_approvals[0]["count"] if pending_approvals else 0
+    pending_count = await _get_pending_approval_count(db)
 
     urgent_approvals = await db.fetch_all(
         "SELECT COUNT(*) as count FROM approvals WHERE status = 'pending' AND priority = 'urgent'",
     )
     urgent_count = urgent_approvals[0]["count"] if urgent_approvals else 0
 
-    # Get at-risk projects (low health score)
-    at_risk = await db.fetch_all(
-        """
-        SELECT COUNT(*) as count FROM latest_project_health
-        WHERE health_score < 0.5 OR risk_level IN ('high', 'critical')
-        """,
+    open_notifications_row = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM notifications WHERE status = 'pending'",
     )
-    at_risk_count = at_risk[0]["count"] if at_risk else 0
+    open_notifications_count = (
+        int(open_notifications_row["count"])
+        if open_notifications_row and open_notifications_row["count"]
+        else 0
+    )
 
-    # Get project status distribution for charts
-    project_stats = await db.fetch_all(
+    health_snapshot_row = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM latest_project_health",
+    )
+    health_snapshot_count = (
+        int(health_snapshot_row["count"])
+        if health_snapshot_row and health_snapshot_row["count"]
+        else 0
+    )
+
+    attention_rows = await db.fetch_all(
         """
-        SELECT state, COUNT(*) as count
-        FROM projects
-        WHERE deleted_at IS NULL
-        GROUP BY state
+        SELECT
+            project_id,
+            title,
+            state,
+            health_score,
+            risk_level,
+            last_check_at
+        FROM projects_need_attention
+        ORDER BY
+            CASE risk_level
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                ELSE 4
+            END,
+            last_check_at DESC
+        LIMIT 5
         """,
     )
-    status_counts = {row["state"]: row["count"] for row in project_stats}
-    project_status_data = [
-        status_counts.get("active", 0),
-        status_counts.get("closed", 0),
-        status_counts.get("blocked", 0),
-        status_counts.get("paused", 0),
+    attention_projects = [
+        {
+            "id": row["project_id"],
+            "title": row["title"],
+            "state": row["state"],
+            "health_score": row["health_score"],
+            "risk_level": row["risk_level"],
+            "last_checked": row["last_check_at"],
+        }
+        for row in attention_rows
     ]
 
-    # Get recent activity (from journal entries)
+    project_status_data = [
+        planning_count,
+        active_count,
+        paused_count,
+        closed_count,
+    ]
+
     recent_journal = await db.fetch_all(
         """
-        SELECT * FROM project_journal_entries
+        SELECT project_id, entry_type, content, created_at
+        FROM project_journal_entries
         ORDER BY created_at DESC
-        LIMIT 10
+        LIMIT 8
         """,
     )
-    recent_activities = []
+    recent_notification_rows = await db.fetch_all(
+        """
+        SELECT
+            n.*,
+            CASE
+                WHEN n.entity_type = 'project' THEN n.entity_id
+                WHEN n.entity_type = 'task' THEN (
+                    SELECT pt.project_id
+                    FROM project_tasks pt
+                    WHERE pt.task_id = n.entity_id
+                    LIMIT 1
+                )
+                ELSE NULL
+            END as project_id
+        FROM notifications n
+        ORDER BY n.created_at DESC
+        LIMIT 8
+        """,
+    )
+    recent_activities: list[dict[str, Any]] = []
     for entry in recent_journal:
-        activity_type = "info"
-        if entry["entry_type"] == "MILESTONE":
-            activity_type = "completion"
-        elif entry["entry_type"] == "DECISION":
-            activity_type = "refinement"
-        elif entry["entry_type"] == "BLOCKER":
-            activity_type = "health"
+        content = entry["content"] or ""
+        recent_activities.append(
+            {
+                "created_at": entry["created_at"],
+                "label": entry["entry_type"].replace("_", " ").title(),
+                "kind": "journal",
+                "title": entry["entry_type"].replace("_", " ").title(),
+                "summary": content[:140] + "..." if len(content) > 140 else content,
+                "link_url": f"/dashboard/projects/{entry['project_id']}" if entry.get("project_id") else None,
+            }
+        )
+    for row in recent_notification_rows:
+        message = row["message"] or ""
+        recent_activities.append(
+            {
+                "created_at": row["created_at"],
+                "label": row["notification_type"].replace("_", " ").title(),
+                "kind": "notification",
+                "title": row["title"],
+                "summary": message[:140] + "..." if len(message) > 140 else message,
+                "link_url": f"/dashboard/projects/{row['project_id']}" if row.get("project_id") else None,
+            }
+        )
+    recent_activities.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    recent_activities = recent_activities[:10]
 
-        recent_activities.append({
-            "timestamp": _format_time(entry["created_at"]),
-            "type": activity_type,
-            "message": entry["content"][:100] + "..." if len(entry["content"]) > 100 else entry["content"],
-            "project_id": entry.get("project_id"),
-        })
-
-    # Get pending approval items
     pending_items = await db.fetch_all(
         """
         SELECT * FROM pending_approvals
@@ -140,9 +225,9 @@ async def overview(
             "description": item.get("description", ""),
             "priority": item.get("priority", "normal"),
             "requested_at": _format_time(item["requested_at"]),
+            "review_href": _approval_review_href(approval_type, item.get("entity_id")),
         })
 
-    # Get task status distribution
     task_stats = await db.fetch_all(
         """
         SELECT status, COUNT(*) as count
@@ -153,45 +238,76 @@ async def overview(
     )
     task_status_counts = {row["status"]: row["count"] for row in task_stats}
     task_status_data = [
+        task_status_counts.get(TaskStatus.PLANNING.value, 0),
         task_status_counts.get("pending", 0),
         task_status_counts.get("active", 0),
+        task_status_counts.get("blocked", 0),
         task_status_counts.get("completed", 0),
         task_status_counts.get("failed", 0),
-        task_status_counts.get("blocked", 0),
     ]
 
-    # Get health distribution
-    health_stats = await db.fetch_all(
+    open_notification_rows = await db.fetch_all(
         """
         SELECT
+            n.*,
             CASE
-                WHEN health_score >= 0.8 THEN 'low'
-                WHEN health_score >= 0.5 THEN 'medium'
-                WHEN health_score >= 0.3 THEN 'high'
-                ELSE 'critical'
-            END as risk_level,
-            COUNT(*) as count
-        FROM latest_project_health
-        GROUP BY risk_level
+                WHEN n.entity_type = 'project' THEN n.entity_id
+                WHEN n.entity_type = 'task' THEN (
+                    SELECT pt.project_id
+                    FROM project_tasks pt
+                    WHERE pt.task_id = n.entity_id
+                    LIMIT 1
+                )
+                ELSE NULL
+            END as project_id
+        FROM notifications n
+        WHERE n.status = 'pending'
+        ORDER BY n.created_at DESC
+        LIMIT 5
         """,
     )
-    health_distribution = [0, 0, 0, 0]  # low, medium, high, critical
-    risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-    for row in health_stats:
-        idx = risk_order.get(row["risk_level"], 0)
-        health_distribution[idx] = row["count"]
+    open_notifications = [
+        {
+            "title": row["title"],
+            "message": row["message"],
+            "type_label": row["notification_type"].replace("_", " ").title(),
+            "delivery_status": row.get("delivery_status", "pending"),
+            "created_at": row["created_at"],
+            "link_url": f"/dashboard/projects/{row['project_id']}" if row.get("project_id") else None,
+        }
+        for row in open_notification_rows
+    ]
 
-    # Get log event counts (from structured logs, estimated)
-    log_events_data = [45, 23, 12, 89, 3]  # reasoning, autonomy, health, function, error
-
-    # Generate latency chart data (mock - would come from actual logs)
-    now = datetime.now(timezone.utc)
-    latency_labels = []
-    latency_data = []
-    for i in range(24):
-        t = now - timedelta(hours=(23 - i))
-        latency_labels.append(t.strftime("%H:00"))
-        latency_data.append(2000 + (i * 100) + (i % 3) * 500)  # Mock data
+    recent_outcome_rows = await db.fetch_all(
+        """
+        SELECT
+            n.*,
+            CASE
+                WHEN n.entity_type = 'project' THEN n.entity_id
+                WHEN n.entity_type = 'task' THEN (
+                    SELECT pt.project_id
+                    FROM project_tasks pt
+                    WHERE pt.task_id = n.entity_id
+                    LIMIT 1
+                )
+                ELSE NULL
+            END as project_id
+        FROM notifications n
+        WHERE n.notification_type IN ('task_result', 'project_result')
+        ORDER BY n.created_at DESC
+        LIMIT 5
+        """,
+    )
+    recent_outcomes = [
+        {
+            "title": row["title"],
+            "message": row["message"],
+            "type_label": row["notification_type"].replace("_", " ").title(),
+            "created_at": row["created_at"],
+            "link_url": f"/dashboard/projects/{row['project_id']}" if row.get("project_id") else None,
+        }
+        for row in recent_outcome_rows
+    ]
 
     return _render_template(
         "dashboard/overview.html",
@@ -199,21 +315,24 @@ async def overview(
         {
             "version": settings.version,
             "pending_count": pending_count,
-            "system_health_score": 98,
-            "system_health_status": "All systems operational",
             "active_projects_count": active_count,
-            "projects_in_progress": active_count,
+            "planning_projects_count": planning_count,
             "pending_approvals_count": pending_count,
             "urgent_approvals": urgent_count,
-            "at_risk_count": at_risk_count,
+            "open_notifications_count": open_notifications_count,
+            "saved_health_checks_count": health_snapshot_count,
             "project_status_data": json.dumps(project_status_data),
-            "latency_labels": json.dumps(latency_labels),
-            "latency_data": json.dumps(latency_data),
             "task_status_data": json.dumps(task_status_data),
-            "health_distribution_data": json.dumps(health_distribution),
-            "log_events_data": json.dumps(log_events_data),
             "recent_activities": recent_activities,
             "pending_approval_items": pending_approval_items,
+            "attention_projects": attention_projects,
+            "attention_note": (
+                "No saved health checks yet. Health attention appears here after scans run."
+                if health_snapshot_count == 0
+                else "No projects are currently flagged by saved health checks."
+            ),
+            "open_notifications": open_notifications,
+            "recent_outcomes": recent_outcomes,
         },
     )
 
@@ -279,14 +398,17 @@ async def projects(
             "created_at": p.get("created_at"),
         })
 
+    pending_count = await _get_pending_approval_count(db)
+
     # Get stats
     all_stats = await db.fetch_one(
         """
         SELECT
             COUNT(*) as total,
+            SUM(CASE WHEN state = 'planning' THEN 1 ELSE 0 END) as planning,
             SUM(CASE WHEN state = 'active' THEN 1 ELSE 0 END) as active,
-            SUM(CASE WHEN state = 'closed' THEN 1 ELSE 0 END) as completed,
-            SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked
+            SUM(CASE WHEN state = 'paused' THEN 1 ELSE 0 END) as paused,
+            SUM(CASE WHEN state = 'closed' THEN 1 ELSE 0 END) as closed
         FROM projects WHERE deleted_at IS NULL
         """,
     )
@@ -298,11 +420,13 @@ async def projects(
             "version": settings.version,
             "projects": projects,
             "filter_status": status,
+            "pending_count": pending_count,
             "stats": {
                 "total": all_stats["total"] if all_stats else 0,
+                "planning": all_stats["planning"] if all_stats else 0,
                 "active": all_stats["active"] if all_stats else 0,
-                "completed": all_stats["completed"] if all_stats else 0,
-                "blocked": all_stats["blocked"] if all_stats else 0,
+                "paused": all_stats["paused"] if all_stats else 0,
+                "closed": all_stats["closed"] if all_stats else 0,
             },
         },
     )
@@ -316,6 +440,7 @@ async def project_detail(
 ) -> Response:
     """Individual project detail view."""
     settings = _get_settings()
+    pending_count = await _get_pending_approval_count(db)
 
     project = await db.fetch_one(
         "SELECT * FROM projects WHERE id = ? AND deleted_at IS NULL",
@@ -326,7 +451,7 @@ async def project_detail(
         return _render_template(
             "dashboard/base.html",
             request,
-            {"version": settings.version, "pending_count": 0},
+            {"version": settings.version, "pending_count": pending_count},
         )
 
     # Get tasks for this project
@@ -393,7 +518,7 @@ async def project_detail(
         request,
         {
             "version": settings.version,
-            "pending_count": 0,
+            "pending_count": pending_count,
             "project": project_data,
             "tasks": tasks,
             "journal": journal,
@@ -444,6 +569,15 @@ async def approvals(
         """,
         (today_start, today_start),
     )
+    avg_response = await db.fetch_one(
+        """
+        SELECT AVG((julianday(reviewed_at) - julianday(requested_at)) * 24 * 60) as avg_minutes
+        FROM approvals
+        WHERE status IN ('approved', 'rejected')
+          AND reviewed_at IS NOT NULL
+          AND requested_at IS NOT NULL
+        """,
+    )
 
     approvals = []
     for a in approvals_data:
@@ -468,6 +602,7 @@ async def approvals(
             "requested_by": a.get("requested_by"),
             "proposal": proposal_data,
             "proposal_preview": proposal_preview,
+            "review_href": _approval_review_href(a["approval_type"], a.get("entity_id")),
         })
 
     return _render_template(
@@ -480,7 +615,7 @@ async def approvals(
             "pending_count": stats["pending"] if stats else 0,
             "approved_today": stats["approved_today"] if stats else 0,
             "rejected_today": stats["rejected_today"] if stats else 0,
-            "avg_response_time": "2.3h",
+            "avg_response_time": _format_duration_minutes(avg_response["avg_minutes"] if avg_response else None),
         },
     )
 
@@ -537,6 +672,7 @@ async def logs(
 ) -> Response:
     """Structured log viewer."""
     settings = _get_settings()
+    pending_count = await _get_pending_approval_count(db)
 
     # Check if table exists and has data
     table_exists = await db.fetch_one(
@@ -627,7 +763,7 @@ async def logs(
             "logs": logs,
             "stats": stats,
             "last_log_time": datetime.now(timezone.utc).isoformat(),
-            "pending_count": 0,
+            "pending_count": pending_count,
         },
     )
 
@@ -639,6 +775,7 @@ async def health(
 ) -> Response:
     """Health monitoring view."""
     settings = _get_settings()
+    pending_count = await _get_pending_approval_count(db)
 
     # Get health stats
     health_stats = await db.fetch_one(
@@ -698,41 +835,11 @@ async def health(
         {
             "version": settings.version,
             "at_risk_projects": at_risk,
-            "pending_count": 0,
+            "pending_count": pending_count,
             "healthy_count": healthy_count,
             "medium_risk_count": medium_risk_count,
             "high_risk_count": high_risk_count,
             "avg_health_score": avg_health_score,
-        },
-    )
-
-
-@router.get("/tasks", response_class=HTMLResponse)
-async def tasks(
-    request: Request,
-    db: Database = Depends(get_database),
-) -> Response:
-    """Task list view."""
-    settings = _get_settings()
-
-    tasks = await db.fetch_all(
-        """
-        SELECT t.*, pt.project_id
-        FROM tasks t
-        LEFT JOIN project_tasks pt ON pt.task_id = t.id
-        WHERE t.deleted_at IS NULL
-        ORDER BY t.created_at DESC
-        LIMIT 100
-        """,
-    )
-
-    return _render_template(
-        "dashboard/tasks.html",
-        request,
-        {
-            "version": settings.version,
-            "tasks": tasks,
-            "pending_count": 0,
         },
     )
 
@@ -920,8 +1027,8 @@ def _render_template(template_name: str, request: Request, context: dict[str, An
 
     # Add settings
     settings = _get_settings()
-    context["version"] = settings.version
-    context["pending_count"] = 0  # Default, will be overridden
+    context.setdefault("version", settings.version)
+    context.setdefault("pending_count", 0)
 
     template = env.get_template(template_name)
     return HTMLResponse(content=template.render(context))
@@ -933,6 +1040,8 @@ def _format_time(iso_string: str | None) -> str:
         return "--:--:--"
     try:
         dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.strftime("%H:%M:%S")
     except:
         return "--:--:--"
@@ -944,6 +1053,8 @@ def _format_relative_time(iso_string: str | None) -> str:
         return "unknown"
     try:
         dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = datetime.now(timezone.utc) - dt
         if delta.days > 0:
             return f"{delta.days}d ago"
@@ -957,3 +1068,16 @@ def _format_relative_time(iso_string: str | None) -> str:
             return "just now"
     except:
         return "unknown"
+
+
+def _format_duration_minutes(avg_minutes: float | None) -> str:
+    """Format an average response time in minutes."""
+    if avg_minutes is None:
+        return "--"
+    total_minutes = int(round(avg_minutes))
+    if total_minutes < 60:
+        return f"{total_minutes}m"
+    hours, minutes = divmod(total_minutes, 60)
+    if minutes == 0:
+        return f"{hours}h"
+    return f"{hours}h {minutes}m"

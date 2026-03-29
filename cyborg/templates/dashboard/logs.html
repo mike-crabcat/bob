@@ -9,7 +9,7 @@
         <h1 class="text-3xl font-bold mb-2">
             <span class="neon-text">System</span> Logs
         </h1>
-        <p class="text-text-secondary">Structured log viewer with real-time updates</p>
+        <p class="text-text-secondary">Structured log viewer for recorded events</p>
     </div>
     <div class="flex items-center gap-3">
         <label class="flex items-center gap-2 text-sm text-text-secondary">
@@ -143,11 +143,6 @@
     </div>
 </div>
 
-<!-- SSE Connection Indicator -->
-<div class="mt-4 flex items-center gap-2 text-sm">
-    <span id="sse-status" class="w-2 h-2 rounded-full bg-accent-green"></span>
-    <span id="sse-text" class="text-text-muted">Connected to log stream</span>
-</div>
 {% endblock %}
 
 {% block scripts %}
@@ -202,28 +197,6 @@ function scrollToBottom() {
 // Initial scroll
 scrollToBottom();
 
-// Poll for new logs (fallback if SSE not available)
-let lastLogTime = '{{ last_log_time }}';
-setInterval(async () => {
-    try {
-        const response = await fetch(`/dashboard/logs/stream?since=${lastLogTime}`);
-        if (response.ok) {
-            const html = await response.text();
-            if (html && html.trim()) {
-                const temp = document.createElement('div');
-                temp.innerHTML = html;
-                while (temp.firstChild) {
-                    logContainer.appendChild(temp.firstChild);
-                }
-                lastLogTime = new Date().toISOString();
-                scrollToBottom();
-            }
-        }
-    } catch (e) {
-        console.error('Failed to fetch new logs:', e);
-    }
-}, 5000);
-
 // Keyboard shortcuts
 document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT') return;
@@ -236,9 +209,4 @@ document.addEventListener('keydown', function(e) {
     }
 });
 </script>
-
-<!-- SSE for real-time updates -->
-<div hx-ext="sse" sse-connect="/dashboard/logs/stream" sse-swap="log-entry">
-    <!-- New log entries will be inserted here -->
-</div>
 {% endblock %}
