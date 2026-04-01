@@ -16,6 +16,7 @@ import cyborg.services.task_service as task_service_module
 from cyborg.config import OpenClawHookSettings, Settings
 from cyborg.database import Database
 from cyborg.main import create_app
+from cyborg.services.session_route_service import SessionRouteService
 from cyborg.services.task_service import TaskService
 
 
@@ -153,6 +154,10 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
             json={
                 "title": "Proposal work",
                 "aim": "Ship the first customer proposal",
+                "metadata": {
+                    "channel": "whatsapp",
+                    "session_key": "whatsappgroup-proposals",
+                },
             },
         )
         assert project.status_code == 201
@@ -169,6 +174,8 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
         assert task.status_code == 201
         task_id = task.json()["id"]
         assert task.json()["project_ids"] == [project_id]
+        assert task.json()["metadata"]["channel"] == "whatsapp"
+        assert task.json()["metadata"]["session_key"] == "whatsappgroup-proposals"
 
         journal = client.post(
             f"/api/v1/projects/{project_id}/journal",
@@ -197,6 +204,106 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
         assert tasks_context.status_code == 200
         assert tasks_context.json()["tasks"][0]["parent_project_id"] == project_id
         assert tasks_context.json()["tasks"][0]["parent_project_title"] == "Proposal work"
+
+
+def test_project_create_requires_source_route_or_linked_task(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        db_path=tmp_path / "data" / "cyborg.db",
+        openclaw=OpenClawHookSettings(base_url="https://openclaw.example", token="secret"),
+    )
+    with make_client(tmp_path, settings) as client:
+        project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Unrouted project",
+            },
+        )
+        assert project.status_code == 409
+        assert "source routing metadata" in project.json()["detail"]
+
+
+def test_project_can_infer_source_route_from_linked_task(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        source_project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Source route holder",
+                "metadata": {
+                    "channel": "whatsapp",
+                    "session_key": "whatsappgroup-source",
+                    "chat_id": "120363400000000000@g.us",
+                },
+            },
+        )
+        assert source_project.status_code == 201
+        source_project_id = source_project.json()["id"]
+
+        task = client.post(
+            f"/api/v1/projects/{source_project_id}/tasks",
+            json={
+                "title": "Linked task",
+                "plan": "1. Draft. 2. Review. 3. Ship.",
+            },
+        )
+        assert task.status_code == 201
+        task_id = task.json()["id"]
+
+        inferred_project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Inferred route project",
+                "task_ids": [task_id],
+            },
+        )
+        assert inferred_project.status_code == 201
+        inferred_metadata = inferred_project.json()["metadata"]
+        assert inferred_metadata["channel"] == "whatsapp"
+        assert inferred_metadata["session_key"] == "whatsappgroup-source"
+        assert inferred_metadata["chat_id"] == "120363400000000000@g.us"
+
+
+def test_notification_route_can_fall_back_to_parent_project_session_key(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Parent routed project",
+                "metadata": {
+                    "channel": "whatsapp",
+                    "session_key": "agent:main:whatsapp:group:120363423288899302@g.us",
+                },
+            },
+        )
+        assert project.status_code == 201
+        project_id = project.json()["id"]
+
+        task = client.post(
+            f"/api/v1/projects/{project_id}/tasks",
+            json={
+                "title": "Inherited task",
+                "plan": "1. Ask. 2. Record. 3. Report.",
+            },
+        )
+        assert task.status_code == 201
+        task_id = task.json()["id"]
+
+        asyncio.run(client.app.state.db.execute("UPDATE tasks SET metadata = ? WHERE id = ?", ("{}", task_id)))
+
+        route = asyncio.run(
+            SessionRouteService(client.app.state.db).resolve_notification_route(
+                {
+                    "delivery_route": "source",
+                    "task_id": task_id,
+                    "parent_project_id": project_id,
+                }
+            )
+        )
+        assert route is not None
+        assert route.chat_id == "120363423288899302@g.us"
+        assert route.session_key == "agent:main:whatsapp:group:120363423288899302@g.us"
+        assert route.route_source == "metadata.session_key"
 
 
 def test_project_spec_approval_required_for_start_and_execute(tmp_path: Path) -> None:
@@ -1016,11 +1123,15 @@ def test_task_assignment_notifications_dispatch_via_derived_target_dm_session(tm
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
         assert assignment["metadata"]["delivery_route"] == "target"
 
-        assignment_calls = [request for request in captured_gateway_requests if request["method"] == "agent"]
+        assignment_calls = [
+            request
+            for request in captured_gateway_requests
+            if request["method"] == "agent" and request["params"].get("idempotencyKey") == assignment["id"]
+        ]
         assert len(assignment_calls) == 1
         assignment_params = assignment_calls[0]["params"]
         assert assignment_calls[0]["expect_final"] is True
-        assert assignment_calls[0]["timeout_seconds"] == 60.0
+        assert assignment_calls[0]["timeout_seconds"] == 90.0
         assert assignment_params["deliver"] is True
         assert assignment_params["channel"] == "whatsapp"
         assert assignment_params["to"] == "+61400111222"
@@ -1129,7 +1240,11 @@ def test_task_assignment_notifications_prefer_registered_dm_session_route(tmp_pa
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
         assert assignment["delivery_status"] == "delivered"
 
-        assignment_calls = [request for request in captured_gateway_requests if request["method"] == "agent"]
+        assignment_calls = [
+            request
+            for request in captured_gateway_requests
+            if request["method"] == "agent" and request["params"].get("idempotencyKey") == assignment["id"]
+        ]
         assert len(assignment_calls) == 1
         assert assignment_calls[0]["expect_final"] is True
         assert assignment_calls[0]["params"]["deliver"] is True
@@ -1147,6 +1262,114 @@ def test_task_assignment_notifications_prefer_registered_dm_session_route(tmp_pa
             )
         ]
         assert target_sends == []
+
+
+def test_auto_created_project_task_assignments_bootstrap_agent_on_source_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    captured_gateway_requests: list[dict[str, object]] = []
+
+    async def fake_send_gateway_request(
+        self,
+        method: str,
+        params: dict[str, object],
+        *,
+        expect_final: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        captured_gateway_requests.append(
+            {
+                "method": method,
+                "params": params,
+                "expect_final": expect_final,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        openclaw_hook_service_module.OpenClawHookService,
+        "_send_gateway_request",
+        fake_send_gateway_request,
+    )
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        db_path=tmp_path / "data" / "cyborg.db",
+        openclaw=OpenClawHookSettings(
+            base_url="https://openclaw.example",
+            token="secret",
+            agent_id="worker",
+            session_key_prefix="cyborg:",
+        ),
+        notification_dispatch_interval_seconds=0,
+    )
+
+    with make_client(tmp_path, settings) as client:
+        project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Execution Test",
+                "aim": "Test execution bootstrap",
+                "method": "Create an automatic task and have Claw work it in the same session.",
+                "auto_execute": True,
+                "metadata": {
+                    "channel": "whatsapp",
+                    "session_key": "agent:main:whatsapp:direct:+61456224867",
+                },
+                "plan": [
+                    {
+                        "title": "First Step",
+                        "description": "Do first thing",
+                        "criteria": "First done",
+                        "order": 0,
+                    },
+                ],
+                "success_criteria": [
+                    {
+                        "check": "completed_task_count >= 1",
+                        "description": "The first task completes",
+                    }
+                ],
+            },
+        )
+        assert project.status_code == 201
+        project_id = project.json()["id"]
+
+        spec_id = client.get(f"/api/v1/projects/{project_id}/specs").json()["specs"][0]["id"]
+        approved = client.post(f"/api/v1/project-specs/{spec_id}/approve", json={"approver": "Bob"})
+        assert approved.status_code == 200
+
+        executed = client.post(f"/api/v1/projects/{project_id}/execute")
+        assert executed.status_code == 200
+
+        notifications = client.get("/api/v1/notifications").json()
+        assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
+        assert assignment["metadata"]["delivery_route"] == "source"
+        assert assignment["metadata"]["auto_created_by_project"] is True
+        assert assignment["delivery_status"] == "delivered"
+
+        assignment_calls = [
+            request
+            for request in captured_gateway_requests
+            if request["method"] == "agent" and request["params"].get("idempotencyKey") == assignment["id"]
+        ]
+        assert len(assignment_calls) == 1
+        assert assignment_calls[0]["expect_final"] is True
+        assert assignment_calls[0]["timeout_seconds"] == 90.0
+        assert assignment_calls[0]["params"]["deliver"] is True
+        assert assignment_calls[0]["params"]["channel"] == "whatsapp"
+        assert assignment_calls[0]["params"]["to"] == "+61456224867"
+        assert assignment_calls[0]["params"]["sessionKey"] == "agent:main:whatsapp:direct:+61456224867"
+        assert "agentId" not in assignment_calls[0]["params"]
+
+        sends = [
+            request
+            for request in captured_gateway_requests
+            if request["method"] == "send" and request["params"].get("idempotencyKey") == assignment["id"]
+        ]
+        assert sends == []
 
 
 def test_task_result_notifications_dispatch_via_source_session_route(tmp_path: Path, monkeypatch) -> None:
@@ -1233,7 +1456,10 @@ def test_task_result_notifications_dispatch_via_source_session_route(tmp_path: P
         assert source_sends
         assert source_sends[0]["params"]["sessionKey"] == "whatsappgroup-source"
         assert any("Task completed: Compile the answer" in str(request["params"]["message"]) for request in source_sends)
-        assert all(request["method"] != "agent" for request in captured_gateway_requests)
+        assert not any(
+            request["method"] == "agent" and request["params"].get("idempotencyKey") == result_notification["id"]
+            for request in captured_gateway_requests
+        )
 
 
 def test_notification_process_due_endpoint_returns_processed_count(tmp_path: Path) -> None:

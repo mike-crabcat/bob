@@ -107,7 +107,12 @@ class Database:
             for schema_file in sorted(self.schema_dir.glob("*.sql"), key=_migration_sort_key):
                 if schema_file.name in applied:
                     continue
-                await connection.executescript(schema_file.read_text(encoding="utf-8"))
+                try:
+                    await connection.executescript(schema_file.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    # Gracefully handle migrations that may fail on idempotent runs (e.g., duplicate columns)
+                    if "duplicate column" not in str(exc).lower():
+                        raise
                 await connection.execute(
                     "INSERT INTO schema_migrations (name) VALUES (?)",
                     (schema_file.name,),

@@ -25,7 +25,7 @@ class OpenClawHookService(BaseService):
     GATEWAY_CLIENT_ID = "gateway-client"
     GATEWAY_CLIENT_MODE = "backend"
     GATEWAY_SCOPES = ["operator.write"]
-    BOOTSTRAP_TIMEOUT_SECONDS = 60.0
+    BOOTSTRAP_TIMEOUT_SECONDS = 90.0
 
     def __init__(
         self,
@@ -64,13 +64,13 @@ class OpenClawHookService(BaseService):
             raise ValueError("No delivery route could be resolved for the notification")
 
         route_data = route.model_dump(mode="json")
-        target_session_key = await self._resolve_delivery_session_key(notification)
+        delivery_session_key = await self._resolve_delivery_session_key(notification, route_data)
 
         # Task assignments and plan approvals use the agent method with detailed prompt
-        if self._should_use_task_assignment_agent(notification, target_session_key):
+        if self._should_use_task_assignment_agent(notification, delivery_session_key):
             await self._send_gateway_request(
                 "agent",
-                self._build_task_assignment_agent_params(notification, route_data, target_session_key),
+                self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
                 expect_final=True,
                 timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
             )
@@ -78,7 +78,7 @@ class OpenClawHookService(BaseService):
 
         # Needs input notifications (plan approvals, etc.) also use agent method for context
         if notification.get("notification_type") == "needs_input":
-            session_key = target_session_key or self._resolve_visible_session_key(route_data)
+            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
             await self._send_gateway_request(
                 "agent",
                 self._build_needs_input_agent_params(notification, route_data, session_key),
@@ -87,7 +87,7 @@ class OpenClawHookService(BaseService):
             )
             return
 
-        visible_session_key = target_session_key or self._resolve_visible_session_key(route_data)
+        visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
         await self._send_gateway_request(
             "send",
@@ -140,11 +140,20 @@ class OpenClawHookService(BaseService):
     async def close(self) -> None:
         return None
 
-    async def _resolve_delivery_session_key(self, notification: dict[str, Any]) -> str | None:
+    async def _resolve_delivery_session_key(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+    ) -> str | None:
         if self._is_target_task_assignment(notification):
             session_key = await self.routing_service.resolve_target_session_key(notification.get("metadata", {}))
             if session_key is None:
                 raise ValueError("Task assignment delivery requires a resolvable target OpenClaw session key")
+            return session_key
+        if self._is_auto_project_source_task_assignment(notification):
+            session_key = self._resolve_visible_session_key(route)
+            if session_key is None:
+                raise ValueError("Auto-created project task assignment requires a visible source OpenClaw session key")
             return session_key
 
         return None
@@ -411,7 +420,7 @@ class OpenClawHookService(BaseService):
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
-        if self.settings.agent_id:
+        if self.settings.agent_id and not self._is_auto_project_source_task_assignment(notification):
             params["agentId"] = self.settings.agent_id
         return params
 
@@ -429,7 +438,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "verbose",
+            "thinking": "low",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -617,5 +626,16 @@ class OpenClawHookService(BaseService):
             and metadata.get("delivery_route") == "target"
         )
 
+    def _is_auto_project_source_task_assignment(self, notification: dict[str, Any]) -> bool:
+        metadata = notification.get("metadata", {})
+        return (
+            notification.get("notification_type") == NotificationType.TASK_ASSIGNMENT.value
+            and metadata.get("delivery_route") == "source"
+            and bool(metadata.get("auto_created_by_project"))
+        )
+
     def _should_use_task_assignment_agent(self, notification: dict[str, Any], session_key: str | None) -> bool:
-        return self._is_target_task_assignment(notification) and bool(session_key)
+        return (
+            self._is_target_task_assignment(notification)
+            or self._is_auto_project_source_task_assignment(notification)
+        ) and bool(session_key)

@@ -72,7 +72,7 @@ class ProjectSpecService(BaseService):
                 await connection.execute(
                     """
                     UPDATE projects
-                    SET aim = ?, method = ?, plan = ?, success_criteria = ?
+                    SET aim = ?, method = ?, plan = ?, success_criteria = ?, updated_at = ?
                     WHERE id = ? AND deleted_at IS NULL
                     """,
                     (
@@ -80,6 +80,7 @@ class ProjectSpecService(BaseService):
                         payload.method,
                         json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan else None,
                         json_dumps([criterion.model_dump(mode="json") for criterion in payload.success_criteria]),
+                        now,
                         project_id,
                     ),
                 )
@@ -143,7 +144,7 @@ class ProjectSpecService(BaseService):
             await connection.execute(
                 """
                 UPDATE projects
-                SET current_spec_id = ?, aim = ?, method = ?, plan = ?, success_criteria = ?
+                SET current_spec_id = ?, aim = ?, method = ?, plan = ?, success_criteria = ?, updated_at = ?
                 WHERE id = ? AND deleted_at IS NULL
                 """,
                 (
@@ -152,6 +153,7 @@ class ProjectSpecService(BaseService):
                     row["method"],
                     row["plan"],
                     row["success_criteria"],
+                    now,
                     project_id,
                 ),
             )

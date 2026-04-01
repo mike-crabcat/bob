@@ -678,6 +678,7 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
     blocked_reason: str | None = None
     blocked_resume_instructions: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
     started_at: datetime | None = None
     paused_at: datetime | None = None
     closed_at: datetime | None = None

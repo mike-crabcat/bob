@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -17,6 +18,38 @@ from cyborg.models import (
     SessionRouteUpdate,
 )
 from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
+
+
+SOURCE_ROUTE_FIELDS = ("channel", "session_key", "chat_id")
+
+
+def extract_source_route_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    extracted: dict[str, Any] = {}
+    if not isinstance(metadata, dict):
+        return extracted
+    for field in SOURCE_ROUTE_FIELDS:
+        value = metadata.get(field)
+        if isinstance(value, str) and value.strip():
+            extracted[field] = value.strip()
+    return extracted
+
+
+def has_source_route_metadata(metadata: dict[str, Any] | None) -> bool:
+    extracted = extract_source_route_metadata(metadata)
+    return extracted.get("channel") == "whatsapp" and bool(extracted.get("chat_id") or extracted.get("session_key"))
+
+
+def merge_source_route_metadata(
+    metadata: dict[str, Any] | None,
+    inherited_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(metadata or {})
+    inherited = extract_source_route_metadata(inherited_metadata)
+    for field, value in inherited.items():
+        existing = merged.get(field)
+        if not isinstance(existing, str) or not existing.strip():
+            merged[field] = value
+    return merged
 
 
 class SessionRouteService(BaseService):
@@ -210,9 +243,30 @@ class SessionRouteService(BaseService):
                 route_source="metadata.chat_id",
             )
         if isinstance(session_key, str) and session_key.strip():
-            resolved = await self.resolve_registered_route("whatsapp", session_key.strip())
+            normalized_session_key = session_key.strip()
+            resolved = await self.resolve_registered_route("whatsapp", normalized_session_key)
             if resolved is not None:
                 return resolved
+            derived_phone_number = self._derive_whatsapp_direct_recipient_from_session_key(normalized_session_key)
+            if derived_phone_number is not None:
+                return ResolvedSessionRoute(
+                    channel="whatsapp",
+                    kind=SessionRouteKind.DM,
+                    to=derived_phone_number,
+                    session_key=normalized_session_key,
+                    phone_number=derived_phone_number,
+                    route_source="metadata.session_key",
+                )
+            derived_chat_id = self._derive_whatsapp_group_chat_id_from_session_key(normalized_session_key)
+            if derived_chat_id is not None:
+                return ResolvedSessionRoute(
+                    channel="whatsapp",
+                    kind=SessionRouteKind.GROUP,
+                    to=derived_chat_id,
+                    session_key=normalized_session_key,
+                    chat_id=derived_chat_id,
+                    route_source="metadata.session_key",
+                )
         return None
 
     async def resolve_target_metadata(self, metadata: dict[str, Any]) -> ResolvedSessionRoute | None:
@@ -249,6 +303,7 @@ class SessionRouteService(BaseService):
             return await self._resolve_contact_route(
                 str(contact_id),
                 session_key=registered.session_key if registered is not None else None,
+                source_session_key=metadata.get("session_key"),
                 route_source="target_session.contact_id",
             )
         return None
@@ -260,6 +315,10 @@ class SessionRouteService(BaseService):
         route = await self.resolve_source_metadata(metadata)
         if route is not None:
             return route
+
+        related_route = await self._resolve_related_source_route(metadata)
+        if related_route is not None:
+            return related_route
 
         # Fallback to default contact from database
         default_contact = await self.db.fetch_one(
@@ -278,6 +337,53 @@ class SessionRouteService(BaseService):
         self.logger.warning(
             f"No notification route could be resolved from metadata: {metadata.get('delivery_route')}"
         )
+        return None
+
+    async def _resolve_related_source_route(self, metadata: dict[str, Any]) -> ResolvedSessionRoute | None:
+        candidate_project_ids: list[str] = []
+        for key in ("parent_project_id", "project_id"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip() and value not in candidate_project_ids:
+                candidate_project_ids.append(value)
+
+        for project_id in candidate_project_ids:
+            project = await self.db.fetch_one(
+                "SELECT metadata FROM projects WHERE id = ? AND deleted_at IS NULL",
+                (project_id,),
+            )
+            if project is None:
+                continue
+            route = await self.resolve_source_metadata(json_loads(project.get("metadata"), {}))
+            if route is not None:
+                return route
+
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            return None
+
+        task = await self.db.fetch_one(
+            "SELECT metadata FROM tasks WHERE id = ? AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if task is not None:
+            route = await self.resolve_source_metadata(json_loads(task.get("metadata"), {}))
+            if route is not None:
+                return route
+
+        linked_projects = await self.db.fetch_all(
+            """
+            SELECT p.metadata
+            FROM project_tasks AS pt
+            INNER JOIN projects AS p ON p.id = pt.project_id
+            WHERE pt.task_id = ? AND p.deleted_at IS NULL
+            ORDER BY p.created_at DESC
+            """,
+            (task_id,),
+        )
+        for project in linked_projects:
+            route = await self.resolve_source_metadata(json_loads(project.get("metadata"), {}))
+            if route is not None:
+                return route
         return None
 
     async def resolve_target_session_key(self, metadata: dict[str, Any]) -> str | None:
@@ -308,6 +414,7 @@ class SessionRouteService(BaseService):
                 return registered.session_key
             resolved = await self._resolve_contact_route(
                 str(contact_id),
+                source_session_key=metadata.get("session_key"),
                 route_source="target_session.contact_id",
             )
             return resolved.session_key
@@ -333,6 +440,7 @@ class SessionRouteService(BaseService):
         contact_id: str,
         *,
         session_key: str | None = None,
+        source_session_key: str | None = None,
         metadata: dict[str, Any] | None = None,
         route_source: str,
     ) -> ResolvedSessionRoute:
@@ -349,7 +457,10 @@ class SessionRouteService(BaseService):
         phone_number = (row.get("phone_number") or "").strip()
         if not phone_number:
             raise ConflictError(f"Contact '{contact_id}' does not have a usable phone number")
-        resolved_session_key = session_key or self._build_whatsapp_dm_session_key(phone_number)
+        resolved_session_key = session_key or self._build_whatsapp_dm_session_key(
+            phone_number,
+            source_session_key=source_session_key,
+        )
         return ResolvedSessionRoute(
             channel="whatsapp",
             kind=SessionRouteKind.DM,
@@ -386,6 +497,28 @@ class SessionRouteService(BaseService):
         decoded["is_active"] = bool(decoded.get("is_active", 0))
         return decoded
 
-    def _build_whatsapp_dm_session_key(self, phone_number: str) -> str:
-        # OpenClaw uses format: whatsapp:direct:{phone_number}
-        return f"whatsapp:direct:{phone_number}"
+    def _build_whatsapp_dm_session_key(self, phone_number: str, *, source_session_key: str | None = None) -> str:
+        return f"{self._resolve_whatsapp_agent_prefix(source_session_key)}whatsapp:direct:{phone_number}"
+
+    def _resolve_whatsapp_agent_prefix(self, source_session_key: str | None) -> str:
+        if isinstance(source_session_key, str):
+            match = re.match(r"^(?P<prefix>agent:[^:]+:)whatsapp:(?:direct|group):", source_session_key.strip())
+            if match is not None:
+                return match.group("prefix")
+
+        current = getattr(self.db, "settings", None)
+        if isinstance(current, Settings) and current.openclaw.agent_id:
+            return f"agent:{current.openclaw.agent_id}:"
+        return "agent:main:"
+
+    def _derive_whatsapp_group_chat_id_from_session_key(self, session_key: str) -> str | None:
+        match = re.search(r"(?:^|:)whatsapp:group:(?P<chat_id>[^:]+@g\.us)$", session_key)
+        if match is None:
+            return None
+        return match.group("chat_id")
+
+    def _derive_whatsapp_direct_recipient_from_session_key(self, session_key: str) -> str | None:
+        match = re.search(r"(?:^|:)whatsapp:direct:(?P<phone_number>\+?[0-9]+)$", session_key)
+        if match is None:
+            return None
+        return match.group("phone_number")

@@ -25,6 +25,15 @@ def _assert_no_internal_leakage(text: str) -> None:
     assert "cyborg task assignment" not in lowered
 
 
+@pytest.fixture
+def test_project_for_task_assignment(acceptance_builder: Any) -> dict[str, Any]:
+    """Create a test project for task assignment tests."""
+    return acceptance_builder.create_project(
+        title="Task Assignment Test Project",
+        aim="Test project for task assignment acceptance tests",
+    )
+
+
 def _start_task_assignment_session(
     acceptance_builder: Any,
     live_openclaw: Any,
@@ -111,6 +120,7 @@ def test_live_task_assignment_direct_answer_completes_task(
     acceptance_builder: Any,
     live_openclaw: Any,
     cyborg_http_server: str,
+    test_project_for_task_assignment: dict[str, Any],
 ) -> None:
     contact = acceptance_builder.create_contact(
         name="Acceptance Contact",
@@ -122,6 +132,7 @@ def test_live_task_assignment_direct_answer_completes_task(
         description="Ask Mike what his favourite fruit is, then complete the task with only the fruit he names.",
         plan="Ask the contact for their favourite fruit. When they answer clearly, complete the task with the exact fruit.",
         requested_by="OpenClaw acceptance",
+        project_ids=[test_project_for_task_assignment["id"]],
         metadata={
             "channel": "whatsapp",
             "session_key": "whatsappgroup-acceptance-source",
@@ -172,6 +183,7 @@ def test_live_task_assignment_requests_follow_up_before_completion(
     acceptance_builder: Any,
     live_openclaw: Any,
     cyborg_http_server: str,
+    test_project_for_task_assignment: dict[str, Any],
 ) -> None:
     contact = acceptance_builder.create_contact(
         name="Acceptance Follow-up Contact",
@@ -190,6 +202,7 @@ def test_live_task_assignment_requests_follow_up_before_completion(
             "Complete the task only after both details are clear."
         ),
         requested_by="OpenClaw acceptance",
+        project_ids=[test_project_for_task_assignment["id"]],
         metadata={
             "channel": "whatsapp",
             "session_key": "whatsappgroup-acceptance-source",

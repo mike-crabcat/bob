@@ -145,21 +145,34 @@ class ProjectExecutionService(BaseService):
         await self.project_spec_service.ensure_project_ready_for_execution(project_id)
 
         now = utcnow().isoformat()
-        
+        previous_state = project["state"]
+        previous_started_at = project.get("started_at")
+
         # Update project state
         await self.db.execute(
             """
-            UPDATE projects 
-            SET state = ?, started_at = ?, auto_execute = 1
+            UPDATE projects
+            SET state = ?, started_at = ?, auto_execute = 1, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.ACTIVE.value, now, project_id),
+            (ProjectState.ACTIVE.value, now, now, project_id),
         )
 
-        # Parse plan and create first task
         plan = self._parse_plan(project.get("plan"))
-        if plan:
-            await self._create_task_for_step(project_id, plan[0], 0)
+        try:
+            if plan:
+                await self._create_task_for_step(project_id, plan[0], 0)
+        except Exception:
+            rollback_now = utcnow().isoformat()
+            await self.db.execute(
+                """
+                UPDATE projects
+                SET state = ?, started_at = ?, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (previous_state, previous_started_at, rollback_now, project_id),
+            )
+            raise
 
         await self._sync_notifications(project_id, immediate=False)
         return await self._build_project_response(await self._get_project_row(project_id))
@@ -216,10 +229,10 @@ class ProjectExecutionService(BaseService):
             await self.db.execute(
                 """
                 UPDATE projects
-                SET state = ?, closed_at = ?, conclusion = ?
+                SET state = ?, closed_at = ?, conclusion = ?, updated_at = ?
                 WHERE id = ? AND deleted_at IS NULL
                 """,
-                (ProjectState.CLOSED.value, now, conclusion, project_id),
+                (ProjectState.CLOSED.value, now, conclusion, now, project_id),
             )
 
             # Add journal entry
@@ -894,11 +907,11 @@ class ProjectExecutionService(BaseService):
         # Update project state to paused (blocked)
         await self.db.execute(
             """
-            UPDATE projects 
-            SET state = ?, paused_at = ?, blocked_reason = ?, blocked_resume_instructions = ?
+            UPDATE projects
+            SET state = ?, paused_at = ?, blocked_reason = ?, blocked_resume_instructions = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.PAUSED.value, now, reason, resume_instructions, project_id),
+            (ProjectState.PAUSED.value, now, reason, resume_instructions, now, project_id),
         )
         
         # Add journal entry

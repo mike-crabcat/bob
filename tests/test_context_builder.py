@@ -1,11 +1,13 @@
 """Tests for ContextBuilder service."""
 
 import pytest
+import pytest_asyncio
+from cyborg.models import PlanStep, ProjectCreate, SuccessCriterion, TaskCreate
 from cyborg.services.context_builder import ContextBuilder, ContextScope
 from cyborg.database import Database
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def sample_project(db: Database):
     """Create a sample project with tasks and journal entries."""
     from cyborg.services.project_service import ProjectService
@@ -17,36 +19,36 @@ async def sample_project(db: Database):
     task_service = TaskService(db)
 
     # Create project
-    project = await project_service.create_project({
-        "title": "Test Project",
-        "aim": "Test autonomous execution",
-        "method": "Use OpenClaw for reasoning",
-        "plan": [
-            {"order": 0, "title": "Step 1", "description": "First step", "criteria": "Done"},
-            {"order": 1, "title": "Step 2", "description": "Second step", "criteria": "Done"},
+    project = await project_service.create_project(ProjectCreate(
+        title="Test Project",
+        aim="Test autonomous execution",
+        method="Use OpenClaw for reasoning",
+        plan=[
+            PlanStep(order=0, title="Step 1", description="First step", criteria="Done"),
+            PlanStep(order=1, title="Step 2", description="Second step", criteria="Done"),
         ],
-        "success_criteria": [
-            {"check": "completed_tasks >= 2", "description": "Complete 2 tasks"},
+        success_criteria=[
+            SuccessCriterion(check="completed_tasks >= 2", description="Complete 2 tasks"),
         ],
-        "auto_execute": True,
-    })
+        auto_execute=True,
+    ))
 
     project_id = str(project.id)
 
     # Create tasks
-    task1 = await task_service.create_task({
-        "title": "Test Task 1",
-        "description": "First test task",
-        "plan": "Do the thing",
-        "project_ids": [project_id],
-    })
+    task1 = await task_service.create_task(TaskCreate(
+        title="Test Task 1",
+        description="First test task",
+        plan="Do the thing",
+        project_ids=[project_id],
+    ))
 
-    task2 = await task_service.create_task({
-        "title": "Test Task 2",
-        "description": "Second test task",
-        "plan": "Do another thing",
-        "project_ids": [project_id],
-    })
+    task2 = await task_service.create_task(TaskCreate(
+        title="Test Task 2",
+        description="Second test task",
+        plan="Do another thing",
+        project_ids=[project_id],
+    ))
 
     # Complete one task
     await task_service.complete_task(

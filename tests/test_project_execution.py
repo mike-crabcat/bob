@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 from cyborg.config import Settings
 from cyborg.main import create_app
 
+PROJECT_ROUTE_METADATA = {
+    "channel": "whatsapp",
+    "session_key": "agent:test:whatsapp:group:120363400000000000@g.us",
+}
+
 
 def make_client(tmp_path: Path) -> TestClient:
     settings = Settings(
@@ -42,6 +47,7 @@ class TestProjectExecution:
                     "method": "Define the implementation approach and then execute each step.",
                     "description": "Testing auto-execution",
                     "auto_execute": True,
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Setup",
@@ -85,6 +91,10 @@ class TestProjectExecution:
                     "aim": "Test execution",
                     "method": "Define the first task and execute it.",
                     "auto_execute": True,
+                    "metadata": {
+                        "channel": "whatsapp",
+                        "session_key": "whatsappgroup-execution",
+                    },
                     "plan": [
                         {
                             "title": "First Step",
@@ -115,9 +125,17 @@ class TestProjectExecution:
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 1
             assert tasks[0]["title"] == "Step 1: First Step"
-            assert tasks[0]["status"] == "planning"
+            assert tasks[0]["status"] == "pending"
+            assert tasks[0]["current_plan_id"] is not None
             assert "Success criteria:" in tasks[0]["plan"]
             assert tasks[0]["metadata"]["project_step_index"] == 0
+            assert tasks[0]["metadata"]["channel"] == "whatsapp"
+            assert tasks[0]["metadata"]["session_key"] == "whatsappgroup-execution"
+            plans = client.get(f"/api/v1/tasks/{tasks[0]['id']}/plans").json()
+            assert plans["current_plan_id"] == tasks[0]["current_plan_id"]
+            assert len(plans["plans"]) == 1
+            assert plans["plans"][0]["status"] == "approved"
+            assert plans["plans"][0]["is_current"] is True
 
     def test_task_completion_triggers_next_task(self, tmp_path: Path) -> None:
         """Test completing a task creates the next task."""
@@ -130,6 +148,7 @@ class TestProjectExecution:
                     "aim": "Test multi-step",
                     "method": "Work through the plan one step at a time.",
                     "auto_execute": True,
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Step 1",
@@ -160,16 +179,6 @@ class TestProjectExecution:
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             first_task_id = tasks[0]["id"]
 
-            # Submit and approve plan for task
-            plan = client.post(
-                f"/api/v1/tasks/{first_task_id}/plans",
-                json={"content": "Plan for step 1"},
-            ).json()
-            client.post(
-                f"/api/v1/plans/{plan['id']}/approve",
-                json={"approver": "Bob"},
-            )
-
             # Start and complete first task
             client.post(f"/api/v1/tasks/{first_task_id}/start")
             client.post(
@@ -181,6 +190,8 @@ class TestProjectExecution:
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 2
             step2 = [t for t in tasks if "Step 2" in t["title"]][0]
+            assert step2["status"] == "pending"
+            assert step2["current_plan_id"] is not None
             assert step2["metadata"]["project_step_index"] == 1
 
     def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path) -> None:
@@ -194,6 +205,7 @@ class TestProjectExecution:
                     "aim": "Test auto-close",
                     "method": "Complete the planned task and evaluate the result.",
                     "auto_execute": True,
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Only Step",
@@ -217,16 +229,6 @@ class TestProjectExecution:
             # Get and complete the only task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             task_id = tasks[0]["id"]
-
-            # Submit and approve plan
-            plan = client.post(
-                f"/api/v1/tasks/{task_id}/plans",
-                json={"content": "Plan"},
-            ).json()
-            client.post(
-                f"/api/v1/plans/{plan['id']}/approve",
-                json={"approver": "Bob"},
-            )
 
             # Complete task
             client.post(f"/api/v1/tasks/{task_id}/start")
@@ -265,6 +267,7 @@ class TestProjectExecution:
                     "aim": "Reach two completed tasks",
                     "method": "Finish the planned step, then generate exactly one follow-up task if more work is needed.",
                     "auto_execute": True,
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Initial step",
@@ -290,10 +293,6 @@ class TestProjectExecution:
 
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
-            first_plan_id = client.get(f"/api/v1/tasks/{first_task_id}/plans").json()["plans"][0]["id"]
-
-            approved = client.post(f"/api/v1/plans/{first_plan_id}/approve", json={"approver": "Bob"})
-            assert approved.status_code == 200
             started = client.post(f"/api/v1/tasks/{first_task_id}/start")
             assert started.status_code == 200
             completed = client.post(
@@ -312,7 +311,8 @@ class TestProjectExecution:
             ]
             assert len(follow_up_tasks) == 1
             follow_up = follow_up_tasks[0]
-            assert follow_up["status"] == "planning"
+            assert follow_up["status"] == "pending"
+            assert follow_up["current_plan_id"] is not None
             assert follow_up["project_ids"] == [project_id]
             assert follow_up["metadata"]["auto_created_by_project"] is True
             assert follow_up["metadata"]["autonomy_cycle_completed_task_count"] == 1
@@ -328,6 +328,10 @@ class TestProjectExecution:
             assert notifications.status_code == 200
             pending_notifications = notifications.json()
             assert any(
+                item["entity_id"] == follow_up["id"] and item["notification_type"] == "task_assignment"
+                for item in pending_notifications
+            )
+            assert not any(
                 item["entity_id"] == follow_up["id"] and item["notification_type"] == "needs_input"
                 for item in pending_notifications
             )
@@ -342,6 +346,7 @@ class TestProjectExecution:
                     "aim": "Reach two completed tasks",
                     "method": "Complete the planned step, then the generated follow-up.",
                     "auto_execute": True,
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Initial step",
@@ -367,8 +372,6 @@ class TestProjectExecution:
 
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
-            first_plan_id = client.get(f"/api/v1/tasks/{first_task_id}/plans").json()["plans"][0]["id"]
-            assert client.post(f"/api/v1/plans/{first_plan_id}/approve", json={"approver": "Bob"}).status_code == 200
             assert client.post(f"/api/v1/tasks/{first_task_id}/start").status_code == 200
             assert client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
@@ -383,8 +386,6 @@ class TestProjectExecution:
                 if task["metadata"].get("autonomy_reason") == "unmet_success_criteria"
             )
 
-            follow_up_plan_id = client.get(f"/api/v1/tasks/{follow_up['id']}/plans").json()["plans"][0]["id"]
-            assert client.post(f"/api/v1/plans/{follow_up_plan_id}/approve", json={"approver": "Bob"}).status_code == 200
             assert client.post(f"/api/v1/tasks/{follow_up['id']}/start").status_code == 200
             assert client.post(
                 f"/api/v1/tasks/{follow_up['id']}/complete",
@@ -419,6 +420,7 @@ class TestProjectExecution:
                     "title": "Manual Project",
                     "aim": "Manual work",
                     "auto_execute": False,
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Step 1",
@@ -471,6 +473,7 @@ class TestProjectExecution:
                 json={
                     "title": "Update Test",
                     "aim": "Test updates",
+                    "metadata": PROJECT_ROUTE_METADATA,
                 },
             ).json()
             project_id = project["id"]
@@ -511,6 +514,7 @@ class TestProjectExecution:
                     "aim": "Test evaluate",
                     "method": "Create and complete a manual project task, then evaluate the project.",
                     "auto_execute": False,  # Disable auto-execution
+                    "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
                             "title": "Step 1",

@@ -4,11 +4,89 @@
 
 - **ID:** `69942812-6ff1-4dd9-92d0-242e832d58e8`
 - **State:** active
-- **Aim:** Build a complete SQLite-backed HTTP data service for Bob (OpenClaw bot) providing persistent storage for tasks, projects, and calendars with full CRUD operations, retry loops, recurring tasks, and context injection endpoints.
-- **Method:** 1) Core data models and SQLite schema. 2) FastAPI HTTP API with CRUD operations. 3) Typer CLI for local management. 4) Project-task relationships and journaling. 5) Context injection endpoints for OpenClaw. 6) Plan versioning and approval workflow. 7) Automatic SUMMARY.md generation. 8) systemd service integration.
+- **Aim:** Build complete SQLite-backed HTTP data service for persistent task, project, and calendar storage with OpenClaw integration
+- **Method:** 1) Core data models and SQLite schema. 2) FastAPI HTTP API with CRUD. 3) Typer CLI tool. 4) Project-task relationships. 5) Context injection endpoints. 6) Plan versioning and approval workflow. 7) Auto documentation. 8) systemd integration.
 - **Description:** FastAPI-based service with Pydantic v2 models, aiosqlite database, Typer CLI tool, and systemd integration. Supports hierarchical tasks with subtasks, project journaling, calendar events with recipients, and automated context summaries for Bob memory window.
 - **Created:** 2026-03-10 13:14:37.693702+00:00
 - **Started:** 2026-03-10 13:18:56.105942+00:00
+- **Auto Execute:** No
+
+## Linked Tasks
+
+### Implement heartbeat-driven plan approval workflow
+
+- **ID:** `c2a5f65a-df3e-446b-8ad6-56102538aa8c`
+- **Status:** completed
+- **Priority:** high
+- **Description:** Create a system where heartbeat queries pending tasks without plans, Bob proposes plans to the user for approval, and approved plans auto-start tasks. Includes: HEARTBEAT.md updates, plan proposal generation, message routing for approve/reject, and auto-start on approval.
+- **Requested By:** Mike
+- **Created:** 2026-03-12 11:43:55.199497+00:00
+- **Completed:** 2026-03-12 11:48:14.209265+00:00
+
+### OpenClaw plugin integration for Cyborg
+
+- **ID:** `a9ef72ed-dd82-496c-933a-86ca7c48c613`
+- **Status:** active
+- **Priority:** high
+- **Description:** Create a native OpenClaw plugin for Cyborg that provides context injection via the plugin system instead of HTTP polling. Plugin should use before_prompt_build hook to inject active tasks, projects, and calendar events into Bob's context window. See tasks/af7fc85e-cf51-4d38-9a9c-8c08f1c5c291/plan.md for prior research.
+- **Requested By:** Mike
+- **Created:** 2026-03-12 11:34:04.316530+00:00
+
+### Add cyborg project update CLI command
+
+- **ID:** `382b5c71-0b65-4edb-96e6-20900c5116e7`
+- **Status:** active
+- **Priority:** high
+- **Description:** Add 'cyborg project update' command to the CLI to allow updating project fields (aim, method, description, state) without using the API directly. Should support --aim, --method, --description, and --state options.
+- **Requested By:** Mike
+- **Created:** 2026-03-12 11:34:04.011301+00:00
+
+### Add project method field and workflow enforcement
+
+- **ID:** `85673d1f-7efd-4457-bc03-823e6afcb1f7`
+- **Status:** completed
+- **Priority:** high
+- **Description:** Add a 'method' field to projects to store the iterative plan for achieving the aim. Update models, API, CLI, and skill documentation to enforce the Aim → Method → Tasks workflow.
+- **Requested By:** Mike
+- **Created:** 2026-03-12 11:26:12.082307+00:00
+- **Completed:** 2026-03-12 11:29:25.370930+00:00
+
+## Plan Progress
+
+✅ **Step 1:** Data models
+   - Create Pydantic models and SQLite schema
+   - *Criteria:* Models defined
+
+✅ **Step 2:** FastAPI
+   - Build FastAPI HTTP API with CRUD operations
+   - *Criteria:* API serving
+
+🔄 **Step 3:** CLI tool
+   - Build Typer CLI for local management
+   - *Criteria:* CLI functional
+
+⏳ **Step 4:** Relationships
+   - Add project-task relationships and journaling
+   - *Criteria:* Relations working
+
+⏳ **Step 5:** Context endpoints
+   - Build OpenClaw context injection endpoints
+   - *Criteria:* Context flowing
+
+⏳ **Step 6:** Approval workflow
+   - Implement plan versioning and approval
+   - *Criteria:* Workflow working
+
+**Progress:** 2/6 steps completed
+
+## Success Criteria
+
+- **FastAPI serving requests**
+  - Check: `api_working`
+- **Typer CLI functional**
+  - Check: `cli_working`
+- **OpenClaw context endpoints working**
+  - Check: `context_injection`
 
 ## Journal Entries
 
@@ -94,14 +172,16 @@ Result: Added method field to Project model, database schema (25_add_project_met
 - `task_id`: 85673d1f-7efd-4457-bc03-823e6afcb1f7
 - `task_title`: Add project method field and workflow enforcement
 
-## Linked Tasks
+### Result - 2026-03-12 11:48:14.209265+00:00
 
-### Add project method field and workflow enforcement
+Task completed: Implement heartbeat-driven plan approval workflow
 
-- **ID:** `85673d1f-7efd-4457-bc03-823e6afcb1f7`
-- **Status:** completed
-- **Priority:** high
-- **Description:** Add a 'method' field to projects to store the iterative plan for achieving the aim. Update models, API, CLI, and skill documentation to enforce the Aim → Method → Tasks workflow.
-- **Requested By:** Mike
-- **Created:** 2026-03-12 11:26:12.082307+00:00
-- **Completed:** 2026-03-12 11:29:25.370930+00:00
+Result: Implemented heartbeat-driven plan approval workflow: 1) Updated HEARTBEAT.md with new workflow, 2) Added cyborg task plan submit/approve/reject/list CLI commands, 3) Fixed UUID import in plan_service.py, 4) Updated skill documentation with plan commands, 5) Tested complete workflow: submit plan → approve → start task.
+
+**Metadata:**
+- `task_id`: c2a5f65a-df3e-446b-8ad6-56102538aa8c
+- `task_title`: Implement heartbeat-driven plan approval workflow
+
+### Note - 2026-03-30 12:02:53.925749+00:00
+
+Cyberpunk lobster logo added to project assets. Generated using OpenAI gpt-image-1. Features chrome hydraulic claws, glowing cybernetic eyes, neon magenta/cyan LED strips, rain-soaked cyberpunk alleyway background, and CYBORG text with glitch-effect neon font. Saved to projects/cyborg/assets/cyborg-lobster-cyberpunk.png. Requested by Mike.

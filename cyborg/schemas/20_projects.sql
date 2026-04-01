@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS projects (
     paused_at TEXT,
     closed_at TEXT,
     conclusion TEXT,
-    deleted_at TEXT
+    deleted_at TEXT,
+    updated_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_state ON projects(state);

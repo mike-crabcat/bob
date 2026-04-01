@@ -664,9 +664,15 @@ class NotificationService(BaseService):
             raise NotFoundError(f"{entity_type.value.capitalize()} '{entity_id}' was not found")
 
         next_count = int(row["notification_count"] or 0) + 1
+        update_fields = ["notification_count = ?", "last_notification_at = ?"]
+        update_params: list[Any] = [next_count, timestamp]
+        if table == "projects":
+            update_fields.append("updated_at = ?")
+            update_params.append(timestamp)
+        update_params.append(entity_id)
         await connection.execute(
-            f"UPDATE {table} SET notification_count = ?, last_notification_at = ? WHERE id = ?",
-            (next_count, timestamp, entity_id),
+            f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = ?",
+            tuple(update_params),
         )
         return next_count
 

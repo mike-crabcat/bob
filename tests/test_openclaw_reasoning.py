@@ -1,12 +1,26 @@
 """Mocked contract-style tests for OpenClawReasoningService."""
 
 import pytest
+import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from cyborg.models import (
+    JournalEntryType,
+    PlanApproveRequest,
+    PlanStep,
+    ProjectCloseRequest,
+    ProjectCreate,
+    ProjectState,
+    SuccessCriterion,
+    TaskBlockRequest,
+    TaskCreate,
+)
+from cyborg.services.openclaw_hook_service import OpenClawHookService
+from cyborg.services.context_builder import ContextScope
 from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
 from cyborg.database import Database
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def sample_project_with_data(db: Database):
     """Create a sample project with tasks for testing."""
     from cyborg.services.project_service import ProjectService
@@ -16,53 +30,53 @@ async def sample_project_with_data(db: Database):
     task_service = TaskService(db)
 
     # Create project with success criteria
-    project = await project_service.create_project({
-        "title": "Test Evaluation Project",
-        "aim": "Test automated evaluation",
-        "method": "Use OpenClaw reasoning",
-        "plan": [
-            {
-                "order": 0,
-                "title": "Complete primary task",
-                "description": "Do the main work",
-                "criteria": "Task is done"
-            },
-            {
-                "order": 1,
-                "title": "Verify results",
-                "description": "Check that everything works",
-                "criteria": "Tests pass"
-            },
+    project = await project_service.create_project(ProjectCreate(
+        title="Test Evaluation Project",
+        aim="Test automated evaluation",
+        method="Use OpenClaw reasoning",
+        plan=[
+            PlanStep(
+                order=0,
+                title="Complete primary task",
+                description="Do the main work",
+                criteria="Task is done"
+            ),
+            PlanStep(
+                order=1,
+                title="Verify results",
+                description="Check that everything works",
+                criteria="Tests pass"
+            ),
         ],
-        "success_criteria": [
-            {
-                "check": "completed_tasks >= 2",
-                "description": "Complete at least 2 tasks"
-            },
-            {
-                "check": "failed_tasks == 0",
-                "description": "No failed tasks"
-            },
+        success_criteria=[
+            SuccessCriterion(
+                check="completed_tasks >= 2",
+                description="Complete at least 2 tasks"
+            ),
+            SuccessCriterion(
+                check="failed_tasks == 0",
+                description="No failed tasks"
+            ),
         ],
-        "auto_execute": True,
-    })
+        auto_execute=True,
+    ))
 
     project_id = str(project.id)
 
     # Create and complete tasks
-    task1 = await task_service.create_task({
-        "title": "Primary Task",
-        "description": "Main work",
-        "plan": "Do it",
-        "project_ids": [project_id],
-    })
+    task1 = await task_service.create_task(TaskCreate(
+        title="Primary Task",
+        description="Main work",
+        plan="Do it",
+        project_ids=[project_id],
+    ))
 
-    task2 = await task_service.create_task({
-        "title": "Verification Task",
-        "description": "Check results",
-        "plan": "Verify",
-        "project_ids": [project_id],
-    })
+    task2 = await task_service.create_task(TaskCreate(
+        title="Verification Task",
+        description="Check results",
+        plan="Verify",
+        project_ids=[project_id],
+    ))
 
     # Complete both tasks
     await task_service.complete_task(
@@ -89,7 +103,7 @@ async def test_evaluate_success_criteria_with_mocked_openclaw(db: Database, samp
 
     reasoning_service = OpenClawReasoningService(db)
 
-    # Mock the OpenClaw gateway call
+    # Mock the OpenClaw gateway call at the class level
     mock_response = {
         "content": '''{
   "all_met": true,
@@ -100,7 +114,7 @@ async def test_evaluate_success_criteria_with_mocked_openclaw(db: Database, samp
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ) as mock_gateway:
@@ -111,8 +125,8 @@ async def test_evaluate_success_criteria_with_mocked_openclaw(db: Database, samp
         call_args = mock_gateway.call_args
 
         # Check the method and params
-        assert call_args[0][0] == "agent"
-        params = call_args[1]["params"]
+        assert call_args.kwargs["method"] == "agent"
+        params = call_args.kwargs["params"]
         assert params["deliver"] == False
         assert params["sessionKey"] == "cyborg:reasoning"
         assert "Test Evaluation Project" in params["message"]
@@ -134,27 +148,27 @@ async def test_evaluate_success_criteria_unmet(db: Database):
     task_service = TaskService(db)
 
     # Create project
-    project = await project_service.create_project({
-        "title": "Incomplete Project",
-        "aim": "Test unmet criteria",
-        "success_criteria": [
-            {
-                "check": "completed_tasks >= 5",
-                "description": "Need 5 completed tasks"
-            }
+    project = await project_service.create_project(ProjectCreate(
+        title="Incomplete Project",
+        aim="Test unmet criteria",
+        success_criteria=[
+            SuccessCriterion(
+                check="completed_tasks >= 5",
+                description="Need 5 completed tasks"
+            )
         ],
-    })
+    ))
 
     project_id = str(project.id)
 
     # Create only 2 tasks
     for i in range(2):
-        task = await task_service.create_task({
-            "title": f"Task {i}",
-            "description": f"Task number {i}",
-            "plan": "Do it",
-            "project_ids": [project_id],
-        })
+        task = await task_service.create_task(TaskCreate(
+            title=f"Task {i}",
+            description=f"Task number {i}",
+            plan="Do it",
+            project_ids=[project_id],
+        ))
         await task_service.complete_task(str(task.id))
 
     reasoning_service = OpenClawReasoningService(db)
@@ -170,7 +184,7 @@ async def test_evaluate_success_criteria_unmet(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -188,11 +202,11 @@ async def test_generate_follow_up_tasks(db: Database):
 
     project_service = ProjectService(db)
 
-    project = await project_service.create_project({
-        "title": "Follow-up Test",
-        "aim": "Test follow-up generation",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="Follow-up Test",
+        aim="Test follow-up generation",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
@@ -213,7 +227,7 @@ async def test_generate_follow_up_tasks(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -245,7 +259,7 @@ async def test_refine_project_strategy(db: Database, sample_project_with_data):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -262,11 +276,11 @@ async def test_refine_project_strategy_with_changes(db: Database):
 
     project_service = ProjectService(db)
 
-    project = await project_service.create_project({
-        "title": "Needs Refinement",
-        "aim": "Test refinement with changes",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="Needs Refinement",
+        aim="Test refinement with changes",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
@@ -293,7 +307,7 @@ async def test_refine_project_strategy_with_changes(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -312,14 +326,17 @@ async def test_extract_learnings(db: Database):
 
     project_service = ProjectService(db)
 
-    project = await project_service.create_project({
-        "title": "Completed for Learning",
-        "aim": "Extract lessons",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="Completed for Learning",
+        aim="Extract lessons",
+        success_criteria=[],
+    ))
 
     # Close the project
-    await project_service.close_project(str(project.id), conclusion="Project completed successfully")
+    await project_service.close_project(
+        str(project.id),
+        ProjectCloseRequest(conclusion="Project completed successfully"),
+    )
 
     project_id = str(project.id)
 
@@ -349,7 +366,7 @@ async def test_extract_learnings(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -364,14 +381,25 @@ async def test_extract_learnings(db: Database):
 async def test_generate_task_plan(db: Database):
     """Test task-level plan generation."""
     from cyborg.services.task_service import TaskService
+    from cyborg.services.project_service import ProjectService
+    from cyborg.models import ProjectCreate
 
     task_service = TaskService(db)
+    project_service = ProjectService(db)
 
-    task = await task_service.create_task({
-        "title": "Complex Task",
-        "description": "Needs detailed planning",
-        "plan": "Initial plan",
-    })
+    # Create a project for the task (tasks now require projects)
+    project = await project_service.create_project(ProjectCreate(
+        title="Test Project",
+        aim="Test project for task plan generation",
+    ))
+    project_id = str(project.id)
+
+    task = await task_service.create_task(TaskCreate(
+        title="Complex Task",
+        description="Needs detailed planning",
+        plan="Initial plan",
+        project_ids=[project_id],
+    ))
 
     task_id = str(task.id)
 
@@ -387,7 +415,7 @@ async def test_generate_task_plan(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -407,27 +435,29 @@ async def test_analyze_project_health(db: Database):
     project_service = ProjectService(db)
     task_service = TaskService(db)
 
-    project = await project_service.create_project({
-        "title": "At Risk Project",
-        "aim": "Health check test",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="At Risk Project",
+        aim="Health check test",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
     # Create some blocked tasks
     for i in range(2):
-        task = await task_service.create_task({
-            "title": f"Blocked Task {i}",
-            "description": f"Task {i}",
-            "plan": "Do it",
-            "project_ids": [project_id],
-        })
+        task = await task_service.create_task(TaskCreate(
+            title=f"Blocked Task {i}",
+            description=f"Task {i}",
+            plan="Do it",
+            project_ids=[project_id],
+        ))
         # Block the task
         await task_service.block_task(
             str(task.id),
-            reason="Waiting for dependency",
-            resume_instructions="Complete parent task first"
+            TaskBlockRequest(
+                reason="Waiting for dependency",
+                resume_instructions="Complete parent task first",
+            ),
         )
 
     reasoning_service = OpenClawReasoningService(db)
@@ -457,7 +487,7 @@ async def test_analyze_project_health(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -494,7 +524,7 @@ async def test_generate_project_plan(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -515,11 +545,11 @@ async def test_openclaw_unavailable_handling(db: Database):
     from cyborg.services.project_service import ProjectService
 
     project_service = ProjectService(db)
-    project = await project_service.create_project({
-        "title": "Test Failure",
-        "aim": "Test error handling",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="Test Failure",
+        aim="Test error handling",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
@@ -527,7 +557,7 @@ async def test_openclaw_unavailable_handling(db: Database):
 
     # Mock gateway failure
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(side_effect=Exception("Gateway unavailable"))
     ):
@@ -543,11 +573,11 @@ async def test_malformed_json_response(db: Database):
     from cyborg.services.project_service import ProjectService
 
     project_service = ProjectService(db)
-    project = await project_service.create_project({
-        "title": "JSON Test",
-        "aim": "Test JSON parsing",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="JSON Test",
+        aim="Test JSON parsing",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
@@ -559,7 +589,7 @@ async def test_malformed_json_response(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ):
@@ -576,11 +606,11 @@ async def test_idempotency_key_included(db: Database):
     from cyborg.services.project_service import ProjectService
 
     project_service = ProjectService(db)
-    project = await project_service.create_project({
-        "title": "Idempotency Test",
-        "aim": "Test idempotency",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="Idempotency Test",
+        aim="Test idempotency",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
@@ -591,7 +621,7 @@ async def test_idempotency_key_included(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ) as mock_gateway:
@@ -609,11 +639,11 @@ async def test_response_format_json_hint(db: Database):
     from cyborg.services.project_service import ProjectService
 
     project_service = ProjectService(db)
-    project = await project_service.create_project({
-        "title": "Format Test",
-        "aim": "Test response format",
-        "success_criteria": [],
-    })
+    project = await project_service.create_project(ProjectCreate(
+        title="Format Test",
+        aim="Test response format",
+        success_criteria=[],
+    ))
 
     project_id = str(project.id)
 
@@ -624,7 +654,7 @@ async def test_response_format_json_hint(db: Database):
     }
 
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ) as mock_gateway:
@@ -650,19 +680,26 @@ async def test_context_builder_integration(db: Database, sample_project_with_dat
 
     # Patch both gateway and context builder
     with patch.object(
-        reasoning_service.openclaw_service,
+        OpenClawHookService,
         '_send_gateway_request',
         new=AsyncMock(return_value=mock_response)
     ), patch.object(
         reasoning_service.context_builder,
         'build_project_context',
-        new=AsyncMock(return_value={"core": {"project": {"title": "Test"}}})
+        new=AsyncMock(return_value={
+            "core": {
+                "project": {"title": "Test", "aim": "Test aim"},
+                "success_criteria": {"criteria": []},
+            },
+            "tasks": {"summary": {"total": 0, "completed": 0, "failed": 0, "active": 0}},
+            "journal": {"entries": []},
+        })
     ) as mock_context:
         await reasoning_service.evaluate_success_criteria(project_id)
 
         # Verify context builder was called with correct scope
         mock_context.assert_called_once()
         call_args = mock_context.call_args
-        assert call_args[0][0] == project_id
-        assert call_args[0][1] == ContextScope.STANDARD  # Default scope
-        assert call_args[0][2] == "evaluation"  # Focus reasoning
+        assert call_args.kwargs["project_id"] == project_id
+        assert call_args.kwargs["scope"] == ContextScope.STANDARD
+        assert call_args.kwargs["focus_reasoning"] == "evaluation"

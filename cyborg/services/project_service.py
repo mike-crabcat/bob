@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
+from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
@@ -26,6 +27,10 @@ from cyborg.models import (
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
 from cyborg.services.project_spec_service import ProjectSpecService
+from cyborg.services.session_route_service import (
+    has_source_route_metadata,
+    merge_source_route_metadata,
+)
 
 
 def _slugify(text: str) -> str:
@@ -88,12 +93,22 @@ class ProjectService(BaseService):
         )
         async with self.db.connection(write=True) as connection:
             await self._validate_task_ids(connection, payload.task_ids)
+            project_metadata = await self._inherit_task_source_route_metadata(
+                connection,
+                payload.metadata,
+                payload.task_ids,
+            )
+            if self._require_source_route_metadata() and not has_source_route_metadata(project_metadata):
+                raise ConflictError(
+                    "Projects require source routing metadata. "
+                    "Provide metadata.channel plus session_key/chat_id, or link an existing routed task."
+                )
             await connection.execute(
                 """
                 INSERT INTO projects (
                     id, title, description, aim, method, state, plan, success_criteria, auto_execute,
-                    created_at, started_at, paused_at, closed_at, conclusion, deleted_at, metadata, current_spec_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL)
+                    created_at, updated_at, started_at, paused_at, closed_at, conclusion, deleted_at, metadata, current_spec_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL)
                 """,
                 (
                     project_id,
@@ -106,8 +121,9 @@ class ProjectService(BaseService):
                     json_dumps([c.model_dump(mode="json") for c in payload.success_criteria]) if payload.success_criteria else None,
                     1 if payload.auto_execute else 0,
                     now,
+                    now,
                     payload.conclusion,
-                    json_dumps(payload.metadata),
+                    json_dumps(project_metadata),
                 ),
             )
             await self._replace_task_links(connection, project_id, payload.task_ids)
@@ -160,6 +176,7 @@ class ProjectService(BaseService):
             values["paused_at"] = utcnow().isoformat()
         if values.get("state") == ProjectState.CLOSED.value and "closed_at" not in values:
             values["closed_at"] = utcnow().isoformat()
+        values["updated_at"] = utcnow().isoformat()
         assignments = ", ".join(f"{field} = ?" for field in values)
         params = tuple(values.values()) + (project_id,)
 
@@ -182,8 +199,8 @@ class ProjectService(BaseService):
         await self._get_project_row(project_id)
         now = utcnow().isoformat()
         await self.db.execute(
-            "UPDATE projects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
-            (now, project_id),
+            "UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (now, now, project_id),
         )
         await self._sync_notifications(project_id, immediate=False)
 
@@ -199,10 +216,10 @@ class ProjectService(BaseService):
         await self.db.execute(
             """
             UPDATE projects
-            SET state = ?, closed_at = ?, conclusion = ?
+            SET state = ?, closed_at = ?, conclusion = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.CLOSED.value, now, payload.conclusion, project_id),
+            (ProjectState.CLOSED.value, now, payload.conclusion, now, project_id),
         )
         await self._sync_notifications(project_id, immediate=False)
         return await self.get_project(project_id)
@@ -245,6 +262,54 @@ class ProjectService(BaseService):
         await self._update_summary_md(project)
         return ProjectJournalEntryResponse.model_validate(decoded)
 
+    async def _inherit_task_source_route_metadata(
+        self,
+        connection: Connection,
+        metadata: dict[str, Any],
+        task_ids: list[Any],
+    ) -> dict[str, Any]:
+        merged_metadata = dict(metadata or {})
+        if has_source_route_metadata(merged_metadata):
+            return merged_metadata
+
+        unique_task_ids = list(dict.fromkeys(str(task_id) for task_id in task_ids))
+        for task_id in unique_task_ids:
+            cursor = await connection.execute(
+                """
+                SELECT t.metadata AS task_metadata, p.metadata AS project_metadata
+                FROM tasks AS t
+                LEFT JOIN project_tasks AS pt ON pt.task_id = t.id
+                LEFT JOIN projects AS p ON p.id = pt.project_id AND p.deleted_at IS NULL
+                WHERE t.id = ? AND t.deleted_at IS NULL
+                ORDER BY p.created_at DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                continue
+            row_dict = dict(row)
+
+            merged_metadata = merge_source_route_metadata(
+                merged_metadata,
+                json_loads(row_dict.get("task_metadata"), {}),
+            )
+            merged_metadata = merge_source_route_metadata(
+                merged_metadata,
+                json_loads(row_dict.get("project_metadata"), {}),
+            )
+            if has_source_route_metadata(merged_metadata):
+                return merged_metadata
+        return merged_metadata
+
+    def _require_source_route_metadata(self) -> bool:
+        current = getattr(self.db, "settings", None)
+        if isinstance(current, Settings):
+            return current.openclaw.enabled
+        return False
+
     async def list_project_tasks(self, project_id: str) -> list[TaskResponse]:
         await self._get_project_row(project_id)
         rows = await self.db.fetch_all(
@@ -270,7 +335,7 @@ class ProjectService(BaseService):
         if state == ProjectState.ACTIVE:
             await self.project_spec_service.ensure_project_ready_for_execution(project_id)
         now = utcnow().isoformat()
-        updates: dict[str, Any] = {"state": state.value}
+        updates: dict[str, Any] = {"state": state.value, "updated_at": now}
         if state == ProjectState.ACTIVE:
             updates["started_at"] = now
         if state == ProjectState.PAUSED:

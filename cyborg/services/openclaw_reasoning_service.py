@@ -308,7 +308,7 @@ class OpenClawReasoningService(BaseService):
             "message": prompt,
             "deliver": False,  # Not delivering to a user
             "sessionKey": reasoning_session,
-            "thinking": "on",
+            "thinking": "low",
             "timeout": timeout * 1000,
             "idempotencyKey": str(uuid4()),
         }

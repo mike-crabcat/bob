@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
+from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
@@ -29,7 +30,11 @@ from cyborg.models import (
 from cyborg.services.base import BaseService, json_dumps, json_loads, next_cron_occurrence, utcnow
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.project_autonomy_service import DEPENDENCY_BLOCKED_PREFIX
-from cyborg.services.session_route_service import SessionRouteService
+from cyborg.services.session_route_service import (
+    SessionRouteService,
+    has_source_route_metadata,
+    merge_source_route_metadata,
+)
 from cyborg.services.webhook_service import WebhookEvent, WebhookService
 
 
@@ -96,15 +101,49 @@ class TaskService(BaseService):
 
         async with self.db.connection(write=True) as connection:
             await self._validate_project_ids(connection, payload.project_ids)
-            await self._validate_target_session_metadata(connection, payload.metadata)
+            task_metadata = await self._inherit_project_source_route_metadata(
+                connection,
+                payload.metadata,
+                payload.project_ids,
+            )
+            auto_approve_initial_plan = self._should_auto_approve_initial_plan(task_metadata)
+            if self._require_source_route_metadata() and not has_source_route_metadata(task_metadata):
+                raise ConflictError(
+                    "Tasks require source routing metadata. "
+                    "Provide metadata.channel plus session_key/chat_id, or attach the task to a routed project."
+                )
+            await self._validate_target_session_metadata(connection, task_metadata)
+
+            task_status = payload.status
+            current_plan_id: str | None = None
+            initial_plan_status = PlanStatus.PENDING_APPROVAL
+            initial_plan_approved_at: str | None = None
+            initial_plan_approved_by: str | None = None
+            initial_plan_is_current = 0
+            blocked_reason = payload.blocked_reason
+            blocked_resume_instructions = payload.blocked_resume_instructions
+            if auto_approve_initial_plan:
+                dependency_ready = await self._dependency_is_satisfied(
+                    {"parent_id": str(payload.parent_id) if payload.parent_id else None}
+                )
+                task_status = TaskStatus.PENDING if dependency_ready else TaskStatus.BLOCKED
+                current_plan_id = plan_id
+                initial_plan_status = PlanStatus.APPROVED
+                initial_plan_approved_at = now.isoformat()
+                initial_plan_approved_by = "cyborg:auto"
+                initial_plan_is_current = 1
+                if not dependency_ready and payload.parent_id is not None:
+                    blocked_reason = self.dependency_blocked_reason(str(payload.parent_id))
+                    blocked_resume_instructions = self.dependency_blocked_resume_instructions(str(payload.parent_id))
+
             await connection.execute(
                 """
                 INSERT INTO tasks (
                     id, title, description, requested_by, plan, status, priority,
-                    parent_id, retry_config, is_recurring, recurrence_rule, next_run_at,
+                    parent_id, current_plan_id, retry_config, is_recurring, recurrence_rule, next_run_at,
                     created_at, updated_at, started_at, completed_at, metadata, deleted_at,
                     blocked_reason, blocked_resume_instructions
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 """,
                 (
                     task_id,
@@ -112,9 +151,10 @@ class TaskService(BaseService):
                     payload.description,
                     payload.requested_by,
                     payload.plan,
-                    payload.status.value,
+                    task_status.value,
                     payload.priority.value,
                     str(payload.parent_id) if payload.parent_id else None,
+                    None,
                     json_dumps(payload.retry_config.model_dump(mode="json")) if payload.retry_config else None,
                     int(payload.is_recurring),
                     payload.recurrence_rule,
@@ -123,9 +163,9 @@ class TaskService(BaseService):
                     now.isoformat(),
                     None,
                     None,
-                    json_dumps(payload.metadata),
-                    payload.blocked_reason,
-                    payload.blocked_resume_instructions,
+                    json_dumps(task_metadata),
+                    blocked_reason,
+                    blocked_resume_instructions,
                 ),
             )
             await self._replace_project_links(connection, task_id, payload.project_ids)
@@ -141,22 +181,31 @@ class TaskService(BaseService):
                     task_id,
                     1,
                     payload.plan,
-                    PlanStatus.PENDING_APPROVAL.value,
+                    initial_plan_status.value,
                     None,
                     now.isoformat(),
-                    None,
-                    None,
-                    0,
+                    initial_plan_approved_at,
+                    initial_plan_approved_by,
+                    initial_plan_is_current,
                 ),
             )
+            if current_plan_id is not None:
+                await connection.execute(
+                    """
+                    UPDATE tasks
+                    SET current_plan_id = ?
+                    WHERE id = ? AND deleted_at IS NULL
+                    """,
+                    (current_plan_id, task_id),
+                )
             await self._add_history(
                 connection,
                 task_id,
                 "created",
-                {"status": payload.status.value, "priority": payload.priority.value},
+                {"status": task_status.value, "priority": payload.priority.value},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=True)
+        await self._sync_notifications(task_id, immediate=not auto_approve_initial_plan)
         return await self.get_task(task_id)
 
     async def update_task(self, task_id: str, payload: TaskUpdate) -> TaskResponse:
@@ -788,6 +837,33 @@ class TaskService(BaseService):
             return None
         return resolved.model_dump(mode="json")
 
+    async def _inherit_project_source_route_metadata(
+        self,
+        connection: Connection,
+        metadata: dict[str, Any],
+        project_ids: list[Any],
+    ) -> dict[str, Any]:
+        merged_metadata = dict(metadata or {})
+        if has_source_route_metadata(merged_metadata):
+            return merged_metadata
+
+        unique_project_ids = list(dict.fromkeys(str(project_id) for project_id in project_ids))
+        for project_id in unique_project_ids:
+            project = await self._fetch_one_connection(
+                connection,
+                "SELECT metadata FROM projects WHERE id = ? AND deleted_at IS NULL",
+                (project_id,),
+            )
+            if project is None:
+                continue
+            merged_metadata = merge_source_route_metadata(
+                merged_metadata,
+                json_loads(project.get("metadata"), {}),
+            )
+            if has_source_route_metadata(merged_metadata):
+                return merged_metadata
+        return merged_metadata
+
     async def _validate_target_session_metadata(self, connection: Connection, metadata: dict[str, Any]) -> None:
         target_session = metadata.get("target_session")
         if not isinstance(target_session, dict):
@@ -852,6 +928,15 @@ class TaskService(BaseService):
         await cursor.close()
         if len(rows) != len(unique_project_ids):
             raise NotFoundError("One or more project_ids do not refer to active projects")
+
+    def _require_source_route_metadata(self) -> bool:
+        current = getattr(self.db, "settings", None)
+        if isinstance(current, Settings):
+            return current.openclaw.enabled
+        return False
+
+    def _should_auto_approve_initial_plan(self, metadata: dict[str, Any]) -> bool:
+        return bool(metadata.get("auto_created_by_project"))
 
     async def _replace_project_links(self, connection: Connection, task_id: str, project_ids: list[Any]) -> None:
         unique_project_ids = list(dict.fromkeys(str(project_id) for project_id in project_ids))
