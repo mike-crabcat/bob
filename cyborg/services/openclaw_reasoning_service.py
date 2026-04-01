@@ -14,6 +14,7 @@ from cyborg.database import Database
 from cyborg.models import PlanStep, SuccessCriterion
 from cyborg.services.base import BaseService
 from cyborg.services.context_builder import ContextBuilder, ContextScope
+from cyborg.services.prompt_history import log_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +317,16 @@ class OpenClawReasoningService(BaseService):
         # Add response format hint
         if response_format == "json":
             params["message"] += "\n\nIMPORTANT: Respond with valid JSON only. No markdown formatting, no code blocks, no explanation outside the JSON."
+
+        # Log the prompt to prompt_history
+        await log_prompt(
+            self.db,
+            category=reasoning_type or "unknown",
+            prompt_text=params["message"],
+            project_id=project_id,
+            task_id=task_id,
+            session_key=reasoning_session,
+        )
 
         # Track timing
         start_time = datetime.now(timezone.utc)

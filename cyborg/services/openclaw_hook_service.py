@@ -14,6 +14,7 @@ from cyborg.config import OpenClawHookSettings, Settings
 from cyborg.database import Database
 from cyborg.models import NotificationDeliveryStatus, NotificationType
 from cyborg.services.base import BaseService, utcnow
+from cyborg.services.prompt_history import log_prompt
 from cyborg.services.session_route_service import SessionRouteService
 
 
@@ -68,6 +69,15 @@ class OpenClawHookService(BaseService):
 
         # Task assignments and plan approvals use the agent method with detailed prompt
         if self._should_use_task_assignment_agent(notification, delivery_session_key):
+            metadata = notification.get("metadata", {})
+            await log_prompt(
+                self.db,
+                category="task_assignment",
+                prompt_text=self._render_task_assignment_prompt(notification, route_data, delivery_session_key),
+                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                task_id=metadata.get("task_id") or notification.get("entity_id"),
+                session_key=delivery_session_key,
+            )
             await self._send_gateway_request(
                 "agent",
                 self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
@@ -79,6 +89,15 @@ class OpenClawHookService(BaseService):
         # Needs input notifications (plan approvals, etc.) also use agent method for context
         if notification.get("notification_type") == "needs_input":
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            metadata = notification.get("metadata", {})
+            await log_prompt(
+                self.db,
+                category="needs_input",
+                prompt_text=self._render_needs_input_prompt(notification, route_data, session_key),
+                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                task_id=metadata.get("task_id") or notification.get("entity_id"),
+                session_key=session_key,
+            )
             await self._send_gateway_request(
                 "agent",
                 self._build_needs_input_agent_params(notification, route_data, session_key),
@@ -89,6 +108,15 @@ class OpenClawHookService(BaseService):
 
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
+        metadata = notification.get("metadata", {})
+        await log_prompt(
+            self.db,
+            category="notification",
+            prompt_text=self._render_message(notification),
+            project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+            task_id=metadata.get("task_id") or notification.get("entity_id"),
+            session_key=visible_session_key,
+        )
         await self._send_gateway_request(
             "send",
             self._build_send_params(
