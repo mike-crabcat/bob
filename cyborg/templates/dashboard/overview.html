@@ -6,21 +6,21 @@
 <!-- Page Header -->
 <div class="mb-8">
     <h1 class="text-3xl font-bold mb-2">
-        <span class="neon-text">System</span> Overview
+        <span class="neon-text">Workflow</span> Overview
     </h1>
-    <p class="text-text-secondary">Real-time monitoring and system status</p>
+    <p class="text-text-secondary">Project, approval, and notification queues backed by current Cyborg data</p>
 </div>
 
 <!-- Stats Grid -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-    <!-- System Health -->
-    <div class="glass-card neon-border-green rounded-xl p-5 card-hover">
+    <!-- Projects In Planning -->
+    <div class="glass-card rounded-xl p-5 card-hover border border-accent-purple/20">
         <div class="flex items-center justify-between mb-3">
-            <span class="text-text-secondary text-sm">SYSTEM HEALTH</span>
-            <span class="text-accent-green text-lg">●</span>
+            <span class="text-text-secondary text-sm">PROJECTS IN PLANNING</span>
+            <span class="text-accent-purple text-lg">◇</span>
         </div>
-        <div class="text-3xl font-bold font-mono-data text-accent-green">{{ system_health_score }}%</div>
-        <div class="text-text-muted text-sm mt-1">{{ system_health_status }}</div>
+        <div class="text-3xl font-bold font-mono-data text-accent-purple">{{ planning_projects_count }}</div>
+        <div class="text-text-muted text-sm mt-1">awaiting specs, approvals, or first execution steps</div>
     </div>
 
     <!-- Active Projects -->
@@ -30,7 +30,7 @@
             <span class="text-accent-cyan">◈</span>
         </div>
         <div class="text-3xl font-bold font-mono-data">{{ active_projects_count }}</div>
-        <div class="text-text-muted text-sm mt-1">{{ projects_in_progress }} in progress</div>
+        <div class="text-text-muted text-sm mt-1">currently executing approved project work</div>
     </div>
 
     <!-- Pending Approvals -->
@@ -43,14 +43,14 @@
         <div class="text-text-muted text-sm mt-1">{{ urgent_approvals }} urgent</div>
     </div>
 
-    <!-- At-Risk Projects -->
-    <div class="glass-card rounded-xl p-5 card-hover {% if at_risk_count > 0 %}neon-border-pink{% else %}border-accent-orange/30{% endif %}">
+    <!-- Open Notifications -->
+    <div class="glass-card rounded-xl p-5 card-hover {% if open_notifications_count > 0 %}border border-accent-orange/30{% else %}border border-accent-cyan/20{% endif %}">
         <div class="flex items-center justify-between mb-3">
-            <span class="text-text-secondary text-sm">AT-RISK</span>
-            <span class="{% if at_risk_count > 0 %}text-accent-red{% else %}text-accent-orange{% endif %}">▲</span>
+            <span class="text-text-secondary text-sm">OPEN NOTIFICATIONS</span>
+            <span class="{% if open_notifications_count > 0 %}text-accent-orange{% else %}text-accent-cyan{% endif %}">●</span>
         </div>
-        <div class="text-3xl font-bold font-mono-data {% if at_risk_count > 0 %}text-accent-red{% else %}text-accent-orange{% endif %}">{{ at_risk_count }}</div>
-        <div class="text-text-muted text-sm mt-1">projects need attention</div>
+        <div class="text-3xl font-bold font-mono-data {% if open_notifications_count > 0 %}text-accent-orange{% else %}text-accent-cyan{% endif %}">{{ open_notifications_count }}</div>
+        <div class="text-text-muted text-sm mt-1">pending acknowledgement or resolution</div>
     </div>
 </div>
 
@@ -67,14 +67,14 @@
         </div>
     </div>
 
-    <!-- Reasoning Latency -->
+    <!-- Task Workflow -->
     <div class="glass-card neon-border rounded-xl p-6">
         <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <span class="text-accent-purple">◈</span>
-            Reasoning Latency (24h)
+            <span class="text-accent-purple">○</span>
+            Task Workflow States
         </h2>
         <div class="chart-container" style="height: 250px;">
-            <canvas id="latencyChart"></canvas>
+            <canvas id="taskStatusChart"></canvas>
         </div>
     </div>
 </div>
@@ -85,33 +85,39 @@
     <div class="lg:col-span-2 glass-card neon-border rounded-xl p-6">
         <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
             <span class="text-accent-green">◇</span>
-            Recent Activity
-            <span class="text-xs text-accent-cyan animate-pulse ml-2">● LIVE</span>
+            Recent Workflow Activity
         </h2>
-        <div class="space-y-2 max-h-80 overflow-y-auto" id="activity-feed"
-             hx-ext="sse,sse-connect"
-             sse-connect="/dashboard/events"
-             sse-swap="message">
+        <div class="space-y-2 max-h-80 overflow-y-auto" id="activity-feed">
             {% for activity in recent_activities %}
             <div class="log-entry p-3 rounded-lg bg-bg-card/50">
                 <div class="flex items-center gap-3">
-                    <span class="font-mono-data text-xs text-text-muted">{{ activity.timestamp }}</span>
-                    <span class="activity-icon">{% if activity.type == 'completion' %}✓{% elif activity.type == 'refinement' %}◈{% elif activity.type == 'health' %}▲{% elif activity.type == 'error' %}✖{% else %}●{% endif %}</span>
-                    <span class="flex-1 text-sm">{{ activity.message }}</span>
-                    {% if activity.project_id %}
-                    <a href="/dashboard/projects/{{ activity.project_id }}" class="text-accent-cyan text-xs hover:underline">view</a>
+                    <span class="font-mono-data text-xs text-text-muted">{{ activity.created_at|relative_time }}</span>
+                    <span class="activity-icon">{% if activity.kind == 'journal' %}◇{% else %}●{% endif %}</span>
+                    <div class="flex-1 min-w-0">
+                        <div class="text-xs text-accent-cyan mb-1">{{ activity.label }}</div>
+                        <div class="text-sm font-medium">{{ activity.title }}</div>
+                        <div class="text-xs text-text-muted">{{ activity.summary }}</div>
+                    </div>
+                    {% if activity.link_url %}
+                    <a href="{{ activity.link_url }}" class="text-accent-cyan text-xs hover:underline">open</a>
                     {% endif %}
                 </div>
             </div>
             {% endfor %}
+            {% if not recent_activities %}
+            <div class="text-center py-8 text-text-muted">
+                <div class="text-2xl mb-2">○</div>
+                <div>No recent workflow activity recorded yet</div>
+            </div>
+            {% endif %}
         </div>
     </div>
 
-    <!-- Quick Approvals -->
+    <!-- Approval Queue -->
     <div class="glass-card neon-border-pink rounded-xl p-6">
         <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
             <span class="text-accent-pink">⚡</span>
-            Pending Approvals
+            Approvals Queue
         </h2>
         <div class="space-y-3">
             {% if pending_approval_items %}
@@ -125,17 +131,17 @@
                     </div>
                     <div class="text-sm font-medium mb-1">{{ approval.title }}</div>
                     <div class="text-xs text-text-muted mb-3">{{ approval.description|truncate(80) }}</div>
-                    <div class="flex gap-2">
-                        <button hx-post="/dashboard/approve/{{ approval.id }}"
-                                hx-target="#approval-{{ approval.id }}"
-                                class="flex-1 px-3 py-1.5 text-xs bg-accent-green/20 text-accent-green rounded hover:bg-accent-green/30 transition-colors">
-                            Approve
-                        </button>
-                        <button hx-post="/dashboard/reject/{{ approval.id }}"
-                                hx-target="#approval-{{ approval.id }}"
-                                class="flex-1 px-3 py-1.5 text-xs bg-accent-red/20 text-accent-red rounded hover:bg-accent-red/30 transition-colors">
-                            Reject
-                        </button>
+                    <div class="flex items-center justify-between gap-2 text-xs">
+                        <span class="text-text-muted">Review this item in the appropriate workflow.</span>
+                        {% if approval.review_href %}
+                        <a href="{{ approval.review_href }}" class="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan rounded hover:bg-accent-cyan/30 transition-colors">
+                            Review
+                        </a>
+                        {% else %}
+                        <a href="/dashboard/approvals" class="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan rounded hover:bg-accent-cyan/30 transition-colors">
+                            Queue
+                        </a>
+                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}
@@ -156,36 +162,86 @@
 
 <!-- Bottom Row -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-    <!-- Tasks by Status -->
+    <!-- Saved Health Attention -->
     <div class="glass-card neon-border rounded-xl p-6">
         <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <span class="text-accent-cyan">◇</span>
-            Tasks by Status
+            <span class="text-accent-orange">▲</span>
+            Projects Needing Attention
         </h2>
-        <div class="chart-container" style="height: 180px;">
-            <canvas id="taskStatusChart"></canvas>
+        <p class="text-xs text-text-muted mb-4">Based on saved health checks, not live host monitoring.</p>
+        <div class="space-y-3">
+            {% for project in attention_projects %}
+            <a href="/dashboard/projects/{{ project.id }}" class="block p-3 rounded-lg bg-bg-card/50 border border-accent-orange/20 hover:border-accent-orange/40 transition-colors">
+                <div class="flex items-center justify-between gap-3 mb-1">
+                    <div class="text-sm font-medium">{{ project.title }}</div>
+                    <span class="text-xs px-2 py-1 rounded {% if project.risk_level == 'critical' %}bg-accent-red/20 text-accent-red{% else %}bg-accent-orange/20 text-accent-orange{% endif %}">
+                        {{ project.risk_level|upper }}
+                    </span>
+                </div>
+                <div class="text-xs text-text-muted">
+                    {% if project.health_score is not none %}{{ (project.health_score * 100)|int }}% health · {% endif %}
+                    last checked {{ project.last_checked|relative_time }}
+                </div>
+            </a>
+            {% endfor %}
+            {% if not attention_projects %}
+            <div class="text-sm text-text-muted">{{ attention_note }}</div>
+            {% endif %}
         </div>
     </div>
 
-    <!-- Health Distribution -->
+    <!-- Open Notifications -->
     <div class="glass-card neon-border rounded-xl p-6">
         <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <span class="text-accent-purple">▲</span>
-            Project Health Distribution
+            <span class="text-accent-cyan">●</span>
+            Open Notifications
         </h2>
-        <div class="chart-container" style="height: 180px;">
-            <canvas id="healthDistributionChart"></canvas>
+        <div class="space-y-3">
+            {% for notification in open_notifications %}
+            <div class="p-3 rounded-lg bg-bg-card/50 border border-accent-cyan/10">
+                <div class="flex items-center justify-between gap-3 mb-1">
+                    <div class="text-sm font-medium">{{ notification.title }}</div>
+                    <span class="text-xs text-text-muted">{{ notification.created_at|relative_time }}</span>
+                </div>
+                <div class="text-xs text-accent-cyan mb-1">{{ notification.type_label }}</div>
+                <div class="text-xs text-text-muted mb-2">{{ notification.message|truncate(120) }}</div>
+                <div class="flex items-center justify-between text-xs">
+                    <span class="text-text-muted">Delivery: {{ notification.delivery_status|upper }}</span>
+                    {% if notification.link_url %}
+                    <a href="{{ notification.link_url }}" class="text-accent-cyan hover:underline">open</a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+            {% if not open_notifications %}
+            <div class="text-sm text-text-muted">No open notifications.</div>
+            {% endif %}
         </div>
     </div>
 
-    <!-- Log Event Types -->
+    <!-- Recent Outcomes -->
     <div class="glass-card neon-border rounded-xl p-6">
         <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <span class="text-accent-green">◈</span>
-            Log Events (24h)
+            <span class="text-accent-green">✓</span>
+            Recent Outcomes
         </h2>
-        <div class="chart-container" style="height: 180px;">
-            <canvas id="logEventsChart"></canvas>
+        <div class="space-y-3">
+            {% for outcome in recent_outcomes %}
+            <div class="p-3 rounded-lg bg-bg-card/50 border border-accent-green/10">
+                <div class="flex items-center justify-between gap-3 mb-1">
+                    <div class="text-sm font-medium">{{ outcome.title }}</div>
+                    <span class="text-xs text-text-muted">{{ outcome.created_at|relative_time }}</span>
+                </div>
+                <div class="text-xs text-accent-green mb-1">{{ outcome.type_label }}</div>
+                <div class="text-xs text-text-muted mb-2">{{ outcome.message|truncate(120) }}</div>
+                {% if outcome.link_url %}
+                <a href="{{ outcome.link_url }}" class="text-xs text-accent-cyan hover:underline">open project</a>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% if not recent_outcomes %}
+            <div class="text-sm text-text-muted">No recent result notifications recorded yet.</div>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -234,10 +290,10 @@ const chartConfig = {
 new Chart(document.getElementById('projectStatusChart'), {
     type: 'doughnut',
     data: {
-        labels: ['Active', 'Completed', 'Blocked', 'Paused'],
+        labels: ['Planning', 'Active', 'Paused', 'Closed'],
         datasets: [{
             data: {{ project_status_data|safe }},
-            backgroundColor: [chartColors.cyan, chartColors.green, chartColors.red, chartColors.orange],
+            backgroundColor: [chartColors.purple, chartColors.cyan, chartColors.orange, chartColors.green],
             borderColor: '#12121a',
             borderWidth: 2,
             hoverOffset: 10
@@ -253,48 +309,29 @@ new Chart(document.getElementById('projectStatusChart'), {
     }
 });
 
-// Reasoning Latency Line Chart
-new Chart(document.getElementById('latencyChart'), {
-    type: 'line',
-    data: {
-        labels: {{ latency_labels|safe }},
-        datasets: [{
-            label: 'Latency (ms)',
-            data: {{ latency_data|safe }},
-            borderColor: chartColors.purple,
-            backgroundColor: 'rgba(178, 38, 255, 0.1)',
-            fill: true,
-            tension: 0.4,
-            pointBackgroundColor: chartColors.purple,
-            pointBorderColor: '#12121a',
-            pointBorderWidth: 2,
-            pointRadius: 3
-        }]
-    },
-    options: chartConfig
-});
-
 // Task Status Bar Chart
 new Chart(document.getElementById('taskStatusChart'), {
     type: 'bar',
     data: {
-        labels: ['Pending', 'Active', 'Completed', 'Failed', 'Blocked'],
+        labels: ['Planning', 'Pending', 'Active', 'Blocked', 'Completed', 'Failed'],
         datasets: [{
             label: 'Tasks',
             data: {{ task_status_data|safe }},
             backgroundColor: [
+                'rgba(178, 38, 255, 0.45)',
                 'rgba(154, 154, 166, 0.5)',
                 chartColors.cyan,
+                chartColors.orange,
                 chartColors.green,
-                chartColors.red,
-                chartColors.orange
+                chartColors.red
             ],
             borderColor: [
+                chartColors.purple,
                 '#6b7280',
                 chartColors.cyan,
+                chartColors.orange,
                 chartColors.green,
-                chartColors.red,
-                chartColors.orange
+                chartColors.red
             ],
             borderWidth: 1,
             borderRadius: 4
@@ -303,51 +340,6 @@ new Chart(document.getElementById('taskStatusChart'), {
     options: {
         ...chartConfig,
         indexAxis: 'y',
-        plugins: { legend: { display: false } }
-    }
-});
-
-// Health Distribution Pie Chart
-new Chart(document.getElementById('healthDistributionChart'), {
-    type: 'pie',
-    data: {
-        labels: ['Low Risk', 'Medium Risk', 'High Risk', 'Critical'],
-        datasets: [{
-            data: {{ health_distribution_data|safe }},
-            backgroundColor: [chartColors.green, chartColors.orange, chartColors.red, '#ff0055'],
-            borderColor: '#12121a',
-            borderWidth: 2
-        }]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } }
-    }
-});
-
-// Log Events Bar Chart
-new Chart(document.getElementById('logEventsChart'), {
-    type: 'bar',
-    data: {
-        labels: ['reasoning_request', 'autonomy_decision', 'health_check', 'function_call', 'error'],
-        datasets: [{
-            label: 'Events',
-            data: {{ log_events_data|safe }},
-            backgroundColor: [
-                'rgba(0, 240, 255, 0.5)',
-                'rgba(255, 0, 255, 0.5)',
-                'rgba(178, 38, 255, 0.5)',
-                'rgba(0, 255, 159, 0.5)',
-                'rgba(255, 0, 85, 0.5)'
-            ],
-            borderColor: [chartColors.cyan, chartColors.pink, chartColors.purple, chartColors.green, chartColors.red],
-            borderWidth: 1,
-            borderRadius: 4
-        }]
-    },
-    options: {
-        ...chartConfig,
         plugins: { legend: { display: false } }
     }
 });
