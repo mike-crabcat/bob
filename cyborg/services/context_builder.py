@@ -168,7 +168,7 @@ class ContextBuilder(BaseService):
             cutoff = utcnow() - timedelta(hours=24)
             return [
                 t for t in tasks
-                if t["status"] in ["active", "pending", "planning"]
+                if t["status"] in ["active", "pending"]
                 or (
                     self._coerce_datetime(t.get("completed_at")) is not None
                     and self._coerce_datetime(t.get("completed_at")) > cutoff
@@ -178,8 +178,8 @@ class ContextBuilder(BaseService):
         # STANDARD / COMPREHENSIVE
         filtered = []
 
-        # Always include active/pending/planning tasks
-        filtered.extend([t for t in tasks if t["status"] in ["active", "pending", "planning"]])
+        # Always include active and pending tasks
+        filtered.extend([t for t in tasks if t["status"] in ["active", "pending"]])
 
         # Include recently completed (last 7 days for standard, 14 for comprehensive)
         days = 14 if scope == ContextScope.COMPREHENSIVE else 7
@@ -249,7 +249,6 @@ class ContextBuilder(BaseService):
 
         return {
             "total": len(tasks),
-            "planning": len([t for t in tasks if t["status"] == "planning"]),
             "pending": len([t for t in tasks if t["status"] == "pending"]),
             "active": len([t for t in tasks if t["status"] == "active"]),
             "completed": len([t for t in tasks if t["status"] == "completed"]),

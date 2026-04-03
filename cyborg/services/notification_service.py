@@ -19,7 +19,6 @@ from cyborg.models import (
     NotificationResponse,
     NotificationStatus,
     NotificationType,
-    PlanStatus,
     ProjectSpecStatus,
     ProjectState,
     TaskStatus,
@@ -117,11 +116,10 @@ class NotificationService(BaseService):
             """
             SELECT *
             FROM tasks
-            WHERE deleted_at IS NULL AND status IN (?, ?, ?, ?)
+            WHERE deleted_at IS NULL AND status IN (?, ?, ?)
             ORDER BY created_at ASC
             """,
             (
-                TaskStatus.PLANNING.value,
                 TaskStatus.BLOCKED.value,
                 TaskStatus.PENDING.value,
                 TaskStatus.ACTIVE.value,
@@ -288,7 +286,7 @@ class NotificationService(BaseService):
             )
             return
 
-        source_updated_at = row.get("current_plan_id") or row.get("updated_at")
+        source_updated_at = row.get("updated_at")
         existing = await self.db.fetch_one(
             """
             SELECT id
@@ -413,16 +411,6 @@ class NotificationService(BaseService):
                 await self._create_event_reminder_notification(row, now)
 
     async def _create_task_input_notification(self, row: dict[str, Any], now: datetime) -> None:
-        latest_plan = await self.db.fetch_one(
-            """
-            SELECT status, feedback
-            FROM plans
-            WHERE task_id = ?
-            ORDER BY version_number DESC
-            LIMIT 1
-            """,
-            (row["id"],),
-        )
         parent_project = await self._get_parent_project(row["id"])
         task_metadata = json_loads(row.get("metadata"), {})
 
@@ -431,20 +419,9 @@ class NotificationService(BaseService):
             message = row.get("blocked_reason") or "This task is blocked and waiting for user input."
             if row.get("blocked_resume_instructions"):
                 message += f"\n\nResume instructions: {row['blocked_resume_instructions']}"
-        elif latest_plan and latest_plan["status"] == PlanStatus.REJECTED.value:
-            title = f"Task plan needs revision: {row['title']}"
-            message = "The latest task plan was rejected."
-            if latest_plan.get("feedback"):
-                message += f"\n\nFeedback: {latest_plan['feedback']}"
-        elif latest_plan and latest_plan["status"] == PlanStatus.PENDING_APPROVAL.value:
-            title = f"Task plan awaiting approval: {row['title']}"
-            message = "The task is waiting for plan approval before it can move to pending."
-            # Include the plan content for approval
-            if row.get("plan"):
-                message += f"\n\nProposed plan:\n{row['plan']}"
         else:
-            title = f"Task needs planning: {row['title']}"
-            message = "The task still needs a usable approved plan before it can start."
+            title = f"Task needs input: {row['title']}"
+            message = "This task is waiting for user input."
 
         if parent_project is not None:
             message += f"\n\nProject: {parent_project['title']} ({parent_project['id']})"
@@ -832,7 +809,7 @@ class NotificationService(BaseService):
         )
 
     async def _task_needs_input(self, row: dict[str, Any]) -> bool:
-        if row["status"] not in {TaskStatus.PLANNING.value, TaskStatus.BLOCKED.value}:
+        if row["status"] != TaskStatus.BLOCKED.value:
             return False
 
         parent_id = row.get("parent_id")

@@ -57,7 +57,7 @@ async def context_summary(database: Database = Depends(get_database)) -> Context
                 LIMIT 1
             ) AS parent_project_title
         FROM tasks AS t
-        WHERE deleted_at IS NULL AND status IN ('planning', 'active', 'pending', 'paused')
+        WHERE deleted_at IS NULL AND status IN ('active', 'pending', 'paused')
         ORDER BY CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -125,7 +125,7 @@ async def context_tasks(database: Database = Depends(get_database)) -> ContextTa
                 LIMIT 1
             ) AS parent_project_title
         FROM tasks AS t
-        WHERE deleted_at IS NULL AND status IN ('planning', 'active', 'pending', 'paused')
+        WHERE deleted_at IS NULL AND status IN ('active', 'pending', 'paused')
         ORDER BY CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2

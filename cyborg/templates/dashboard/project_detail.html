@@ -157,6 +157,62 @@
     </div>
 </div>
 
+<!-- Prompt History -->
+<div class="glass-card neon-border rounded-xl p-6 mb-8">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-orange">◈</span>
+        Prompt History
+        <span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-accent-orange/20 text-accent-orange">{{ prompts|length }}</span>
+    </h2>
+    <div class="space-y-2">
+        {% for prompt in prompts[:20] %}
+        {% set category_colors = {
+            'plan_generation': 'text-accent-cyan bg-accent-cyan/15',
+            'criteria_evaluation': 'text-accent-cyan bg-accent-cyan/15',
+            'strategy_refinement': 'text-accent-cyan bg-accent-cyan/15',
+            'learning_extraction': 'text-accent-cyan bg-accent-cyan/15',
+            'task_planning': 'text-accent-cyan bg-accent-cyan/15',
+            'health_analysis': 'text-accent-cyan bg-accent-cyan/15',
+            'follow_up_generation': 'text-accent-cyan bg-accent-cyan/15',
+            'task_assignment': 'text-accent-purple bg-accent-purple/15',
+            'needs_input': 'text-accent-orange bg-accent-orange/15',
+            'notification': 'text-accent-pink bg-accent-pink/15',
+        } %}
+        <div class="p-3 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors"
+             x-data="{ expanded: false }">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="text-xs px-2 py-0.5 rounded {{ category_colors.get(prompt.category, 'text-text-muted bg-bg-elevated') }}">
+                        {{ prompt.category.replace('_', ' ') }}
+                    </span>
+                    {% if prompt.task_id %}
+                    <a href="/dashboard/projects/{{ project.id }}" class="text-xs text-accent-cyan hover:underline font-mono-data">
+                        {{ prompt.task_id[:8] }}
+                    </a>
+                    {% endif %}
+                    {% if prompt.token_count_estimate %}
+                    <span class="text-xs text-text-muted">{{ prompt.token_count_estimate }} tokens</span>
+                    {% endif %}
+                    <span class="text-xs text-text-muted ml-auto">{{ prompt.timestamp|relative_time }}</span>
+                </div>
+                <div class="text-sm text-text-primary">
+                    <span x-show="!expanded">{{ prompt.prompt_text[:200] }}{% if prompt.prompt_text|length > 200 %}...{% endif %}</span>
+                    <span x-show="expanded" x-cloak>{{ prompt.prompt_text }}</span>
+                </div>
+                {% if prompt.prompt_text|length > 200 %}
+                <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline mt-1">
+                    <span x-show="!expanded">Show more</span>
+                    <span x-show="expanded" x-cloak>Show less</span>
+                </button>
+                {% endif %}
+            </div>
+        </div>
+        {% else %}
+        <div class="text-text-muted text-sm">No prompts logged yet</div>
+        {% endfor %}
+    </div>
+</div>
+
 <!-- Journal Timeline -->
 <div class="glass-card neon-border rounded-xl p-6">
     <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">

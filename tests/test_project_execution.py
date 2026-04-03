@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from cyborg.config import Settings
 from cyborg.main import create_app
+from cyborg.services.task_service import TaskService
 
 PROJECT_ROUTE_METADATA = {
     "channel": "whatsapp",
@@ -31,6 +33,11 @@ def approve_latest_project_spec(client: TestClient, project_id: str, approver: s
     approved = client.post(f"/api/v1/project-specs/{spec_id}/approve", json={"approver": approver})
     assert approved.status_code == 200
     return approved.json()
+
+
+def create_task(client: TestClient, **payload: object) -> dict[str, object]:
+    task = asyncio.run(TaskService(client.app.state.db).create_task(payload))
+    return task.model_dump(mode="json")
 
 
 class TestProjectExecution:
@@ -126,16 +133,10 @@ class TestProjectExecution:
             assert len(tasks) == 1
             assert tasks[0]["title"] == "Step 1: First Step"
             assert tasks[0]["status"] == "pending"
-            assert tasks[0]["current_plan_id"] is not None
             assert "Success criteria:" in tasks[0]["plan"]
             assert tasks[0]["metadata"]["project_step_index"] == 0
             assert tasks[0]["metadata"]["channel"] == "whatsapp"
             assert tasks[0]["metadata"]["session_key"] == "whatsappgroup-execution"
-            plans = client.get(f"/api/v1/tasks/{tasks[0]['id']}/plans").json()
-            assert plans["current_plan_id"] == tasks[0]["current_plan_id"]
-            assert len(plans["plans"]) == 1
-            assert plans["plans"][0]["status"] == "approved"
-            assert plans["plans"][0]["is_current"] is True
 
     def test_task_completion_triggers_next_task(self, tmp_path: Path) -> None:
         """Test completing a task creates the next task."""
@@ -191,7 +192,6 @@ class TestProjectExecution:
             assert len(tasks) == 2
             step2 = [t for t in tasks if "Step 2" in t["title"]][0]
             assert step2["status"] == "pending"
-            assert step2["current_plan_id"] is not None
             assert step2["metadata"]["project_step_index"] == 1
 
     def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path) -> None:
@@ -312,7 +312,6 @@ class TestProjectExecution:
             assert len(follow_up_tasks) == 1
             follow_up = follow_up_tasks[0]
             assert follow_up["status"] == "pending"
-            assert follow_up["current_plan_id"] is not None
             assert follow_up["project_ids"] == [project_id]
             assert follow_up["metadata"]["auto_created_by_project"] is True
             assert follow_up["metadata"]["autonomy_cycle_completed_task_count"] == 1
@@ -434,27 +433,15 @@ class TestProjectExecution:
             project_id = project["id"]
 
             # Create a manual task
-            task = client.post(
-                "/api/v1/tasks",
-                json={
-                    "title": "Manual Task",
-                    "description": "A manual task",
-                    "plan": "1. Do the manual task. 2. Report the result.",
-                    "priority": "medium",
-                    "project_ids": [project_id],
-                },
-            ).json()
-            task_id = task["id"]
-
-            # Submit and approve plan
-            plan = client.post(
-                f"/api/v1/tasks/{task_id}/plans",
-                json={"content": "Plan"},
-            ).json()
-            client.post(
-                f"/api/v1/plans/{plan['id']}/approve",
-                json={"approver": "Bob"},
+            task = create_task(
+                client,
+                title="Manual Task",
+                description="A manual task",
+                plan="1. Do the manual task. 2. Report the result.",
+                priority="medium",
+                project_ids=[project_id],
             )
+            task_id = str(task["id"])
 
             # Complete the task
             client.post(f"/api/v1/tasks/{task_id}/start")
@@ -538,27 +525,15 @@ class TestProjectExecution:
             client.post(f"/api/v1/projects/{project_id}/start")
 
             # Create and complete a task manually
-            task = client.post(
-                "/api/v1/tasks",
-                json={
-                    "title": "Manual Task",
-                    "description": "A task",
-                    "plan": "1. Do the task. 2. Evaluate the result.",
-                    "priority": "medium",
-                    "project_ids": [project_id],
-                },
-            ).json()
-            task_id = task["id"]
-
-            # Submit and approve plan
-            plan = client.post(
-                f"/api/v1/tasks/{task_id}/plans",
-                json={"content": "Plan"},
-            ).json()
-            client.post(
-                f"/api/v1/plans/{plan['id']}/approve",
-                json={"approver": "Bob"},
+            task = create_task(
+                client,
+                title="Manual Task",
+                description="A task",
+                plan="1. Do the task. 2. Evaluate the result.",
+                priority="medium",
+                project_ids=[project_id],
             )
+            task_id = str(task["id"])
 
             # Evaluate before completion - should not close (criteria not met)
             result = client.post(f"/api/v1/projects/{project_id}/evaluate")

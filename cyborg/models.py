@@ -75,7 +75,6 @@ class CyborgModel(BaseModel):
 
 
 class TaskStatus(StrEnum):
-    PLANNING = "planning"
     PENDING = "pending"
     ACTIVE = "active"
     PAUSED = "paused"
@@ -314,7 +313,7 @@ class TaskFields(CyborgModel):
     description: str | None = None
     requested_by: str | None = Field(default=None, max_length=200)
     plan: str | None = None
-    status: TaskStatus = TaskStatus.PLANNING
+    status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
     parent_id: UUID | None = None
     retry_config: RetryConfig | None = None
@@ -417,7 +416,6 @@ class TaskResponse(TaskFields, EntityRef, SoftDeleteFields):
     result: str | None = None
     project_ids: list[UUID] = Field(default_factory=list)
     blocked_at: datetime | None = None
-    current_plan_id: UUID | None = None
     notification_count: int = 0
     last_notification_at: datetime | None = None
     needs_input_since: datetime | None = None
@@ -501,100 +499,6 @@ class TaskUnblockRequest(CyborgModel):
 
 class TaskRetryRequest(CyborgModel):
     details: MetadataDict = Field(default_factory=dict)
-
-
-# Plan versioning models
-
-
-class PlanStatus(StrEnum):
-    DRAFT = "draft"
-    PENDING_APPROVAL = "pending_approval"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-
-
-class PlanFields(CyborgModel):
-    """Base fields for plan versions."""
-    task_id: UUID
-    version_number: int = Field(ge=1)
-    content: str = Field(min_length=1)
-    status: PlanStatus = PlanStatus.DRAFT
-    feedback: str | None = None
-    is_current: bool = False
-
-    @field_validator("content")
-    @classmethod
-    def content_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("content must not be blank")
-        return stripped
-
-
-class PlanCreate(CyborgModel):
-    """Request to create a new plan version."""
-    content: str = Field(min_length=1, description="The plan content")
-
-    @field_validator("content")
-    @classmethod
-    def content_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("content must not be blank")
-        return stripped
-
-
-class PlanSubmitRequest(CyborgModel):
-    """Request to submit a plan for approval."""
-    content: str = Field(min_length=1, description="The plan content to submit")
-
-    @field_validator("content")
-    @classmethod
-    def content_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("content must not be blank")
-        return stripped
-
-
-class PlanApproveRequest(CyborgModel):
-    """Request to approve a plan."""
-    approver: str = Field(min_length=1, description="Name of the person approving the plan")
-
-    @field_validator("approver")
-    @classmethod
-    def approver_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("approver must not be blank")
-        return stripped
-
-
-class PlanRejectRequest(CyborgModel):
-    """Request to reject a plan with feedback."""
-    feedback: str = Field(min_length=1, description="Reason for rejection")
-
-    @field_validator("feedback")
-    @classmethod
-    def feedback_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("feedback must not be blank")
-        return stripped
-
-
-class PlanResponse(PlanFields, EntityRef):
-    """Response model for a plan version."""
-    created_at: datetime
-    approved_at: datetime | None = None
-    approved_by: str | None = None
-
-
-class PlanListResponse(CyborgModel):
-    """Response for listing plans."""
-    task_id: UUID
-    plans: list[PlanResponse]
-    current_plan_id: UUID | None = None
 
 
 class ProjectFields(CyborgModel):

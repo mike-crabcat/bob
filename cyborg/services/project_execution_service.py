@@ -407,7 +407,7 @@ class ProjectExecutionService(BaseService):
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as blocked,
-                SUM(CASE WHEN status IN (?, ?, ?, ?) THEN 1 ELSE 0 END) as open_count
+                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as open_count
             FROM tasks AS t
             INNER JOIN project_tasks AS pt ON pt.task_id = t.id
             WHERE pt.project_id = ? AND t.deleted_at IS NULL
@@ -416,7 +416,6 @@ class ProjectExecutionService(BaseService):
                 TaskStatus.COMPLETED.value,
                 TaskStatus.FAILED.value,
                 TaskStatus.BLOCKED.value,
-                TaskStatus.PLANNING.value,
                 TaskStatus.BLOCKED.value,
                 TaskStatus.PENDING.value,
                 TaskStatus.ACTIVE.value,
@@ -560,7 +559,7 @@ class ProjectExecutionService(BaseService):
             INNER JOIN project_tasks AS pt ON pt.task_id = t.id
             WHERE pt.project_id = ? AND t.status IN (?, ?, ?) AND t.deleted_at IS NULL
             """,
-            (project_id, TaskStatus.PLANNING.value, TaskStatus.PENDING.value, TaskStatus.ACTIVE.value),
+            (project_id, TaskStatus.BLOCKED.value, TaskStatus.PENDING.value, TaskStatus.ACTIVE.value),
         )
 
         if open_tasks:
@@ -582,12 +581,11 @@ class ProjectExecutionService(BaseService):
             INNER JOIN project_tasks AS pt ON pt.task_id = t.id
             WHERE pt.project_id = ?
               AND t.deleted_at IS NULL
-              AND t.status IN (?, ?, ?, ?)
+              AND t.status IN (?, ?, ?)
             LIMIT 1
             """,
             (
                 project_id,
-                TaskStatus.PLANNING.value,
                 TaskStatus.BLOCKED.value,
                 TaskStatus.PENDING.value,
                 TaskStatus.ACTIVE.value,

@@ -79,7 +79,8 @@ class ProjectService(BaseService):
         row = await self._get_project_row(project_id)
         return ProjectResponse.model_validate(await self._decode_project_row(row))
 
-    async def create_project(self, payload: ProjectCreate) -> ProjectResponse:
+    async def create_project(self, payload: ProjectCreate | dict[str, Any]) -> ProjectResponse:
+        payload = ProjectCreate.model_validate(payload)
         if payload.state == ProjectState.ACTIVE:
             raise ConflictError("Projects cannot be created directly in 'active' state. Create the project, submit a spec, approve it, then start or execute it.")
 
@@ -327,6 +328,7 @@ class ProjectService(BaseService):
             row["retry_config"] = json_loads(row["retry_config"], None)
             row["metadata"] = json_loads(row["metadata"], {})
             row["project_ids"] = await self._get_project_ids_for_task(row["id"])
+            row.pop("current_plan_id", None)
             tasks.append(TaskResponse.model_validate(row))
         return tasks
 

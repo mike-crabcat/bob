@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel, model_validator
 
 from cyborg.dependencies import get_task_service
+
 from cyborg.models import (
     TaskBlockRequest,
-    TaskCreate,
     TaskFailureRequest,
     TaskHistoryResponse,
     TaskResponse,
@@ -34,14 +34,6 @@ async def list_tasks(
     service: TaskService = Depends(get_task_service),
 ) -> list[TaskResponse]:
     return await service.list_tasks(status=status, parent_id=str(parent_id) if parent_id else None)
-
-
-@router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-async def create_task(
-    payload: TaskCreate,
-    service: TaskService = Depends(get_task_service),
-) -> TaskResponse:
-    return await service.create_task(payload)
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
@@ -137,15 +129,6 @@ async def upsert_step(
     service: TaskService = Depends(get_task_service),
 ) -> TaskStepResponse:
     return await service.upsert_step(str(task_id), payload)
-
-
-@router.post("/{task_id}/subtasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-async def create_subtask(
-    task_id: UUID,
-    payload: TaskCreate,
-    service: TaskService = Depends(get_task_service),
-) -> TaskResponse:
-    return await service.create_subtask(str(task_id), payload)
 
 
 @router.get("/{task_id}/history", response_model=list[TaskHistoryResponse])

@@ -17,12 +17,10 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ServiceError
 from cyborg.models import HealthResponse
-from cyborg.routers import calendars, contacts, context, dashboard, health, learning, notifications, openclaw, plans, planning, project_specs, projects, session_routes, tasks, webhooks
+from cyborg.routers import calendars, contacts, context, dashboard, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks
 from cyborg.structured_logging import configure_logging, CorrelationIdMiddleware
 
-
 logger = logging.getLogger(__name__)
-
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -108,7 +106,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(context.router)
     app.include_router(notifications.router)
     app.include_router(openclaw.router)
-    app.include_router(plans.router)
     app.include_router(planning.router)
     app.include_router(health.router)
     app.include_router(learning.router)
@@ -119,9 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     return app
 
-
 app = create_app()
-
 
 async def _notification_loop(database: Database, *, interval_seconds: float, stop_event: asyncio.Event) -> None:
     """Periodically sync and dispatch notifications without relying on client polling."""

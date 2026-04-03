@@ -100,7 +100,7 @@ class HealthMonitorService(BaseService):
                 TaskStatus.BLOCKED.value,
                 TaskStatus.ACTIVE.value,
                 TaskStatus.PENDING.value,
-                TaskStatus.PLANNING.value,
+                TaskStatus.PENDING.value,
                 project_id,
             ),
         )

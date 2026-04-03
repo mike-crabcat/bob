@@ -313,7 +313,7 @@ new Chart(document.getElementById('projectStatusChart'), {
 new Chart(document.getElementById('taskStatusChart'), {
     type: 'bar',
     data: {
-        labels: ['Planning', 'Pending', 'Active', 'Blocked', 'Completed', 'Failed'],
+        labels: ['Pending', 'Active', 'Blocked', 'Completed', 'Failed'],
         datasets: [{
             label: 'Tasks',
             data: {{ task_status_data|safe }},

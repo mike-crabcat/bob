@@ -8,6 +8,8 @@ import types
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import pytest
 
 import cyborg.services.calendar_service as calendar_service_module
 import cyborg.services.notification_service as notification_service_module
@@ -15,6 +17,7 @@ import cyborg.services.openclaw_hook_service as openclaw_hook_service_module
 import cyborg.services.task_service as task_service_module
 from cyborg.config import OpenClawHookSettings, Settings
 from cyborg.database import Database
+from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.main import create_app
 from cyborg.services.session_route_service import SessionRouteService
 from cyborg.services.task_service import TaskService
@@ -29,46 +32,31 @@ def make_client(tmp_path: Path, settings: Settings | None = None) -> TestClient:
     return TestClient(create_app(resolved_settings))
 
 
+def create_task(client: TestClient, **payload: object) -> dict[str, object]:
+    task = asyncio.run(TaskService(client.app.state.db).create_task(payload))
+    return task.model_dump(mode="json")
+
+
 def test_health_and_task_retry_loop(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json() == {"status": "ok", "database": "ok"}
 
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Investigate sync issue",
-                "requested_by": "Bob",
-                "priority": "high",
-                "plan": "1. Inspect logs. 2. Retry sync. 3. Report outcome.",
-                "retry_config": {
-                    "max_attempts": 2,
-                    "on_failure": "retry_from",
-                    "retry_from_step": 2,
-                },
+        task = create_task(
+            client,
+            title="Investigate sync issue",
+            requested_by="Bob",
+            priority="high",
+            plan="1. Inspect logs. 2. Retry sync. 3. Report outcome.",
+            retry_config={
+                "max_attempts": 2,
+                "on_failure": "retry_from",
+                "retry_from_step": 2,
             },
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-        assert task.json()["status"] == "planning"
-
-        pre_plan_start = client.post(f"/api/v1/tasks/{task_id}/start")
-        assert pre_plan_start.status_code == 409
-
-        plan = client.get(f"/api/v1/tasks/{task_id}/plans")
-        assert plan.status_code == 200
-        plan_id = plan.json()["plans"][0]["id"]
-
-        approved = client.post(
-            f"/api/v1/plans/{plan_id}/approve",
-            json={"approver": "Bob"},
-        )
-        assert approved.status_code == 200
-
-        pending_task = client.get(f"/api/v1/tasks/{task_id}")
-        assert pending_task.status_code == 200
-        assert pending_task.json()["status"] == "pending"
+        task_id = str(task["id"])
+        assert task["status"] == "pending"
 
         started = client.post(f"/api/v1/tasks/{task_id}/start")
         assert started.status_code == 200
@@ -112,39 +100,20 @@ def test_health_and_task_retry_loop(tmp_path: Path) -> None:
         assert "retry_from_step" in actions
 
 
-def test_task_planning_gate_requires_plan_approval(tmp_path: Path) -> None:
+def test_task_creation_routes_are_not_available(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        task = client.post("/api/v1/tasks", json={"title": "Need a plan", "plan": "1. Plan the work. 2. Do the work."})
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-        assert task.json()["status"] == "planning"
+        direct_task = client.post("/api/v1/tasks", json={"title": "Need a plan", "plan": "1. Plan. 2. Do."})
+        assert direct_task.status_code == 405
 
-        missing_plan = client.post("/api/v1/tasks", json={"title": "Missing plan"})
-        assert missing_plan.status_code == 422
+        project = client.post("/api/v1/projects", json={"title": "Route removal"})
+        assert project.status_code == 201
+        project_id = project.json()["id"]
 
-        update_pending = client.put(f"/api/v1/tasks/{task_id}", json={"status": "pending"})
-        assert update_pending.status_code == 409
-
-        plans = client.get(f"/api/v1/tasks/{task_id}/plans")
-        assert plans.status_code == 200
-        plan_id = plans.json()["plans"][0]["id"]
-
-        start_without_approval = client.post(f"/api/v1/tasks/{task_id}/start")
-        assert start_without_approval.status_code == 409
-
-        approved = client.post(
-            f"/api/v1/plans/{plan_id}/approve",
-            json={"approver": "Bob"},
+        nested_task = client.post(
+            f"/api/v1/projects/{project_id}/tasks",
+            json={"title": "Should fail", "plan": "1. Plan. 2. Do."},
         )
-        assert approved.status_code == 200
-
-        task_after_approval = client.get(f"/api/v1/tasks/{task_id}")
-        assert task_after_approval.status_code == 200
-        assert task_after_approval.json()["status"] == "pending"
-
-        started = client.post(f"/api/v1/tasks/{task_id}/start")
-        assert started.status_code == 200
-        assert started.json()["status"] == "active"
+        assert nested_task.status_code == 405
 
 
 def test_project_and_context_endpoints(tmp_path: Path) -> None:
@@ -163,19 +132,17 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
         assert project.status_code == 201
         project_id = project.json()["id"]
 
-        task = client.post(
-            f"/api/v1/projects/{project_id}/tasks",
-            json={
-                "title": "Draft proposal",
-                "priority": "critical",
-                "plan": "1. Draft proposal. 2. Review. 3. Deliver.",
-            },
+        task = create_task(
+            client,
+            title="Draft proposal",
+            priority="critical",
+            plan="1. Draft proposal. 2. Review. 3. Deliver.",
+            project_ids=[project_id],
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-        assert task.json()["project_ids"] == [project_id]
-        assert task.json()["metadata"]["channel"] == "whatsapp"
-        assert task.json()["metadata"]["session_key"] == "whatsappgroup-proposals"
+        task_id = str(task["id"])
+        assert task["project_ids"] == [project_id]
+        assert task["metadata"]["channel"] == "whatsapp"
+        assert task["metadata"]["session_key"] == "whatsappgroup-proposals"
 
         journal = client.post(
             f"/api/v1/projects/{project_id}/journal",
@@ -194,7 +161,7 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
         summary = client.get("/api/v1/context/summary")
         assert summary.status_code == 200
         payload = summary.json()
-        assert payload["task_counts"]["planning"] == 1
+        assert payload["task_counts"]["pending"] == 1
         assert payload["project_counts"]["planning"] == 1
         assert payload["active_tasks"][0]["id"] == task_id
         assert payload["active_tasks"][0]["parent_project_id"] == project_id
@@ -240,15 +207,13 @@ def test_project_can_infer_source_route_from_linked_task(tmp_path: Path) -> None
         assert source_project.status_code == 201
         source_project_id = source_project.json()["id"]
 
-        task = client.post(
-            f"/api/v1/projects/{source_project_id}/tasks",
-            json={
-                "title": "Linked task",
-                "plan": "1. Draft. 2. Review. 3. Ship.",
-            },
+        task = create_task(
+            client,
+            title="Linked task",
+            plan="1. Draft. 2. Review. 3. Ship.",
+            project_ids=[source_project_id],
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
+        task_id = str(task["id"])
 
         inferred_project = client.post(
             "/api/v1/projects",
@@ -279,15 +244,13 @@ def test_notification_route_can_fall_back_to_parent_project_session_key(tmp_path
         assert project.status_code == 201
         project_id = project.json()["id"]
 
-        task = client.post(
-            f"/api/v1/projects/{project_id}/tasks",
-            json={
-                "title": "Inherited task",
-                "plan": "1. Ask. 2. Record. 3. Report.",
-            },
+        task = create_task(
+            client,
+            title="Inherited task",
+            plan="1. Ask. 2. Record. 3. Report.",
+            project_ids=[project_id],
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
+        task_id = str(task["id"])
 
         asyncio.run(client.app.state.db.execute("UPDATE tasks SET metadata = ? WHERE id = ?", ("{}", task_id)))
 
@@ -450,20 +413,14 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
         started_project = client.post(f"/api/v1/projects/{project_id}/start")
         assert started_project.status_code == 200
 
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Only linked task",
-                "plan": "1. Do the work. 2. Finish.",
-                "project_ids": [project_id],
-            },
+        task = create_task(
+            client,
+            title="Only linked task",
+            plan="1. Do the work. 2. Finish.",
+            project_ids=[project_id],
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
+        task_id = str(task["id"])
 
-        plan_id = client.get(f"/api/v1/tasks/{task_id}/plans").json()["plans"][0]["id"]
-        task_approved = client.post(f"/api/v1/plans/{plan_id}/approve", json={"approver": "Bob"})
-        assert task_approved.status_code == 200
         task_started = client.post(f"/api/v1/tasks/{task_id}/start")
         assert task_started.status_code == 200
         completed = client.post(f"/api/v1/tasks/{task_id}/complete", json={"result_summary": "Done"})
@@ -548,8 +505,8 @@ def test_calendar_event_and_recipient_flow(tmp_path: Path) -> None:
 
 def test_soft_delete_hides_tasks(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        task = client.post("/api/v1/tasks", json={"title": "Disposable task", "plan": "1. Create. 2. Delete."})
-        task_id = task.json()["id"]
+        task = create_task(client, title="Disposable task", plan="1. Create. 2. Delete.")
+        task_id = str(task["id"])
 
         deleted = client.delete(f"/api/v1/tasks/{task_id}")
         assert deleted.status_code == 204
@@ -574,26 +531,23 @@ def test_task_target_session_round_trips_and_resolves_dm_contact(tmp_path: Path)
         assert contact.status_code == 201
         contact_id = contact.json()["id"]
 
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Ask Alice for the figure",
-                "plan": "1. Reach out. 2. Wait for answer. 3. Report back.",
-                "metadata": {
+        task = create_task(
+            client,
+            title="Ask Alice for the figure",
+            plan="1. Reach out. 2. Wait for answer. 3. Report back.",
+            metadata={
+                "channel": "whatsapp",
+                "session_key": "whatsappgroup-origin",
+                "target_session": {
                     "channel": "whatsapp",
-                    "session_key": "whatsappgroup-origin",
-                    "target_session": {
-                        "channel": "whatsapp",
-                        "kind": "dm",
-                        "contact_id": contact_id,
-                    },
+                    "kind": "dm",
+                    "contact_id": contact_id,
                 },
             },
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-        assert task.json()["metadata"]["session_key"] == "whatsappgroup-origin"
-        assert task.json()["metadata"]["target_session"] == {
+        task_id = str(task["id"])
+        assert task["metadata"]["session_key"] == "whatsappgroup-origin"
+        assert task["metadata"]["target_session"] == {
             "channel": "whatsapp",
             "kind": "dm",
             "contact_id": contact_id,
@@ -625,38 +579,34 @@ def test_task_target_session_accepts_groups_and_rejects_invalid_targets(tmp_path
         )
         assert session_route.status_code == 201
 
-        group_task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Ask the finance group",
-                "plan": "1. Ask the group. 2. Collect answer. 3. Summarize.",
-                "metadata": {
+        group_task = create_task(
+            client,
+            title="Ask the finance group",
+            plan="1. Ask the group. 2. Collect answer. 3. Summarize.",
+            metadata={
+                "channel": "whatsapp",
+                "session_key": "whatsappgroup-origin",
+                "target_session": {
                     "channel": "whatsapp",
-                    "session_key": "whatsappgroup-origin",
-                    "target_session": {
-                        "channel": "whatsapp",
-                        "kind": "group",
-                        "session_key": "whatsappgroup-finance",
-                    },
+                    "kind": "group",
+                    "session_key": "whatsappgroup-finance",
                 },
             },
         )
-        assert group_task.status_code == 201
-        assert group_task.json()["metadata"]["target_session"] == {
+        assert group_task["metadata"]["target_session"] == {
             "channel": "whatsapp",
             "kind": "group",
             "session_key": "whatsappgroup-finance",
         }
 
         task_service = TaskService(client.app.state.db)
-        resolved = asyncio.run(task_service.resolve_target_session(group_task.json()["id"]))
+        resolved = asyncio.run(task_service.resolve_target_session(str(group_task["id"])))
         assert resolved is not None
         assert resolved["to"] == "120363426096069246@g.us"
         assert resolved["route_source"] == "session_routes"
 
-        missing_group_route = client.post(
-            "/api/v1/tasks",
-            json={
+        with pytest.raises(ValidationError):
+            asyncio.run(TaskService(client.app.state.db).create_task({
                 "title": "Broken group target",
                 "plan": "1. Try. 2. Fail.",
                 "metadata": {
@@ -665,13 +615,10 @@ def test_task_target_session_accepts_groups_and_rejects_invalid_targets(tmp_path
                         "kind": "group",
                     },
                 },
-            },
-        )
-        assert missing_group_route.status_code == 422
+            }))
 
-        unresolved_group_route = client.post(
-            "/api/v1/tasks",
-            json={
+        with pytest.raises(ConflictError):
+            asyncio.run(TaskService(client.app.state.db).create_task({
                 "title": "Unknown group target",
                 "plan": "1. Try. 2. Fail.",
                 "metadata": {
@@ -681,13 +628,10 @@ def test_task_target_session_accepts_groups_and_rejects_invalid_targets(tmp_path
                         "session_key": "whatsappgroup-missing",
                     },
                 },
-            },
-        )
-        assert unresolved_group_route.status_code == 409
+            }))
 
-        missing_contact = client.post(
-            "/api/v1/tasks",
-            json={
+        with pytest.raises(NotFoundError):
+            asyncio.run(TaskService(client.app.state.db).create_task({
                 "title": "Broken DM target",
                 "plan": "1. Try. 2. Fail.",
                 "metadata": {
@@ -697,50 +641,32 @@ def test_task_target_session_accepts_groups_and_rejects_invalid_targets(tmp_path
                         "contact_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     },
                 },
-            },
-        )
-        assert missing_contact.status_code == 404
+            }))
 
 
 def test_task_notifications_skip_dependency_blocked_tasks(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        parent = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Parent task",
-                "plan": "1. Do parent work. 2. Finish.",
-                "metadata": {"channel": "whatsapp", "session_key": "whatsappgroup-origin"},
-            },
+        parent = create_task(
+            client,
+            title="Parent task",
+            plan="1. Do parent work. 2. Finish.",
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-origin"},
         )
-        assert parent.status_code == 201
-        parent_id = parent.json()["id"]
+        parent_id = str(parent["id"])
 
-        child = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Child task",
-                "plan": "1. Follow the parent. 2. Finish.",
-                "parent_id": parent_id,
-                "metadata": {"channel": "whatsapp", "session_key": "whatsappgroup-origin"},
-            },
+        child = create_task(
+            client,
+            title="Child task",
+            plan="1. Follow the parent. 2. Finish.",
+            parent_id=parent_id,
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-origin"},
         )
-        assert child.status_code == 201
-        child_id = child.json()["id"]
+        child_id = str(child["id"])
 
         initial_notifications = client.get("/api/v1/notifications")
         assert initial_notifications.status_code == 200
         assert [item["entity_id"] for item in initial_notifications.json()] == [parent_id]
 
-        parent_plan_id = client.get(f"/api/v1/tasks/{parent_id}/plans").json()["plans"][0]["id"]
-        child_plan_id = client.get(f"/api/v1/tasks/{child_id}/plans").json()["plans"][0]["id"]
-        approved_child = client.post(f"/api/v1/plans/{child_plan_id}/approve", json={"approver": "Bob"})
-        assert approved_child.status_code == 200
-        child_after_approval = client.get(f"/api/v1/tasks/{child_id}")
-        assert child_after_approval.status_code == 200
-        assert child_after_approval.json()["status"] == "blocked"
-
-        approved = client.post(f"/api/v1/plans/{parent_plan_id}/approve", json={"approver": "Bob"})
-        assert approved.status_code == 200
         started = client.post(f"/api/v1/tasks/{parent_id}/start")
         assert started.status_code == 200
         completed = client.post(
@@ -778,12 +704,13 @@ def test_task_notifications_repeat_daily_then_stop(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(notification_service_module, "utcnow", lambda: current)
 
     with make_client(tmp_path) as client:
-        task = client.post(
-            "/api/v1/tasks",
-            json={"title": "Review numbers", "plan": "1. Prepare. 2. Review. 3. Approve."},
+        task = create_task(client, title="Review numbers", plan="1. Prepare. 2. Review. 3. Approve.")
+        task_id = str(task["id"])
+        blocked = client.post(
+            f"/api/v1/tasks/{task_id}/block",
+            json={"reason": "Waiting for user input", "resume_instructions": "Resume once input arrives."},
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
+        assert blocked.status_code == 200
 
         expected_sequences = [1, 2, 3, 4]
         for expected_sequence in expected_sequences:
@@ -809,23 +736,16 @@ def test_task_notifications_repeat_daily_then_stop(tmp_path: Path, monkeypatch) 
 
 def test_task_complete_accepts_result_alias_and_persists_summary(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Ask Mike his favourite beer",
-                "plan": "1. Ask the question. 2. Record the answer. 3. Report back.",
-                "metadata": {
-                    "channel": "whatsapp",
-                    "chat_id": "120363426096069246@g.us",
-                },
+        task = create_task(
+            client,
+            title="Ask Mike his favourite beer",
+            plan="1. Ask the question. 2. Record the answer. 3. Report back.",
+            metadata={
+                "channel": "whatsapp",
+                "chat_id": "120363426096069246@g.us",
             },
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-
-        plan_id = client.get(f"/api/v1/tasks/{task_id}/plans").json()["plans"][0]["id"]
-        approved = client.post(f"/api/v1/plans/{plan_id}/approve", json={"approver": "Bob"})
-        assert approved.status_code == 200
+        task_id = str(task["id"])
         started = client.post(f"/api/v1/tasks/{task_id}/start")
         assert started.status_code == 200
 
@@ -1095,29 +1015,22 @@ def test_task_assignment_notifications_dispatch_via_derived_target_dm_session(tm
         assert contact.status_code == 201
         contact_id = contact.json()["id"]
 
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Ask Alice for the figure",
-                "plan": "1. DM Alice. 2. Wait for reply. 3. Report back.",
-                "metadata": {
+        task = create_task(
+            client,
+            title="Ask Alice for the figure",
+            plan="1. DM Alice. 2. Wait for reply. 3. Report back.",
+            metadata={
+                "channel": "whatsapp",
+                "chat_id": "120363400000000000@g.us",
+                "session_key": "agent:main:whatsapp:group:120363400000000000@g.us",
+                "target_session": {
                     "channel": "whatsapp",
-                    "chat_id": "120363400000000000@g.us",
-                    "session_key": "agent:main:whatsapp:group:120363400000000000@g.us",
-                    "target_session": {
-                        "channel": "whatsapp",
-                        "kind": "dm",
-                        "contact_id": contact_id,
-                    },
+                    "kind": "dm",
+                    "contact_id": contact_id,
                 },
             },
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-
-        plan_id = client.get(f"/api/v1/tasks/{task_id}/plans").json()["plans"][0]["id"]
-        approved = client.post(f"/api/v1/plans/{plan_id}/approve", json={"approver": "Bob"})
-        assert approved.status_code == 200
+        task_id = str(task["id"])
 
         notifications = client.get("/api/v1/notifications").json()
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
@@ -1212,29 +1125,22 @@ def test_task_assignment_notifications_prefer_registered_dm_session_route(tmp_pa
         )
         assert route.status_code == 201
 
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Ask Alice for the figure",
-                "plan": "1. DM Alice. 2. Wait for reply. 3. Report back.",
-                "metadata": {
+        task = create_task(
+            client,
+            title="Ask Alice for the figure",
+            plan="1. DM Alice. 2. Wait for reply. 3. Report back.",
+            metadata={
+                "channel": "whatsapp",
+                "session_key": "agent:main:whatsapp:group:120363400000000000@g.us",
+                "chat_id": "120363400000000000@g.us",
+                "target_session": {
                     "channel": "whatsapp",
-                    "session_key": "agent:main:whatsapp:group:120363400000000000@g.us",
-                    "chat_id": "120363400000000000@g.us",
-                    "target_session": {
-                        "channel": "whatsapp",
-                        "kind": "dm",
-                        "contact_id": contact_id,
-                    },
+                    "kind": "dm",
+                    "contact_id": contact_id,
                 },
             },
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-
-        plan_id = client.get(f"/api/v1/tasks/{task_id}/plans").json()["plans"][0]["id"]
-        approved = client.post(f"/api/v1/plans/{plan_id}/approve", json={"approver": "Bob"})
-        assert approved.status_code == 200
+        task_id = str(task["id"])
 
         notifications = client.get("/api/v1/notifications").json()
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
@@ -1419,23 +1325,16 @@ def test_task_result_notifications_dispatch_via_source_session_route(tmp_path: P
         )
         assert route.status_code == 201
 
-        task = client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Compile the answer",
-                "plan": "1. Gather inputs. 2. Summarize. 3. Send response.",
-                "metadata": {
-                    "channel": "whatsapp",
-                    "session_key": "whatsappgroup-source",
-                },
+        task = create_task(
+            client,
+            title="Compile the answer",
+            plan="1. Gather inputs. 2. Summarize. 3. Send response.",
+            metadata={
+                "channel": "whatsapp",
+                "session_key": "whatsappgroup-source",
             },
         )
-        assert task.status_code == 201
-        task_id = task.json()["id"]
-
-        plan_id = client.get(f"/api/v1/tasks/{task_id}/plans").json()["plans"][0]["id"]
-        approved = client.post(f"/api/v1/plans/{plan_id}/approve", json={"approver": "Bob"})
-        assert approved.status_code == 200
+        task_id = str(task["id"])
         started = client.post(f"/api/v1/tasks/{task_id}/start")
         assert started.status_code == 200
         completed = client.post(
@@ -1464,15 +1363,47 @@ def test_task_result_notifications_dispatch_via_source_session_route(tmp_path: P
 
 def test_notification_process_due_endpoint_returns_processed_count(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        task = client.post(
-            "/api/v1/tasks",
-            json={"title": "Needs a plan", "plan": "1. Draft. 2. Review."},
-        )
-        assert task.status_code == 201
+        create_task(client, title="Needs a plan", plan="1. Draft. 2. Review.")
 
         processed = client.post("/api/v1/notifications/process-due")
         assert processed.status_code == 200
         assert processed.json() == {"processed": 0}
+
+
+def test_dashboard_project_detail_shows_prompt_history(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Prompt Dashboard Test",
+                "aim": "Verify prompt history shows on dashboard",
+            },
+        )
+        assert project.status_code == 201
+        project_id = project.json()["id"]
+
+        asyncio.run(
+            client.app.state.db.execute(
+                """
+                INSERT INTO prompt_history (id, category, prompt_text, project_id, token_count_estimate)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "ph-test-001",
+                    "plan_generation",
+                    "Generate a project plan for building a cyberpunk dashboard portal.",
+                    project_id,
+                    15,
+                ),
+            )
+        )
+
+        response = client.get(f"/dashboard/projects/{project_id}")
+        assert response.status_code == 200
+        html = response.text
+        assert "Prompt History" in html
+        assert "plan generation" in html
+        assert "Generate a project plan for building a cyberpunk dashboard portal." in html
 
 
 def test_openclaw_gateway_transport_uses_backend_handshake_and_connect_challenge(

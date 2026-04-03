@@ -238,7 +238,6 @@ async def overview(
     )
     task_status_counts = {row["status"]: row["count"] for row in task_stats}
     task_status_data = [
-        task_status_counts.get(TaskStatus.PLANNING.value, 0),
         task_status_counts.get("pending", 0),
         task_status_counts.get("active", 0),
         task_status_counts.get("blocked", 0),
@@ -513,6 +512,18 @@ async def project_detail(
         except (json.JSONDecodeError, TypeError):
             project_data["success_criteria"] = []
 
+    # Get prompt history for this project and its tasks
+    prompts = await db.fetch_all(
+        """
+        SELECT ph.* FROM prompt_history ph
+        WHERE ph.project_id = ?
+           OR ph.task_id IN (SELECT pt.task_id FROM project_tasks pt WHERE pt.project_id = ?)
+        ORDER BY ph.timestamp DESC
+        LIMIT 50
+        """,
+        (project_id, project_id),
+    )
+
     return _render_template(
         "dashboard/project_detail.html",
         request,
@@ -523,6 +534,7 @@ async def project_detail(
             "tasks": tasks,
             "journal": journal,
             "health_checks": health_checks,
+            "prompts": prompts,
         },
     )
 

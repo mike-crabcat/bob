@@ -11,7 +11,6 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
-    PlanStatus,
     RetryAction,
     RetryConfig,
     TaskBlockRequest,
@@ -88,13 +87,10 @@ class TaskService(BaseService):
         task = await self.get_task(task_id)
         return await self._resolve_target_session_from_metadata(task.metadata)
 
-    async def create_task(self, payload: TaskCreate) -> TaskResponse:
-        if payload.status != TaskStatus.PLANNING:
-            raise ConflictError("New tasks must start in 'planning' status")
-
+    async def create_task(self, payload: TaskCreate | dict[str, Any]) -> TaskResponse:
+        payload = TaskCreate.model_validate(payload)
         now = utcnow()
         task_id = str(uuid4())
-        plan_id = str(uuid4())
         next_run_at = payload.next_run_at
         if payload.is_recurring and payload.recurrence_rule and next_run_at is None:
             next_run_at = next_cron_occurrence(payload.recurrence_rule, now)
@@ -106,7 +102,6 @@ class TaskService(BaseService):
                 payload.metadata,
                 payload.project_ids,
             )
-            auto_approve_initial_plan = self._should_auto_approve_initial_plan(task_metadata)
             if self._require_source_route_metadata() and not has_source_route_metadata(task_metadata):
                 raise ConflictError(
                     "Tasks require source routing metadata. "
@@ -114,27 +109,15 @@ class TaskService(BaseService):
                 )
             await self._validate_target_session_metadata(connection, task_metadata)
 
-            task_status = payload.status
-            current_plan_id: str | None = None
-            initial_plan_status = PlanStatus.PENDING_APPROVAL
-            initial_plan_approved_at: str | None = None
-            initial_plan_approved_by: str | None = None
-            initial_plan_is_current = 0
+            dependency_ready = await self._dependency_is_satisfied(
+                {"parent_id": str(payload.parent_id) if payload.parent_id else None}
+            )
+            task_status = TaskStatus.PENDING if dependency_ready else TaskStatus.BLOCKED
             blocked_reason = payload.blocked_reason
             blocked_resume_instructions = payload.blocked_resume_instructions
-            if auto_approve_initial_plan:
-                dependency_ready = await self._dependency_is_satisfied(
-                    {"parent_id": str(payload.parent_id) if payload.parent_id else None}
-                )
-                task_status = TaskStatus.PENDING if dependency_ready else TaskStatus.BLOCKED
-                current_plan_id = plan_id
-                initial_plan_status = PlanStatus.APPROVED
-                initial_plan_approved_at = now.isoformat()
-                initial_plan_approved_by = "cyborg:auto"
-                initial_plan_is_current = 1
-                if not dependency_ready and payload.parent_id is not None:
-                    blocked_reason = self.dependency_blocked_reason(str(payload.parent_id))
-                    blocked_resume_instructions = self.dependency_blocked_resume_instructions(str(payload.parent_id))
+            if not dependency_ready and payload.parent_id is not None:
+                blocked_reason = self.dependency_blocked_reason(str(payload.parent_id))
+                blocked_resume_instructions = self.dependency_blocked_resume_instructions(str(payload.parent_id))
 
             await connection.execute(
                 """
@@ -169,35 +152,6 @@ class TaskService(BaseService):
                 ),
             )
             await self._replace_project_links(connection, task_id, payload.project_ids)
-            await connection.execute(
-                """
-                INSERT INTO plans (
-                    id, task_id, version_number, content, status,
-                    feedback, created_at, approved_at, approved_by, is_current
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    plan_id,
-                    task_id,
-                    1,
-                    payload.plan,
-                    initial_plan_status.value,
-                    None,
-                    now.isoformat(),
-                    initial_plan_approved_at,
-                    initial_plan_approved_by,
-                    initial_plan_is_current,
-                ),
-            )
-            if current_plan_id is not None:
-                await connection.execute(
-                    """
-                    UPDATE tasks
-                    SET current_plan_id = ?
-                    WHERE id = ? AND deleted_at IS NULL
-                    """,
-                    (current_plan_id, task_id),
-                )
             await self._add_history(
                 connection,
                 task_id,
@@ -205,7 +159,7 @@ class TaskService(BaseService):
                 {"status": task_status.value, "priority": payload.priority.value},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=not auto_approve_initial_plan)
+        await self._sync_notifications(task_id, immediate=True)
         return await self.get_task(task_id)
 
     async def update_task(self, task_id: str, payload: TaskUpdate) -> TaskResponse:
@@ -231,11 +185,7 @@ class TaskService(BaseService):
         if "status" in values:
             next_status = TaskStatus(values["status"])
             await self._validate_status_transition(task_id, row["status"], next_status)
-            immediate_notification = (
-                next_status.value != row["status"] and next_status in {TaskStatus.PLANNING, TaskStatus.BLOCKED}
-            )
-            if next_status == TaskStatus.PLANNING:
-                values["current_plan_id"] = None
+            immediate_notification = next_status.value != row["status"] and next_status == TaskStatus.BLOCKED
             if next_status == TaskStatus.ACTIVE and "started_at" not in values:
                 values["started_at"] = now.isoformat()
             if next_status == TaskStatus.COMPLETED and "completed_at" not in values:
@@ -378,7 +328,6 @@ class TaskService(BaseService):
             if retry_config and retry_config.on_failure == RetryAction.RETRY_FROM:
                 updated_config = retry_config.model_copy(update={"current_attempt": retry_config.current_attempt + 1})
                 if updated_config.current_attempt <= updated_config.max_attempts:
-                    await self._verify_plan_approved(task_id, target_status=TaskStatus.ACTIVE)
                     await self._reset_steps_from_retry_point(connection, task_id, updated_config.retry_from_step, now.isoformat())
                     await connection.execute(
                         """
@@ -461,7 +410,6 @@ class TaskService(BaseService):
         updated_config = retry_config.model_copy(update={"current_attempt": retry_config.current_attempt + 1})
         if updated_config.current_attempt > updated_config.max_attempts:
             raise ConflictError(f"Task '{task_id}' has exhausted its retry budget")
-        await self._verify_plan_approved(task_id, target_status=TaskStatus.ACTIVE)
 
         async with self.db.connection(write=True) as connection:
             if updated_config.on_failure == RetryAction.RETRY_FROM and updated_config.retry_from_step is not None:
@@ -666,14 +614,12 @@ class TaskService(BaseService):
         now = utcnow().isoformat()
         started_at = now if status == TaskStatus.ACTIVE else None
 
-        # Check plan approval if transitioning to active
         if status == TaskStatus.ACTIVE:
             if row["status"] != TaskStatus.PENDING.value:
                 raise ConflictError(
                     f"Cannot transition task '{task_id}' from '{row['status']}' to 'active'. "
                     "Task must be in 'pending' status."
                 )
-            await self._verify_plan_approved(task_id, target_status=status)
 
         async with self.db.connection(write=True) as connection:
             await connection.execute(
@@ -702,46 +648,10 @@ class TaskService(BaseService):
         await self._sync_notifications(task_id, immediate=False)
         return await self.get_task(task_id)
 
-    async def _verify_plan_approved(self, task_id: str, *, target_status: TaskStatus) -> None:
-        """Verify that a task has an approved current plan before transition.
-        
-        Raises ConflictError if no approved plan exists.
-        """
-        # Check if there's an approved plan for this task
-        plan_row = await self.db.fetch_one(
-            """
-            SELECT p.status 
-            FROM plans p
-            INNER JOIN tasks t ON t.current_plan_id = p.id
-            WHERE t.id = ? AND p.status = ?
-            """,
-            (task_id, PlanStatus.APPROVED.value),
-        )
-        
-        if plan_row is None:
-            # Check if there's any plan at all
-            any_plan = await self.db.fetch_one(
-                "SELECT status FROM plans WHERE task_id = ? ORDER BY version_number DESC LIMIT 1",
-                (task_id,),
-            )
-            
-            if any_plan is None:
-                raise ConflictError(
-                    f"Cannot transition task '{task_id}' to '{target_status.value}': "
-                    "no approved plan is available. Submit a plan and have it approved first."
-                )
-            else:
-                raise ConflictError(
-                    f"Cannot transition task '{task_id}' to '{target_status.value}': "
-                    f"current plan is not approved (latest plan status: {any_plan['status']}). "
-                    "Wait for approval or submit a new plan."
-                )
-
     async def _validate_status_transition(self, task_id: str, current_status: str, next_status: TaskStatus) -> None:
         if current_status == next_status.value:
             return
         if next_status == TaskStatus.PENDING:
-            await self._verify_plan_approved(task_id, target_status=next_status)
             row = await self._get_task_row(task_id)
             if not await self._dependency_is_satisfied(row):
                 raise ConflictError(
@@ -754,7 +664,6 @@ class TaskService(BaseService):
                     f"Cannot transition task '{task_id}' from '{current_status}' to 'active'. "
                     "Task must be in 'pending' status."
                 )
-            await self._verify_plan_approved(task_id, target_status=next_status)
             row = await self._get_task_row(task_id)
             if not await self._dependency_is_satisfied(row):
                 raise ConflictError(
@@ -764,23 +673,9 @@ class TaskService(BaseService):
     async def _determine_unblocked_status(self, task_id: str, row: dict[str, Any]) -> TaskStatus:
         if not await self._dependency_is_satisfied(row):
             return TaskStatus.BLOCKED
-        if await self._has_approved_current_plan(task_id):
-            if row.get("started_at"):
-                return TaskStatus.ACTIVE
-            return TaskStatus.PENDING
-        return TaskStatus.PLANNING
-
-    async def _has_approved_current_plan(self, task_id: str) -> bool:
-        row = await self.db.fetch_one(
-            """
-            SELECT 1
-            FROM plans p
-            INNER JOIN tasks t ON t.current_plan_id = p.id
-            WHERE t.id = ? AND p.status = ?
-            """,
-            (task_id, PlanStatus.APPROVED.value),
-        )
-        return row is not None
+        if row.get("started_at"):
+            return TaskStatus.ACTIVE
+        return TaskStatus.PENDING
 
     async def _dependency_is_satisfied(self, row: dict[str, Any]) -> bool:
         parent_id = row.get("parent_id")
@@ -815,7 +710,7 @@ class TaskService(BaseService):
         row["retry_config"] = json_loads(row.get("retry_config"), None)
         row["metadata"] = json_loads(row.get("metadata"), {})
         row["project_ids"] = await self._get_project_ids(row["id"])
-        # current_plan_id is already in the row from the database
+        row.pop("current_plan_id", None)
         return row
 
     async def _get_project_ids(self, task_id: str) -> list[str]:
@@ -934,9 +829,6 @@ class TaskService(BaseService):
         if isinstance(current, Settings):
             return current.openclaw.enabled
         return False
-
-    def _should_auto_approve_initial_plan(self, metadata: dict[str, Any]) -> bool:
-        return bool(metadata.get("auto_created_by_project"))
 
     async def _replace_project_links(self, connection: Connection, task_id: str, project_ids: list[Any]) -> None:
         unique_project_ids = list(dict.fromkeys(str(project_id) for project_id in project_ids))

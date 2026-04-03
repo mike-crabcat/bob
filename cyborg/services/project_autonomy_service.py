@@ -152,12 +152,11 @@ class ProjectAutonomyService(BaseService):
             INNER JOIN project_tasks AS pt ON pt.task_id = t.id
             WHERE pt.project_id = ?
               AND t.deleted_at IS NULL
-              AND t.status IN (?, ?, ?, ?)
+              AND t.status IN (?, ?, ?)
             LIMIT 1
             """,
             (
                 project_id,
-                TaskStatus.PLANNING.value,
                 TaskStatus.BLOCKED.value,
                 TaskStatus.PENDING.value,
                 TaskStatus.ACTIVE.value,
@@ -179,19 +178,7 @@ class ProjectAutonomyService(BaseService):
         return [row["project_id"] for row in rows]
 
     async def _released_status(self, connection: Connection, task_id: str) -> TaskStatus:
-        plan_row = await self._fetch_one_connection(
-            connection,
-            """
-            SELECT 1 AS approved
-            FROM plans AS p
-            INNER JOIN tasks AS t ON t.current_plan_id = p.id
-            WHERE t.id = ? AND p.status = 'approved'
-            """,
-            (task_id,),
-        )
-        if plan_row is not None:
-            return TaskStatus.PENDING
-        return TaskStatus.PLANNING
+        return TaskStatus.PENDING
 
     async def _dependency_is_satisfied_connection(self, connection: Connection, row: dict[str, Any]) -> bool:
         parent_id = row.get("parent_id")
