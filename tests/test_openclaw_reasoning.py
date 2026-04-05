@@ -127,7 +127,8 @@ async def test_evaluate_success_criteria_with_mocked_openclaw(db: Database, samp
         assert call_args.kwargs["method"] == "agent"
         params = call_args.kwargs["params"]
         assert params["deliver"] == False
-        assert params["sessionKey"] == "cyborg:reasoning"
+        assert params["sessionKey"].startswith("cyborg:reasoning:")
+        assert "criteria-evaluation" in params["sessionKey"]
         assert "Test Evaluation Project" in params["message"]
 
         # Verify the parsed response
@@ -702,3 +703,208 @@ async def test_context_builder_integration(db: Database, sample_project_with_dat
         assert call_args.kwargs["project_id"] == project_id
         assert call_args.kwargs["scope"] == ContextScope.STANDARD
         assert call_args.kwargs["focus_reasoning"] == "evaluation"
+
+
+@pytest.mark.asyncio
+async def test_fresh_session_key_per_call(db: Database, sample_project_with_data):
+    """Each reasoning call should get a unique session key."""
+    project_id = sample_project_with_data["project_id"]
+
+    reasoning_service = OpenClawReasoningService(db)
+
+    mock_response = {
+        "content": '{"all_met": true, "met_criteria": [], "unmet_criteria": [], "reasoning": "OK"}'
+    }
+
+    with patch.object(
+        OpenClawHookService,
+        '_send_gateway_request',
+        new=AsyncMock(return_value=mock_response)
+    ) as mock_gateway:
+        await reasoning_service.evaluate_success_criteria(project_id)
+        await reasoning_service.evaluate_success_criteria(project_id)
+
+        assert mock_gateway.call_count == 2
+        call1_params = mock_gateway.call_args_list[0].kwargs["params"]
+        call2_params = mock_gateway.call_args_list[1].kwargs["params"]
+
+        session_key_1 = call1_params["sessionKey"]
+        session_key_2 = call2_params["sessionKey"]
+
+        assert session_key_1 != session_key_2
+        assert session_key_1.startswith("cyborg:reasoning:")
+        assert session_key_2.startswith("cyborg:reasoning:")
+
+
+@pytest.mark.asyncio
+async def test_session_key_includes_reasoning_type(db: Database, sample_project_with_data):
+    """Session key should encode the reasoning type."""
+    project_id = sample_project_with_data["project_id"]
+
+    reasoning_service = OpenClawReasoningService(db)
+
+    mock_response = {
+        "content": '{"all_met": true, "met_criteria": [], "unmet_criteria": [], "reasoning": "OK"}'
+    }
+
+    with patch.object(
+        OpenClawHookService,
+        '_send_gateway_request',
+        new=AsyncMock(return_value=mock_response)
+    ) as mock_gateway:
+        await reasoning_service.evaluate_success_criteria(project_id)
+
+        params = mock_gateway.call_args.kwargs["params"]
+        assert "criteria-evaluation" in params["sessionKey"]
+
+
+@pytest.mark.asyncio
+async def test_session_key_override(db: Database, sample_project_with_data):
+    """Explicit session_key param should be used as-is."""
+    project_id = sample_project_with_data["project_id"]
+
+    reasoning_service = OpenClawReasoningService(db)
+
+    mock_response = {
+        "content": '{"all_met": true, "met_criteria": [], "unmet_criteria": [], "reasoning": "OK"}'
+    }
+
+    with patch.object(
+        OpenClawHookService,
+        '_send_gateway_request',
+        new=AsyncMock(return_value=mock_response)
+    ) as mock_gateway:
+        # Call _call_openclaw directly with an explicit session_key
+        await reasoning_service._call_openclaw(
+            prompt="test",
+            response_format="text",
+            session_key="my-custom-session",
+        )
+
+        params = mock_gateway.call_args.kwargs["params"]
+        assert params["sessionKey"] == "my-custom-session"
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_in_evaluation_prompt(db: Database):
+    """Evaluation prompt should mention upstream task results when they exist."""
+    from cyborg.services.project_service import ProjectService
+    from cyborg.services.task_service import TaskService
+
+    project_service = ProjectService(db)
+    task_service = TaskService(db)
+
+    project = await project_service.create_project(ProjectCreate(
+        title="Upstream Context Test",
+        aim="Test upstream context in prompts",
+        success_criteria=[
+            SuccessCriterion(check="completed_tasks >= 1", description="One task done"),
+        ],
+    ))
+    project_id = str(project.id)
+
+    # Create parent task and complete it
+    parent = await task_service.create_task(TaskCreate(
+        title="Parent Research Task",
+        description="Do the research",
+        plan="Research",
+        project_ids=[project_id],
+    ))
+    await task_service.complete_task(str(parent.id), result_summary="Found key insights about the domain")
+
+    # Add a file to the parent task
+    await db.execute(
+        """INSERT INTO task_files (id, task_id, project_id, filename, relative_path, purpose, content_type, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
+        (str(__import__('uuid').uuid4()), str(parent.id), project_id, "report.md",
+         f"tasks/{str(parent.id).replace('-','')[:8]}/report.md", "result", "text/markdown"),
+    )
+
+    # Create child task with parent reference
+    child = await task_service.create_task(TaskCreate(
+        title="Child Analysis Task",
+        description="Analyze the research",
+        plan="Analyze",
+        project_ids=[project_id],
+    ))
+    # Set parent_id via direct DB update
+    await db.execute(
+        "UPDATE tasks SET parent_id = ? WHERE id = ?",
+        (str(parent.id), str(child.id)),
+    )
+
+    reasoning_service = OpenClawReasoningService(db)
+
+    mock_response = {
+        "content": '{"all_met": true, "met_criteria": ["One task done"], "unmet_criteria": [], "reasoning": "OK"}'
+    }
+
+    with patch.object(
+        OpenClawHookService,
+        '_send_gateway_request',
+        new=AsyncMock(return_value=mock_response)
+    ) as mock_gateway:
+        await reasoning_service.evaluate_success_criteria(project_id)
+
+        params = mock_gateway.call_args.kwargs["params"]
+        message = params["message"]
+
+        assert "Upstream Task Results" in message
+        assert "Parent Research Task" in message
+        assert "Found key insights" in message
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_in_refinement_prompt(db: Database):
+    """Refinement prompt should include upstream context."""
+    from cyborg.services.project_service import ProjectService
+    from cyborg.services.task_service import TaskService
+
+    project_service = ProjectService(db)
+    task_service = TaskService(db)
+
+    project = await project_service.create_project(ProjectCreate(
+        title="Refinement Upstream Test",
+        aim="Test upstream in refinement",
+        success_criteria=[],
+    ))
+    project_id = str(project.id)
+
+    parent = await task_service.create_task(TaskCreate(
+        title="Upstream Data Task",
+        description="Collect data",
+        plan="Collect",
+        project_ids=[project_id],
+    ))
+    await task_service.complete_task(str(parent.id), result_summary="Data collected: 500 records")
+
+    child = await task_service.create_task(TaskCreate(
+        title="Downstream Analysis",
+        description="Analyze collected data",
+        plan="Analyze",
+        project_ids=[project_id],
+    ))
+    await db.execute(
+        "UPDATE tasks SET parent_id = ? WHERE id = ?",
+        (str(parent.id), str(child.id)),
+    )
+
+    reasoning_service = OpenClawReasoningService(db)
+
+    mock_response = {
+        "content": '{"should_refine": false, "reasoning": "OK", "suggested_changes": [], "new_priorities": {}, "risks_identified": []}'
+    }
+
+    with patch.object(
+        OpenClawHookService,
+        '_send_gateway_request',
+        new=AsyncMock(return_value=mock_response)
+    ) as mock_gateway:
+        await reasoning_service.refine_project_strategy(project_id, str(child.id))
+
+        params = mock_gateway.call_args.kwargs["params"]
+        message = params["message"]
+
+        assert "Upstream Task Results" in message
+        assert "Upstream Data Task" in message
+        assert "500 records" in message

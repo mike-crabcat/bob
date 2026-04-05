@@ -310,8 +310,13 @@ class OpenClawReasoningService(BaseService):
         """
         from cyborg.structured_logging import log_reasoning_request
 
-        # Use a dedicated reasoning session
-        reasoning_session = session_key or "cyborg:reasoning"
+        # Use a fresh session for each reasoning call
+        if session_key:
+            reasoning_session = session_key
+        else:
+            short_uuid = str(uuid4())[:8]
+            type_slug = (reasoning_type or "unknown").replace("_", "-")
+            reasoning_session = f"cyborg:reasoning:{type_slug}:{short_uuid}"
 
         if not self.openclaw_service.is_configured():
             log_reasoning_request(
@@ -404,6 +409,54 @@ class OpenClawReasoningService(BaseService):
             logger.error("OpenClaw reasoning call failed: %s", e)
             raise RuntimeError(f"OpenClaw reasoning failed: {e}") from e
 
+    def _format_upstream_context_for_prompt(
+        self,
+        context: dict[str, Any],
+        task_id: str | None = None,
+    ) -> str:
+        """Format upstream task context into prompt-ready text.
+
+        If task_id is provided, only show upstream for that specific task.
+        Otherwise, show all upstream context.
+        """
+        tasks_context = context.get("tasks", {})
+        upstream = tasks_context.get("upstream_context", {})
+        if not upstream:
+            return ""
+
+        parts = ["", "## Upstream Task Results (Prior Work)"]
+
+        targets = {task_id: upstream[task_id]} if (task_id and task_id in upstream) else upstream
+
+        for _dep_task_id, parent_info in targets.items():
+            parts.append(f"### Parent Task: {parent_info.get('title', 'Unknown')}")
+            parts.append(f"Status: {parent_info.get('status', 'unknown')}")
+            if parent_info.get("result"):
+                result_text = parent_info["result"][:500]
+                parts.append(f"Result: {result_text}")
+            if parent_info.get("completed_at"):
+                parts.append(f"Completed: {parent_info['completed_at']}")
+
+            output_files = parent_info.get("output_files", [])
+            if output_files:
+                parts.append("Output Files:")
+                for f in output_files:
+                    path = f.get("relative_path", f.get("filename", "unknown"))
+                    purpose = f.get("purpose", "")
+                    parts.append(f"  - {path} ({purpose})")
+
+            dep_files = parent_info.get("dependency_output_files", [])
+            if dep_files:
+                parts.append("Available Input Files:")
+                for f in dep_files:
+                    path = f.get("relative_path", f.get("filename", "unknown"))
+                    purpose = f.get("purpose", "")
+                    parts.append(f"  - {path} ({purpose})")
+
+            parts.append("")
+
+        return "\n".join(parts)
+
     def _build_plan_prompt(
         self,
         aim: str,
@@ -486,6 +539,14 @@ class OpenClawReasoningService(BaseService):
 
         parts.extend([
             "",
+        ])
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
+        parts.extend([
+            "",
             "Evaluate each criterion based on available evidence.",
             "Respond with valid JSON only:",
             "{",
@@ -519,7 +580,7 @@ class OpenClawReasoningService(BaseService):
         trigger_info = ""
         if trigger_task:
             status = trigger_task.get("status", "unknown")
-            result = trigger_task.get("result", "")[:200]
+            result = (trigger_task.get("result") or "")[:200]
             trigger_info = f"Status: {status}, Result: {result}"
 
         parts = [
@@ -544,6 +605,10 @@ class OpenClawReasoningService(BaseService):
         for entry in journal[-5:]:
             content = entry.get("content", "")[:150]
             parts.append(f"  - [{entry['entry_type']}] {content}")
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
 
         parts.extend([
             "",
@@ -587,8 +652,15 @@ class OpenClawReasoningService(BaseService):
             f"  - Completed: {tasks['completed']}",
             f"  - Failed: {tasks['failed']}",
             "",
-            "Full Journal:",
         ]
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
+        parts.extend([
+            "Full Journal:",
+        ])
 
         for entry in journal[-20:]:  # Last 20 entries
             parts.append(f"  - [{entry['entry_type']}] {entry['content'][:150]}")
@@ -667,6 +739,14 @@ class OpenClawReasoningService(BaseService):
             for f in dependency_files:
                 parts.append(f"- `{f.get('relative_path', f.get('filename', 'unknown'))}` ({f.get('purpose', 'unknown')})")
 
+        # Include upstream task results from project context
+        upstream_text = self._format_upstream_context_for_prompt(
+            project_context,
+            task_id=task.get("id"),
+        )
+        if upstream_text:
+            parts.append(upstream_text)
+
         parts.extend([
             "",
             "Generate a concise plan (3-5 bullet points) for executing this task.",
@@ -706,6 +786,10 @@ class OpenClawReasoningService(BaseService):
             for task in blocked_tasks[:5]:
                 reason = task.get("blocked_reason", "No reason")[:100]
                 parts.append(f"  - {task['title']}: {reason}")
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
 
         parts.extend([
             "",
@@ -781,6 +865,10 @@ class OpenClawReasoningService(BaseService):
             )
             for entry in journal[-5:]:
                 parts.append(f"  - [{entry['entry_type']}] {entry['content'][:150]}")
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
 
         parts.extend(
             [

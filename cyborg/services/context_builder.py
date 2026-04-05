@@ -147,6 +147,7 @@ class ContextBuilder(BaseService):
         )
 
         # Attach output files for non-minimal scopes
+        upstream_context: dict[str, Any] = {}
         if scope != ContextScope.MINIMAL:
             for task in filtered_tasks:
                 try:
@@ -158,11 +159,72 @@ class ContextBuilder(BaseService):
                 except Exception:
                     task["output_files"] = []
 
+            upstream_context = await self._get_upstream_task_context(filtered_tasks)
+
         return {
             "summary": self._summarize_task_state(filtered_tasks),
             "tasks": self._format_tasks_for_scope(filtered_tasks, scope),
             "recent_results": self._get_recent_task_results(filtered_tasks, limit=5),
+            "upstream_context": upstream_context,
         }
+
+    async def _get_upstream_task_context(
+        self,
+        tasks: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build upstream dependency context for tasks that have parent tasks.
+
+        Returns a dict keyed by task_id containing upstream task results,
+        output files, and reasoning metadata.
+        """
+        upstream: dict[str, Any] = {}
+
+        for task in tasks:
+            parent_id = task.get("parent_id")
+            if not parent_id:
+                continue
+
+            parent = await self.db.fetch_one(
+                """
+                SELECT id, title, description, status, result, completed_at, metadata
+                FROM tasks
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (parent_id,),
+            )
+            if not parent:
+                continue
+
+            parent_info: dict[str, Any] = {
+                "task_id": parent["id"],
+                "title": parent["title"],
+                "status": parent["status"],
+                "result": parent.get("result"),
+                "completed_at": parent.get("completed_at"),
+            }
+
+            try:
+                parent_files = await self.db.fetch_all(
+                    "SELECT filename, relative_path, purpose FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+                    (parent_id,),
+                )
+                parent_info["output_files"] = [dict(r) for r in parent_files] if parent_files else []
+            except Exception:
+                parent_info["output_files"] = []
+
+            task_metadata = json_loads(task.get("metadata"), {})
+            dependency_files = task_metadata.get("dependency_output_files")
+            if dependency_files:
+                parent_info["dependency_output_files"] = dependency_files
+
+            parent_metadata = json_loads(parent.get("metadata"), {})
+            reasoning_artifacts = parent_metadata.get("reasoning_artifacts")
+            if reasoning_artifacts:
+                parent_info["reasoning_artifacts"] = reasoning_artifacts
+
+            upstream[task["id"]] = parent_info
+
+        return upstream
 
     def _filter_tasks_by_scope(
         self,

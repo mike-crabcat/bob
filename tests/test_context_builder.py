@@ -392,3 +392,127 @@ async def test_duration_calculation(db: Database):
     duration = context["core"]["project"]["duration_days"]
     assert duration is not None
     assert duration >= 0
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_with_completed_parent(db: Database):
+    """Upstream context should include parent task results and files."""
+    from cyborg.services.project_service import ProjectService
+    from cyborg.services.task_service import TaskService
+    from uuid import uuid4
+
+    project_service = ProjectService(db)
+    task_service = TaskService(db)
+
+    project = await project_service.create_project(ProjectCreate(
+        title="Upstream Context Project",
+        aim="Test upstream context",
+        success_criteria=[],
+    ))
+    project_id = str(project.id)
+
+    # Create and complete a parent task
+    parent = await task_service.create_task(TaskCreate(
+        title="Parent Task",
+        description="Do the parent work",
+        plan="Parent plan",
+        project_ids=[project_id],
+    ))
+    await task_service.complete_task(str(parent.id), result_summary="Parent result: found important data")
+
+    # Add a file to the parent
+    await db.execute(
+        """INSERT INTO task_files (id, task_id, project_id, filename, relative_path, purpose, content_type, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
+        (str(uuid4()), str(parent.id), project_id, "data.csv",
+         f"tasks/{str(parent.id).replace('-','')[:8]}/data.csv", "result", "text/csv"),
+    )
+
+    # Create child task with parent reference
+    child = await task_service.create_task(TaskCreate(
+        title="Child Task",
+        description="Use parent data",
+        plan="Child plan",
+        project_ids=[project_id],
+    ))
+    await db.execute(
+        "UPDATE tasks SET parent_id = ? WHERE id = ?",
+        (str(parent.id), str(child.id)),
+    )
+
+    builder = ContextBuilder(db)
+    context = await builder.build_project_context(
+        project_id=project_id,
+        scope=ContextScope.STANDARD,
+    )
+
+    upstream = context["tasks"]["upstream_context"]
+    assert len(upstream) == 1
+
+    child_id = str(child.id)
+    assert child_id in upstream
+    parent_info = upstream[child_id]
+
+    assert parent_info["title"] == "Parent Task"
+    assert parent_info["status"] == "completed"
+    assert "important data" in parent_info["result"]
+    assert len(parent_info["output_files"]) == 1
+    assert parent_info["output_files"][0]["filename"] == "data.csv"
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_empty_for_minimal_scope(db: Database):
+    """Upstream context should not be computed at MINIMAL scope."""
+    from cyborg.services.project_service import ProjectService
+    from cyborg.services.task_service import TaskService
+
+    project_service = ProjectService(db)
+    task_service = TaskService(db)
+
+    project = await project_service.create_project(ProjectCreate(
+        title="Minimal Upstream Test",
+        aim="Test minimal scope",
+        success_criteria=[],
+    ))
+    project_id = str(project.id)
+
+    parent = await task_service.create_task(TaskCreate(
+        title="Parent",
+        description="Parent work",
+        plan="Plan",
+        project_ids=[project_id],
+    ))
+    await task_service.complete_task(str(parent.id), result_summary="Done")
+
+    child = await task_service.create_task(TaskCreate(
+        title="Child",
+        description="Child work",
+        plan="Plan",
+        project_ids=[project_id],
+    ))
+    await db.execute(
+        "UPDATE tasks SET parent_id = ? WHERE id = ?",
+        (str(parent.id), str(child.id)),
+    )
+
+    builder = ContextBuilder(db)
+    context = await builder.build_project_context(
+        project_id=project_id,
+        scope=ContextScope.MINIMAL,
+    )
+
+    assert context["tasks"]["upstream_context"] == {}
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_empty_without_parent(db: Database, sample_project):
+    """Upstream context should be empty when no tasks have parents."""
+    builder = ContextBuilder(db)
+    project_id = sample_project["project_id"]
+
+    context = await builder.build_project_context(
+        project_id=project_id,
+        scope=ContextScope.STANDARD,
+    )
+
+    assert context["tasks"]["upstream_context"] == {}
