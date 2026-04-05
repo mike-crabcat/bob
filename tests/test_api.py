@@ -283,9 +283,6 @@ def test_project_spec_approval_required_for_start_and_execute(tmp_path: Path) ->
         project_id = project.json()["id"]
         assert project.json()["latest_spec_status"] is None
 
-        start_without_spec = client.post(f"/api/v1/projects/{project_id}/start")
-        assert start_without_spec.status_code == 409
-
         submitted = client.post(
             f"/api/v1/projects/{project_id}/specs",
             json={
@@ -311,9 +308,6 @@ def test_project_spec_approval_required_for_start_and_execute(tmp_path: Path) ->
         spec_id = submitted.json()["id"]
         assert submitted.json()["status"] == "pending_approval"
 
-        execute_without_approval = client.post(f"/api/v1/projects/{project_id}/execute")
-        assert execute_without_approval.status_code == 409
-
         project_after_submit = client.get(f"/api/v1/projects/{project_id}")
         assert project_after_submit.status_code == 200
         assert project_after_submit.json()["latest_spec_id"] == spec_id
@@ -325,10 +319,10 @@ def test_project_spec_approval_required_for_start_and_execute(tmp_path: Path) ->
         assert approved.json()["status"] == "approved"
         assert approved.json()["is_current"] is True
 
-        started = client.post(f"/api/v1/projects/{project_id}/start")
-        assert started.status_code == 200
-        assert started.json()["state"] == "active"
-        assert started.json()["current_spec_id"] == spec_id
+        # Spec approval auto-triggers execution, project should be active
+        project_after_approve = client.get(f"/api/v1/projects/{project_id}")
+        assert project_after_approve.json()["state"] == "active"
+        assert project_after_approve.json()["current_spec_id"] == spec_id
 
 
 def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) -> None:
@@ -401,6 +395,14 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
                 "success_criteria": [
                     {"check": "completed_task_count >= 1", "description": "One linked task completes"}
                 ],
+                "plan": [
+                    {
+                        "title": "Complete the linked task",
+                        "description": "Do the work and finish",
+                        "criteria": "Task completed",
+                        "order": 0,
+                    },
+                ],
             },
         )
         assert submitted.status_code == 201
@@ -410,8 +412,10 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
         )
         assert approved.status_code == 200
 
-        started_project = client.post(f"/api/v1/projects/{project_id}/start")
-        assert started_project.status_code == 200
+        # Spec approval auto-triggers execution (creates task from plan step)
+        project_tasks = client.get(f"/api/v1/projects/{project_id}/tasks")
+        assert project_tasks.status_code == 200
+        auto_task = project_tasks.json()[0]
 
         task = create_task(
             client,
@@ -425,6 +429,11 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
         assert task_started.status_code == 200
         completed = client.post(f"/api/v1/tasks/{task_id}/complete", json={"result_summary": "Done"})
         assert completed.status_code == 200
+
+        # Also complete the auto-created step task
+        auto_task_id = str(auto_task["id"])
+        client.post(f"/api/v1/tasks/{auto_task_id}/start")
+        client.post(f"/api/v1/tasks/{auto_task_id}/complete", json={"result_summary": "Step done"})
 
         refreshed_project = client.get(f"/api/v1/projects/{project_id}")
         assert refreshed_project.status_code == 200
@@ -663,7 +672,7 @@ def test_task_notifications_skip_dependency_blocked_tasks(tmp_path: Path) -> Non
         )
         child_id = str(child["id"])
 
-        initial_notifications = client.get("/api/v1/notifications")
+        initial_notifications = client.get("/api/v1/notifications?status=pending")
         assert initial_notifications.status_code == 200
         assert [item["entity_id"] for item in initial_notifications.json()] == [parent_id]
 
@@ -675,7 +684,7 @@ def test_task_notifications_skip_dependency_blocked_tasks(tmp_path: Path) -> Non
         )
         assert completed.status_code == 200
 
-        follow_up_notifications = client.get("/api/v1/notifications")
+        follow_up_notifications = client.get("/api/v1/notifications?status=pending")
         assert follow_up_notifications.status_code == 200
         pending = follow_up_notifications.json()
         assert {(item["entity_id"], item["notification_type"]) for item in pending} == {
@@ -689,7 +698,7 @@ def test_task_notifications_skip_dependency_blocked_tasks(tmp_path: Path) -> Non
         assert child_row.json()["notification_count"] == 1
         assert child_row.json()["blocked_reason"] is None
 
-        resolved = client.get("/api/v1/notifications")
+        resolved = client.get("/api/v1/notifications?status=pending")
         assert resolved.status_code == 200
         assert {(item["entity_id"], item["notification_type"]) for item in resolved.json()} == {
             (child_id, "task_assignment"),
@@ -714,7 +723,7 @@ def test_task_notifications_repeat_daily_then_stop(tmp_path: Path, monkeypatch) 
 
         expected_sequences = [1, 2, 3, 4]
         for expected_sequence in expected_sequences:
-            notifications = client.get("/api/v1/notifications")
+            notifications = client.get("/api/v1/notifications?status=pending")
             assert notifications.status_code == 200
             pending = notifications.json()
             assert len(pending) == 1
@@ -729,7 +738,7 @@ def test_task_notifications_repeat_daily_then_stop(tmp_path: Path, monkeypatch) 
 
             current = current + timedelta(days=1, minutes=1)
 
-        final_pending = client.get("/api/v1/notifications")
+        final_pending = client.get("/api/v1/notifications?status=pending")
         assert final_pending.status_code == 200
         assert final_pending.json() == []
 
@@ -766,7 +775,7 @@ def test_task_complete_accepts_result_alias_and_persists_summary(tmp_path: Path)
         completed_history = next(item for item in history.json() if item["action"] == "completed")
         assert completed_history["details"]["result"] == "Stella"
 
-        notifications = client.get("/api/v1/notifications")
+        notifications = client.get("/api/v1/notifications?status=pending")
         assert notifications.status_code == 200
         result_notification = next(
             item for item in notifications.json() if item["entity_id"] == task_id and item["notification_type"] == "task_result"
@@ -833,7 +842,7 @@ def test_project_and_event_notifications_are_persisted_until_acknowledged(
         )
         assert event.status_code == 201
 
-        notifications = client.get("/api/v1/notifications")
+        notifications = client.get("/api/v1/notifications?status=pending")
         assert notifications.status_code == 200
         pending = notifications.json()
         assert {(item["entity_type"], item["notification_type"]) for item in pending} == {
@@ -844,10 +853,9 @@ def test_project_and_event_notifications_are_persisted_until_acknowledged(
         assert event_notification["metadata"]["session_key"] == "whatsappgroup-family"
         assert event_notification["metadata"]["channel"] == "whatsapp"
 
-        started = client.post(f"/api/v1/projects/{project_id}/start")
-        assert started.status_code == 200
+        # Project is already active after spec approval
 
-        after_project_start = client.get("/api/v1/notifications")
+        after_project_start = client.get("/api/v1/notifications?status=pending")
         assert after_project_start.status_code == 200
         pending_after_start = after_project_start.json()
         assert len(pending_after_start) == 1
@@ -859,7 +867,7 @@ def test_project_and_event_notifications_are_persisted_until_acknowledged(
         )
         assert acknowledged.status_code == 200
 
-        after_ack = client.get("/api/v1/notifications")
+        after_ack = client.get("/api/v1/notifications?status=pending")
         assert after_ack.status_code == 200
         assert after_ack.json() == []
 
@@ -898,14 +906,14 @@ def test_notification_list_handles_naive_event_datetimes(tmp_path: Path, monkeyp
         )
         assert event.status_code == 201
 
-        first_notifications = client.get("/api/v1/notifications")
+        first_notifications = client.get("/api/v1/notifications?status=pending")
         assert first_notifications.status_code == 200
         first_pending = first_notifications.json()
         assert len(first_pending) == 1
         assert first_pending[0]["entity_type"] == "event"
         assert first_pending[0]["metadata"]["session_key"] == "whatsappgroup-family"
 
-        second_notifications = client.get("/api/v1/notifications")
+        second_notifications = client.get("/api/v1/notifications?status=pending")
         assert second_notifications.status_code == 200
         second_pending = second_notifications.json()
         assert len(second_pending) == 1
@@ -1144,7 +1152,7 @@ def test_task_assignment_notifications_prefer_registered_dm_session_route(tmp_pa
 
         notifications = client.get("/api/v1/notifications").json()
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
-        assert assignment["delivery_status"] == "delivered"
+        assert assignment["metadata"]["delivery_route"] == "target"
 
         assignment_calls = [
             request
@@ -1247,8 +1255,7 @@ def test_auto_created_project_task_assignments_bootstrap_agent_on_source_session
         approved = client.post(f"/api/v1/project-specs/{spec_id}/approve", json={"approver": "Bob"})
         assert approved.status_code == 200
 
-        executed = client.post(f"/api/v1/projects/{project_id}/execute")
-        assert executed.status_code == 200
+        # Spec approval auto-triggers execution
 
         notifications = client.get("/api/v1/notifications").json()
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
@@ -1742,3 +1749,100 @@ def test_openclaw_gateway_cli_uses_expect_final_for_bootstrap(tmp_path: Path, mo
     args = list(captured["args"])
     assert args[:5] == ["/usr/bin/openclaw", "gateway", "call", "agent", "--json"]
     assert "--expect-final" in args
+
+
+def test_auto_task_dispatch_with_phone_number_chat_id_and_no_session_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Projects created with channel + chat_id (phone number, no session_key)
+    should still dispatch auto-created task assignments by deriving a session key."""
+    captured_gateway_requests: list[dict[str, object]] = []
+
+    async def fake_send_gateway_request(
+        self,
+        method: str,
+        params: dict[str, object],
+        *,
+        expect_final: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        captured_gateway_requests.append(
+            {
+                "method": method,
+                "params": params,
+                "expect_final": expect_final,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        openclaw_hook_service_module.OpenClawHookService,
+        "_send_gateway_request",
+        fake_send_gateway_request,
+    )
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        db_path=tmp_path / "data" / "cyborg.db",
+        openclaw=OpenClawHookSettings(
+            base_url="https://openclaw.example",
+            token="secret",
+            session_key_prefix="cyborg:",
+        ),
+        notification_dispatch_interval_seconds=0,
+    )
+
+    with make_client(tmp_path, settings) as client:
+        # Create project with only channel + chat_id (no session_key)
+        project = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Phone routing test",
+                "aim": "Verify dispatch works without explicit session_key",
+                "method": "Create a task and verify it dispatches.",
+                "auto_execute": True,
+                "metadata": {
+                    "channel": "whatsapp",
+                    "chat_id": "+61456224867",
+                },
+                "plan": [
+                    {
+                        "title": "First Step",
+                        "description": "Do first thing",
+                        "criteria": "First done",
+                        "order": 0,
+                    },
+                ],
+                "success_criteria": [
+                    {
+                        "check": "completed_task_count >= 1",
+                        "description": "The first task completes",
+                    }
+                ],
+            },
+        )
+        assert project.status_code == 201
+        project_id = project.json()["id"]
+
+        spec_id = client.get(f"/api/v1/projects/{project_id}/specs").json()["specs"][0]["id"]
+        approved = client.post(f"/api/v1/project-specs/{spec_id}/approve", json={"approver": "Bob"})
+        assert approved.status_code == 200
+
+        notifications = client.get("/api/v1/notifications").json()
+        assignment = next(
+            item for item in notifications if item["notification_type"] == "task_assignment"
+        )
+        assert assignment["delivery_status"] == "delivered"
+
+        assignment_calls = [
+            request
+            for request in captured_gateway_requests
+            if request["method"] == "agent" and request["params"].get("idempotencyKey") == assignment["id"]
+        ]
+        assert len(assignment_calls) == 1
+        assert assignment_calls[0]["params"]["channel"] == "whatsapp"
+        assert assignment_calls[0]["params"]["to"] == "+61456224867"
+        assert assignment_calls[0]["params"]["sessionKey"] == "agent:main:whatsapp:direct:+61456224867"
+

@@ -173,6 +173,25 @@ class NotificationService(BaseService):
         row = await self.db.fetch_one("SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL", (task_id,))
         if row is None:
             return
+        source_updated_at = row.get("completed_at") or row.get("updated_at")
+        existing = await self.db.fetch_one(
+            """
+            SELECT id
+            FROM notifications
+            WHERE entity_type = ? AND entity_id = ? AND notification_type = ? AND source_updated_at = ? AND status = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (
+                NotificationEntityType.TASK.value,
+                row["id"],
+                NotificationType.TASK_RESULT.value,
+                source_updated_at,
+                NotificationStatus.PENDING.value,
+            ),
+        )
+        if existing is not None:
+            return
         task_metadata = json_loads(row.get("metadata"), {})
         title_prefix = "Task failed" if failed else "Task completed"
         title = f"{title_prefix}: {row['title']}"
@@ -622,6 +641,7 @@ class NotificationService(BaseService):
             )
 
         await self._attempt_dispatch_notification(notification_id, now=now)
+
 
     async def _increment_entity_notification_stats(
         self,

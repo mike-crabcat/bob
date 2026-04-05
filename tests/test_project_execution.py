@@ -121,18 +121,16 @@ class TestProjectExecution:
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
 
-            # Start execution
-            response = client.post(f"/api/v1/projects/{project_id}/execute")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["state"] == "active"
-            assert len(data["task_ids"]) == 1
+            # Spec approval auto-triggers execution
+            project_after = client.get(f"/api/v1/projects/{project_id}").json()
+            assert project_after["state"] == "active"
 
             # Verify task was created
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 1
             assert tasks[0]["title"] == "Step 1: First Step"
-            assert tasks[0]["status"] == "pending"
+            assert tasks[0]["status"] == "active"
+            assert tasks[0]["started_at"] is not None
             assert "Success criteria:" in tasks[0]["plan"]
             assert tasks[0]["metadata"]["project_step_index"] == 0
             assert tasks[0]["metadata"]["channel"] == "whatsapp"
@@ -174,14 +172,14 @@ class TestProjectExecution:
             ).json()
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
-            client.post(f"/api/v1/projects/{project_id}/execute")
+
+            # Spec approval auto-triggers execution
 
             # Get first task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             first_task_id = tasks[0]["id"]
 
-            # Start and complete first task
-            client.post(f"/api/v1/tasks/{first_task_id}/start")
+            # Complete first task (already auto-started)
             client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Step 1 completed"},
@@ -191,7 +189,8 @@ class TestProjectExecution:
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 2
             step2 = [t for t in tasks if "Step 2" in t["title"]][0]
-            assert step2["status"] == "pending"
+            assert step2["status"] == "active"
+            assert step2["started_at"] is not None
             assert step2["metadata"]["project_step_index"] == 1
 
     def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path) -> None:
@@ -224,14 +223,14 @@ class TestProjectExecution:
             ).json()
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
-            client.post(f"/api/v1/projects/{project_id}/execute")
+
+            # Spec approval auto-triggers execution
 
             # Get and complete the only task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             task_id = tasks[0]["id"]
 
-            # Complete task
-            client.post(f"/api/v1/tasks/{task_id}/start")
+            # Complete task (already auto-started)
             client.post(
                 f"/api/v1/tasks/{task_id}/complete",
                 json={"result_summary": "Completed"},
@@ -288,13 +287,10 @@ class TestProjectExecution:
             project_id = project.json()["id"]
             approve_latest_project_spec(client, project_id)
 
-            executed = client.post(f"/api/v1/projects/{project_id}/execute")
-            assert executed.status_code == 200
+            # Spec approval auto-triggers execution
 
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
-            started = client.post(f"/api/v1/tasks/{first_task_id}/start")
-            assert started.status_code == 200
             completed = client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Initial step finished"},
@@ -311,7 +307,8 @@ class TestProjectExecution:
             ]
             assert len(follow_up_tasks) == 1
             follow_up = follow_up_tasks[0]
-            assert follow_up["status"] == "pending"
+            assert follow_up["status"] == "active"
+            assert follow_up["started_at"] is not None
             assert follow_up["project_ids"] == [project_id]
             assert follow_up["metadata"]["auto_created_by_project"] is True
             assert follow_up["metadata"]["autonomy_cycle_completed_task_count"] == 1
@@ -366,12 +363,10 @@ class TestProjectExecution:
             project_id = project.json()["id"]
             approve_latest_project_spec(client, project_id)
 
-            executed = client.post(f"/api/v1/projects/{project_id}/execute")
-            assert executed.status_code == 200
+            # Spec approval auto-triggers execution
 
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
-            assert client.post(f"/api/v1/tasks/{first_task_id}/start").status_code == 200
             assert client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Initial step finished"},
@@ -385,7 +380,6 @@ class TestProjectExecution:
                 if task["metadata"].get("autonomy_reason") == "unmet_success_criteria"
             )
 
-            assert client.post(f"/api/v1/tasks/{follow_up['id']}/start").status_code == 200
             assert client.post(
                 f"/api/v1/tasks/{follow_up['id']}/complete",
                 json={"result_summary": "Follow-up completed"},
@@ -491,21 +485,22 @@ class TestProjectExecution:
             assert len(data["success_criteria"]) == 1
 
     def test_evaluate_endpoint(self, tmp_path: Path) -> None:
-        """Test the evaluate endpoint for manual completion check."""
+        """Test the evaluate endpoint for manual completion check on non-auto-execute projects."""
         with make_client(tmp_path) as client:
-            # Create project WITHOUT auto_execute but start it manually
+            # Create project with auto_execute=False so the autonomy checkpoint
+            # won't auto-close it — the evaluate endpoint must be called manually.
             project = client.post(
                 "/api/v1/projects",
                 json={
                     "title": "Evaluate Test",
                     "aim": "Test evaluate",
                     "method": "Create and complete a manual project task, then evaluate the project.",
-                    "auto_execute": False,  # Disable auto-execution
+                    "auto_execute": False,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
-                            "title": "Step 1",
-                            "description": "Do it",
+                            "title": "Manual step",
+                            "description": "Do the manual task",
                             "criteria": "Done",
                             "order": 0,
                         },
@@ -520,9 +515,13 @@ class TestProjectExecution:
             ).json()
             project_id = project["id"]
 
-            # Start the project manually (sets state to ACTIVE)
+            # Spec approval triggers execution even for non-auto projects
+            # (start_project_execution creates the first task regardless)
             approve_latest_project_spec(client, project_id)
-            client.post(f"/api/v1/projects/{project_id}/start")
+
+            # Get the auto-created step task from execution
+            project_tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
+            auto_task_id = project_tasks[0]["id"]
 
             # Create and complete a task manually
             task = create_task(
@@ -539,9 +538,10 @@ class TestProjectExecution:
             result = client.post(f"/api/v1/projects/{project_id}/evaluate")
             assert result.json() is None
 
-            # Complete the task
-            client.post(f"/api/v1/tasks/{task_id}/start")
-            client.post(f"/api/v1/tasks/{task_id}/complete")
+            # Complete both tasks
+            for tid in [task_id, auto_task_id]:
+                client.post(f"/api/v1/tasks/{tid}/start")
+                client.post(f"/api/v1/tasks/{tid}/complete", json={"result_summary": "Done"})
 
             # Evaluate after completion - should close (criteria met)
             result = client.post(f"/api/v1/projects/{project_id}/evaluate")

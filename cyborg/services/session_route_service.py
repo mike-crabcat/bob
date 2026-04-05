@@ -233,15 +233,29 @@ class SessionRouteService(BaseService):
         chat_id = metadata.get("chat_id")
         session_key = metadata.get("session_key")
         if isinstance(chat_id, str) and chat_id.strip():
-            registered = await self.resolve_registered_group_route_by_chat_id("whatsapp", chat_id.strip())
-            return ResolvedSessionRoute(
-                channel="whatsapp",
-                kind=SessionRouteKind.GROUP,
-                to=chat_id.strip(),
-                session_key=session_key or (registered.session_key if registered is not None else None),
-                chat_id=chat_id.strip(),
-                route_source="metadata.chat_id",
-            )
+            normalized_chat_id = chat_id.strip()
+            if normalized_chat_id.endswith("@g.us"):
+                # Group chat
+                registered = await self.resolve_registered_group_route_by_chat_id("whatsapp", normalized_chat_id)
+                return ResolvedSessionRoute(
+                    channel="whatsapp",
+                    kind=SessionRouteKind.GROUP,
+                    to=normalized_chat_id,
+                    session_key=session_key or (registered.session_key if registered is not None else None),
+                    chat_id=normalized_chat_id,
+                    route_source="metadata.chat_id",
+                )
+            else:
+                # Direct message — phone number chat_id, derive session key
+                derived_session_key = session_key or self._build_whatsapp_dm_session_key(normalized_chat_id)
+                return ResolvedSessionRoute(
+                    channel="whatsapp",
+                    kind=SessionRouteKind.DM,
+                    to=normalized_chat_id,
+                    session_key=derived_session_key,
+                    phone_number=normalized_chat_id,
+                    route_source="metadata.chat_id",
+                )
         if isinstance(session_key, str) and session_key.strip():
             normalized_session_key = session_key.strip()
             resolved = await self.resolve_registered_route("whatsapp", normalized_session_key)

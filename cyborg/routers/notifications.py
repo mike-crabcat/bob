@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
 
 @router.get("", response_model=list[NotificationResponse])
 async def list_notifications(
-    status: NotificationStatus | None = NotificationStatus.PENDING,
+    status: NotificationStatus | None = None,
     entity_type: NotificationEntityType | None = None,
     limit: int = 100,
     service: NotificationService = Depends(get_notification_service),

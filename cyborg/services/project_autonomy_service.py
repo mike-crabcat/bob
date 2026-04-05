@@ -107,6 +107,9 @@ class ProjectAutonomyService(BaseService):
                 next_status = await self._released_status(connection, row["id"])
                 updates: list[str] = ["status = ?", "updated_at = ?"]
                 params: list[Any] = [next_status.value, now]
+                if next_status == TaskStatus.ACTIVE:
+                    updates.append("started_at = COALESCE(started_at, ?)")
+                    params.append(now)
                 if row.get("blocked_reason", "").startswith(DEPENDENCY_BLOCKED_PREFIX):
                     updates.append("blocked_reason = NULL")
                     updates.append("blocked_resume_instructions = NULL")
@@ -121,11 +124,58 @@ class ProjectAutonomyService(BaseService):
                     {"status": next_status.value, "released_by": completed_task_id},
                     now,
                 )
+                # Propagate parent task files to dependent metadata
+                await self._propagate_dependency_files(connection, completed_task_id, row["id"])
                 released_task_ids.append(row["id"])
 
         notification_service = NotificationService(self.db)
         for task_id in released_task_ids:
             await notification_service.sync_task_state(task_id, immediate=True)
+
+    async def _propagate_dependency_files(
+        self,
+        connection: Connection,
+        parent_task_id: str,
+        dependent_task_id: str,
+    ) -> None:
+        """Store parent task file references in dependent task's metadata."""
+        # Fetch parent task files
+        cursor = await connection.execute(
+            "SELECT task_id, filename, relative_path, purpose FROM task_files WHERE task_id = ?",
+            (parent_task_id,),
+        )
+        file_rows = await cursor.fetchall()
+        await cursor.close()
+
+        if not file_rows:
+            return
+
+        # Build dependency_output_files list
+        dependency_files = [
+            {
+                "task_id": row["task_id"],
+                "filename": row["filename"],
+                "relative_path": row["relative_path"],
+                "purpose": row["purpose"],
+            }
+            for row in file_rows
+        ]
+
+        # Merge into existing metadata
+        dep_row = await self._fetch_one_connection(
+            connection,
+            "SELECT metadata FROM tasks WHERE id = ?",
+            (dependent_task_id,),
+        )
+        if dep_row is None:
+            return
+
+        metadata = json_loads(dep_row.get("metadata"), {})
+        metadata["dependency_output_files"] = dependency_files
+        await connection.execute(
+            "UPDATE tasks SET metadata = ? WHERE id = ?",
+            (json_dumps(metadata), dependent_task_id),
+        )
 
     async def _checkpoint_project(self, project_id: str) -> None:
         project = await self.db.fetch_one(
@@ -178,6 +228,24 @@ class ProjectAutonomyService(BaseService):
         return [row["project_id"] for row in rows]
 
     async def _released_status(self, connection: Connection, task_id: str) -> TaskStatus:
+        """Determine the status for a dependency-released task.
+
+        Returns ACTIVE if the task belongs to an auto-executing project,
+        PENDING otherwise.
+        """
+        project_row = await self._fetch_one_connection(
+            connection,
+            """
+            SELECT p.auto_execute
+            FROM projects AS p
+            INNER JOIN project_tasks AS pt ON pt.project_id = p.id
+            WHERE pt.task_id = ? AND p.deleted_at IS NULL
+            LIMIT 1
+            """,
+            (task_id,),
+        )
+        if project_row and bool(project_row.get("auto_execute", 0)):
+            return TaskStatus.ACTIVE
         return TaskStatus.PENDING
 
     async def _dependency_is_satisfied_connection(self, connection: Connection, row: dict[str, Any]) -> bool:
@@ -397,6 +465,7 @@ class ProjectAutonomyService(BaseService):
                 )
 
                 task = await task_service.create_task(task_payload)
+                await self._auto_start_refinement_task(task_service, str(task.id), project_id)
                 changes_applied.append(f"Created task: {task.title}")
 
             elif change_type == "reprioritize":
@@ -437,6 +506,22 @@ class ProjectAutonomyService(BaseService):
                 changes_count=len(changes_applied),
                 changes_applied=changes_applied[:5],  # Limit logged changes
             )
+
+    async def _auto_start_refinement_task(
+        self, task_service: Any, task_id: str, project_id: str
+    ) -> None:
+        """Start a refinement task if its project is auto-executing."""
+        project = await self.db.fetch_one(
+            "SELECT auto_execute FROM projects WHERE id = ? AND deleted_at IS NULL",
+            (project_id,),
+        )
+        if project and bool(project.get("auto_execute", 0)):
+            try:
+                await task_service.start_task(task_id)
+            except Exception:
+                logger.warning(
+                    "Auto-start failed for refinement task %s", task_id, exc_info=True
+                )
 
     async def _add_journal_entry(
         self,

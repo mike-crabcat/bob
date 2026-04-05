@@ -146,6 +146,18 @@ class ContextBuilder(BaseService):
             focus_reasoning
         )
 
+        # Attach output files for non-minimal scopes
+        if scope != ContextScope.MINIMAL:
+            for task in filtered_tasks:
+                try:
+                    file_rows = await self.db.fetch_all(
+                        "SELECT filename, relative_path, purpose FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+                        (task["id"],),
+                    )
+                    task["output_files"] = [dict(r) for r in file_rows] if file_rows else []
+                except Exception:
+                    task["output_files"] = []
+
         return {
             "summary": self._summarize_task_state(filtered_tasks),
             "tasks": self._format_tasks_for_scope(filtered_tasks, scope),

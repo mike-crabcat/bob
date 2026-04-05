@@ -129,7 +129,6 @@ def test_live_evaluate_success_criteria_met(
             {"check": "failed_tasks == 0", "description": "No failed tasks"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     acceptance_builder.add_project_journal_entry(
@@ -143,7 +142,6 @@ def test_live_evaluate_success_criteria_met(
         plan="Call the customer, gather two observations, summarize the notes.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="Customer one reported slow pickup and liked the menu variety.",
     )
     acceptance_builder.create_task(
@@ -152,7 +150,6 @@ def test_live_evaluate_success_criteria_met(
         plan="Call the customer, gather two observations, summarize the notes.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="Customer two praised service quality and suggested clearer pickup signage.",
     )
 
@@ -185,7 +182,6 @@ def test_live_evaluate_success_criteria_unmet(
             {"check": "failed_tasks == 0", "description": "No failed tasks"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     acceptance_builder.create_task(
@@ -194,7 +190,6 @@ def test_live_evaluate_success_criteria_unmet(
         plan="Draft the checklist and save it.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="Drafted the initial checklist.",
     )
     acceptance_builder.create_task(
@@ -203,7 +198,6 @@ def test_live_evaluate_success_criteria_unmet(
         plan="Verify all launch links and record any broken links.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         fail_result="Two launch links were broken.",
     )
 
@@ -234,7 +228,6 @@ def test_live_generate_follow_up_tasks(
             {"check": "completed_tasks >= 2", "description": "Checklist and approval work completed"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     acceptance_builder.add_project_journal_entry(
@@ -248,7 +241,6 @@ def test_live_generate_follow_up_tasks(
         plan="Draft the checklist and circulate it internally.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="Drafted the checklist and circulated it internally.",
     )
 
@@ -287,7 +279,6 @@ def test_live_refine_project_strategy_healthy(
             {"check": "completed_tasks >= 2", "description": "Core onboarding work completed"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     task = acceptance_builder.create_task(
@@ -296,7 +287,6 @@ def test_live_refine_project_strategy_healthy(
         plan="Collect notes and draft the guide.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="Drafted the onboarding guide and shared it for review.",
     )
 
@@ -326,7 +316,6 @@ def test_live_refine_project_strategy_degraded(
             {"check": "completed_tasks >= 2", "description": "Venue and supplier coordination completed"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     task = acceptance_builder.create_task(
@@ -335,7 +324,6 @@ def test_live_refine_project_strategy_degraded(
         plan="Confirm date, room availability, and AV support.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         fail_result="The venue cancelled the original booking and no replacement has been confirmed.",
     )
     acceptance_builder.add_project_journal_entry(
@@ -373,7 +361,6 @@ def test_live_extract_learnings(
             {"check": "completed_tasks >= 1", "description": "Complete the experiment task"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     acceptance_builder.create_task(
@@ -382,7 +369,6 @@ def test_live_extract_learnings(
         plan="Run the experiment and summarize what happened.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="The experiment worked, but setup time was longer than expected.",
     )
     acceptance_builder.create_task(
@@ -391,7 +377,6 @@ def test_live_extract_learnings(
         plan="Review the setup steps and identify the delay.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         fail_result="Could not reproduce the delay because the original environment was gone.",
     )
     acceptance_builder.add_project_journal_entry(
@@ -435,7 +420,6 @@ def test_live_generate_task_plan(
             {"check": "completed_tasks >= 1", "description": "A venue shortlist is prepared"},
         ],
         approve_spec=True,
-        start=True,
     )
     task = acceptance_builder.create_task(
         title="Prepare a venue shortlist",
@@ -471,7 +455,6 @@ def test_live_analyze_project_health(
             {"check": "completed_tasks >= 2", "description": "Core handoff tasks completed"},
         ],
         approve_spec=True,
-        start=True,
     )
     project_id = project["id"]
     acceptance_builder.create_task(
@@ -480,7 +463,6 @@ def test_live_analyze_project_health(
         plan="Collect the documents and record any missing items.",
         project_ids=[project_id],
         approve_plan=True,
-        start=True,
         complete_result="Collected most supplier documents, but the insurance certificate is still missing.",
     )
     blocked = acceptance_builder.create_task(

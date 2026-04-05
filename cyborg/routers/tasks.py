@@ -12,6 +12,9 @@ from cyborg.dependencies import get_task_service
 from cyborg.models import (
     TaskBlockRequest,
     TaskFailureRequest,
+    TaskFileCreate,
+    TaskFileListResponse,
+    TaskFileResponse,
     TaskHistoryResponse,
     TaskResponse,
     TaskRetryRequest,
@@ -134,3 +137,35 @@ async def upsert_step(
 @router.get("/{task_id}/history", response_model=list[TaskHistoryResponse])
 async def list_history(task_id: UUID, service: TaskService = Depends(get_task_service)) -> list[TaskHistoryResponse]:
     return await service.list_history(str(task_id))
+
+
+@router.get("/{task_id}/files", response_model=TaskFileListResponse)
+async def list_task_files(
+    task_id: UUID,
+    service: TaskService = Depends(get_task_service),
+) -> TaskFileListResponse:
+    return await service.list_task_files(str(task_id))
+
+
+class TaskFileRegisterRequest(BaseModel):
+    project_id: UUID
+    file: TaskFileCreate
+
+
+@router.post("/{task_id}/files", response_model=TaskFileResponse, status_code=status.HTTP_201_CREATED)
+async def register_task_file(
+    task_id: UUID,
+    payload: TaskFileRegisterRequest,
+    service: TaskService = Depends(get_task_service),
+) -> TaskFileResponse:
+    return await service.register_task_file(str(task_id), str(payload.project_id), payload.file)
+
+
+@router.delete("/{task_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task_file(
+    task_id: UUID,
+    file_id: UUID,
+    service: TaskService = Depends(get_task_service),
+) -> Response:
+    await service.delete_task_file(str(task_id), str(file_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

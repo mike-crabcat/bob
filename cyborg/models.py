@@ -244,6 +244,15 @@ class RetryConfig(CyborgModel):
         return self
 
 
+class TaskFilePurpose(StrEnum):
+    REASONING = "reasoning"
+    RESULT = "result"
+    ANALYSIS = "analysis"
+    LOG = "log"
+    ARTIFACT = "artifact"
+    OTHER = "other"
+
+
 class TaskTargetSession(CyborgModel):
     channel: Literal["whatsapp"]
     kind: TaskTargetSessionKind
@@ -419,6 +428,8 @@ class TaskResponse(TaskFields, EntityRef, SoftDeleteFields):
     notification_count: int = 0
     last_notification_at: datetime | None = None
     needs_input_since: datetime | None = None
+    output_directory: str | None = None
+    files: list[TaskFileResponse] = Field(default_factory=list)
 
 
 class TaskStepFields(CyborgModel):
@@ -501,6 +512,44 @@ class TaskRetryRequest(CyborgModel):
     details: MetadataDict = Field(default_factory=dict)
 
 
+class TaskFileCreate(CyborgModel):
+    """Request to register a file produced by a task."""
+    filename: str = Field(min_length=1, max_length=255)
+    purpose: TaskFilePurpose = TaskFilePurpose.ARTIFACT
+    description: str | None = None
+    content_type: str = "text/plain"
+
+    @field_validator("filename")
+    @classmethod
+    def filename_must_not_have_path_sep(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("filename must not be blank")
+        if "/" in stripped or "\\" in stripped:
+            raise ValueError("filename must not contain path separators")
+        return stripped
+
+
+class TaskFileResponse(CyborgModel, EntityRef):
+    task_id: UUID
+    project_id: UUID
+    filename: str
+    relative_path: str
+    purpose: TaskFilePurpose
+    description: str | None = None
+    content_type: str = "text/plain"
+    size_bytes: int | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskFileListResponse(CyborgModel):
+    task_id: UUID
+    output_directory: str | None = None
+    files: list[TaskFileResponse] = Field(default_factory=list)
+
+
 class ProjectFields(CyborgModel):
     title: str = Field(min_length=1, max_length=200)
     description: str | None = None
@@ -510,7 +559,7 @@ class ProjectFields(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = Field(default=False, description="Whether to auto-execute when project becomes active")
+    auto_execute: bool = Field(default=True, description="Whether to auto-execute when project becomes active")
 
     @field_validator("title")
     @classmethod
@@ -530,7 +579,7 @@ class ProjectCreate(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = Field(default=False)
+    auto_execute: bool = Field(default=True)
     task_ids: list[UUID] = Field(default_factory=list)
     metadata: MetadataDict = Field(default_factory=dict)
 
@@ -576,7 +625,7 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = False
+    auto_execute: bool = True
     subagent_session_key: str | None = None
     metadata: MetadataDict = Field(default_factory=dict)
     blocked_reason: str | None = None

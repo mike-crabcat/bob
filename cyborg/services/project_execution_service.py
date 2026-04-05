@@ -133,7 +133,7 @@ class ProjectExecutionService(BaseService):
 
     async def start_project_execution(self, project_id: str) -> ProjectResponse:
         """Start auto-execution for a project.
-        
+
         This will:
         1. Transition project to ACTIVE state
         2. Create the first task for step 0
@@ -148,11 +148,11 @@ class ProjectExecutionService(BaseService):
         previous_state = project["state"]
         previous_started_at = project.get("started_at")
 
-        # Update project state
+        # Update project state (keep existing auto_execute setting)
         await self.db.execute(
             """
             UPDATE projects
-            SET state = ?, started_at = ?, auto_execute = 1, updated_at = ?
+            SET state = ?, started_at = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
             (ProjectState.ACTIVE.value, now, now, project_id),
@@ -353,14 +353,61 @@ class ProjectExecutionService(BaseService):
 
         return True  # Default to satisfied to allow progression
 
+    async def _step_task_exists(self, project_id: str, step_index: int) -> bool:
+        """Check if a non-completed task already exists for a plan step."""
+        rows = await self.db.fetch_all(
+            """
+            SELECT t.metadata
+            FROM tasks AS t
+            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
+            WHERE pt.project_id = ? AND t.deleted_at IS NULL AND t.status != 'completed'
+            """,
+            (project_id,),
+        )
+        for row in rows:
+            meta = json_loads(row.get("metadata"), {})
+            if meta.get("project_step_index") == step_index:
+                return True
+        return False
+
+    async def _auto_start_task(self, task_id: str, project_id: str) -> None:
+        """Start a task immediately if the project has auto_execute enabled."""
+        project = await self._get_project_row(project_id)
+        if not project or not project.get("auto_execute"):
+            return
+        try:
+            await self.task_service.start_task(str(task_id))
+        except Exception:
+            logger.warning(
+                "Auto-start failed for task %s in project %s",
+                task_id,
+                project_id,
+                exc_info=True,
+            )
+
     async def _create_task_for_step(self, project_id: str, step: PlanStep, step_index: int) -> None:
         """Create a task for a plan step."""
+        if await self._step_task_exists(project_id, step_index):
+            return
+
         task_title = f"Step {step_index + 1}: {step.title}"
-        
+
+        # Resolve output directory for this task
+        output_directory: str | None = None
+        try:
+            from cyborg.services.project_service import ProjectService
+
+            project_service = ProjectService(self.db)
+            project_path = await project_service.get_project_path(project_id)
+            # Use a placeholder short_id; the actual task ID isn't known yet
+            output_directory = str(project_path / "tasks" / "pending")
+        except Exception:
+            pass
+
         task_payload = TaskCreate(
             title=task_title,
             description=step.description,
-            plan=self._build_step_task_plan(step),
+            plan=self._build_step_task_plan(step, output_directory),
             priority=TaskPriority.HIGH,
             project_ids=[project_id],
             metadata={
@@ -370,7 +417,18 @@ class ProjectExecutionService(BaseService):
             },
         )
 
-        await self.task_service.create_task(task_payload)
+        task = await self.task_service.create_task(task_payload)
+        await self._auto_start_task(str(task.id), project_id)
+
+        # Now that we have the real task ID, update the plan with the correct output directory
+        if output_directory is not None and output_directory.endswith("/pending"):
+            from cyborg.services.project_service import short_task_id
+
+            real_dir = output_directory.replace("/pending", f"/{short_task_id(str(task.id))}")
+            updated_plan = self._build_step_task_plan(step, real_dir)
+            from cyborg.models import TaskUpdate
+
+            await self.task_service.update_task(str(task.id), TaskUpdate(plan=updated_plan))
 
         # Add journal entry
         await self._add_journal_entry(
@@ -380,13 +438,22 @@ class ProjectExecutionService(BaseService):
             {"step_index": step_index, "step_title": step.title},
         )
 
-    def _build_step_task_plan(self, step: PlanStep) -> str:
+    def _build_step_task_plan(self, step: PlanStep, output_directory: str | None = None) -> str:
         """Build the initial task plan for an auto-created project step."""
-        return (
+        plan = (
             f"Objective: {step.title}\n"
             f"Execution: {step.description}\n"
             f"Success criteria: {step.criteria}"
         )
+        if output_directory:
+            plan += (
+                f"\n\n## Output Directory\n"
+                f"All task artifacts must be written to: `{output_directory}`\n"
+                f"- Use descriptive filenames for each artifact.\n"
+                f"- Put the primary result in `RESULT.md`.\n"
+                f"- Register all output files via the task files API."
+            )
+        return plan
 
     async def _evaluate_criteria(
         self,
@@ -640,6 +707,7 @@ class ProjectExecutionService(BaseService):
                 },
             )
             task = await self.task_service.create_task(task_payload)
+            await self._auto_start_task(str(task.id), project_id)
             created_task_ids.append(str(task.id))
             existing_signatures.add(signature)
 
@@ -770,6 +838,7 @@ class ProjectExecutionService(BaseService):
                 )
 
                 task = await self.task_service.create_task(task_payload)
+                await self._auto_start_task(str(task.id), project_id)
                 created_task_ids.append(str(task.id))
 
             if created_task_ids:

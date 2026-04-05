@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from cyborg.database import Database
 from cyborg.models import PlanStep, SuccessCriterion
-from cyborg.services.base import BaseService
+from cyborg.services.base import BaseService, json_loads
 from cyborg.services.context_builder import ContextBuilder, ContextScope
 from cyborg.services.prompt_history import log_prompt
 
@@ -207,7 +207,27 @@ class OpenClawReasoningService(BaseService):
                 focus_reasoning="task_planning",
             )
 
-        prompt = self._build_task_plan_prompt(dict(task), project_context)
+        # Resolve output directory and dependency files from task metadata
+        task_metadata = json_loads(task.get("metadata"), {})
+        output_directory: str | None = task_metadata.get("output_directory")
+        dependency_files: list[dict[str, Any]] | None = task_metadata.get("dependency_output_files")
+
+        # If not in metadata, compute from project link
+        if output_directory is None and project_id_from_task:
+            try:
+                from cyborg.services.task_service import TaskService
+
+                task_service = TaskService(self.db)
+                output_directory = await task_service._compute_output_directory(task_id)
+            except Exception:
+                pass
+
+        prompt = self._build_task_plan_prompt(
+            dict(task),
+            project_context,
+            output_directory=output_directory,
+            dependency_files=dependency_files,
+        )
 
         response = await self._call_openclaw(
             prompt=prompt,
@@ -603,6 +623,8 @@ class OpenClawReasoningService(BaseService):
         self,
         task: dict[str, Any],
         project_context: dict[str, Any],
+        output_directory: str | None = None,
+        dependency_files: list[dict[str, Any]] | None = None,
     ) -> str:
         """Build prompt for task-level planning."""
 
@@ -624,6 +646,26 @@ class OpenClawReasoningService(BaseService):
                 ])
             if project.get("aim"):
                 parts.append(f"Project Aim: {project['aim']}")
+
+        if output_directory:
+            parts.extend([
+                "",
+                "## Output Directory",
+                f"All task artifacts must be written to: `{output_directory}`",
+                "- Use descriptive filenames for each artifact.",
+                "- Put the primary result in `RESULT.md`.",
+                "- Register all output files via the task files API.",
+            ])
+
+        if dependency_files:
+            parts.extend([
+                "",
+                "## Input Files from Previous Task",
+                "The following files were produced by a dependency task and are available as inputs:",
+                "",
+            ])
+            for f in dependency_files:
+                parts.append(f"- `{f.get('relative_path', f.get('filename', 'unknown'))}` ({f.get('purpose', 'unknown')})")
 
         parts.extend([
             "",

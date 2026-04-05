@@ -5,7 +5,6 @@ import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from cyborg.models import (
     JournalEntryType,
-    PlanApproveRequest,
     PlanStep,
     ProjectCloseRequest,
     ProjectCreate,

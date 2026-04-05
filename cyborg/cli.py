@@ -156,7 +156,7 @@ def _api_call(method: str, path: str, data: Optional[dict[str, Any]] = None) -> 
     req = Request(url, data=body, headers=headers, method=method)
 
     try:
-        with urlopen(req) as response:
+        with urlopen(req, timeout=30) as response:
             response_body = response.read()
             if not response_body:
                 return {"data": None}
@@ -173,7 +173,7 @@ def _text_call(path: str) -> str:
     req = Request(url, method="GET")
 
     try:
-        with urlopen(req) as response:
+        with urlopen(req, timeout=30) as response:
             return response.read().decode()
     except HTTPError as exc:
         _handle_http_error(exc)
@@ -697,69 +697,6 @@ def serve(
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
 
 
-@task_app.command("create")
-def task_create(
-    title: Annotated[str, typer.Argument(help="Task title")],
-    requested_by: Annotated[Optional[str], typer.Option("--requested-by", "-r", help="Who requested the task")] = "Bob",
-    priority: Annotated[Optional[str], typer.Option("--priority", "-p", help="Task priority")] = "medium",
-    description: Annotated[Optional[str], typer.Option("--description", "-d", help="Task description")] = None,
-    plan: Annotated[str, typer.Option(help="Initial execution plan (required)")] = ...,
-    status: Annotated[Optional[str], typer.Option("--status", help="Initial task status")] = None,
-    parent_id: Annotated[Optional[str], typer.Option("--parent-id", help="Parent task ID")] = None,
-    project_ids: Annotated[Optional[list[str]], typer.Option("--project-id", help="Associated project ID")] = None,
-    recurrence_rule: Annotated[Optional[str], typer.Option("--recurring", "--recurrence-rule", help="Cron expression for recurring task")] = None,
-    is_recurring: Annotated[Optional[bool], typer.Option("--is-recurring/--not-recurring", help="Explicitly mark the task as recurring or not")] = None,
-    next_run_at: Annotated[Optional[str], typer.Option("--next-run-at", help="Next scheduled run time (ISO format)")] = None,
-    retry_max_attempts: Annotated[Optional[int], typer.Option("--retry-max-attempts", help="Retry policy max attempts")] = None,
-    retry_current_attempt: Annotated[Optional[int], typer.Option("--retry-current-attempt", help="Current retry attempt count")] = None,
-    retry_on_failure: Annotated[Optional[str], typer.Option("--retry-on-failure", help="Retry action: retry, retry_from, escalate, abort")] = None,
-    retry_from_step: Annotated[Optional[int], typer.Option("--retry-from-step", help="Restart from this step number")] = None,
-    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Extra task metadata as JSON object")] = None,
-    channel: Annotated[Optional[str], typer.Option(help="Source channel for notifications and approvals")] = None,
-    chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for notifications and approvals")] = None,
-    session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
-    target_kind: Annotated[Optional[str], typer.Option("--target-kind", help="Target session kind: group or dm")] = None,
-    target_session_key: Annotated[Optional[str], typer.Option("--target-session-key", help="Target WhatsApp group session key")] = None,
-    target_chat_id: Annotated[Optional[str], typer.Option("--target-chat-id", help="Target WhatsApp chat ID")] = None,
-    target_contact_id: Annotated[Optional[str], typer.Option("--target-contact-id", help="Target contact ID for WhatsApp DM")] = None,
-    blocked_reason: Annotated[Optional[str], typer.Option("--blocked-reason", help="Blocked reason")] = None,
-    blocked_resume_instructions: Annotated[Optional[str], typer.Option("--blocked-resume-instructions", help="How to resume the task")] = None,
-) -> None:
-    """Create a new task."""
-
-    payload = _build_task_payload(
-        title=title,
-        requested_by=requested_by,
-        priority=priority,
-        description=description,
-        plan=plan,
-        status=status,
-        parent_id=parent_id,
-        project_ids=project_ids,
-        recurrence_rule=recurrence_rule,
-        is_recurring=is_recurring,
-        next_run_at=next_run_at,
-        retry_max_attempts=retry_max_attempts,
-        retry_current_attempt=retry_current_attempt,
-        retry_on_failure=retry_on_failure,
-        retry_from_step=retry_from_step,
-        metadata_json=metadata_json,
-        channel=channel,
-        chat_id=chat_id,
-        session_key=session_key,
-        target_kind=target_kind,
-        target_session_key=target_session_key,
-        target_chat_id=target_chat_id,
-        target_contact_id=target_contact_id,
-        blocked_reason=blocked_reason,
-        blocked_resume_instructions=blocked_resume_instructions,
-    )
-    task = _api_call("POST", "/api/v1/tasks", payload)["data"]
-    typer.echo(f"Created task: {task['id']}")
-    typer.echo(f"Title: {task['title']}")
-    typer.echo(f"Status: {task['status']}")
-
-
 @task_app.command("list")
 def task_list(
     status: Annotated[Optional[str], typer.Option("--status", "-s", help="Filter by status")] = None,
@@ -1004,64 +941,6 @@ def task_step_add(
         payload["completed_at"] = completed_at
     step = _api_call("POST", f"/api/v1/tasks/{task_id}/steps", payload)["data"]
     typer.echo(f"Upserted step {step['step_number']} for task {task_id}")
-
-
-@task_app.command("subtask-create")
-def task_subtask_create(
-    task_id: Annotated[str, typer.Argument(help="Parent task ID")],
-    title: Annotated[str, typer.Argument(help="Subtask title")],
-    requested_by: Annotated[Optional[str], typer.Option("--requested-by", "-r", help="Who requested the task")] = "Bob",
-    priority: Annotated[Optional[str], typer.Option("--priority", "-p", help="Task priority")] = "medium",
-    description: Annotated[Optional[str], typer.Option("--description", "-d", help="Task description")] = None,
-    plan: Annotated[str, typer.Option(help="Initial execution plan (required)")] = ...,
-    status: Annotated[Optional[str], typer.Option("--status", help="Initial task status")] = None,
-    project_ids: Annotated[Optional[list[str]], typer.Option("--project-id", help="Associated project ID")] = None,
-    recurrence_rule: Annotated[Optional[str], typer.Option("--recurring", "--recurrence-rule", help="Cron expression for recurring task")] = None,
-    is_recurring: Annotated[Optional[bool], typer.Option("--is-recurring/--not-recurring", help="Explicitly mark the task as recurring or not")] = None,
-    next_run_at: Annotated[Optional[str], typer.Option("--next-run-at", help="Next scheduled run time (ISO format)")] = None,
-    retry_max_attempts: Annotated[Optional[int], typer.Option("--retry-max-attempts", help="Retry policy max attempts")] = None,
-    retry_current_attempt: Annotated[Optional[int], typer.Option("--retry-current-attempt", help="Current retry attempt count")] = None,
-    retry_on_failure: Annotated[Optional[str], typer.Option("--retry-on-failure", help="Retry action: retry, retry_from, escalate, abort")] = None,
-    retry_from_step: Annotated[Optional[int], typer.Option("--retry-from-step", help="Restart from this step number")] = None,
-    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Extra task metadata as JSON object")] = None,
-    channel: Annotated[Optional[str], typer.Option(help="Source channel for notifications and approvals")] = None,
-    chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for notifications and approvals")] = None,
-    session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
-    target_kind: Annotated[Optional[str], typer.Option("--target-kind", help="Target session kind: group or dm")] = None,
-    target_session_key: Annotated[Optional[str], typer.Option("--target-session-key", help="Target WhatsApp group session key")] = None,
-    target_chat_id: Annotated[Optional[str], typer.Option("--target-chat-id", help="Target WhatsApp chat ID")] = None,
-    target_contact_id: Annotated[Optional[str], typer.Option("--target-contact-id", help="Target contact ID for WhatsApp DM")] = None,
-) -> None:
-    """Create a subtask under an existing task."""
-
-    payload = _build_task_payload(
-        title=title,
-        requested_by=requested_by,
-        priority=priority,
-        description=description,
-        plan=plan,
-        status=status,
-        project_ids=project_ids,
-        recurrence_rule=recurrence_rule,
-        is_recurring=is_recurring,
-        next_run_at=next_run_at,
-        retry_max_attempts=retry_max_attempts,
-        retry_current_attempt=retry_current_attempt,
-        retry_on_failure=retry_on_failure,
-        retry_from_step=retry_from_step,
-        metadata_json=metadata_json,
-        channel=channel,
-        chat_id=chat_id,
-        session_key=session_key,
-        target_kind=target_kind,
-        target_session_key=target_session_key,
-        target_chat_id=target_chat_id,
-        target_contact_id=target_contact_id,
-    )
-    task = _api_call("POST", f"/api/v1/tasks/{task_id}/subtasks", payload)["data"]
-    typer.echo(f"Created subtask: {task['id']}")
-    typer.echo(f"Title: {task['title']}")
-    typer.echo(f"Status: {task['status']}")
 
 
 @task_app.command("history")
@@ -1422,14 +1301,6 @@ def project_spec_reject_id(
     typer.echo(f"Feedback: {rejected['feedback']}")
 
 
-@project_app.command("start")
-def project_start(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
-    """Start a project."""
-
-    result = _api_call("POST", f"/api/v1/projects/{id}/start")
-    typer.echo(f"Project started: {result['data']['title']}")
-
-
 @project_app.command("pause")
 def project_pause(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
     """Pause a project."""
@@ -1465,63 +1336,6 @@ def project_tasks(
         typer.echo("No tasks found for this project.")
         return
     _print_task_table(tasks)
-
-
-@project_app.command("task-create")
-def project_task_create(
-    project_id: Annotated[str, typer.Argument(help="Project ID")],
-    title: Annotated[str, typer.Argument(help="Task title")],
-    requested_by: Annotated[Optional[str], typer.Option("--requested-by", "-r", help="Who requested the task")] = "Bob",
-    priority: Annotated[Optional[str], typer.Option("--priority", "-p", help="Task priority")] = "medium",
-    description: Annotated[Optional[str], typer.Option("--description", "-d", help="Task description")] = None,
-    plan: Annotated[str, typer.Option(help="Initial execution plan (required)")] = ...,
-    status: Annotated[Optional[str], typer.Option("--status", help="Initial task status")] = None,
-    recurrence_rule: Annotated[Optional[str], typer.Option("--recurring", "--recurrence-rule", help="Cron expression for recurring task")] = None,
-    is_recurring: Annotated[Optional[bool], typer.Option("--is-recurring/--not-recurring", help="Explicitly mark the task as recurring or not")] = None,
-    next_run_at: Annotated[Optional[str], typer.Option("--next-run-at", help="Next scheduled run time (ISO format)")] = None,
-    retry_max_attempts: Annotated[Optional[int], typer.Option("--retry-max-attempts", help="Retry policy max attempts")] = None,
-    retry_current_attempt: Annotated[Optional[int], typer.Option("--retry-current-attempt", help="Current retry attempt count")] = None,
-    retry_on_failure: Annotated[Optional[str], typer.Option("--retry-on-failure", help="Retry action: retry, retry_from, escalate, abort")] = None,
-    retry_from_step: Annotated[Optional[int], typer.Option("--retry-from-step", help="Restart from this step number")] = None,
-    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Extra task metadata as JSON object")] = None,
-    channel: Annotated[Optional[str], typer.Option(help="Source channel for notifications and approvals")] = None,
-    chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for notifications and approvals")] = None,
-    session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
-    target_kind: Annotated[Optional[str], typer.Option("--target-kind", help="Target session kind: group or dm")] = None,
-    target_session_key: Annotated[Optional[str], typer.Option("--target-session-key", help="Target WhatsApp group session key")] = None,
-    target_chat_id: Annotated[Optional[str], typer.Option("--target-chat-id", help="Target WhatsApp chat ID")] = None,
-    target_contact_id: Annotated[Optional[str], typer.Option("--target-contact-id", help="Target contact ID for WhatsApp DM")] = None,
-) -> None:
-    """Create a task from a project (auto-linked)."""
-
-    payload = _build_task_payload(
-        title=title,
-        requested_by=requested_by,
-        priority=priority,
-        description=description,
-        plan=plan,
-        status=status,
-        recurrence_rule=recurrence_rule,
-        is_recurring=is_recurring,
-        next_run_at=next_run_at,
-        retry_max_attempts=retry_max_attempts,
-        retry_current_attempt=retry_current_attempt,
-        retry_on_failure=retry_on_failure,
-        retry_from_step=retry_from_step,
-        metadata_json=metadata_json,
-        channel=channel,
-        chat_id=chat_id,
-        session_key=session_key,
-        target_kind=target_kind,
-        target_session_key=target_session_key,
-        target_chat_id=target_chat_id,
-        target_contact_id=target_contact_id,
-    )
-    task = _api_call("POST", f"/api/v1/projects/{project_id}/tasks", payload)["data"]
-    typer.echo(f"Created task from project: {task['id']}")
-    typer.echo(f"Title: {task['title']}")
-    typer.echo(f"Status: {task['status']}")
-    typer.echo(f"Auto-linked to project: {project_id}")
 
 
 @project_app.command("journal")
@@ -1560,15 +1374,6 @@ def project_journal_add(
     entry = _api_call("POST", f"/api/v1/projects/{project_id}/journal", payload)["data"]
     typer.echo(f"Added journal entry: {entry['id']}")
     typer.echo(f"Type: {entry['entry_type']}")
-
-
-@project_app.command("execute")
-def project_execute(project_id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
-    """Start project auto-execution."""
-
-    project = _api_call("POST", f"/api/v1/projects/{project_id}/execute")["data"]
-    typer.echo(f"Project execution started: {project['title']}")
-    typer.echo(f"State: {project['state']}")
 
 
 @project_app.command("evaluate")

@@ -131,11 +131,15 @@ class OpenClawHookService(BaseService):
         await self.db.execute(
             """
             UPDATE notifications
-            SET delivery_status = ?, last_delivery_at = ?, last_delivery_error = NULL, next_delivery_at = NULL, updated_at = ?
+            SET delivery_status = ?, status = ?, acknowledged_at = ?, acknowledged_by = ?,
+                last_delivery_at = ?, last_delivery_error = NULL, next_delivery_at = NULL, updated_at = ?
             WHERE id = ?
             """,
             (
                 NotificationDeliveryStatus.DELIVERED.value,
+                "acknowledged",
+                now,
+                "delivery",
                 now,
                 now,
                 notification_id,

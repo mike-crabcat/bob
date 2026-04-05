@@ -369,6 +369,9 @@ async def test_duration_calculation(db: Database):
         "success_criteria": [
             {"check": "completed_task_count >= 1", "description": "One task completed"}
         ],
+        "plan": [
+            {"title": "Complete task", "description": "Do the work", "criteria": "Done", "order": 0},
+        ],
     })
 
     specs = await project_service.project_spec_service.list_specs(str(project.id))
@@ -377,8 +380,7 @@ async def test_duration_calculation(db: Database):
         ProjectSpecApproveRequest(approver="Test"),
     )
 
-    # Start the project
-    await project_service.start_project(str(project.id))
+    # Spec approval auto-triggers execution, project is already active
 
     builder = ContextBuilder(db)
     context = await builder.build_project_context(

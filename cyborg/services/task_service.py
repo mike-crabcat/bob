@@ -16,6 +16,10 @@ from cyborg.models import (
     TaskBlockRequest,
     TaskCreate,
     TaskFailureRequest,
+    TaskFileCreate,
+    TaskFileListResponse,
+    TaskFilePurpose,
+    TaskFileResponse,
     TaskHistoryResponse,
     TaskResponse,
     TaskRetryRequest,
@@ -711,6 +715,9 @@ class TaskService(BaseService):
         row["metadata"] = json_loads(row.get("metadata"), {})
         row["project_ids"] = await self._get_project_ids(row["id"])
         row.pop("current_plan_id", None)
+        # Attach output directory and file listings
+        row["output_directory"] = await self._compute_output_directory(row["id"])
+        row["files"] = await self._fetch_task_file_dicts(row["id"])
         return row
 
     async def _get_project_ids(self, task_id: str) -> list[str]:
@@ -978,3 +985,183 @@ class TaskService(BaseService):
         except Exception:
             # Don't let webhook failures affect task operations
             pass
+
+    # ------------------------------------------------------------------
+    # File management
+    # ------------------------------------------------------------------
+
+    async def register_task_file(
+        self,
+        task_id: str,
+        project_id: str,
+        payload: TaskFileCreate,
+    ) -> TaskFileResponse:
+        """Register a file produced by a task in the database."""
+        await self._get_task_row(task_id)
+        now = utcnow().isoformat()
+
+        # Compute the relative path under the project workspace
+        relative_path = f"tasks/{task_id.replace('-', '')[:8]}/{payload.filename}"
+
+        # Determine size if possible
+        size_bytes: int | None = None
+        try:
+            from pathlib import Path
+
+            full_path = Path(f"/home/mike/.openclaw/workspace/projects") / relative_path
+            if full_path.exists():
+                size_bytes = full_path.stat().st_size
+        except Exception:
+            pass
+
+        file_id = str(uuid4())
+        await self.db.execute(
+            """
+            INSERT INTO task_files (
+                id, task_id, project_id, filename, relative_path,
+                purpose, description, content_type, size_bytes,
+                metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                file_id,
+                task_id,
+                project_id,
+                payload.filename,
+                relative_path,
+                payload.purpose.value,
+                payload.description,
+                payload.content_type,
+                size_bytes,
+                json_dumps({}),
+                now,
+                now,
+            ),
+        )
+        row = await self.db.fetch_one("SELECT * FROM task_files WHERE id = ?", (file_id,))
+        return self._task_file_response_from_row(dict(row))
+
+    async def list_task_files(self, task_id: str) -> TaskFileListResponse:
+        """Return all files registered for a task, plus the output directory."""
+        await self._get_task_row(task_id)
+        rows = await self.db.fetch_all(
+            "SELECT * FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+        files = [self._task_file_response_from_row(dict(r)) for r in rows]
+        return TaskFileListResponse(
+            task_id=task_id,
+            output_directory=await self._compute_output_directory(task_id),
+            files=files,
+        )
+
+    async def delete_task_file(self, task_id: str, file_id: str) -> None:
+        """Remove a task-file record from the database (does NOT delete from disk)."""
+        await self._get_task_row(task_id)
+        await self.db.execute(
+            "DELETE FROM task_files WHERE id = ? AND task_id = ?",
+            (file_id, task_id),
+        )
+
+    async def _compute_output_directory(self, task_id: str) -> str | None:
+        """Return the output directory path for a task, or None if no project link."""
+        project_ids = await self._get_project_ids(task_id)
+        if not project_ids:
+            return None
+        project_id = project_ids[0]
+        try:
+            from cyborg.services.project_service import ProjectService
+
+            project_service = ProjectService(self.db)
+            project_path = await project_service.get_project_path(project_id)
+            short_id = task_id.replace("-", "")[:8]
+            return str(project_path / "tasks" / short_id)
+        except Exception:
+            return None
+
+    async def _fetch_task_file_dicts(self, task_id: str) -> list[dict[str, Any]]:
+        """Fetch task file rows as plain dicts suitable for TaskFileResponse validation."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            d = dict(row)
+            d["metadata"] = json_loads(d.get("metadata"), {})
+            result.append(d)
+        return result
+
+    async def _auto_register_untracked_files(self, task_id: str, output_directory: str) -> None:
+        """Scan the output directory for files not yet tracked and register them."""
+        from pathlib import Path
+
+        output_path = Path(output_directory)
+        if not output_path.exists():
+            return
+
+        project_ids = await self._get_project_ids(task_id)
+        if not project_ids:
+            return
+        project_id = project_ids[0]
+
+        # Get already-tracked filenames
+        tracked = await self.db.fetch_all(
+            "SELECT filename FROM task_files WHERE task_id = ?",
+            (task_id,),
+        )
+        tracked_names = {r["filename"] for r in tracked}
+
+        for child in sorted(output_path.iterdir()):
+            if child.is_dir():
+                continue
+            if child.name in tracked_names:
+                continue
+            payload = TaskFileCreate(
+                filename=child.name,
+                purpose=self._guess_purpose(child.name),
+                content_type=self._guess_content_type(child.name),
+            )
+            try:
+                await self.register_task_file(task_id, project_id, payload)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _guess_purpose(filename: str) -> TaskFilePurpose:
+        """Guess a file purpose from its name."""
+        name = filename.lower()
+        if name.endswith((".log",)):
+            return TaskFilePurpose.LOG
+        if name.endswith((".json", ".csv", ".yaml", ".yml", ".toml")):
+            return TaskFilePurpose.ANALYSIS
+        if name.endswith((".md", ".txt", ".rst")):
+            return TaskFilePurpose.RESULT
+        return TaskFilePurpose.ARTIFACT
+
+    @staticmethod
+    def _guess_content_type(filename: str) -> str:
+        """Guess MIME type from filename extension."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        mapping = {
+            "json": "application/json",
+            "csv": "text/csv",
+            "md": "text/markdown",
+            "txt": "text/plain",
+            "html": "text/html",
+            "yaml": "text/yaml",
+            "yml": "text/yaml",
+            "toml": "text/plain",
+            "log": "text/plain",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "pdf": "application/pdf",
+        }
+        return mapping.get(ext, "application/octet-stream")
+
+    @staticmethod
+    def _task_file_response_from_row(row: dict[str, Any]) -> TaskFileResponse:
+        """Build a TaskFileResponse from a raw DB row dict."""
+        row["metadata"] = json_loads(row.get("metadata"), {})
+        return TaskFileResponse.model_validate(row)

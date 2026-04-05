@@ -35,15 +35,18 @@ from cyborg.services.session_route_service import (
 
 def _slugify(text: str) -> str:
     """Convert text to a URL-friendly slug."""
-    # Convert to lowercase
     text = text.lower()
-    # Replace non-alphanumeric characters with hyphens
     text = re.sub(r'[^a-z0-9]+', '-', text)
     # Remove leading/trailing hyphens
     text = text.strip('-')
     # Collapse multiple hyphens
     text = re.sub(r'-+', '-', text)
     return text
+
+
+def short_task_id(task_id: str) -> str:
+    """Return first 8 chars of a UUID with hyphens stripped."""
+    return task_id.replace("-", "")[:8]
 
 
 class ProjectService(BaseService):
@@ -79,7 +82,7 @@ class ProjectService(BaseService):
         row = await self._get_project_row(project_id)
         return ProjectResponse.model_validate(await self._decode_project_row(row))
 
-    async def create_project(self, payload: ProjectCreate | dict[str, Any]) -> ProjectResponse:
+    async def create_project(self, payload: ProjectCreate | dict[str, Any], *, defer_effects: bool = False) -> ProjectResponse:
         payload = ProjectCreate.model_validate(payload)
         if payload.state == ProjectState.ACTIVE:
             raise ConflictError("Projects cannot be created directly in 'active' state. Create the project, submit a spec, approve it, then start or execute it.")
@@ -128,13 +131,27 @@ class ProjectService(BaseService):
                 ),
             )
             await self._replace_task_links(connection, project_id, payload.task_ids)
+        # Spec submission is fast (DB-only), keep synchronous so the response
+        # includes the latest spec status.
         if spec_payload is not None:
             await self.project_spec_service.submit_spec(project_id, spec_payload)
-        else:
-            await self._sync_notifications(project_id, immediate=payload.state == ProjectState.PLANNING)
+        if defer_effects:
+            project = await self.get_project(project_id)
+            return project
+        await self._post_create_background_effects(
+            project_id,
+            has_spec=spec_payload is not None,
+            initial_state=payload.state,
+        )
+        project = await self.get_project(project_id)
+        return project
+
+    async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState) -> None:
+        """Run notification sync and summary update (can be deferred to background)."""
+        if not has_spec:
+            await self._sync_notifications(project_id, immediate=initial_state == ProjectState.PLANNING)
         project = await self.get_project(project_id)
         await self._update_summary_md(project)
-        return project
 
     async def update_project(self, project_id: str, payload: ProjectUpdate) -> ProjectResponse:
         existing = await self._get_project_row(project_id)
@@ -204,9 +221,6 @@ class ProjectService(BaseService):
             (now, now, project_id),
         )
         await self._sync_notifications(project_id, immediate=False)
-
-    async def start_project(self, project_id: str) -> ProjectResponse:
-        return await self._transition_project(project_id, ProjectState.ACTIVE)
 
     async def pause_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.PAUSED)
@@ -437,6 +451,28 @@ class ProjectService(BaseService):
         )
         return [row["project_id"] for row in rows]
 
+    async def _get_task_files(self, task_id: str) -> list[dict[str, Any]]:
+        """Fetch lightweight file records for a task."""
+        rows = await self.db.fetch_all(
+            "SELECT filename, purpose FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_project_path(self, project_id: str) -> Path:
+        """Return the workspace directory path for a project.
+
+        The path is derived from the project title slug:
+        ``/home/mike/.openclaw/workspace/projects/<slug>/``
+
+        The directory is created on disk if it does not already exist.
+        """
+        row = await self._get_project_row(project_id)
+        slug = _slugify(row["title"])
+        path = Path(f"/home/mike/.openclaw/workspace/projects/{slug}")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     async def _update_summary_md(self, project: ProjectResponse) -> None:
         """Generate and write a SUMMARY.md file for the project.
 
@@ -492,6 +528,13 @@ class ProjectService(BaseService):
                 lines.append(f"- **Created:** {task.created_at}")
                 if task.completed_at:
                     lines.append(f"- **Completed:** {task.completed_at}")
+                # Attach output files
+                task_files = await self._get_task_files(str(task.id))
+                if task_files:
+                    lines.append("")
+                    lines.append("**Output Files:**")
+                    for f in task_files:
+                        lines.append(f"  - `{f['filename']}` ({f['purpose']})")
                 lines.append("")
         else:
             lines.append("*No linked tasks.*")
