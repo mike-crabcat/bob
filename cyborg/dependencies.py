@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 
 from cyborg.config import Settings
 from cyborg.database import Database
+from cyborg.exceptions import ForbiddenError
 from cyborg.services.calendar_service import CalendarService
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.project_execution_service import ProjectExecutionService
@@ -18,6 +19,23 @@ def get_settings(request: Request) -> Settings:
     """Return the application settings instance."""
 
     return request.app.state.settings
+
+
+def require_dashboard_origin(request: Request) -> None:
+    """Verify the request originates from the dashboard.
+
+    If CYBORG_DASHBOARD_SECRET is not configured, the check is skipped (dev mode).
+    Otherwise, the request must include the secret as a cookie or header.
+    """
+    settings: Settings = request.app.state.settings
+    if not settings.dashboard_secret_configured:
+        return
+
+    secret = request.cookies.get("cyborg_dashboard_secret") or request.headers.get(
+        "X-Dashboard-Secret", ""
+    )
+    if secret != settings.dashboard_secret:
+        raise ForbiddenError("This operation requires dashboard authorization")
 
 def get_database(request: Request) -> Database:
     """Return the shared database pool."""

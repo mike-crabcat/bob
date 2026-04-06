@@ -23,3 +23,9 @@ class ConflictError(ServiceError):
     """Raised when an operation would violate service state."""
 
     status_code = 409
+
+
+class ForbiddenError(ServiceError):
+    """Raised when an operation is not permitted."""
+
+    status_code = 403

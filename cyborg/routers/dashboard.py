@@ -684,6 +684,34 @@ async def approve_approval(
     db: Database = Depends(get_database),
 ) -> Response:
     """Approve an item and update the display."""
+    approval = await db.fetch_one(
+        "SELECT * FROM approvals WHERE id = ?",
+        (approval_id,),
+    )
+    if not approval:
+        return Response(content="Approval not found", status_code=404)
+
+    entity_id = approval["entity_id"]
+    approval_type = approval["approval_type"]
+
+    # If this is a project_plan approval, invoke the spec approval service
+    if approval_type == "project_plan" and entity_id:
+        from cyborg.services.project_spec_service import ProjectSpecService
+        from cyborg.models import ProjectSpecApproveRequest
+
+        spec_service = ProjectSpecService(db)
+        pending_spec = await db.fetch_one(
+            """
+            SELECT id FROM project_specs
+            WHERE project_id = ? AND status = 'pending_approval'
+            ORDER BY version_number DESC LIMIT 1
+            """,
+            (entity_id,),
+        )
+        if pending_spec:
+            approve_payload = ProjectSpecApproveRequest(approver="dashboard_user")
+            await spec_service.approve_spec(str(pending_spec["id"]), approve_payload)
+
     await db.execute(
         """
         UPDATE approvals
@@ -705,6 +733,34 @@ async def reject_approval(
     db: Database = Depends(get_database),
 ) -> Response:
     """Reject an item and update the display."""
+    approval = await db.fetch_one(
+        "SELECT * FROM approvals WHERE id = ?",
+        (approval_id,),
+    )
+    if not approval:
+        return Response(content="Approval not found", status_code=404)
+
+    entity_id = approval["entity_id"]
+    approval_type = approval["approval_type"]
+
+    # If this is a project_plan approval, invoke the spec reject service
+    if approval_type == "project_plan" and entity_id:
+        from cyborg.services.project_spec_service import ProjectSpecService
+        from cyborg.models import ProjectSpecRejectRequest
+
+        spec_service = ProjectSpecService(db)
+        pending_spec = await db.fetch_one(
+            """
+            SELECT id FROM project_specs
+            WHERE project_id = ? AND status = 'pending_approval'
+            ORDER BY version_number DESC LIMIT 1
+            """,
+            (entity_id,),
+        )
+        if pending_spec:
+            reject_payload = ProjectSpecRejectRequest(feedback="Rejected via dashboard")
+            await spec_service.reject_spec(str(pending_spec["id"]), reject_payload)
+
     await db.execute(
         """
         UPDATE approvals
@@ -1091,7 +1147,18 @@ def _render_template(template_name: str, request: Request, context: dict[str, An
     context.setdefault("pending_count", 0)
 
     template = env.get_template(template_name)
-    return HTMLResponse(content=template.render(context))
+    response = HTMLResponse(content=template.render(context))
+
+    # Set dashboard secret cookie so form submissions are authenticated
+    if settings.dashboard_secret_configured:
+        response.set_cookie(
+            key="cyborg_dashboard_secret",
+            value=settings.dashboard_secret,
+            httponly=True,
+            samesite="strict",
+        )
+
+    return response
 
 
 def _format_time(iso_string: str | None) -> str:

@@ -33,6 +33,9 @@ from cyborg.models import (
 from cyborg.services.base import BaseService, json_dumps, json_loads, next_cron_occurrence, utcnow
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.project_autonomy_service import DEPENDENCY_BLOCKED_PREFIX
+
+# Task-level notifications (NEEDS_INPUT, TASK_RESULT) have been removed.
+# Only task assignment (reasoning prompt dispatch) remains via NotificationService.
 from cyborg.services.session_route_service import (
     SessionRouteService,
     has_source_route_metadata,
@@ -53,9 +56,6 @@ class TaskService(BaseService):
         if self._webhook_service is None:
             self._webhook_service = WebhookService(self.db)
         return self._webhook_service
-
-    async def _sync_notifications(self, task_id: str, *, immediate: bool = False) -> None:
-        await NotificationService(self.db).sync_task_state(task_id, immediate=immediate)
 
     async def list_tasks(
         self,
@@ -163,7 +163,11 @@ class TaskService(BaseService):
                 {"status": task_status.value, "priority": payload.priority.value},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=True)
+        # Dispatch task assignment as a reasoning prompt (fire-once)
+        try:
+            await NotificationService(self.db).create_task_assignment_notification(task_id)
+        except Exception:
+            pass
         return await self.get_task(task_id)
 
     async def update_task(self, task_id: str, payload: TaskUpdate) -> TaskResponse:
@@ -174,7 +178,6 @@ class TaskService(BaseService):
             return await self.get_task(task_id)
 
         now = utcnow()
-        immediate_notification = False
         raw_metadata = values.get("metadata")
         if values.get("is_recurring") and values.get("recurrence_rule") and values.get("next_run_at") is None:
             values["next_run_at"] = next_cron_occurrence(values["recurrence_rule"], now).isoformat()
@@ -189,7 +192,6 @@ class TaskService(BaseService):
         if "status" in values:
             next_status = TaskStatus(values["status"])
             await self._validate_status_transition(task_id, row["status"], next_status)
-            immediate_notification = next_status.value != row["status"] and next_status == TaskStatus.BLOCKED
             if next_status == TaskStatus.ACTIVE and "started_at" not in values:
                 values["started_at"] = now.isoformat()
             if next_status == TaskStatus.COMPLETED and "completed_at" not in values:
@@ -197,7 +199,7 @@ class TaskService(BaseService):
         elif row["status"] == TaskStatus.BLOCKED.value and (
             "blocked_reason" in values or "blocked_resume_instructions" in values
         ):
-            immediate_notification = True
+            pass
 
         assignments = ", ".join(f"{field} = ?" for field in values)
         params = tuple(values.values()) + (task_id,)
@@ -211,7 +213,6 @@ class TaskService(BaseService):
                 await self._validate_project_ids(connection, project_ids)
                 await self._replace_project_links(connection, task_id, project_ids)
             await self._add_history(connection, task_id, "updated", payload.model_dump(exclude_unset=True, mode="json"), now.isoformat())
-        await self._sync_notifications(task_id, immediate=immediate_notification)
         # Trigger project execution flow when status transitions to completed via update
         if values.get("status") == TaskStatus.COMPLETED.value and row["status"] != TaskStatus.COMPLETED.value:
             await self._trigger_project_execution(task_id, row["title"])
@@ -226,7 +227,6 @@ class TaskService(BaseService):
                 (now, now, task_id),
             )
             await self._add_history(connection, task_id, "deleted", {}, now)
-        await self._sync_notifications(task_id, immediate=False)
 
     async def start_task(self, task_id: str) -> TaskResponse:
         return await self._transition_task(task_id, TaskStatus.ACTIVE, "started")
@@ -280,12 +280,6 @@ class TaskService(BaseService):
             # Add journal entry to parent projects
             await self._add_completion_journal_entry(connection, task_id, row["title"], result_summary, now.isoformat())
 
-        await self._sync_notifications(task_id, immediate=False)
-        await NotificationService(self.db).create_task_result_notification(
-            task_id,
-            failed=False,
-            result_summary=result_summary,
-        )
         task_response = await self.get_task(task_id)
 
         # Trigger post-completion autonomy flow for linked tasks and projects.
@@ -388,16 +382,9 @@ class TaskService(BaseService):
                         TaskStepStatus.ACTIVE.value,
                     ),
                 )
-        
-        await self._sync_notifications(task_id, immediate=False)
-        if not should_reload:
-            await NotificationService(self.db).create_task_result_notification(
-                task_id,
-                failed=True,
-                result_summary=payload.result,
-            )
+
         task_response = await self.get_task(task_id)
-        
+
         # Trigger webhook notification (only if actually failed, not retrying)
         if not should_reload:
             await self._trigger_webhook(
@@ -446,7 +433,7 @@ class TaskService(BaseService):
                 ),
             )
             await self._add_history(connection, task_id, "retried", payload.model_dump(mode="json"), now.isoformat())
-        await self._sync_notifications(task_id, immediate=False)
+
         return await self.get_task(task_id)
 
     async def list_steps(self, task_id: str) -> list[TaskStepResponse]:
@@ -557,7 +544,7 @@ class TaskService(BaseService):
                 {"reason": payload.reason},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=True)
+
         return await self.get_task(task_id)
 
     async def unblock_task(self, task_id: str, payload: TaskUnblockRequest) -> TaskResponse:
@@ -604,7 +591,7 @@ class TaskService(BaseService):
                 {"status": resumed_status.value, "notes": payload.notes} if payload.notes else {"status": resumed_status.value},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=False)
+
         return await self.get_task(task_id)
 
     async def list_history(self, task_id: str) -> list[TaskHistoryResponse]:
@@ -652,7 +639,7 @@ class TaskService(BaseService):
                     (TaskStepStatus.ACTIVE.value, now, task_id, TaskStepStatus.PENDING.value),
                 )
             await self._add_history(connection, task_id, action, {"status": status.value}, now)
-        await self._sync_notifications(task_id, immediate=False)
+
         return await self.get_task(task_id)
 
     async def _validate_status_transition(self, task_id: str, current_status: str, next_status: TaskStatus) -> None:

@@ -146,11 +146,26 @@ class OpenClawHookService(BaseService):
             ),
         )
 
-    async def mark_delivery_failure(self, notification_id: str, attempt_count: int, error: str, *, timestamp: str | None = None) -> None:
+    async def mark_delivery_failure(
+        self,
+        notification_id: str,
+        attempt_count: int,
+        error: str,
+        *,
+        notification_type: str | None = None,
+        timestamp: str | None = None,
+    ) -> None:
         now = utcnow()
         if timestamp is not None:
             now = type(now).fromisoformat(timestamp)
-        delay = timedelta(minutes=min(360, max(1, 2 ** max(attempt_count - 1, 0))))
+
+        # Agent-type dispatches (task_assignment, needs_input) send a full prompt
+        # to OpenClaw. Retrying too quickly sends duplicate prompts that confuse
+        # the agent. Wait at least 1 hour between retries for these.
+        if notification_type in ("task_assignment", "needs_input"):
+            delay = timedelta(hours=max(1, min(6, attempt_count)))
+        else:
+            delay = timedelta(minutes=min(360, max(1, 2 ** max(attempt_count - 1, 0))))
         if delay > self.MAX_RETRY_DELAY:
             delay = self.MAX_RETRY_DELAY
         next_retry = (now + delay).isoformat()

@@ -62,8 +62,8 @@ class ProjectService(BaseService):
             self._project_spec_service = ProjectSpecService(self.db)
         return self._project_spec_service
 
-    async def _sync_notifications(self, project_id: str, *, immediate: bool = False) -> None:
-        await NotificationService(self.db).sync_project_state(project_id, immediate=immediate)
+    async def _sync_notifications(self, project_id: str) -> None:
+        await NotificationService(self.db).sync_project_state(project_id)
 
     async def list_projects(self, *, state: ProjectState | None = None) -> list[ProjectResponse]:
         query = "SELECT * FROM projects WHERE deleted_at IS NULL"
@@ -149,7 +149,7 @@ class ProjectService(BaseService):
     async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState) -> None:
         """Run notification sync and summary update (can be deferred to background)."""
         if not has_spec:
-            await self._sync_notifications(project_id, immediate=initial_state == ProjectState.PLANNING)
+            await self._sync_notifications(project_id)
         project = await self.get_project(project_id)
         await self._update_summary_md(project)
 
@@ -197,14 +197,6 @@ class ProjectService(BaseService):
         if not values and task_ids is None and spec_payload is None:
             return await self.get_project(project_id)
 
-        if values.get("state") == ProjectState.ACTIVE.value:
-            await self.project_spec_service.ensure_project_ready_for_execution(project_id)
-        if values.get("state") == ProjectState.ACTIVE.value and "started_at" not in values:
-            values["started_at"] = utcnow().isoformat()
-        if values.get("state") == ProjectState.PAUSED.value and "paused_at" not in values:
-            values["paused_at"] = utcnow().isoformat()
-        if values.get("state") == ProjectState.CLOSED.value and "closed_at" not in values:
-            values["closed_at"] = utcnow().isoformat()
         values["updated_at"] = utcnow().isoformat()
         assignments = ", ".join(f"{field} = ?" for field in values)
         params = tuple(values.values()) + (project_id,)
@@ -218,8 +210,7 @@ class ProjectService(BaseService):
         if spec_payload is not None:
             await self.project_spec_service.submit_spec(project_id, spec_payload)
         else:
-            immediate_notification = values.get("state") == ProjectState.PLANNING.value and existing["state"] != ProjectState.PLANNING.value
-            await self._sync_notifications(project_id, immediate=immediate_notification)
+            await self._sync_notifications(project_id)
         project = await self.get_project(project_id)
         await self._update_summary_md(project)
         return project
@@ -231,7 +222,7 @@ class ProjectService(BaseService):
             "UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
             (now, now, project_id),
         )
-        await self._sync_notifications(project_id, immediate=False)
+        await self._sync_notifications(project_id)
 
     async def pause_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.PAUSED)
@@ -247,7 +238,7 @@ class ProjectService(BaseService):
             """,
             (ProjectState.CLOSED.value, now, payload.conclusion, now, project_id),
         )
-        await self._sync_notifications(project_id, immediate=False)
+        await self._sync_notifications(project_id)
         return await self.get_project(project_id)
 
     async def list_journal(self, project_id: str) -> list[ProjectJournalEntryResponse]:
@@ -372,7 +363,7 @@ class ProjectService(BaseService):
             f"UPDATE projects SET {assignments} WHERE id = ? AND deleted_at IS NULL",
             tuple(updates.values()) + (project_id,),
         )
-        await self._sync_notifications(project_id, immediate=False)
+        await self._sync_notifications(project_id)
         return await self.get_project(project_id)
 
     async def _get_project_row(self, project_id: str) -> dict[str, Any]:

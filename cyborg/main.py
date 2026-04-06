@@ -49,10 +49,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         attach_database_handler(database)
 
         stop_event = asyncio.Event()
-        notification_worker = asyncio.create_task(
-            _notification_loop(
+        heartbeat_worker = asyncio.create_task(
+            _heartbeat_loop(
                 database,
-                interval_seconds=resolved_settings.notification_dispatch_interval_seconds,
+                interval_seconds=resolved_settings.heartbeat_interval_seconds,
                 stop_event=stop_event,
             )
         )
@@ -60,9 +60,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             stop_event.set()
-            notification_worker.cancel()
+            heartbeat_worker.cancel()
             try:
-                await notification_worker
+                await heartbeat_worker
             except asyncio.CancelledError:
                 pass
             await database.close()
@@ -118,8 +118,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 app = create_app()
 
-async def _notification_loop(database: Database, *, interval_seconds: float, stop_event: asyncio.Event) -> None:
-    """Periodically sync and dispatch notifications without relying on client polling."""
+async def _heartbeat_loop(database: Database, *, interval_seconds: float, stop_event: asyncio.Event) -> None:
+    """Periodically dispatch pending notifications and scan for blocked projects."""
 
     if interval_seconds <= 0:
         await stop_event.wait()
@@ -127,14 +127,30 @@ async def _notification_loop(database: Database, *, interval_seconds: float, sto
 
     from cyborg.services.notification_service import NotificationService
 
-    service = NotificationService(database)
+    notification_service = NotificationService(database)
     while not stop_event.is_set():
         try:
-            await service.process_due_notifications()
+            await notification_service.dispatch_pending()
         except Exception:
-            # Notification processing is best-effort and must not take down the API.
-            logger.exception("Notification processing failed")
+            logger.exception("Heartbeat notification dispatch failed")
+        try:
+            await _check_blocked_projects(database, notification_service)
+        except Exception:
+            logger.exception("Heartbeat blocked-project check failed")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
             continue
+
+
+async def _check_blocked_projects(database: Database, notification_service: NotificationService) -> None:
+    """Find blocked projects missing notifications and raise one."""
+    from cyborg.models import ProjectState
+
+    blocked = await database.fetch_all(
+        """SELECT id FROM projects
+           WHERE deleted_at IS NULL AND state = ? AND blocked_reason IS NOT NULL""",
+        (ProjectState.PAUSED.value,),
+    )
+    for project in blocked:
+        await notification_service.sync_project_state(project["id"])

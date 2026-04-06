@@ -6,11 +6,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 
-from cyborg.dependencies import get_project_spec_service
+from cyborg.dependencies import get_project_spec_service, require_dashboard_origin
 from cyborg.models import (
-    ProjectSpecApproveRequest,
     ProjectSpecListResponse,
-    ProjectSpecRejectRequest,
     ProjectSpecResponse,
     ProjectSpecSubmitRequest,
 )
@@ -24,6 +22,7 @@ router = APIRouter(prefix="/api/v1", tags=["project-specs"])
 async def submit_project_spec(
     project_id: UUID,
     payload: ProjectSpecSubmitRequest,
+    _auth: None = Depends(require_dashboard_origin),
     service: ProjectSpecService = Depends(get_project_spec_service),
 ) -> ProjectSpecResponse:
     """Submit a new project specification for approval."""
@@ -46,23 +45,3 @@ async def get_project_spec(
 ) -> ProjectSpecResponse:
     """Get a specific project spec by ID."""
     return await service.get_spec(str(spec_id))
-
-
-@router.post("/project-specs/{spec_id}/approve", response_model=ProjectSpecResponse)
-async def approve_project_spec(
-    spec_id: UUID,
-    payload: ProjectSpecApproveRequest,
-    service: ProjectSpecService = Depends(get_project_spec_service),
-) -> ProjectSpecResponse:
-    """Approve a project spec."""
-    return await service.approve_spec(str(spec_id), payload)
-
-
-@router.post("/project-specs/{spec_id}/reject", response_model=ProjectSpecResponse)
-async def reject_project_spec(
-    spec_id: UUID,
-    payload: ProjectSpecRejectRequest,
-    service: ProjectSpecService = Depends(get_project_spec_service),
-) -> ProjectSpecResponse:
-    """Reject a project spec."""
-    return await service.reject_spec(str(spec_id), payload)

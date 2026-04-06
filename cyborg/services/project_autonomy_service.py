@@ -10,7 +10,6 @@ from aiosqlite import Connection
 from cyborg.database import Database
 from cyborg.models import JournalEntryType, ProjectState, TaskStatus
 from cyborg.services.base import BaseService, utcnow, json_dumps, json_loads
-from cyborg.services.notification_service import NotificationService
 
 
 logger = logging.getLogger(__name__)
@@ -127,10 +126,6 @@ class ProjectAutonomyService(BaseService):
                 # Propagate parent task files to dependent metadata
                 await self._propagate_dependency_files(connection, completed_task_id, row["id"])
                 released_task_ids.append(row["id"])
-
-        notification_service = NotificationService(self.db)
-        for task_id in released_task_ids:
-            await notification_service.sync_task_state(task_id, immediate=True)
 
     async def _propagate_dependency_files(
         self,

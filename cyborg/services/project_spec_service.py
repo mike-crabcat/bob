@@ -17,7 +17,6 @@ from cyborg.models import (
     ProjectState,
 )
 from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
-from cyborg.services.notification_service import NotificationService
 
 
 class ProjectSpecService(BaseService):
@@ -25,9 +24,6 @@ class ProjectSpecService(BaseService):
 
     def __init__(self, db: Database) -> None:
         super().__init__(db)
-
-    async def _sync_project_notifications(self, project_id: str, *, immediate: bool = False) -> None:
-        await NotificationService(self.db).sync_project_state(project_id, immediate=immediate)
 
     async def submit_spec(self, project_id: str, payload: ProjectSpecSubmitRequest) -> ProjectSpecResponse:
         project = await self._get_project_row(project_id)
@@ -85,7 +81,12 @@ class ProjectSpecService(BaseService):
                     ),
                 )
 
-        await self._sync_project_notifications(project_id, immediate=False)
+        await self._create_approval_record(
+            project_id,
+            title=f"Spec v{next_version}: {payload.aim or project.get('title', 'Project spec')}",
+            description=f"Project spec version {next_version} pending approval.",
+        )
+
         return await self.get_spec(spec_id)
 
     async def list_specs(self, project_id: str) -> ProjectSpecListResponse:
@@ -192,7 +193,6 @@ class ProjectSpecService(BaseService):
             # submit it as a new pending spec revision for user approval.
             # Do NOT start execution yet.
             await self._generate_plan_revision(project_id, row)
-            await self._sync_project_notifications(project_id, immediate=False)
             return await self.get_spec(spec_id)
 
         if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value):
@@ -202,8 +202,6 @@ class ProjectSpecService(BaseService):
             if project["state"] == ProjectState.PAUSED.value:
                 await execution_service.cleanup_old_plan_tasks(project_id)
             await execution_service.start_project_execution(project_id)
-        else:
-            await self._sync_project_notifications(project_id, immediate=False)
 
         return await self.get_spec(spec_id)
 
@@ -229,8 +227,8 @@ class ProjectSpecService(BaseService):
                 ),
             )
 
-        await self._sync_project_notifications(row["project_id"], immediate=True)
         return await self.get_spec(spec_id)
+
 
     async def ensure_project_ready_for_execution(self, project_id: str) -> None:
         project = await self._get_project_row(project_id)
@@ -283,6 +281,25 @@ class ProjectSpecService(BaseService):
         row["latest_spec_id"] = latest["id"] if latest else None
         row["latest_spec_status"] = latest["status"] if latest else None
         return row
+
+    async def _create_approval_record(
+        self,
+        project_id: str,
+        title: str,
+        description: str | None = None,
+    ) -> None:
+        """Create a pending approval record so the spec appears in the dashboard queue."""
+        approval_id = str(uuid4())
+        now = utcnow().isoformat()
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, status, priority, requested_at, requested_by, created_at
+            ) VALUES (?, 'project_plan', ?, ?, ?, NULL, 'pending', 'normal', ?, 'system', ?)
+            """,
+            (approval_id, project_id, title, description, now, now),
+        )
 
     async def _get_project_row(self, project_id: str) -> dict[str, Any]:
         row = await self.db.fetch_one(
@@ -406,6 +423,12 @@ class ProjectSpecService(BaseService):
                     "step_count": len(generated_steps),
                 }),
             ),
+        )
+
+        await self._create_approval_record(
+            project_id,
+            title=f"Plan revision v{next_version}: {approved_spec_row.get('aim', 'Generated plan')}",
+            description=f"OpenClaw generated an execution plan ({len(generated_steps)} steps). Pending your approval.",
         )
 
         logger.info(

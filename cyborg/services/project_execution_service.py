@@ -88,8 +88,8 @@ class ProjectExecutionService(BaseService):
             self._reasoning_service = OpenClawReasoningService(self.db)
         return self._reasoning_service
 
-    async def _sync_notifications(self, project_id: str, *, immediate: bool = False) -> None:
-        await NotificationService(self.db).sync_project_state(project_id, immediate=immediate)
+    async def _sync_notifications(self, project_id: str) -> None:
+        await NotificationService(self.db).sync_project_state(project_id)
 
     async def on_task_completed(self, task_id: str, task_title: str, result_summary: str | None = None) -> list[ProjectResponse]:
         """Hook called when a task is completed.
@@ -177,7 +177,7 @@ class ProjectExecutionService(BaseService):
             )
             raise
 
-        await self._sync_notifications(project_id, immediate=False)
+        await self._sync_notifications(project_id)
         return await self._build_project_response(await self._get_project_row(project_id))
 
     async def evaluate_and_complete(self, project_id: str) -> ProjectResponse | None:
@@ -258,7 +258,7 @@ class ProjectExecutionService(BaseService):
                 conclusion=conclusion[:200],
             )
 
-            await self._sync_notifications(project_id, immediate=False)
+            await self._sync_notifications(project_id)
             await NotificationService(self.db).create_project_result_notification(
                 project_id,
                 conclusion=conclusion,
@@ -1040,7 +1040,7 @@ class ProjectExecutionService(BaseService):
             reason=reason,
             resume_instructions=resume_instructions,
         )
-        await self._sync_notifications(project_id, immediate=True)
+        await self._sync_notifications(project_id)
         return await self._build_project_response(await self._get_project_row(project_id))
 
     async def mark_ready_for_review(self, project_id: str, review_notes: str | None = None) -> ProjectResponse:

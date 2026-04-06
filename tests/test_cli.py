@@ -577,6 +577,7 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
         "CYBORG_OPENCLAW_TOKEN",
         "CYBORG_OPENCLAW_HOOK_PATH",
         "CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS",
+        "CYBORG_HEARTBEAT_INTERVAL_SECONDS",
         "CYBORG_ENV_FILE",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -619,7 +620,7 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
     assert settings.openclaw.base_url == "https://openclaw.example"
     assert settings.openclaw.token == "secret-token"
     assert settings.openclaw.hook_path == "/hooks/agent"
-    assert settings.notification_dispatch_interval_seconds == 15.0
+    assert settings.heartbeat_interval_seconds == 15.0
     assert captured["app"] == "fake-app"
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8420

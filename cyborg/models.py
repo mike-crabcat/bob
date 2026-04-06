@@ -597,7 +597,6 @@ class ProjectUpdate(CyborgModel):
     description: str | None = None
     aim: str | None = None
     method: str | None = None
-    state: ProjectState | None = None
     conclusion: str | None = None
     plan: list[PlanStep] | None = None
     success_criteria: list[SuccessCriterion] | None = None

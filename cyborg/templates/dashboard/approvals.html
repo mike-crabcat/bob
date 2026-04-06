@@ -8,7 +8,7 @@
     <h1 class="text-3xl font-bold mb-2">
         <span class="neon-text-pink">Pending</span> Approvals
     </h1>
-    <p class="text-text-secondary">Review queued approval items and then complete the actual workflow through the linked project or CLI/API.</p>
+    <p class="text-text-secondary">Review queued approval items and approve or reject them directly.</p>
 </div>
 
 <!-- Stats Row -->
@@ -57,7 +57,7 @@
 
 <div class="glass-card rounded-xl p-4 mb-6 border border-accent-cyan/20">
     <p class="text-sm text-text-secondary">
-        Dashboard approvals are read-only summaries. They do not directly invoke task-plan or project-spec approval services.
+        Approving or rejecting project plans here directly applies the decision to the project spec. Other approval types are tracked in this queue only.
     </p>
 </div>
 
@@ -118,10 +118,18 @@
                     Review Context
                 </a>
                 {% endif %}
-                <a href="/dashboard/approvals"
-                   class="flex-1 px-4 py-2.5 bg-bg-card text-text-secondary border border-accent-cyan/20 rounded-lg hover:border-accent-cyan/40 transition-colors font-medium text-center">
-                    Queue Details
-                </a>
+                <form method="POST" action="/dashboard/approve/{{ approval.id }}" class="flex-1">
+                    <button type="submit"
+                            class="w-full px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
+                        Approve
+                    </button>
+                </form>
+                <form method="POST" action="/dashboard/reject/{{ approval.id }}" class="flex-1">
+                    <button type="submit"
+                            class="w-full px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                        Reject
+                    </button>
+                </form>
             </div>
         </div>
     </div>

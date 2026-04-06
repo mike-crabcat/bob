@@ -561,20 +561,6 @@ def _find_current_plan(task_id: str) -> dict[str, Any]:
     return plans_data["plans"][0]
 
 
-def _find_pending_project_spec(project_id: str) -> dict[str, Any]:
-    result = _api_call("GET", f"/api/v1/projects/{project_id}/specs")
-    specs_data = result["data"]
-    specs = specs_data.get("specs") if specs_data else None
-    if not specs:
-        typer.echo("No project specs found for this project.", err=True)
-        raise typer.Exit(code=1)
-    for spec in specs:
-        if spec["status"] == "pending_approval":
-            return spec
-    typer.echo("No pending project spec found for this project.", err=True)
-    raise typer.Exit(code=1)
-
-
 @app.command()
 def install(
     host: Annotated[str, typer.Option(help="Host address for the service")] = DEFAULT_HOST,
@@ -692,7 +678,7 @@ def serve(
         log_level=log_level,
         webhooks=env_settings.webhooks,
         openclaw=env_settings.openclaw,
-        notification_dispatch_interval_seconds=env_settings.notification_dispatch_interval_seconds,
+        heartbeat_interval_seconds=env_settings.heartbeat_interval_seconds,
     )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
 
@@ -1163,7 +1149,6 @@ def project_update(
     aim: Annotated[Optional[str], typer.Option("--aim", "-a", help="Project aim/objective")] = None,
     method: Annotated[Optional[str], typer.Option("--method", "-m", help="Project method/plan")] = None,
     description: Annotated[Optional[str], typer.Option("--description", "-d", help="Project description")] = None,
-    state: Annotated[Optional[str], typer.Option("--state", help="Project state")] = None,
     conclusion: Annotated[Optional[str], typer.Option("--conclusion", help="Project conclusion")] = None,
     auto_execute: Annotated[Optional[bool], typer.Option("--auto-execute/--manual", help="Enable or disable auto-execution")] = None,
     plan_json: Annotated[Optional[str], typer.Option("--plan-json", help="Execution plan as JSON array")] = None,
@@ -1181,7 +1166,6 @@ def project_update(
         aim=aim,
         method=method,
         description=description,
-        state=state,
         conclusion=conclusion,
         auto_execute=auto_execute,
         plan_json=plan_json,
@@ -1249,56 +1233,6 @@ def project_spec_get(spec_id: Annotated[str, typer.Argument(help="Project spec I
     """Get a specific project spec."""
 
     _echo_json(_api_call("GET", f"/api/v1/project-specs/{spec_id}")["data"])
-
-
-@project_spec_app.command("approve")
-def project_spec_approve(
-    project_id: Annotated[str, typer.Argument(help="Project ID")],
-    approver: Annotated[str, typer.Option("--approver", "-a", help="Name of approver")] = "Mike",
-) -> None:
-    """Approve the latest pending project spec for a project."""
-
-    spec = _find_pending_project_spec(project_id)
-    approved = _api_call("POST", f"/api/v1/project-specs/{spec['id']}/approve", {"approver": approver})["data"]
-    typer.echo(f"Project spec approved: {approved['id']}")
-    typer.echo(f"Approved by: {approved['approved_by']}")
-
-
-@project_spec_app.command("approve-id")
-def project_spec_approve_id(
-    spec_id: Annotated[str, typer.Argument(help="Project spec ID")],
-    approver: Annotated[str, typer.Option("--approver", "-a", help="Name of approver")] = "Mike",
-) -> None:
-    """Approve a specific project spec by ID."""
-
-    approved = _api_call("POST", f"/api/v1/project-specs/{spec_id}/approve", {"approver": approver})["data"]
-    typer.echo(f"Project spec approved: {approved['id']}")
-    typer.echo(f"Approved by: {approved['approved_by']}")
-
-
-@project_spec_app.command("reject")
-def project_spec_reject(
-    project_id: Annotated[str, typer.Argument(help="Project ID")],
-    feedback: Annotated[str, typer.Option("--feedback", "-f", help="Rejection feedback")] = ...,
-) -> None:
-    """Reject the latest pending project spec for a project."""
-
-    spec = _find_pending_project_spec(project_id)
-    rejected = _api_call("POST", f"/api/v1/project-specs/{spec['id']}/reject", {"feedback": feedback})["data"]
-    typer.echo(f"Project spec rejected: {rejected['id']}")
-    typer.echo(f"Feedback: {rejected['feedback']}")
-
-
-@project_spec_app.command("reject-id")
-def project_spec_reject_id(
-    spec_id: Annotated[str, typer.Argument(help="Project spec ID")],
-    feedback: Annotated[str, typer.Option("--feedback", "-f", help="Rejection feedback")] = ...,
-) -> None:
-    """Reject a specific project spec by ID."""
-
-    rejected = _api_call("POST", f"/api/v1/project-specs/{spec_id}/reject", {"feedback": feedback})["data"]
-    typer.echo(f"Project spec rejected: {rejected['id']}")
-    typer.echo(f"Feedback: {rejected['feedback']}")
 
 
 @project_app.command("pause")

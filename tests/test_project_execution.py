@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from cyborg.config import Settings
 from cyborg.main import create_app
+from cyborg.models import ProjectSpecApproveRequest
+from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.task_service import TaskService
 
 PROJECT_ROUTE_METADATA = {
@@ -30,9 +32,10 @@ def approve_latest_project_spec(client: TestClient, project_id: str, approver: s
     specs = client.get(f"/api/v1/projects/{project_id}/specs")
     assert specs.status_code == 200
     spec_id = specs.json()["specs"][0]["id"]
-    approved = client.post(f"/api/v1/project-specs/{spec_id}/approve", json={"approver": approver})
-    assert approved.status_code == 200
-    return approved.json()
+    service = ProjectSpecService(client.app.state.db)
+    payload = ProjectSpecApproveRequest(approver=approver)
+    result = asyncio.run(service.approve_spec(spec_id, payload))
+    return result.model_dump(mode="json")
 
 
 def create_task(client: TestClient, **payload: object) -> dict[str, object]:
