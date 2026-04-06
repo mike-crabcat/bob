@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from jinja2 import FileSystemLoader
 
@@ -524,6 +525,20 @@ async def project_detail(
         (project_id, project_id),
     )
 
+    # Scan project workspace for files
+    from cyborg.services.project_service import ProjectService
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+
+    # Build short-id -> title mapping for task file association
+    task_id_map: dict[str, str] = {}
+    for t in tasks:
+        short = t["id"].replace("-", "")[:8]
+        task_id_map[short] = t["title"]
+
+    scanned_files = _scan_project_files(project_path, task_id_map=task_id_map)
+    file_categories = _group_files_by_category(scanned_files)
+
     return _render_template(
         "dashboard/project_detail.html",
         request,
@@ -535,7 +550,38 @@ async def project_detail(
             "journal": journal,
             "health_checks": health_checks,
             "prompts": prompts,
+            "file_categories": file_categories,
+            "file_count": len(scanned_files),
         },
+    )
+
+
+@router.get("/projects/{project_id}/files/{file_path:path}")
+async def serve_project_file(
+    project_id: str,
+    file_path: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Serve a file from the project workspace for browser viewing."""
+    from cyborg.services.project_service import ProjectService
+    from starlette.responses import FileResponse as StarletteFileResponse
+    import mimetypes
+
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+
+    resolved = (project_path / file_path).resolve()
+    workspace_root = project_path.resolve()
+
+    if not str(resolved).startswith(str(workspace_root)):
+        return Response(status_code=403)
+    if not resolved.is_file():
+        return Response(status_code=404)
+
+    content_type, _ = mimetypes.guess_type(str(resolved))
+    return StarletteFileResponse(
+        str(resolved),
+        media_type=content_type or "application/octet-stream",
     )
 
 
@@ -1033,6 +1079,8 @@ def _render_template(template_name: str, request: Request, context: dict[str, An
 
     # Register custom filters
     env.filters['relative_time'] = _format_relative_time
+    env.filters['file_size'] = _format_file_size
+    env.filters['file_icon'] = _file_icon
 
     # Add request to context
     context["request"] = request
@@ -1093,3 +1141,86 @@ def _format_duration_minutes(avg_minutes: float | None) -> str:
     if minutes == 0:
         return f"{hours}h"
     return f"{hours}h {minutes}m"
+
+
+def _format_file_size(size_bytes: int | None) -> str:
+    """Format a byte count as a human-readable size."""
+    if size_bytes is None:
+        return "--"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _file_icon(filename: str) -> str:
+    """Return a small text icon based on file extension."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    icons = {
+        "md": "\U0001f4c4", "txt": "\U0001f4c4",
+        "png": "\U0001f5bc", "jpg": "\U0001f5bc", "jpeg": "\U0001f5bc",
+        "webp": "\U0001f5bc", "gif": "\U0001f5bc",
+        "mp3": "\U0001f3b5", "wav": "\U0001f3b5", "flac": "\U0001f3b5",
+        "py": "\U0001f40d", "sh": "\u2699",
+        "json": "\U0001f4cb", "csv": "\U0001f4ca",
+        "pdf": "\U0001f4d5",
+    }
+    return icons.get(ext, "\U0001f4ce")
+
+
+_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache"}
+
+
+def _scan_project_files(
+    project_path: Path,
+    *,
+    task_id_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Scan the project workspace for files, returning entries for the template."""
+    from pathlib import Path as _Path
+
+    workspace_root = project_path.resolve()
+    if not workspace_root.exists():
+        return []
+
+    files: list[dict[str, Any]] = []
+    for child in sorted(workspace_root.rglob("*")):
+        if not child.is_file():
+            continue
+        rel_parts = child.relative_to(workspace_root).parts
+        if any(part.startswith(".") or part in _SKIP_DIRS for part in rel_parts):
+            continue
+
+        relative = str(child.relative_to(workspace_root))
+        stat = child.stat()
+        category = rel_parts[0] if len(rel_parts) > 1 else "root"
+
+        entry: dict[str, Any] = {
+            "name": child.name,
+            "relative_path": relative,
+            "category": category,
+            "size_bytes": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+
+        # Annotate task files with their task title
+        if category == "tasks" and len(rel_parts) >= 3 and task_id_map:
+            short_id = rel_parts[1]
+            if short_id in task_id_map:
+                entry["task_short_id"] = short_id
+                entry["task_title"] = task_id_map[short_id]
+
+        files.append(entry)
+
+    return files
+
+
+def _group_files_by_category(files: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group scanned files by their category (first path segment)."""
+    categories: dict[str, list[dict[str, Any]]] = {}
+    for f in files:
+        categories.setdefault(f["category"], []).append(f)
+    return categories

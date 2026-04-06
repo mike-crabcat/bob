@@ -195,9 +195,12 @@ class ProjectSpecService(BaseService):
             await self._sync_project_notifications(project_id, immediate=False)
             return await self.get_spec(spec_id)
 
-        if project["state"] != ProjectState.ACTIVE.value:
+        if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value):
             from cyborg.services.project_execution_service import ProjectExecutionService
             execution_service = ProjectExecutionService(self.db)
+            # Clean up old auto-created tasks for paused projects before re-planning
+            if project["state"] == ProjectState.PAUSED.value:
+                await execution_service.cleanup_old_plan_tasks(project_id)
             await execution_service.start_project_execution(project_id)
         else:
             await self._sync_project_notifications(project_id, immediate=False)

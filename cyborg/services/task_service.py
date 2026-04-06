@@ -212,6 +212,9 @@ class TaskService(BaseService):
                 await self._replace_project_links(connection, task_id, project_ids)
             await self._add_history(connection, task_id, "updated", payload.model_dump(exclude_unset=True, mode="json"), now.isoformat())
         await self._sync_notifications(task_id, immediate=immediate_notification)
+        # Trigger project execution flow when status transitions to completed via update
+        if values.get("status") == TaskStatus.COMPLETED.value and row["status"] != TaskStatus.COMPLETED.value:
+            await self._trigger_project_execution(task_id, row["title"])
         return await self.get_task(task_id)
 
     async def delete_task(self, task_id: str) -> None:

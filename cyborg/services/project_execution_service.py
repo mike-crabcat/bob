@@ -148,6 +148,9 @@ class ProjectExecutionService(BaseService):
         previous_state = project["state"]
         previous_started_at = project.get("started_at")
 
+        # Preserve original started_at when resuming from paused
+        started_at = previous_started_at if previous_state == ProjectState.PAUSED.value else now
+
         # Update project state (keep existing auto_execute setting)
         await self.db.execute(
             """
@@ -155,7 +158,7 @@ class ProjectExecutionService(BaseService):
             SET state = ?, started_at = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.ACTIVE.value, now, now, project_id),
+            (ProjectState.ACTIVE.value, started_at, now, project_id),
         )
 
         plan = self._parse_plan(project.get("plan"))
@@ -370,10 +373,50 @@ class ProjectExecutionService(BaseService):
                 return True
         return False
 
+    async def cleanup_old_plan_tasks(self, project_id: str) -> int:
+        """Remove all auto-created tasks from a previous plan before re-planning.
+
+        Soft-deletes them, preserving history via journal entries.
+        Returns count of tasks cleaned up.
+        """
+        rows = await self.db.fetch_all(
+            """
+            SELECT t.id
+            FROM tasks t
+            INNER JOIN project_tasks pt ON pt.task_id = t.id
+            WHERE pt.project_id = ?
+              AND t.deleted_at IS NULL
+              AND t.metadata LIKE '%auto_created_by_project%'
+            """,
+            (project_id,),
+        )
+        if not rows:
+            return 0
+
+        task_ids = [row["id"] for row in rows]
+        now = utcnow().isoformat()
+        for task_id in task_ids:
+            await self.db.execute(
+                "UPDATE tasks SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, task_id),
+            )
+
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.DECISION,
+            f"Cleaned up {len(task_ids)} auto-created tasks from previous plan before re-planning.",
+            {"replan_reason": "new plan approved"},
+        )
+        return len(task_ids)
+
     async def _auto_start_task(self, task_id: str, project_id: str) -> None:
         """Start a task immediately if the project has auto_execute enabled."""
         project = await self._get_project_row(project_id)
         if not project or not project.get("auto_execute"):
+            return
+        # Skip if task already completed (e.g. subagent finished during creation)
+        task_row = await self.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+        if task_row and task_row["status"] == TaskStatus.COMPLETED.value:
             return
         try:
             await self.task_service.start_task(str(task_id))

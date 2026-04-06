@@ -440,7 +440,7 @@ class ProjectAutonomyService(BaseService):
         from cyborg.structured_logging import log_autonomy_decision
         from uuid import uuid4
         from cyborg.services.task_service import TaskService
-        from cyborg.models import TaskCreate, TaskPriority
+        from cyborg.models import TaskCreate, TaskPriority, TaskUpdate
 
         task_service = TaskService(self.db)
         changes_applied = []
@@ -474,7 +474,7 @@ class ProjectAutonomyService(BaseService):
                 for task_id_str, priority in new_priorities.items():
                     await task_service.update_task(
                         task_id_str,
-                        priority=priority,
+                        TaskUpdate(priority=priority),
                     )
                     changes_applied.append(f"Reprioritized task {task_id_str} to {priority}")
 

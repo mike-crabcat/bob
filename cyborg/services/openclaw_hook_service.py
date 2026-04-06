@@ -567,6 +567,32 @@ class OpenClawHookService(BaseService):
                 "- If the answer is incomplete, ask one focused follow-up at a time.",
             ]
         )
+
+        # Include output directory instructions if available
+        output_directory = metadata.get("output_directory")
+        if output_directory:
+            task_id = metadata.get("task_id") or notification.get("entity_id")
+            lines.extend(
+                [
+                    "",
+                    "## Output Directory",
+                    f"All task artifacts must be written to: `{output_directory}`",
+                    "- Use descriptive filenames for each artifact.",
+                    "- Put the primary result in `RESULT.md`.",
+                ]
+            )
+            if self.cyborg_service_url:
+                lines.extend(
+                    [
+                        f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "- Register all output files via the API: POST /api/v1/tasks/{task_id}/files",
+                    ]
+                )
         # Include API completion instructions with service URL
         if self.cyborg_service_url:
             lines.extend(

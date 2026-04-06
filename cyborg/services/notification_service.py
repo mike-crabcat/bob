@@ -491,6 +491,19 @@ class NotificationService(BaseService):
             message_parts.append(f"Project: {parent_project['title']} ({parent_project['id']})")
         message = "\n\n".join(part for part in message_parts if part) or "A task is ready to action."
 
+        # Compute output directory for the task
+        output_directory = None
+        if parent_project is not None:
+            try:
+                from cyborg.services.project_service import ProjectService
+
+                project_service = ProjectService(self.db)
+                project_path = await project_service.get_project_path(parent_project["id"])
+                short_id = row["id"].replace("-", "")[:8]
+                output_directory = str(project_path / "tasks" / short_id)
+            except Exception:
+                pass
+
         metadata = {
             **task_metadata,
             "task_id": row["id"],
@@ -498,6 +511,7 @@ class NotificationService(BaseService):
             "parent_project_id": parent_project["id"] if parent_project else None,
             "parent_project_title": parent_project["title"] if parent_project else None,
             "delivery_route": delivery_route,
+            "output_directory": output_directory,
         }
         await self._create_entity_notification(
             entity_type=NotificationEntityType.TASK,

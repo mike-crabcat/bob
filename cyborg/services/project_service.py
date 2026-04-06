@@ -167,6 +167,16 @@ class ProjectService(BaseService):
             plan=raw_plan,
             success_criteria=raw_success_criteria,
         )
+
+        # Block spec-field updates on active projects — pause first
+        has_spec_fields = any(v is not None for v in (raw_aim, raw_method, raw_plan, raw_success_criteria))
+        if has_spec_fields and existing["state"] == ProjectState.ACTIVE.value:
+            raise ConflictError(
+                "Cannot update project spec fields (aim/method/plan/success_criteria) "
+                "while the project is active. "
+                "Pause the project first, then update the aim/method/plan."
+            )
+
         if spec_payload is None:
             if raw_aim is not None:
                 values["aim"] = raw_aim
@@ -176,6 +186,7 @@ class ProjectService(BaseService):
                 values["plan"] = json_dumps(raw_plan)
             if raw_success_criteria is not None:
                 values["success_criteria"] = json_dumps(raw_success_criteria)
+
         
         # Convert plan and success_criteria to JSON
         if "auto_execute" in values and values["auto_execute"] is not None:

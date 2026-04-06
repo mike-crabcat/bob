@@ -157,6 +157,60 @@
     </div>
 </div>
 
+<!-- Project Files -->
+<div class="glass-card neon-border rounded-xl p-6 mb-8">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-cyan">◈</span>
+        Project Files
+        <span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-accent-cyan/20 text-accent-cyan">{{ file_count }}</span>
+    </h2>
+    {% if file_categories %}
+    <div class="space-y-4">
+        {% for category, files in file_categories.items() %}
+        <div>
+            <h3 class="text-sm font-medium text-text-secondary mb-2 uppercase tracking-wider">{{ category }}/</h3>
+            {% if category == "tasks" %}
+            {% set ns = namespace(grouped=[]) %}
+            {% for f in files %}
+            {% if f.task_title %}
+            {% set ns.grouped = ns.grouped + [f] %}
+            {% endif %}
+            {% endfor %}
+            {% if ns.grouped %}
+            {% for f in ns.grouped %}
+            {% if loop.first or f.task_short_id != ns.grouped[loop.index0 - 1].task_short_id %}
+            <div class="text-xs text-accent-cyan mt-3 mb-1 pl-1">{{ f.task_title }}</div>
+            {% endif %}
+            <a href="/dashboard/projects/{{ project.id }}/files/{{ f.relative_path }}"
+               target="_blank"
+               class="block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors">
+                <span class="text-sm">{{ f.name|file_icon }}</span>
+                <span class="text-sm flex-1 truncate text-text-primary">{{ f.name }}</span>
+                <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
+            </a>
+            {% endfor %}
+            {% endif %}
+            {% else %}
+            <div class="space-y-1">
+                {% for f in files %}
+                <a href="/dashboard/projects/{{ project.id }}/files/{{ f.relative_path }}"
+                   target="_blank"
+                   class="block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors">
+                    <span class="text-sm">{{ f.name|file_icon }}</span>
+                    <span class="text-sm flex-1 truncate text-text-primary">{{ f.name }}</span>
+                    <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-text-muted text-sm">No files found in project workspace</div>
+    {% endif %}
+</div>
+
 <!-- Prompt History -->
 <div class="glass-card neon-border rounded-xl p-6 mb-8">
     <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
