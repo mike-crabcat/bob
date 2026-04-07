@@ -36,7 +36,6 @@ class ProjectAutonomyService(BaseService):
     def __init__(self, db: Database, execution_service: Any | None = None) -> None:
         super().__init__(db)
         self._execution_service = execution_service
-        self._reasoning_service = None
 
     @property
     def execution_service(self) -> Any:
@@ -46,40 +45,15 @@ class ProjectAutonomyService(BaseService):
             self._execution_service = ProjectExecutionService(self.db)
         return self._execution_service
 
-    @property
-    def reasoning_service(self) -> Any:
-        """Lazy-load reasoning service."""
-        if self._reasoning_service is None:
-            from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
-
-            self._reasoning_service = OpenClawReasoningService(self.db)
-        return self._reasoning_service
-
     async def on_task_completed(
         self,
         task_id: str,
         task_title: str,
         result_summary: str | None = None,
-        enable_refinement: bool = True,
     ) -> None:
-        """
-        Handle task completion with optional strategy refinement.
-
-        Args:
-            task_id: The completed task ID
-            task_title: Title of the completed task
-            result_summary: Summary of the task result
-            enable_refinement: Whether to trigger strategy refinement (default: True)
-        """
+        """Handle task completion: release dependents and trigger project progression."""
         await self._release_unblocked_dependents(task_id)
         await self.execution_service.on_task_completed(task_id, task_title, result_summary)
-
-        for project_id in await self._get_project_ids_for_task(task_id):
-            await self._checkpoint_project(project_id)
-
-            # Trigger strategy refinement for auto-executing projects
-            if enable_refinement:
-                await self.checkpoint_and_refine(project_id, task_id)
 
     async def _release_unblocked_dependents(self, completed_task_id: str) -> None:
         rows = await self.db.fetch_all(
@@ -172,43 +146,6 @@ class ProjectAutonomyService(BaseService):
             (json_dumps(metadata), dependent_task_id),
         )
 
-    async def _checkpoint_project(self, project_id: str) -> None:
-        project = await self.db.fetch_one(
-            """
-            SELECT id, state, auto_execute
-            FROM projects
-            WHERE id = ? AND deleted_at IS NULL
-            """,
-            (project_id,),
-        )
-        if project is None:
-            return
-        if project["state"] != ProjectState.ACTIVE.value or not bool(project.get("auto_execute", 0)):
-            return
-        if await self._project_has_incomplete_tasks(project_id):
-            return
-        await self.execution_service.evaluate_and_complete(project_id)
-
-    async def _project_has_incomplete_tasks(self, project_id: str) -> bool:
-        row = await self.db.fetch_one(
-            """
-            SELECT 1 AS has_open
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ?
-              AND t.deleted_at IS NULL
-              AND t.status IN (?, ?, ?)
-            LIMIT 1
-            """,
-            (
-                project_id,
-                TaskStatus.BLOCKED.value,
-                TaskStatus.PENDING.value,
-                TaskStatus.ACTIVE.value,
-            ),
-        )
-        return row is not None
-
     async def _get_project_ids_for_task(self, task_id: str) -> list[str]:
         rows = await self.db.fetch_all(
             """
@@ -282,241 +219,6 @@ class ProjectAutonomyService(BaseService):
         row = await cursor.fetchone()
         await cursor.close()
         return dict(row) if row is not None else None
-
-    async def checkpoint_and_refine(
-        self,
-        project_id: str,
-        completed_task_id: str,
-    ) -> None:
-        """
-        After task completion, evaluate project state and potentially refine strategy.
-
-        This is called after each task completion for auto-executing projects.
-        It will:
-        1. Check if the project needs strategy refinement
-        2. Ask OpenClaw to analyze and suggest refinements
-        3. Auto-apply refinements (based on design decision)
-        4. Record decisions in journal
-        """
-        from cyborg.structured_logging import log_autonomy_decision
-
-        project = await self.db.fetch_one(
-            "SELECT id, state, auto_execute, metadata FROM projects WHERE id = ? AND deleted_at IS NULL",
-            (project_id,),
-        )
-        if not project:
-            return
-        if project["state"] != ProjectState.ACTIVE.value or not bool(project.get("auto_execute", 0)):
-            return
-
-        # Check if project has auto-refinement enabled (default: yes)
-        metadata = json_loads(project.get("metadata"), {})
-        if metadata.get("auto_refine", True) is False:
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "refinement_skipped",
-                project_id,
-                reason="auto_refine disabled in metadata",
-                trigger_task_id=completed_task_id,
-            )
-            return
-
-        # Trigger strategy refinement
-        try:
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "refinement_started",
-                project_id,
-                trigger_task_id=completed_task_id,
-            )
-
-            refinement = await self.reasoning_service.refine_project_strategy(
-                project_id,
-                completed_task_id,
-            )
-
-            # Record the analysis in journal
-            await self._add_refinement_journal(
-                project_id,
-                completed_task_id,
-                refinement,
-            )
-
-            # Log the refinement decision
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "refinement_completed",
-                project_id,
-                trigger_task_id=completed_task_id,
-                should_refine=refinement.get("should_refine", False),
-                suggested_changes_count=len(refinement.get("suggested_changes", [])),
-                risks_identified_count=len(refinement.get("risks_identified", [])),
-            )
-
-            # Auto-apply refinements if suggested (design decision: auto-accept)
-            if refinement.get("should_refine"):
-                await self._apply_refinements(project_id, refinement, completed_task_id)
-
-        except Exception as e:
-            # Log but don't fail - refinement is optional
-            logger.error(f"Strategy refinement failed for project {project_id}: {e}")
-
-            # Log structured error
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "refinement_failed",
-                project_id,
-                trigger_task_id=completed_task_id,
-                error_type=type(e).__name__,
-                error_message=str(e),
-            )
-
-            # Record failure in journal
-            await self._add_journal_entry(
-                project_id,
-                JournalEntryType.NOTE,
-                f"Strategy refinement failed: {str(e)}",
-            )
-
-    async def _add_refinement_journal(
-        self,
-        project_id: str,
-        trigger_task_id: str,
-        refinement: dict[str, Any],
-    ) -> None:
-        """Record strategy refinement analysis in project journal."""
-        from uuid import uuid4
-
-        content_parts = [
-            f"Strategy refinement triggered by task completion: {trigger_task_id}",
-            "",
-            f"Should refine: {refinement.get('should_refine', False)}",
-            f"Reasoning: {refinement.get('reasoning', 'No reasoning provided')}",
-        ]
-
-        if refinement.get("suggested_changes"):
-            content_parts.extend([
-                "",
-                "Suggested changes:",
-            ])
-            for i, change in enumerate(refinement["suggested_changes"], 1):
-                content_parts.append(f"  {i}. {change.get('type', 'unknown')}: {change.get('description', '')}")
-
-        if refinement.get("risks_identified"):
-            content_parts.extend([
-                "",
-                "Risks identified:",
-            ])
-            for risk in refinement["risks_identified"]:
-                content_parts.append(f"  - {risk}")
-
-        await self._add_journal_entry(
-            project_id,
-            JournalEntryType.DECISION,
-            "\n".join(content_parts),
-            {
-                "refinement": refinement,
-                "trigger_task_id": trigger_task_id,
-            },
-        )
-
-    async def _apply_refinements(
-        self,
-        project_id: str,
-        refinement: dict[str, Any],
-        trigger_task_id: str,
-    ) -> None:
-        """
-        Auto-apply strategy refinements.
-
-        Based on design decision: refinements are auto-accepted.
-        This modifies the project plan, creates/removes tasks, or changes priorities.
-        """
-        from cyborg.structured_logging import log_autonomy_decision
-        from uuid import uuid4
-        from cyborg.services.task_service import TaskService
-        from cyborg.models import TaskCreate, TaskPriority, TaskUpdate
-
-        task_service = TaskService(self.db)
-        changes_applied = []
-
-        for change in refinement.get("suggested_changes", []):
-            change_type = change.get("type")
-
-            if change_type == "add_task":
-                # Create new task
-                task_payload = TaskCreate(
-                    title=change.get("description", "Refinement task")[:200],
-                    description=f"Auto-generated task from strategy refinement.\n\nReasoning: {refinement.get('reasoning', '')}",
-                    plan=f"Address: {change.get('description', '')}",
-                    priority=TaskPriority.HIGH,
-                    project_ids=[project_id],
-                    metadata={
-                        "auto_created_by_project": True,
-                        "autonomy_reason": "strategy_refinement",
-                        "trigger_task_id": trigger_task_id,
-                        "refinement_data": change,
-                    },
-                )
-
-                task = await task_service.create_task(task_payload)
-                await self._auto_start_refinement_task(task_service, str(task.id), project_id)
-                changes_applied.append(f"Created task: {task.title}")
-
-            elif change_type == "reprioritize":
-                # Update task priority
-                new_priorities = refinement.get("new_priorities", {})
-                for task_id_str, priority in new_priorities.items():
-                    await task_service.update_task(
-                        task_id_str,
-                        TaskUpdate(priority=priority),
-                    )
-                    changes_applied.append(f"Reprioritized task {task_id_str} to {priority}")
-
-            elif change_type == "change_approach":
-                # Record approach change - may need plan updates
-                await self._add_journal_entry(
-                    project_id,
-                    JournalEntryType.DECISION,
-                    f"Approach change recommended: {change.get('description', '')}",
-                    {"change": change},
-                )
-                changes_applied.append(f"Approach change: {change.get('description', '')}")
-
-        # Record what was applied
-        if changes_applied:
-            await self._add_journal_entry(
-                project_id,
-                JournalEntryType.MILESTONE,
-                f"Applied {len(changes_applied)} refinement changes:\n" + "\n".join(f"  - {c}" for c in changes_applied),
-                {"changes_applied": changes_applied, "refinement": refinement},
-            )
-
-            # Log the applied refinements
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "refinement_applied",
-                project_id,
-                trigger_task_id=trigger_task_id,
-                changes_count=len(changes_applied),
-                changes_applied=changes_applied[:5],  # Limit logged changes
-            )
-
-    async def _auto_start_refinement_task(
-        self, task_service: Any, task_id: str, project_id: str
-    ) -> None:
-        """Start a refinement task if its project is auto-executing."""
-        project = await self.db.fetch_one(
-            "SELECT auto_execute FROM projects WHERE id = ? AND deleted_at IS NULL",
-            (project_id,),
-        )
-        if project and bool(project.get("auto_execute", 0)):
-            try:
-                await task_service.start_task(task_id)
-            except Exception:
-                logger.warning(
-                    "Auto-start failed for refinement task %s", task_id, exc_info=True
-                )
 
     async def _add_journal_entry(
         self,

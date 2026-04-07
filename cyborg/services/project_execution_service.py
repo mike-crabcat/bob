@@ -93,11 +93,10 @@ class ProjectExecutionService(BaseService):
 
     async def on_task_completed(self, task_id: str, task_title: str, result_summary: str | None = None) -> list[ProjectResponse]:
         """Hook called when a task is completed.
-        
-        Checks if any projects linked to this task should progress to the next step.
+
+        For auto-executing projects, invokes reasoning to decide the next action.
         Returns list of projects that were affected.
         """
-        # Get all projects linked to this task
         project_ids = await self._get_project_ids_for_task(task_id)
         affected_projects: list[ProjectResponse] = []
 
@@ -106,28 +105,12 @@ class ProjectExecutionService(BaseService):
             if not project or project["state"] != ProjectState.ACTIVE.value:
                 continue
 
-            # Check if project has auto-execution enabled
             if not project.get("auto_execute"):
                 continue
 
-            # Parse plan
-            plan = self._parse_plan(project.get("plan"))
-            if not plan:
-                continue
-
-            # Find current step based on completed tasks
-            current_step_index = await self._get_current_step_index(project_id, plan)
-            
-            if current_step_index >= len(plan):
-                # All steps complete, check success criteria
-                await self._evaluate_success_criteria(project_id)
-            else:
-                # Check if current step criteria is satisfied by this task completion
-                current_step = plan[current_step_index]
-                if self._is_step_satisfied(current_step, task_title, result_summary):
-                    # Create next task for the next step
-                    await self._create_task_for_step(project_id, current_step, current_step_index)
-                    affected_projects.append(await self._build_project_response(project))
+            # Invoke reasoning to decide next action
+            await self.decide_next_action(project_id, task_id, task_title, result_summary)
+            affected_projects.append(await self._build_project_response(project))
 
         return affected_projects
 
@@ -164,7 +147,7 @@ class ProjectExecutionService(BaseService):
         plan = self._parse_plan(project.get("plan"))
         try:
             if plan:
-                await self._create_task_for_step(project_id, plan[0], 0)
+                await self._create_initial_task(project_id, plan[0])
         except Exception:
             rollback_now = utcnow().isoformat()
             await self.db.execute(
@@ -184,6 +167,8 @@ class ProjectExecutionService(BaseService):
         """
         Evaluate success criteria using OpenClaw reasoning and auto-complete project if all criteria met.
 
+        This is used for manual evaluation via the API endpoint.
+        The automatic flow uses decide_next_action instead.
         Returns the completed project if auto-completed, None otherwise.
         """
         from cyborg.structured_logging import log_autonomy_decision
@@ -193,91 +178,61 @@ class ProjectExecutionService(BaseService):
             return None
 
         success_criteria = self._parse_success_criteria(project.get("success_criteria"))
-
         if not success_criteria:
-            # No criteria defined, can't auto-complete
             return None
 
-        if await self._project_has_open_tasks(project_id):
-            return None
-
-        # Use OpenClaw reasoning service for semantic evaluation
+        # Use OpenClaw reasoning for evaluation
         try:
             evaluation = await self.reasoning_service.evaluate_success_criteria(project_id)
         except Exception as e:
-            # Log error but fall back to rule-based evaluation
-            logger.error(f"OpenClaw evaluation failed for project {project_id}, falling back to rule-based: {e}")
+            logger.error("Evaluation failed for project %s: %s", project_id, e)
             log_autonomy_decision(
                 _get_structured_logger(),
                 "evaluation_failed",
                 project_id,
                 error_type=type(e).__name__,
                 error_message=str(e),
-                fallback="rule_based",
             )
-            context, _met_criteria, unmet_criteria = await self._evaluate_criteria(project_id, success_criteria)
-            evaluation = {
-                "all_met": len(unmet_criteria) == 0,
-                "met_criteria": [c.description for c in _met_criteria],
-                "unmet_criteria": [c.description for c in unmet_criteria],
-                "reasoning": "Rule-based evaluation (OpenClaw unavailable)",
-            }
+            return None
 
-        if evaluation.get("all_met"):
-            # Generate conclusion
-            conclusion = await self._generate_conclusion_from_evaluation(project_id, project, evaluation)
+        if not evaluation.get("all_met"):
+            return None
 
-            # Close the project
-            now = utcnow().isoformat()
-            await self.db.execute(
-                """
-                UPDATE projects
-                SET state = ?, closed_at = ?, conclusion = ?, updated_at = ?
-                WHERE id = ? AND deleted_at IS NULL
-                """,
-                (ProjectState.CLOSED.value, now, conclusion, now, project_id),
-            )
+        # Generate conclusion
+        aim = project.get("aim", "The project")
+        reasoning = evaluation.get("reasoning", "")
+        conclusion = f"{aim} has been successfully completed.\n\n{reasoning}"
 
-            # Add journal entry
-            await self._add_journal_entry(
-                project_id,
-                JournalEntryType.MILESTONE,
-                f"Project auto-completed based on OpenClaw evaluation.\n\n{evaluation.get('reasoning', '')}\n\n{conclusion}",
-                {
-                    "evaluation": evaluation,
-                    "all_met_criteria": evaluation.get("met_criteria", []),
-                },
-            )
+        now = utcnow().isoformat()
+        await self.db.execute(
+            """
+            UPDATE projects
+            SET state = ?, closed_at = ?, conclusion = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (ProjectState.CLOSED.value, now, conclusion, now, project_id),
+        )
 
-            # Log auto-completion decision
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "project_auto_completed",
-                project_id,
-                met_criteria_count=len(evaluation.get("met_criteria", [])),
-                conclusion=conclusion[:200],
-            )
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.MILESTONE,
+            f"Project auto-completed based on evaluation.\n\n{reasoning}",
+            {"evaluation": evaluation},
+        )
 
-            await self._sync_notifications(project_id)
-            await NotificationService(self.db).create_project_result_notification(
-                project_id,
-                conclusion=conclusion,
-            )
-            return await self._build_project_response(await self._get_project_row(project_id))
+        log_autonomy_decision(
+            _get_structured_logger(),
+            "project_auto_completed",
+            project_id,
+            met_criteria_count=len(evaluation.get("met_criteria", [])),
+        )
 
-        # Generate follow-up tasks for unmet criteria
-        unmet = evaluation.get("unmet_criteria", [])
-        if unmet:
-            log_autonomy_decision(
-                _get_structured_logger(),
-                "follow_up_tasks_initiated",
-                project_id,
-                unmet_criteria_count=len(unmet),
-                unmet_criteria=unmet[:3],  # Log first 3
-            )
-            await self._generate_follow_up_tasks_llm(project_id, project, unmet, evaluation)
-
-        return None
+        await self._sync_notifications(project_id)
+        await NotificationService(self.db).create_project_result_notification(
+            project_id,
+            conclusion=conclusion,
+        )
+        return await self._build_project_response(await self._get_project_row(project_id))
 
     async def _get_project_ids_for_task(self, task_id: str) -> list[str]:
         """Get all project IDs linked to a task."""
@@ -323,55 +278,6 @@ class ProjectExecutionService(BaseService):
         except (json.JSONDecodeError, Exception):
             pass
         return []
-
-    async def _get_current_step_index(self, project_id: str, plan: list[PlanStep]) -> int:
-        """Determine the current step index based on completed tasks."""
-        # Count completed tasks linked to this project
-        result = await self.db.fetch_one(
-            """
-            SELECT COUNT(*) as count
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.status = ? AND t.deleted_at IS NULL
-            """,
-            (project_id, TaskStatus.COMPLETED.value),
-        )
-        return result["count"] if result else 0
-
-    def _is_step_satisfied(self, step: PlanStep, task_title: str, result_summary: str | None) -> bool:
-        """Check if a step's criteria is satisfied by a task completion.
-        
-        This is a simple heuristic - can be extended with more sophisticated evaluation.
-        """
-        criteria = step.criteria.lower()
-        title = task_title.lower()
-        result = (result_summary or "").lower()
-
-        # Simple keyword matching
-        # Criteria like "API endpoints created" matches task title containing "endpoint"
-        keywords = re.findall(r'\b\w+\b', criteria)
-        for keyword in keywords:
-            if len(keyword) > 3 and (keyword in title or keyword in result):
-                return True
-
-        return True  # Default to satisfied to allow progression
-
-    async def _step_task_exists(self, project_id: str, step_index: int) -> bool:
-        """Check if a non-completed task already exists for a plan step."""
-        rows = await self.db.fetch_all(
-            """
-            SELECT t.metadata
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.deleted_at IS NULL AND t.status != 'completed'
-            """,
-            (project_id,),
-        )
-        for row in rows:
-            meta = json_loads(row.get("metadata"), {})
-            if meta.get("project_step_index") == step_index:
-                return True
-        return False
 
     async def cleanup_old_plan_tasks(self, project_id: str) -> int:
         """Remove all auto-created tasks from a previous plan before re-planning.
@@ -428,61 +334,160 @@ class ProjectExecutionService(BaseService):
                 exc_info=True,
             )
 
-    async def _create_task_for_step(self, project_id: str, step: PlanStep, step_index: int) -> None:
-        """Create a task for a plan step."""
-        if await self._step_task_exists(project_id, step_index):
+    async def decide_next_action(
+        self,
+        project_id: str,
+        completed_task_id: str,
+        completed_task_title: str,
+        result_summary: str | None = None,
+    ) -> None:
+        """Invoke reasoning to decide what to do after a task completes.
+
+        Reasoning returns one of:
+        - create_task: create a new task and dispatch it
+        - close_project: all success criteria are met
+        - block_project: need human input
+        """
+        from cyborg.structured_logging import log_autonomy_decision
+
+        project = await self._get_project_row(project_id)
+        if not project or project["state"] != ProjectState.ACTIVE.value:
             return
 
-        task_title = f"Step {step_index + 1}: {step.title}"
+        # Cycle prevention: check reasoning cycle count
+        project_metadata = json_loads(project.get("metadata"), {})
+        cycle_count = int(project_metadata.get("reasoning_cycle_count", 0)) + 1
+        max_cycles = 15
 
-        # Resolve output directory for this task
+        if cycle_count > max_cycles:
+            logger.warning(
+                "Project %s exceeded max reasoning cycles (%d), blocking",
+                project_id, max_cycles,
+            )
+            await self._block_project_cycle_limit(project_id, cycle_count)
+            return
+
+        # Increment cycle count
+        project_metadata["reasoning_cycle_count"] = cycle_count
+        await self.db.execute(
+            "UPDATE projects SET metadata = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (json.dumps(project_metadata), utcnow().isoformat(), project_id),
+        )
+
+        # Ask reasoning what to do next
+        decision = await self.reasoning_service.decide_next_step(project_id, completed_task_id)
+        action = decision.get("action", "block_project")
+        reasoning = decision.get("reasoning", "")
+
+        log_autonomy_decision(
+            _get_structured_logger(),
+            f"next_action_{action}",
+            project_id,
+            trigger_task_id=completed_task_id,
+            reasoning=reasoning[:200],
+            cycle_count=cycle_count,
+        )
+
+        if action == "create_task":
+            task_def = decision.get("task", {})
+            await self._create_reasoned_task(project_id, task_def, reasoning)
+        elif action == "close_project":
+            await self._close_project_from_reasoning(project_id, reasoning, decision)
+        elif action == "block_project":
+            block_reason = decision.get("block_reason", "Project blocked by reasoning")
+            resume_instructions = decision.get("resume_instructions", "")
+            await self._block_project_from_reasoning(project_id, block_reason, resume_instructions, reasoning)
+
+        # Record decision in journal
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.DECISION,
+            f"Reasoning decision: {action}. {reasoning[:300]}",
+            {"action": action, "reasoning": reasoning, "cycle_count": cycle_count},
+        )
+
+    async def _create_reasoned_task(
+        self,
+        project_id: str,
+        task_definition: dict[str, Any],
+        reasoning: str,
+    ) -> None:
+        """Create a task based on reasoning decision."""
+        title = task_definition.get("title", "Next step")[:200]
+        description = task_definition.get("description", "")
+        plan = task_definition.get("plan", "")
+        priority_str = task_definition.get("priority", "high")
+
+        try:
+            priority = TaskPriority(priority_str)
+        except ValueError:
+            priority = TaskPriority.HIGH
+
+        # Resolve output directory
         output_directory: str | None = None
         try:
             from cyborg.services.project_service import ProjectService
-
             project_service = ProjectService(self.db)
             project_path = await project_service.get_project_path(project_id)
-            # Use a placeholder short_id; the actual task ID isn't known yet
             output_directory = str(project_path / "tasks" / "pending")
         except Exception:
             pass
 
+        if output_directory and not plan.endswith(output_directory):
+            plan += (
+                f"\n\n## Output Directory\n"
+                f"All task artifacts must be written to: `{output_directory}`\n"
+                f"- Use descriptive filenames for each artifact.\n"
+                f"- Put the primary result in `RESULT.md`.\n"
+                f"- Register all output files via the task files API."
+            )
+
         task_payload = TaskCreate(
-            title=task_title,
-            description=step.description,
-            plan=self._build_step_task_plan(step, output_directory),
-            priority=TaskPriority.HIGH,
+            title=title,
+            description=description,
+            plan=plan,
+            priority=priority,
             project_ids=[project_id],
             metadata={
-                "project_step_index": step_index,
-                "project_step_criteria": step.criteria,
                 "auto_created_by_project": True,
+                "source": "reasoning",
             },
         )
 
         task = await self.task_service.create_task(task_payload)
         await self._auto_start_task(str(task.id), project_id)
 
-        # Now that we have the real task ID, update the plan with the correct output directory
-        if output_directory is not None and output_directory.endswith("/pending"):
-            from cyborg.services.project_service import short_task_id
+        # Update output directory with actual task ID
+        if output_directory and output_directory.endswith("/pending"):
+            try:
+                from cyborg.services.project_service import short_task_id
+                from cyborg.models import TaskUpdate
 
-            real_dir = output_directory.replace("/pending", f"/{short_task_id(str(task.id))}")
-            updated_plan = self._build_step_task_plan(step, real_dir)
-            from cyborg.models import TaskUpdate
+                real_dir = output_directory.replace("/pending", f"/{short_task_id(str(task.id))}")
+                updated_plan = plan.replace(output_directory, real_dir)
+                await self.task_service.update_task(str(task.id), TaskUpdate(plan=updated_plan))
+            except Exception:
+                pass
 
-            await self.task_service.update_task(str(task.id), TaskUpdate(plan=updated_plan))
-
-        # Add journal entry
         await self._add_journal_entry(
             project_id,
             JournalEntryType.MILESTONE,
-            f"Auto-created task for step {step_index + 1}: {step.title}",
-            {"step_index": step_index, "step_title": step.title},
+            f"Reasoning created task: {title}",
+            {"reasoning": reasoning[:200]},
         )
 
-    def _build_step_task_plan(self, step: PlanStep, output_directory: str | None = None) -> str:
-        """Build the initial task plan for an auto-created project step."""
+    async def _create_initial_task(self, project_id: str, step: PlanStep) -> None:
+        """Create the initial task from plan step 0 (deterministic first task)."""
+        # Resolve output directory
+        output_directory: str | None = None
+        try:
+            from cyborg.services.project_service import ProjectService
+            project_service = ProjectService(self.db)
+            project_path = await project_service.get_project_path(project_id)
+            output_directory = str(project_path / "tasks" / "pending")
+        except Exception:
+            pass
+
         plan = (
             f"Objective: {step.title}\n"
             f"Execution: {step.description}\n"
@@ -496,460 +501,127 @@ class ProjectExecutionService(BaseService):
                 f"- Put the primary result in `RESULT.md`.\n"
                 f"- Register all output files via the task files API."
             )
-        return plan
 
-    async def _evaluate_criteria(
+        task_payload = TaskCreate(
+            title=step.title,
+            description=step.description,
+            plan=plan,
+            priority=TaskPriority.HIGH,
+            project_ids=[project_id],
+            metadata={
+                "auto_created_by_project": True,
+                "source": "initial_plan_step",
+                "project_step_index": 0,
+            },
+        )
+
+        task = await self.task_service.create_task(task_payload)
+        await self._auto_start_task(str(task.id), project_id)
+
+        # Update output directory with actual task ID
+        if output_directory and output_directory.endswith("/pending"):
+            try:
+                from cyborg.services.project_service import short_task_id
+                from cyborg.models import TaskUpdate
+
+                real_dir = output_directory.replace("/pending", f"/{short_task_id(str(task.id))}")
+                updated_plan = plan.replace(output_directory, real_dir)
+                await self.task_service.update_task(str(task.id), TaskUpdate(plan=updated_plan))
+            except Exception:
+                pass
+
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.MILESTONE,
+            f"Auto-created initial task: {step.title}",
+            {"step_title": step.title},
+        )
+
+    async def _close_project_from_reasoning(
         self,
         project_id: str,
-        criteria: list[SuccessCriterion],
-    ) -> tuple[dict[str, Any], list[SuccessCriterion], list[SuccessCriterion]]:
-        """Evaluate project success criteria and split them into met/unmet lists."""
-        # Get project data for evaluation context
+        reasoning: str,
+        decision: dict[str, Any],
+    ) -> None:
+        """Close a project based on reasoning decision."""
         project = await self._get_project_row(project_id)
         if not project:
-            return ({}, [], criteria)
+            return
 
-        # Get task statistics
-        task_stats = await self.db.fetch_one(
+        aim = project.get("aim", "The project")
+        conclusion = f"{aim} has been successfully completed.\n\n{reasoning}"
+
+        now = utcnow().isoformat()
+        await self.db.execute(
             """
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as blocked,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as open_count
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.deleted_at IS NULL
+            UPDATE projects
+            SET state = ?, closed_at = ?, conclusion = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
             """,
-            (
-                TaskStatus.COMPLETED.value,
-                TaskStatus.FAILED.value,
-                TaskStatus.BLOCKED.value,
-                TaskStatus.BLOCKED.value,
-                TaskStatus.PENDING.value,
-                TaskStatus.ACTIVE.value,
-                project_id,
-            ),
+            (ProjectState.CLOSED.value, now, conclusion, now, project_id),
         )
 
-        # Convert stats to integers (SQLite returns strings)
-        total = int(task_stats["total"]) if task_stats and task_stats["total"] else 0
-        completed = int(task_stats["completed"]) if task_stats and task_stats["completed"] else 0
-        failed = int(task_stats["failed"]) if task_stats and task_stats["failed"] else 0
-        blocked = int(task_stats["blocked"]) if task_stats and task_stats["blocked"] else 0
-        open_count = int(task_stats["open_count"]) if task_stats and task_stats["open_count"] else 0
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.MILESTONE,
+            f"Project auto-completed by reasoning.\n\n{reasoning}",
+            {"decision": decision},
+        )
 
-        context = {
-            "task_count": total,
-            "completed_task_count": completed,
-            "failed_task_count": failed,
-            "blocked_task_count": blocked,
-            "open_task_count": open_count,
-            "project_state": project["state"],
-        }
+        await self._sync_notifications(project_id)
+        await NotificationService(self.db).create_project_result_notification(
+            project_id,
+            conclusion=conclusion,
+        )
 
-        met_criteria: list[SuccessCriterion] = []
-        unmet_criteria: list[SuccessCriterion] = []
-        for criterion in criteria:
-            if self._evaluate_criterion(criterion, context):
-                met_criteria.append(criterion)
-            else:
-                unmet_criteria.append(criterion)
-
-        return context, met_criteria, unmet_criteria
-
-    def _evaluate_criterion(self, criterion: SuccessCriterion, context: dict[str, Any]) -> bool:
-        """Evaluate a single success criterion against the context.
-        
-        This is a simple evaluator that supports basic numeric comparisons.
-        Can be extended with more sophisticated expression evaluation.
-        """
-        check = criterion.check.lower()
-
-        # Simple pattern matching for common checks
-        # e.g., "task_count > 5", "completed_task_count >= 3"
-        match = re.match(r'(\w+)\s*(>=?|<=?|==|!=)\s*(\d+)', check)
-        if match:
-            var_name, operator, value_str = match.groups()
-            value = int(value_str)
-            
-            if var_name not in context:
-                return False
-            
-            actual_value = context[var_name]
-            if isinstance(actual_value, str):
-                try:
-                    actual_value = int(actual_value)
-                except ValueError:
-                    return False
-
-            if operator == ">=":
-                return actual_value >= value
-            elif operator == ">":
-                return actual_value > value
-            elif operator == "<=":
-                return actual_value <= value
-            elif operator == "<":
-                return actual_value < value
-            elif operator == "==":
-                return actual_value == value
-            elif operator == "!=":
-                return actual_value != value
-
-        # Default: assume satisfied if we can't evaluate
-        return True
-
-    async def _generate_conclusion(
+    async def _block_project_from_reasoning(
         self,
         project_id: str,
-        project: dict[str, Any],
-        success_criteria: list[SuccessCriterion],
-    ) -> str:
-        """Generate a smart conclusion for a completed project."""
-        # Get completed tasks
-        tasks = await self.db.fetch_all(
-            """
-            SELECT t.title, t.completed_at
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.status = ? AND t.deleted_at IS NULL
-            ORDER BY t.completed_at ASC
-            """,
-            (project_id, TaskStatus.COMPLETED.value),
-        )
-
-        # Get journal milestones
-        milestones = await self.db.fetch_all(
-            """
-            SELECT content, created_at
-            FROM project_journal_entries
-            WHERE project_id = ? AND entry_type = ?
-            ORDER BY created_at ASC
-            """,
-            (project_id, JournalEntryType.MILESTONE.value),
-        )
-
-        # Build conclusion
-        lines: list[str] = []
-        lines.append(f"## Project Conclusion: {project['title']}")
-        lines.append("")
-        
-        lines.append("### Accomplishments")
-        if tasks:
-            for task in tasks:
-                lines.append(f"- {task['title']}")
-        else:
-            lines.append("- Project completed")
-        lines.append("")
-
-        lines.append("### Key Milestones")
-        if milestones:
-            for milestone in milestones:
-                lines.append(f"- {milestone['content']}")
-        else:
-            lines.append("- Project successfully executed")
-        lines.append("")
-
-        lines.append("### Outcome")
-        aim = project.get("aim") or "The project aim"
-        lines.append(f"{aim} was achieved.")
-        lines.append("")
-
-        lines.append("### Success Criteria Met")
-        for criterion in success_criteria:
-            lines.append(f"- ✅ {criterion.description}")
-        lines.append("")
-
-        # Check for any remaining open tasks
-        open_tasks = await self.db.fetch_all(
-            """
-            SELECT t.title
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.status IN (?, ?, ?) AND t.deleted_at IS NULL
-            """,
-            (project_id, TaskStatus.BLOCKED.value, TaskStatus.PENDING.value, TaskStatus.ACTIVE.value),
-        )
-
-        if open_tasks:
-            lines.append("### Next Steps")
-            lines.append("Remaining open tasks:")
-            for task in open_tasks:
-                lines.append(f"- {task['title']}")
-        else:
-            lines.append("### Next Steps")
-            lines.append("All planned tasks completed. Project is ready for closure.")
-
-        return "\n".join(lines)
-
-    async def _project_has_open_tasks(self, project_id: str) -> bool:
-        row = await self.db.fetch_one(
-            """
-            SELECT 1 AS has_open
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ?
-              AND t.deleted_at IS NULL
-              AND t.status IN (?, ?, ?)
-            LIMIT 1
-            """,
-            (
-                project_id,
-                TaskStatus.BLOCKED.value,
-                TaskStatus.PENDING.value,
-                TaskStatus.ACTIVE.value,
-            ),
-        )
-        return row is not None
-
-    async def _generate_follow_up_tasks(
-        self,
-        project_id: str,
-        project: dict[str, Any],
-        unmet_criteria: list[SuccessCriterion],
-        context: dict[str, Any],
-    ) -> list[str]:
-        existing_tasks = await self.db.fetch_all(
-            """
-            SELECT t.id, t.metadata
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.deleted_at IS NULL
-            """,
-            (project_id,),
-        )
-        existing_signatures = {
-            (
-                (json_loads(row.get("metadata"), {}) or {}).get("autonomy_cycle_completed_task_count"),
-                (json_loads(row.get("metadata"), {}) or {}).get("autonomy_criterion_check"),
-            )
-            for row in existing_tasks
-        }
-
-        project_metadata = json_loads(project.get("metadata"), {})
-        created_task_ids: list[str] = []
-        snapshot = context.get("completed_task_count", 0)
-        for criterion in unmet_criteria:
-            signature = (snapshot, criterion.check)
-            if signature in existing_signatures:
-                continue
-            task_payload = TaskCreate(
-                title=self._build_follow_up_task_title(criterion),
-                description=self._build_follow_up_task_description(project, criterion),
-                plan=self._build_follow_up_task_plan(project, criterion),
-                priority=TaskPriority.HIGH,
-                project_ids=[project_id],
-                metadata={
-                    **project_metadata,
-                    "auto_created_by_project": True,
-                    "autonomy_reason": "unmet_success_criteria",
-                    "autonomy_cycle_completed_task_count": snapshot,
-                    "autonomy_criterion_check": criterion.check,
-                    "autonomy_criterion_description": criterion.description,
-                },
-            )
-            task = await self.task_service.create_task(task_payload)
-            await self._auto_start_task(str(task.id), project_id)
-            created_task_ids.append(str(task.id))
-            existing_signatures.add(signature)
-
-        if created_task_ids:
-            await self._add_journal_entry(
-                project_id,
-                JournalEntryType.DECISION,
-                "Project autonomy generated follow-up tasks for unmet success criteria.",
-                {
-                    "autonomy_action": "follow_up_generated",
-                    "completed_task_count": snapshot,
-                    "created_task_ids": created_task_ids,
-                    "unmet_criteria": [
-                        {"check": criterion.check, "description": criterion.description}
-                        for criterion in unmet_criteria
-                    ],
-                },
-            )
-        return created_task_ids
-
-    async def _generate_conclusion_from_evaluation(
-        self,
-        project_id: str,
-        project: dict[str, Any],
-        evaluation: dict[str, Any],
-    ) -> str:
-        """Generate project conclusion from OpenClaw evaluation."""
-        lines = [
-            f"## Project Conclusion: {project['title']}",
-            "",
-            f"**Aim:** {project.get('aim', 'N/A')}",
-            "",
-            "**Evaluation:**",
-            evaluation.get('reasoning', 'Project completed successfully.'),
-            "",
-            "**Success Criteria Met:**",
-        ]
-
-        for criterion in evaluation.get("met_criteria", []):
-            lines.append(f"  ✅ {criterion}")
-
-        lines.extend([
-            "",
-            "**Outcome:**",
-            f"{project.get('aim', 'The project')} has been successfully completed.",
-            "",
-        ])
-
-        # Get completed tasks for summary
-        tasks = await self.db.fetch_all(
-            """
-            SELECT t.title, t.completed_at
-            FROM tasks AS t
-            INNER JOIN project_tasks AS pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.status = ? AND t.deleted_at IS NULL
-            ORDER BY t.completed_at ASC
-            """,
-            (project_id, TaskStatus.COMPLETED.value),
-        )
-
-        if tasks:
-            lines.append("**Accomplishments:**")
-            for task in tasks:
-                lines.append(f"  - {task['title']}")
-            lines.append("")
-
-        # Get journal milestones
-        milestones = await self.db.fetch_all(
-            """
-            SELECT content, created_at
-            FROM project_journal_entries
-            WHERE project_id = ? AND entry_type = ?
-            ORDER BY created_at ASC
-            """,
-            (project_id, JournalEntryType.MILESTONE.value),
-        )
-
-        if milestones:
-            lines.append("**Key Milestones:**")
-            for milestone in milestones:
-                lines.append(f"  - {milestone['content'][:100]}...")
-            lines.append("")
-
-        return "\n".join(lines)
-
-    async def _generate_follow_up_tasks_llm(
-        self,
-        project_id: str,
-        project: dict[str, Any],
-        unmet_criteria: list[str],
-        evaluation: dict[str, Any],
+        block_reason: str,
+        resume_instructions: str,
+        reasoning: str,
     ) -> None:
-        """
-        Generate follow-up tasks using OpenClaw reasoning.
-
-        This replaces the template-based approach with LLM-generated tasks.
-        """
-        try:
-            # Use reasoning service to generate contextual follow-up tasks
-            task_suggestions = await self.reasoning_service.generate_follow_up_tasks(
-                project_id,
-                unmet_criteria,
-            )
-
-            if not task_suggestions:
-                # Fallback to template-based generation
-                logging.warning("OpenClaw generated no follow-up tasks for project %s", project_id)
-                return
-
-            project_metadata = json_loads(project.get("metadata"), {})
-            created_task_ids: list[str] = []
-
-            for task_data in task_suggestions:
-                # Create task with LLM-generated content
-                task_payload = TaskCreate(
-                    title=task_data.get("title", "Follow-up task")[:200],
-                    description=task_data.get("description", ""),
-                    plan=task_data.get("plan", ""),
-                    priority=TaskPriority.HIGH,
-                    project_ids=[project_id],
-                    metadata={
-                        **project_metadata,
-                        "auto_created_by_project": True,
-                        "autonomy_reason": "unmet_success_criteria",
-                        "autonomy_method": "llm_generated",
-                        "evaluation": evaluation,
-                    },
-                )
-
-                task = await self.task_service.create_task(task_payload)
-                await self._auto_start_task(str(task.id), project_id)
-                created_task_ids.append(str(task.id))
-
-            if created_task_ids:
-                await self._add_journal_entry(
-                    project_id,
-                    JournalEntryType.DECISION,
-                    f"Generated {len(created_task_ids)} LLM-based follow-up tasks for unmet criteria:\n" +
-                    "\n".join(f"  - {c}" for c in unmet_criteria),
-                    {
-                        "autonomy_action": "llm_follow_up_generated",
-                        "created_task_ids": created_task_ids,
-                        "unmet_criteria": unmet_criteria,
-                        "evaluation": evaluation,
-                    },
-                )
-
-        except Exception as e:
-            # Log error and fall back to template-based
-            import logging
-            logging.error(f"LLM follow-up generation failed for project {project_id}: {e}")
-
-            # Fall back to template-based generation
-            # Convert criteria strings to SuccessCriterion objects
-            success_criteria = self._parse_success_criteria(project.get("success_criteria"))
-            unmet_criterion_objects = [
-                c for c in success_criteria
-                if c.description in unmet_criteria or c.check in unmet_criteria
-            ]
-
-            if unmet_criterion_objects:
-                context, _met_criteria, _unmet_criteria = await self._evaluate_criteria(project_id, success_criteria)
-                await self._generate_follow_up_tasks(
-                    project_id,
-                    project,
-                    unmet_criterion_objects,
-                    context,
-                )
-
-    def _build_follow_up_task_title(self, criterion: SuccessCriterion) -> str:
-        return f"Advance project criterion: {criterion.description}"[:200]
-
-    def _build_follow_up_task_description(self, project: dict[str, Any], criterion: SuccessCriterion) -> str:
-        parts = [
-            f"Project: {project['title']}",
-            f"Unmet success criterion: {criterion.description}",
-            f"Check: {criterion.check}",
-        ]
-        if project.get("aim"):
-            parts.append(f"Project aim: {project['aim']}")
-        return "\n".join(parts)
-
-    def _build_follow_up_task_plan(self, project: dict[str, Any], criterion: SuccessCriterion) -> str:
-        lines = [
-            f"Objective: satisfy the unmet project success criterion '{criterion.description}'.",
-        ]
-        if project.get("aim"):
-            lines.append(f"Project aim: {project['aim']}")
-        if project.get("method"):
-            lines.append(f"Project method: {project['method']}")
-        lines.extend(
-            [
-                f"Success criterion check: {criterion.check}",
-                "Review the completed project work and identify the next concrete action needed to satisfy this criterion.",
-                "Execute that action or gather the missing information needed to progress it.",
-                "When complete, report the result in terms of the criterion.",
-            ]
+        """Block a project based on reasoning decision."""
+        now = utcnow().isoformat()
+        await self.db.execute(
+            """
+            UPDATE projects
+            SET state = ?, blocked_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (ProjectState.PAUSED.value, block_reason, now, project_id),
         )
-        return "\n".join(lines)
+
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.DECISION,
+            f"Project blocked by reasoning: {block_reason}",
+            {"block_reason": block_reason, "resume_instructions": resume_instructions, "reasoning": reasoning[:300]},
+        )
+
+        await self._sync_notifications(project_id)
+
+    async def _block_project_cycle_limit(self, project_id: str, cycle_count: int) -> None:
+        """Block a project that exceeded the reasoning cycle limit."""
+        now = utcnow().isoformat()
+        block_reason = f"Project exceeded maximum reasoning cycles ({cycle_count}). Manual review required."
+        await self.db.execute(
+            """
+            UPDATE projects
+            SET state = ?, blocked_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (ProjectState.PAUSED.value, block_reason, now, project_id),
+        )
+
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.DECISION,
+            block_reason,
+            {"cycle_count": cycle_count},
+        )
+
+        await self._sync_notifications(project_id)
 
     async def _add_journal_entry(
         self,
@@ -995,10 +667,6 @@ class ProjectExecutionService(BaseService):
         row["task_ids"] = [t["task_id"] for t in task_ids]
 
         return ProjectResponse.model_validate(row)
-
-    async def _evaluate_success_criteria(self, project_id: str) -> None:
-        """Evaluate success criteria and auto-complete if all met."""
-        await self.evaluate_and_complete(project_id)
 
     async def block_project(self, project_id: str, reason: str, resume_instructions: str | None = None) -> ProjectResponse:
         """Block a project waiting for user input or external action.

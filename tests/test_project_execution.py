@@ -131,7 +131,7 @@ class TestProjectExecution:
             # Verify task was created
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 1
-            assert tasks[0]["title"] == "Step 1: First Step"
+            assert tasks[0]["title"] == "First Step"
             assert tasks[0]["status"] == "active"
             assert tasks[0]["started_at"] is not None
             assert "Success criteria:" in tasks[0]["plan"]
@@ -139,8 +139,24 @@ class TestProjectExecution:
             assert tasks[0]["metadata"]["channel"] == "whatsapp"
             assert tasks[0]["metadata"]["session_key"] == "whatsappgroup-execution"
 
-    def test_task_completion_triggers_next_task(self, tmp_path: Path) -> None:
-        """Test completing a task creates the next task."""
+    def test_task_completion_triggers_next_task(self, tmp_path: Path, monkeypatch) -> None:
+        """Test completing a task triggers reasoning which creates the next task."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            return {
+                "action": "create_task",
+                "reasoning": "Step 1 done, create step 2",
+                "task": {
+                    "title": "Step 2",
+                    "description": "Do step 2",
+                    "plan": "Objective: Step 2\nExecution: Do step 2\nSuccess criteria: Step 2 done",
+                    "priority": "high",
+                },
+            }
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             # Create and start project
             project = client.post(
@@ -188,16 +204,24 @@ class TestProjectExecution:
                 json={"result_summary": "Step 1 completed"},
             )
 
-            # Verify second task was created
+            # Verify second task was created by reasoning
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 2
             step2 = [t for t in tasks if "Step 2" in t["title"]][0]
             assert step2["status"] == "active"
             assert step2["started_at"] is not None
-            assert step2["metadata"]["project_step_index"] == 1
+            assert step2["metadata"]["auto_created_by_project"] is True
+            assert step2["metadata"]["source"] == "reasoning"
 
-    def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path) -> None:
+    def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path, monkeypatch) -> None:
         """Test completing all tasks auto-closes the project."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            return {"action": "close_project", "reasoning": "All criteria met. Project complete."}
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             # Create and start project
             project = client.post(
@@ -243,8 +267,6 @@ class TestProjectExecution:
             project = client.get(f"/api/v1/projects/{project_id}").json()
             assert project["state"] == "closed"
             assert project["conclusion"] is not None
-            assert "Accomplishments" in project["conclusion"]
-            assert "Success Criteria Met" in project["conclusion"]
 
             notifications = client.get("/api/v1/notifications")
             assert notifications.status_code == 200
@@ -257,10 +279,26 @@ class TestProjectExecution:
             assert project_result["metadata"]["project_id"] == project_id
             assert project_result["metadata"]["delivery_route"] == "source"
             assert project_result["title"] == "Project completed: Auto-close Test"
-            assert "Accomplishments" in project_result["message"]
+            assert project_result["message"] is not None
 
-    def test_unmet_success_criteria_generate_single_follow_up_task(self, tmp_path: Path) -> None:
-        """Test that unmet criteria create one follow-up task after the last open task completes."""
+    def test_unmet_success_criteria_generate_single_follow_up_task(self, tmp_path: Path, monkeypatch) -> None:
+        """Test that reasoning creates a follow-up task when criteria aren't met."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            return {
+                "action": "create_task",
+                "reasoning": "Only 1 task completed but criteria needs 2, creating follow-up",
+                "task": {
+                    "title": "Advance project criterion: Two tasks have been completed",
+                    "description": "Follow-up task to reach 2 completed tasks",
+                    "plan": "Objective: satisfy the unmet project success criterion 'Two tasks have been completed'.\nSuccess criterion check: completed_task_count >= 2",
+                    "priority": "high",
+                },
+            }
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             project = client.post(
                 "/api/v1/projects",
@@ -306,7 +344,8 @@ class TestProjectExecution:
             assert len(tasks) == 2
 
             follow_up_tasks = [
-                task for task in tasks if task["metadata"].get("autonomy_reason") == "unmet_success_criteria"
+                task for task in tasks
+                if task["metadata"].get("auto_created_by_project") and task["metadata"].get("source") == "reasoning"
             ]
             assert len(follow_up_tasks) == 1
             follow_up = follow_up_tasks[0]
@@ -314,10 +353,7 @@ class TestProjectExecution:
             assert follow_up["started_at"] is not None
             assert follow_up["project_ids"] == [project_id]
             assert follow_up["metadata"]["auto_created_by_project"] is True
-            assert follow_up["metadata"]["autonomy_cycle_completed_task_count"] == 1
-            assert follow_up["metadata"]["autonomy_criterion_check"] == "completed_task_count >= 2"
-            assert follow_up["metadata"]["autonomy_criterion_description"] == "Two tasks have been completed"
-            assert "Success criterion check: completed_task_count >= 2" in follow_up["plan"]
+            assert "completed_task_count >= 2" in follow_up["plan"]
 
             project_row = client.get(f"/api/v1/projects/{project_id}")
             assert project_row.status_code == 200
@@ -335,8 +371,32 @@ class TestProjectExecution:
                 for item in pending_notifications
             )
 
-    def test_follow_up_task_completion_closes_project_when_criteria_are_met(self, tmp_path: Path) -> None:
+    def test_follow_up_task_completion_closes_project_when_criteria_are_met(self, tmp_path: Path, monkeypatch) -> None:
         """Test that a generated follow-up task can satisfy the project and trigger closure."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        call_count = 0
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First task completed — criteria not met, create follow-up
+                return {
+                    "action": "create_task",
+                    "reasoning": "Need 2 tasks, only 1 done",
+                    "task": {
+                        "title": "Follow-up: Reach two completed tasks",
+                        "description": "Complete this to satisfy the success criteria",
+                        "plan": "Complete the follow-up work",
+                        "priority": "high",
+                    },
+                }
+            # Second task completed — close project
+            return {"action": "close_project", "reasoning": "Both tasks done. Success criteria met."}
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             project = client.post(
                 "/api/v1/projects",
@@ -380,7 +440,7 @@ class TestProjectExecution:
             follow_up = next(
                 task
                 for task in tasks_after_first_completion.json()
-                if task["metadata"].get("autonomy_reason") == "unmet_success_criteria"
+                if task["metadata"].get("auto_created_by_project") and task["metadata"].get("source") == "reasoning"
             )
 
             assert client.post(
@@ -393,7 +453,7 @@ class TestProjectExecution:
             closed = closed_project.json()
             assert closed["state"] == "closed"
             assert closed["conclusion"] is not None
-            assert "Success Criteria Met" in closed["conclusion"]
+            assert "successfully completed" in closed["conclusion"]
 
             notifications = client.get("/api/v1/notifications")
             assert notifications.status_code == 200
@@ -487,8 +547,37 @@ class TestProjectExecution:
             assert len(data["plan"]) == 1
             assert len(data["success_criteria"]) == 1
 
-    def test_evaluate_endpoint(self, tmp_path: Path) -> None:
+    def test_evaluate_endpoint(self, tmp_path: Path, monkeypatch) -> None:
         """Test the evaluate endpoint for manual completion check on non-auto-execute projects."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_evaluate_success_criteria(self, project_id):
+            # Check actual completed task count to determine if criteria are met
+            task_rows = await self.db.fetch_all(
+                """
+                SELECT t.status FROM tasks t
+                INNER JOIN project_tasks pt ON pt.task_id = t.id
+                WHERE pt.project_id = ? AND t.deleted_at IS NULL
+                """,
+                (project_id,),
+            )
+            completed = sum(1 for r in task_rows if r["status"] == "completed")
+            if completed >= 1:
+                return {
+                    "all_met": True,
+                    "met_criteria": ["One done"],
+                    "unmet_criteria": [],
+                    "reasoning": "All tasks completed",
+                }
+            return {
+                "all_met": False,
+                "met_criteria": [],
+                "unmet_criteria": ["One done"],
+                "reasoning": "No tasks completed yet",
+            }
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "evaluate_success_criteria", fake_evaluate_success_criteria)
+
         with make_client(tmp_path) as client:
             # Create project with auto_execute=False so the autonomy checkpoint
             # won't auto-close it — the evaluate endpoint must be called manually.

@@ -218,6 +218,12 @@ async def overview(
     pending_approval_items = []
     for item in pending_items:
         approval_type = item.get("approval_type", "unknown")
+        proposal = None
+        if item.get("proposal_data"):
+            try:
+                proposal = json.loads(item["proposal_data"])
+            except (json.JSONDecodeError, TypeError):
+                pass
         pending_approval_items.append({
             "id": item["id"],
             "type": approval_type,
@@ -227,6 +233,7 @@ async def overview(
             "priority": item.get("priority", "normal"),
             "requested_at": _format_time(item["requested_at"]),
             "review_href": _approval_review_href(approval_type, item.get("entity_id")),
+            "proposal": proposal,
         })
 
     task_stats = await db.fetch_all(
@@ -711,6 +718,23 @@ async def approve_approval(
         if pending_spec:
             approve_payload = ProjectSpecApproveRequest(approver="dashboard_user")
             await spec_service.approve_spec(str(pending_spec["id"]), approve_payload)
+        else:
+            # Spec already approved (e.g. re-approving after a reset) — just trigger execution
+            from cyborg.models import ProjectState
+            project = await db.fetch_one(
+                "SELECT state FROM projects WHERE id = ? AND deleted_at IS NULL",
+                (entity_id,),
+            )
+            if project and project["state"] in (
+                ProjectState.PLANNING.value,
+                ProjectState.PAUSED.value,
+                ProjectState.ACTIVE.value,
+            ):
+                from cyborg.services.project_execution_service import ProjectExecutionService
+                execution_service = ProjectExecutionService(db)
+                if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+                    await execution_service.cleanup_old_plan_tasks(entity_id)
+                await execution_service.start_project_execution(entity_id)
 
     await db.execute(
         """

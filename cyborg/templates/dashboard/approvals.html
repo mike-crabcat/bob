@@ -90,7 +90,53 @@
                 <p class="text-text-secondary text-sm mb-4">{{ approval.description }}</p>
 
                 <!-- Proposal Data Preview -->
-                {% if approval.proposal %}
+                {% if approval.approval_type == 'project_plan' and approval.proposal %}
+                <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10 space-y-3">
+                    {% if approval.proposal.aim %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">AIM</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.aim }}</div>
+                    </div>
+                    {% endif %}
+                    {% if approval.proposal.method %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">METHOD</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.method }}</div>
+                    </div>
+                    {% endif %}
+                    {% if approval.proposal.plan %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">PLAN</div>
+                        <ol class="text-sm text-text-primary space-y-2 list-decimal list-inside">
+                            {% for step in approval.proposal.plan %}
+                            <li>
+                                <span class="font-medium">{{ step.title }}</span>
+                                {% if step.description %}
+                                <div class="text-text-secondary whitespace-pre-line ml-4">{{ step.description }}</div>
+                                {% endif %}
+                                {% if step.criteria %}
+                                <div class="text-text-muted text-xs ml-4">Done when: {{ step.criteria }}</div>
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ol>
+                    </div>
+                    {% endif %}
+                    {% if approval.proposal.success_criteria %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">SUCCESS CRITERIA</div>
+                        <ul class="text-sm text-text-primary space-y-1">
+                            {% for criterion in approval.proposal.success_criteria %}
+                            <li class="flex items-start gap-2">
+                                <span class="text-accent-cyan mt-0.5">&#x25B8;</span>
+                                <span>{{ criterion.description or criterion.check }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
+                {% elif approval.proposal %}
                 <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10">
                     <div class="text-xs text-text-muted mb-2 font-mono">PROPOSAL DATA:</div>
                     <pre class="text-sm text-text-primary overflow-x-auto whitespace-pre-wrap">{{ approval.proposal_preview }}</pre>

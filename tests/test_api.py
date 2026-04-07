@@ -379,7 +379,19 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
         assert specs.json()["specs"][1]["status"] == "approved"
 
 
-def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: Path) -> None:
+def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: Path, monkeypatch) -> None:
+    import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+    call_count = 0
+
+    async def fake_decide_next_step(self, project_id, completed_task_id):
+        nonlocal call_count
+        call_count += 1
+        # First call (auto task completes) - create the manual task (already created), so close
+        return {"action": "close_project", "reasoning": "All criteria met"}
+
+    monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
     with make_client(tmp_path) as client:
         project = client.post(
             "/api/v1/projects",

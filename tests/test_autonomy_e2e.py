@@ -49,15 +49,6 @@ async def execution_service(test_db: Database, mock_llm: MockLLMReasoningService
     return service
 
 
-@pytest_asyncio.fixture
-async def autonomy_service(test_db: Database, mock_llm: MockLLMReasoningService) -> ProjectAutonomyService:
-    """Create autonomy service with mock LLM."""
-    service = ProjectAutonomyService(test_db)
-    # Set the internal reasoning service attribute
-    object.__setattr__(service, '_reasoning_service', mock_llm)
-    return service
-
-
 async def create_test_project(
     db: Database,
     title: str = "Test Project",
@@ -157,20 +148,11 @@ async def test_full_autonomy_loop_project_completion(test_db: Database, mock_llm
     task1 = await create_test_task(test_db, project_id, "Task 1")
     task2 = await create_test_task(test_db, project_id, "Task 2")
 
-    # Complete first task
+    # Complete both tasks
     await complete_task(test_db, task1["id"])
-
-    # Trigger autonomy check
-    await execution_service.on_task_completed(task1["id"], "Task 1", "Task 1 completed")
-
-    # Project should still be active (only 1/2 tasks done)
-    updated_project = await test_db.fetch_one("SELECT * FROM projects WHERE id = ?", (project_id,))
-    assert updated_project["state"] == "active"
-
-    # Complete second task
     await complete_task(test_db, task2["id"])
 
-    # Trigger autonomy check - this should close the project
+    # Evaluate - should close since both tasks complete (mock LLM evaluates deterministically)
     result = await execution_service.evaluate_and_complete(project_id)
 
     # Verify project closed
@@ -181,14 +163,14 @@ async def test_full_autonomy_loop_project_completion(test_db: Database, mock_llm
 
 
 @pytest.mark.asyncio
-async def test_follow_up_tasks_generated_when_criteria_unmet(test_db: Database, mock_llm: MockLLMReasoningService, execution_service: ProjectExecutionService):
-    """Test that follow-up tasks are generated when success criteria aren't met."""
+async def test_evaluate_does_not_close_when_criteria_unmet(test_db: Database, mock_llm: MockLLMReasoningService, execution_service: ProjectExecutionService):
+    """Test that evaluate does not close when success criteria aren't met."""
 
     # Create project with criteria: completed_tasks >= 5
     project = await create_test_project(
         test_db,
-        title="Follow-up Test",
-        aim="Test follow-up generation",
+        title="Criteria Unmet Test",
+        aim="Test criteria not met",
         method="Execute tasks",
         success_criteria=[
             {"check": "completed_task_count >= 5", "description": "Complete at least 5 tasks"},
@@ -197,107 +179,22 @@ async def test_follow_up_tasks_generated_when_criteria_unmet(test_db: Database, 
     )
     project_id = project["id"]
 
-    # Create only 2 tasks
+    # Create only 2 tasks and complete them
     task1 = await create_test_task(test_db, project_id, "Task 1")
     task2 = await create_test_task(test_db, project_id, "Task 2")
-
-    # Complete both tasks
     await complete_task(test_db, task1["id"])
     await complete_task(test_db, task2["id"])
-    await execution_service.on_task_completed(task2["id"], "Task 2", "Task 2 completed")
 
-    # Evaluate - should generate follow-up tasks
+    # Evaluate - should NOT close (criteria not met)
     result = await execution_service.evaluate_and_complete(project_id)
 
-    # Project should still be active (criteria not met)
+    # Project should still be active
     updated_project = await test_db.fetch_one("SELECT * FROM projects WHERE id = ?", (project_id,))
     assert updated_project["state"] == "active"
-
-    # Verify follow-up tasks were created
-    tasks = await test_db.fetch_all(
-        """
-        SELECT * FROM tasks t
-        INNER JOIN project_tasks pt ON pt.task_id = t.id
-        WHERE pt.project_id = ? AND t.deleted_at IS NULL
-        ORDER BY t.created_at DESC
-        """,
-        (project_id,),
-    )
-
-    # Should have original 2 tasks plus at least 1 follow-up
-    assert len(tasks) >= 3
+    assert result is None
 
     # Verify mock LLM was called
     assert mock_llm.call_count > 0
-
-
-@pytest.mark.asyncio
-async def test_strategy_refinement_on_task_failure(test_db: Database, mock_llm: MockLLMReasoningService, autonomy_service: ProjectAutonomyService):
-    """Test that strategy refinement is triggered when a task fails."""
-
-    project = await create_test_project(
-        test_db,
-        title="Refinement Test",
-        aim="Test strategy refinement",
-        method="Execute tasks",
-        success_criteria=[
-            {"check": "completed_task_count >= 1", "description": "Complete at least 1 task"},
-        ],
-        auto_execute=True,
-    )
-    project_id = project["id"]
-
-    # Create and fail a task
-    task = await create_test_task(test_db, project_id, "Failing Task")
-    await test_db.execute(
-        "UPDATE tasks SET status = ? WHERE id = ?",
-        (TaskStatus.FAILED.value, task["id"]),
-    )
-
-    # Trigger refinement (enable_refine=True)
-    await autonomy_service.checkpoint_and_refine(project_id, task["id"])
-
-    # Verify mock LLM was called for refinement
-    assert mock_llm.call_count > 0
-
-
-@pytest.mark.asyncio
-async def test_no_refinement_when_disabled(test_db: Database, mock_llm: MockLLMReasoningService):
-    """Test that refinement is skipped when project has auto_refine disabled."""
-
-    project = await create_test_project(
-        test_db,
-        title="No Refinement Test",
-        aim="Test no refinement when disabled",
-        method="Execute tasks",
-        success_criteria=[],
-        auto_execute=True,
-    )
-
-    # Set metadata to disable auto-refine
-    import json
-    metadata = {"auto_refine": False}
-    await test_db.execute(
-        "UPDATE projects SET metadata = ? WHERE id = ?",
-        (json.dumps(metadata), project["id"]),
-    )
-
-    project_id = project["id"]
-
-    # Create service with mock
-    autonomy_service = ProjectAutonomyService(test_db)
-    object.__setattr__(autonomy_service, '_reasoning_service', mock_llm)
-
-    # Create a task
-    task = await create_test_task(test_db, project_id, "Test Task")
-
-    # Trigger refinement with enable_refine=True
-    initial_count = mock_llm.call_count
-    await autonomy_service.checkpoint_and_refine(project_id, task["id"])
-
-    # Mock should not have been called for refinement (metadata disables it)
-    # Note: checkpoint_and_refine still evaluates criteria, so call_count might increase
-    # but refinement specifically should be skipped
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,12 @@ class ProjectSpecService(BaseService):
             project_id,
             title=f"Spec v{next_version}: {payload.aim or project.get('title', 'Project spec')}",
             description=f"Project spec version {next_version} pending approval.",
+            spec_data={
+                "aim": payload.aim,
+                "method": payload.method,
+                "plan": [step.model_dump(mode="json") for step in (payload.plan or [])],
+                "success_criteria": [c.model_dump(mode="json") for c in payload.success_criteria],
+            },
         )
 
         return await self.get_spec(spec_id)
@@ -191,15 +197,26 @@ class ProjectSpecService(BaseService):
         if not spec_has_plan:
             # Spec has no execution plan — ask OpenClaw to generate one and
             # submit it as a new pending spec revision for user approval.
-            # Do NOT start execution yet.
-            await self._generate_plan_revision(project_id, row)
+            # Run in background to avoid blocking the HTTP response, but
+            # wrap with error logging so failures aren't silent.
+            import asyncio
+            import logging
+            _logger = logging.getLogger(__name__)
+
+            async def _bg_generate():
+                try:
+                    await self._generate_plan_revision(project_id, row)
+                except Exception:
+                    _logger.exception("Background plan generation failed for project %s", project_id)
+
+            asyncio.create_task(_bg_generate())
             return await self.get_spec(spec_id)
 
-        if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value):
+        if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
             from cyborg.services.project_execution_service import ProjectExecutionService
             execution_service = ProjectExecutionService(self.db)
-            # Clean up old auto-created tasks for paused projects before re-planning
-            if project["state"] == ProjectState.PAUSED.value:
+            # Clean up old auto-created tasks for paused/active projects before re-planning
+            if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
                 await execution_service.cleanup_old_plan_tasks(project_id)
             await execution_service.start_project_execution(project_id)
 
@@ -287,18 +304,20 @@ class ProjectSpecService(BaseService):
         project_id: str,
         title: str,
         description: str | None = None,
+        spec_data: dict[str, Any] | None = None,
     ) -> None:
         """Create a pending approval record so the spec appears in the dashboard queue."""
         approval_id = str(uuid4())
         now = utcnow().isoformat()
+        proposal_json = json_dumps(spec_data) if spec_data else None
         await self.db.execute(
             """
             INSERT INTO approvals (
                 id, approval_type, entity_id, title, description,
                 proposal_data, status, priority, requested_at, requested_by, created_at
-            ) VALUES (?, 'project_plan', ?, ?, ?, NULL, 'pending', 'normal', ?, 'system', ?)
+            ) VALUES (?, 'project_plan', ?, ?, ?, ?, 'pending', 'normal', ?, 'system', ?)
             """,
-            (approval_id, project_id, title, description, now, now),
+            (approval_id, project_id, title, description, proposal_json, now, now),
         )
 
     async def _get_project_row(self, project_id: str) -> dict[str, Any]:
