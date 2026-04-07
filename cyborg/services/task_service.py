@@ -231,6 +231,108 @@ class TaskService(BaseService):
     async def start_task(self, task_id: str) -> TaskResponse:
         return await self._transition_task(task_id, TaskStatus.ACTIVE, "started")
 
+    async def submit_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
+        """Submit a task for review. OpenClaw agents must use this instead of complete.
+
+        Sets status to SUBMITTED, auto-registers output files, runs a reasoning
+        review, and either completes the task or rejects and retries.
+        """
+        row = await self._get_task_row(task_id)
+        if row["status"] != TaskStatus.ACTIVE.value:
+            raise ConflictError(
+                f"Cannot submit task '{task_id}' from '{row['status']}'. Task must be 'active'."
+            )
+
+        now = utcnow()
+
+        # 1. Transition to SUBMITTED
+        async with self.db.connection(write=True) as connection:
+            await connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, result = COALESCE(?, result), submitted_at = ?, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (
+                    TaskStatus.SUBMITTED.value,
+                    result_summary,
+                    now.isoformat(),
+                    now.isoformat(),
+                    task_id,
+                ),
+            )
+            await self._add_history(
+                connection,
+                task_id,
+                "submitted",
+                {"result_summary": result_summary},
+                now.isoformat(),
+            )
+
+        # 2. Auto-register untracked output files
+        output_directory = await self._compute_output_directory(task_id)
+        if output_directory:
+            try:
+                await self._auto_register_untracked_files(task_id, output_directory)
+            except Exception:
+                pass
+
+        # 3. Run submission review
+        try:
+            from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+
+            reasoning_service = OpenClawReasoningService(self.db)
+            review = await reasoning_service.review_task_submission(task_id, result_summary)
+        except Exception:
+            # If review fails, reject and retry (safe default)
+            review = {
+                "approved": False,
+                "reasoning": "Review call failed - task will be retried",
+                "issues": ["review_call_failed"],
+                "suggestions": ["Try submitting the task again"],
+            }
+
+        # 4. Act on review result
+        if review.get("approved"):
+            # Approved - complete the task normally
+            return await self.complete_task(task_id, result_summary)
+
+        # Rejected - send back to active and notify
+        retry_now = utcnow()
+        async with self.db.connection(write=True) as connection:
+            await connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, submitted_at = NULL, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (
+                    TaskStatus.ACTIVE.value,
+                    retry_now.isoformat(),
+                    task_id,
+                ),
+            )
+            await self._add_history(
+                connection,
+                task_id,
+                "submission_rejected",
+                {
+                    "reasoning": review.get("reasoning", ""),
+                    "issues": review.get("issues", []),
+                },
+                retry_now.isoformat(),
+            )
+
+        # Dispatch retry notification
+        try:
+            await NotificationService(self.db).create_task_retry_notification(
+                task_id, review, now=retry_now
+            )
+        except Exception:
+            pass
+
+        return await self.get_task(task_id)
+
     async def complete_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
         row = await self._get_task_row(task_id)
         now = utcnow()
@@ -653,15 +755,29 @@ class TaskService(BaseService):
                 )
             return
         if next_status == TaskStatus.ACTIVE:
-            if current_status != TaskStatus.PENDING.value:
+            if current_status not in (TaskStatus.PENDING.value, TaskStatus.SUBMITTED.value):
                 raise ConflictError(
                     f"Cannot transition task '{task_id}' from '{current_status}' to 'active'. "
-                    "Task must be in 'pending' status."
+                    "Task must be in 'pending' or 'submitted' status."
                 )
             row = await self._get_task_row(task_id)
             if not await self._dependency_is_satisfied(row):
                 raise ConflictError(
                     f"Cannot transition task '{task_id}' to 'active' while its dependency is incomplete."
+                )
+            return
+        if next_status == TaskStatus.SUBMITTED:
+            if current_status != TaskStatus.ACTIVE.value:
+                raise ConflictError(
+                    f"Cannot transition task '{task_id}' from '{current_status}' to 'submitted'. "
+                    "Task must be in 'active' status."
+                )
+            return
+        if next_status == TaskStatus.COMPLETED:
+            if current_status not in (TaskStatus.ACTIVE.value, TaskStatus.SUBMITTED.value):
+                raise ConflictError(
+                    f"Cannot transition task '{task_id}' from '{current_status}' to 'completed'. "
+                    "Task must be in 'active' or 'submitted' status."
                 )
 
     async def _determine_unblocked_status(self, task_id: str, row: dict[str, Any]) -> TaskStatus:

@@ -822,6 +822,24 @@ def task_complete(
     typer.echo(f"Task completed: {result['data']['title']}")
 
 
+@task_app.command("submit")
+def task_submit(
+    id: Annotated[str, typer.Argument(help="Task ID")],
+    result_summary: Annotated[Optional[str], typer.Option("--result-summary", "-s", help="Summary of task results")] = None,
+) -> None:
+    """Submit a task for review (used by AI agents)."""
+
+    data = {"result_summary": result_summary} if result_summary else None
+    result = _api_call("POST", f"/api/v1/tasks/{id}/submit", data)
+    task = result["data"]
+    if task["status"] == "completed":
+        typer.echo(f"Task submitted and approved: {task['title']}")
+    elif task["status"] == "active":
+        typer.echo(f"Task submitted but review requested changes: {task['title']}")
+    else:
+        typer.echo(f"Task submitted: {task['title']} (status: {task['status']})")
+
+
 @task_app.command("block")
 def task_block(
     id: Annotated[str, typer.Argument(help="Task ID")],
@@ -957,6 +975,40 @@ def task_delete(id: Annotated[str, typer.Argument(help="Task ID")]) -> None:
 
     _api_call("DELETE", f"/api/v1/tasks/{id}")
     typer.echo(f"Task deleted: {id}")
+
+
+@task_app.command("file")
+def task_file(
+    id: Annotated[str, typer.Argument(help="Task ID")],
+    project_id: Annotated[str, typer.Option("--project-id", "-p", help="Project ID")],
+    filename: Annotated[str, typer.Option("--filename", "-f", help="Filename")],
+    purpose: Annotated[
+        str,
+        typer.Option(
+            "--purpose",
+            help="File purpose: reasoning, result, analysis, log, artifact, other",
+        ),
+    ] = "artifact",
+    description: Annotated[
+        Optional[str], typer.Option("--description", "-d", help="File description")
+    ] = None,
+) -> None:
+    """Register a file created during task execution."""
+
+    payload = {
+        "project_id": project_id,
+        "file": {
+            "filename": filename,
+            "purpose": purpose,
+            "content_type": "text/plain",
+        },
+    }
+    if description:
+        payload["file"]["description"] = description
+
+    result = _api_call("POST", f"/api/v1/tasks/{id}/files", payload)
+    f = result["data"]
+    typer.echo(f"File registered: {f['filename']} ({f['purpose']}) -> task {id}")
 
 
 @plan_app.command("submit")

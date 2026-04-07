@@ -39,12 +39,13 @@ class OpenClawReasoningService(BaseService):
     """
 
     # Default timeouts for different reasoning types (seconds)
-    TIMEOUT_PLAN = 60
-    TIMEOUT_EVALUATION = 60
-    TIMEOUT_REFINEMENT = 90
-    TIMEOUT_LEARNING = 75
-    TIMEOUT_NEXT_ACTION = 90
-    TIMEOUT_DEFAULT = 60
+    TIMEOUT_PLAN = 180
+    TIMEOUT_EVALUATION = 120
+    TIMEOUT_REFINEMENT = 180
+    TIMEOUT_LEARNING = 120
+    TIMEOUT_NEXT_ACTION = 180
+    TIMEOUT_REVIEW = 120
+    TIMEOUT_DEFAULT = 120
 
     def __init__(self, db: Database):
         super().__init__(db)
@@ -332,6 +333,44 @@ class OpenClawReasoningService(BaseService):
         )
 
         return self._parse_follow_up_tasks_response(response)
+
+    async def review_task_submission(
+        self,
+        task_id: str,
+        result_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Review a task submission to verify the agent actually completed the work.
+
+        Returns {approved: bool, reasoning: str, issues: [str], suggestions: [str]}.
+        """
+        task = await self.db.fetch_one(
+            "SELECT * FROM tasks WHERE id = ?",
+            (task_id,),
+        )
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+
+        files = await self.db.fetch_all(
+            "SELECT filename, purpose, description, size_bytes FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+
+        steps = await self.db.fetch_all(
+            "SELECT step_number, description, status, result FROM task_steps WHERE task_id = ? ORDER BY step_number ASC",
+            (task_id,),
+        )
+
+        prompt = self._build_submission_review_prompt(dict(task), files, steps, result_summary)
+
+        response = await self._call_openclaw(
+            prompt=prompt,
+            response_format="json",
+            timeout=self.TIMEOUT_REVIEW,
+            reasoning_type="submission_review",
+            task_id=task_id,
+        )
+
+        return self._parse_submission_review_response(response)
 
     async def _call_openclaw(
         self,
@@ -1206,6 +1245,92 @@ class OpenClawReasoningService(BaseService):
             ]
         )
         return "\n".join(lines)
+
+    def _build_submission_review_prompt(
+        self,
+        task: dict[str, Any],
+        files: list[Any],
+        steps: list[Any],
+        result_summary: str | None,
+    ) -> str:
+        parts = [
+            "You are reviewing whether an AI agent actually completed a task as requested.",
+            "Be strict but fair. The agent should have done real work, not just restated the plan.",
+            "",
+            "## Task Definition",
+            f"Title: {task.get('title', 'Unknown')}",
+        ]
+        if task.get("description"):
+            parts.append(f"Description: {task['description']}")
+        if task.get("plan"):
+            parts.append(f"Plan: {task['plan'][:1000]}")
+
+        parts.extend([
+            "",
+            "## What the Agent Claims",
+            f"Result summary: {result_summary or '(none provided)'}",
+        ])
+
+        if steps:
+            parts.extend(["", "## Task Steps"])
+            for step in steps:
+                s = step if isinstance(step, dict) else dict(step)
+                parts.append(
+                    f"  Step {s.get('step_number', '?')}: [{s.get('status', '?')}] {s.get('description', '')[:200]}"
+                )
+                if s.get("result"):
+                    parts.append(f"    Result: {str(s['result'])[:300]}")
+
+        if files:
+            parts.extend(["", "## Output Files"])
+            for f in files:
+                fd = f if isinstance(f, dict) else dict(f)
+                size = fd.get("size_bytes")
+                size_str = f" ({size} bytes)" if size else ""
+                parts.append(
+                    f"  - {fd.get('filename', '?')} [{fd.get('purpose', '?')}]{size_str}"
+                )
+                if fd.get("description"):
+                    parts.append(f"    {fd['description'][:200]}")
+        else:
+            parts.extend(["", "## Output Files", "(no files registered)"])
+
+        parts.extend([
+            "",
+            "## Review Checklist",
+            "1. Does the result summary actually address the task title and description?",
+            "2. Were the expected output files created? If the plan mentioned creating files, do they exist?",
+            "3. Were the task steps completed with real results (not just marked done)?",
+            "4. Is the result substantive, not just a restatement of the plan?",
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "approved": true or false,',
+            '  "reasoning": "Brief explanation of the decision",',
+            '  "issues": ["list of specific issues found, empty if approved"],',
+            '  "suggestions": ["specific actions the agent should take to fix issues"]',
+            "}",
+        ])
+
+        return "\n".join(parts)
+
+    def _parse_submission_review_response(self, response: str) -> dict[str, Any]:
+        try:
+            data = self._load_json_payload(response)
+            return {
+                "approved": bool(data.get("approved", False)),
+                "reasoning": str(data.get("reasoning", "")),
+                "issues": [str(i) for i in data.get("issues", [])],
+                "suggestions": [str(s) for s in data.get("suggestions", [])],
+            }
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error("Failed to parse submission review response: %s", e)
+            return {
+                "approved": False,
+                "reasoning": f"Failed to parse review response: {e}",
+                "issues": ["review_parse_failure"],
+                "suggestions": ["Try submitting the task again"],
+            }
 
     def _extract_response_text(self, response: Any) -> str:
         """Extract the most useful text payload from an OpenClaw gateway response."""

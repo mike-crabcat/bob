@@ -84,6 +84,26 @@ async def complete_task(
     return await service.complete_task(str(task_id), payload.result_summary if payload else None)
 
 
+class TaskSubmitRequest(BaseModel):
+    result_summary: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_result_alias(cls, value: object) -> object:
+        if isinstance(value, dict) and "result_summary" not in value and "result" in value:
+            return {**value, "result_summary": value["result"]}
+        return value
+
+
+@router.post("/{task_id}/submit", response_model=TaskResponse)
+async def submit_task(
+    task_id: UUID,
+    payload: TaskSubmitRequest | None = None,
+    service: TaskService = Depends(get_task_service),
+) -> TaskResponse:
+    return await service.submit_task(str(task_id), payload.result_summary if payload else None)
+
+
 @router.post("/{task_id}/fail", response_model=TaskResponse)
 async def fail_task(
     task_id: UUID,

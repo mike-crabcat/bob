@@ -131,7 +131,7 @@ class OpenClawHookSettings:
     agent_id: str | None = None
     sender_name: str = "Cyborg"
     wake_mode: str = "now"
-    timeout_seconds: float = 15.0
+    timeout_seconds: float = 120.0
     session_key_prefix: str | None = None
 
     @property
@@ -264,7 +264,7 @@ class Settings:
             agent_id=os.getenv("CYBORG_OPENCLAW_AGENT_ID") or None,
             sender_name=os.getenv("CYBORG_OPENCLAW_SENDER_NAME", "Cyborg"),
             wake_mode=os.getenv("CYBORG_OPENCLAW_WAKE_MODE", "now"),
-            timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "15")),
+            timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "120")),
             session_key_prefix=os.getenv("CYBORG_OPENCLAW_SESSION_KEY_PREFIX") or None,
         )
         public_url = os.getenv("CYBORG_PUBLIC_URL", "")

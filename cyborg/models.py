@@ -79,6 +79,7 @@ class TaskStatus(StrEnum):
     ACTIVE = "active"
     PAUSED = "paused"
     BLOCKED = "blocked"
+    SUBMITTED = "submitted"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -192,6 +193,7 @@ class NotificationType(StrEnum):
     TASK_ASSIGNMENT = "task_assignment"
     TASK_RESULT = "task_result"
     PROJECT_RESULT = "project_result"
+    TASK_RETRY = "task_retry"
 
 
 class NotificationStatus(StrEnum):
@@ -421,6 +423,7 @@ class TaskResponse(TaskFields, EntityRef, SoftDeleteFields):
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
+    submitted_at: datetime | None = None
     completed_at: datetime | None = None
     result: str | None = None
     project_ids: list[UUID] = Field(default_factory=list)

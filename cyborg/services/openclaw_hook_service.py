@@ -26,7 +26,7 @@ class OpenClawHookService(BaseService):
     GATEWAY_CLIENT_ID = "gateway-client"
     GATEWAY_CLIENT_MODE = "backend"
     GATEWAY_SCOPES = ["operator.write"]
-    BOOTSTRAP_TIMEOUT_SECONDS = 90.0
+    BOOTSTRAP_TIMEOUT_SECONDS = 180.0
 
     def __init__(
         self,
@@ -106,6 +106,26 @@ class OpenClawHookService(BaseService):
             )
             return
 
+        # Task retry notifications use the agent method with retry-specific prompt
+        if notification.get("notification_type") == NotificationType.TASK_RETRY.value:
+            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            metadata = notification.get("metadata", {})
+            await log_prompt(
+                self.db,
+                category="task_retry",
+                prompt_text=self._render_task_retry_prompt(notification, route_data, session_key),
+                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                task_id=metadata.get("task_id") or notification.get("entity_id"),
+                session_key=session_key,
+            )
+            await self._send_gateway_request(
+                "agent",
+                self._build_task_retry_agent_params(notification, route_data, session_key),
+                expect_final=True,
+                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+            )
+            return
+
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
         metadata = notification.get("metadata", {})
@@ -162,7 +182,7 @@ class OpenClawHookService(BaseService):
         # Agent-type dispatches (task_assignment, needs_input) send a full prompt
         # to OpenClaw. Retrying too quickly sends duplicate prompts that confuse
         # the agent. Wait at least 1 hour between retries for these.
-        if notification_type in ("task_assignment", "needs_input"):
+        if notification_type in ("task_assignment", "needs_input", "task_retry"):
             delay = timedelta(hours=max(1, min(6, attempt_count)))
         else:
             delay = timedelta(minutes=min(360, max(1, 2 ** max(attempt_count - 1, 0))))
@@ -612,15 +632,15 @@ class OpenClawHookService(BaseService):
         if self.cyborg_service_url:
             lines.extend(
                 [
-                    f'- Once the task is answered, complete the task by calling: cyborg task complete <task-id> --result-summary "<answer>"',
-                    f'- Or use the HTTP API: POST {self.cyborg_service_url}/api/v1/tasks/<task-id>/complete with JSON {{"result_summary":"<answer>"}}',
+                    f'- Once the task is done, submit the task for review by calling: cyborg task submit <task-id> --result-summary "<answer>"',
+                    f'- Or use the HTTP API: POST {self.cyborg_service_url}/api/v1/tasks/<task-id>/submit with JSON {{"result_summary":"<answer>"}}',
                 ]
             )
         else:
             lines.extend(
                 [
-                    '- Once the task is answered, complete the Cyborg task with the exact answer using: cyborg task complete <task-id> --result-summary "<answer>".',
-                    '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/complete with JSON {"result_summary":"<answer>"}.',
+                    '- Once the task is done, submit the task for review using: cyborg task submit <task-id> --result-summary "<answer>".',
+                    '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/submit with JSON {"result_summary":"<answer>"}.',
                 ]
             )
         lines.extend(
@@ -691,6 +711,104 @@ class OpenClawHookService(BaseService):
                 f"Or use the HTTP API: PUT /api/v1/tasks/{task_id}/plan with plan approval details.",
             ])
         return "\n".join(lines)
+
+    def _render_task_retry_prompt(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> str:
+        """Render prompt for task_retry notifications (submission rejected)."""
+        metadata = notification.get("metadata", {})
+        review_feedback = metadata.get("review_feedback", {})
+        issues = review_feedback.get("issues", [])
+        suggestions = review_feedback.get("suggestions", [])
+        reasoning = review_feedback.get("reasoning", "")
+
+        lines = [
+            "Cyborg task retry: the previous submission for this task was rejected by review.",
+            "",
+            "You must address the issues below and re-submit the task.",
+            "",
+            f"Task ID: {metadata.get('task_id') or notification.get('entity_id')}",
+            f"Notification ID: {notification['id']}",
+            f"Session Key: {session_key}",
+            f"Task: {notification['title']}",
+            "",
+            "## Review Feedback",
+            f"Reason: {reasoning}",
+        ]
+
+        if issues:
+            lines.extend(["", "Issues found:"])
+            for issue in issues:
+                lines.append(f"  - {issue}")
+
+        if suggestions:
+            lines.extend(["", "Specific suggestions:"])
+            for suggestion in suggestions:
+                lines.append(f"  - {suggestion}")
+
+        lines.extend([
+            "",
+            "## Instructions",
+            "- Address each issue raised by the review.",
+            "- Create any missing files that were expected.",
+            "- Do the actual work required by the task, don't just claim it's done.",
+        ])
+
+        # Include output directory instructions if available
+        output_directory = metadata.get("output_directory")
+        if output_directory:
+            task_id = metadata.get("task_id") or notification.get("entity_id")
+            lines.extend([
+                "",
+                "## Output Directory",
+                f"All task artifacts must be written to: `{output_directory}`",
+                "- Use descriptive filenames for each artifact.",
+                "- Put the primary result in `RESULT.md`.",
+            ])
+            if self.cyborg_service_url:
+                lines.append(
+                    f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files"
+                )
+
+        # Submit instructions
+        if self.cyborg_service_url:
+            lines.extend([
+                "",
+                f'- When finished, submit the task by calling: cyborg task submit {metadata.get("task_id", "<task-id>")} --result-summary "<answer>"',
+                f'- Or use the HTTP API: POST {self.cyborg_service_url}/api/v1/tasks/{metadata.get("task_id", "<task-id>")}/submit with JSON {{"result_summary":"<answer>"}}',
+            ])
+        else:
+            lines.extend([
+                "",
+                f'- When finished, submit the task using: cyborg task submit {metadata.get("task_id", "<task-id>")} --result-summary "<answer>".',
+                '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/submit with JSON {"result_summary":"<answer>"}.',
+            ])
+
+        return "\n".join(lines)
+
+    def _build_task_retry_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": self._render_task_retry_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "low",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
 
     def _is_target_task_assignment(self, notification: dict[str, Any]) -> bool:
         metadata = notification.get("metadata", {})

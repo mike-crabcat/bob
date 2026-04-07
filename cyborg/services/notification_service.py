@@ -264,6 +264,94 @@ class NotificationService(BaseService):
             source_updated_at=source_updated_at,
         )
 
+    # ── Task retry (submission rejected) ──────────────────────────
+
+    async def create_task_retry_notification(
+        self,
+        task_id: str,
+        review_feedback: dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Create a TASK_RETRY notification when a submission is rejected by review.
+
+        Dispatches to the same session as the original task assignment so
+        the agent can retry in context.
+        """
+        row = await self.db.fetch_one(
+            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if row is None:
+            return
+
+        task_metadata = json_loads(row.get("metadata"), {})
+        target_session = task_metadata.get("target_session")
+        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
+        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
+
+        if delivery_route is None:
+            return
+
+        source_updated_at = row.get("updated_at")
+        parent_project = await self._get_parent_project(task_id)
+
+        issues = review_feedback.get("issues", [])
+        suggestions = review_feedback.get("suggestions", [])
+        reasoning = review_feedback.get("reasoning", "")
+
+        message_parts = [
+            f"Task submission rejected: {row['title']}",
+            "",
+            f"Reason: {reasoning}",
+        ]
+        if issues:
+            message_parts.append("")
+            message_parts.append("Issues:")
+            for issue in issues:
+                message_parts.append(f"  - {issue}")
+        if suggestions:
+            message_parts.append("")
+            message_parts.append("Suggestions:")
+            for suggestion in suggestions:
+                message_parts.append(f"  - {suggestion}")
+
+        message = "\n".join(message_parts)
+
+        output_directory = None
+        if parent_project is not None:
+            try:
+                from cyborg.services.project_service import ProjectService
+
+                project_service = ProjectService(self.db)
+                project_path = await project_service.get_project_path(parent_project["id"])
+                short_id = row["id"].replace("-", "")[:8]
+                output_directory = str(project_path / "tasks" / short_id)
+            except Exception:
+                pass
+
+        metadata = {
+            **task_metadata,
+            "task_id": row["id"],
+            "task_status": "active",
+            "parent_project_id": parent_project["id"] if parent_project else None,
+            "parent_project_title": parent_project["title"] if parent_project else None,
+            "delivery_route": delivery_route,
+            "output_directory": output_directory,
+            "review_feedback": review_feedback,
+        }
+
+        await self._create_entity_notification(
+            entity_type=NotificationEntityType.TASK,
+            entity_id=row["id"],
+            notification_type=NotificationType.TASK_RETRY,
+            title=f"Task retry: {row['title']}",
+            message=message,
+            metadata=metadata,
+            now=now or utcnow(),
+            source_updated_at=source_updated_at,
+        )
+
     # ── Backward-compat shim for process_due_notifications ──────
 
     async def process_due_notifications(self, *, now: datetime | None = None) -> int:
