@@ -11,6 +11,7 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
+    NotificationEntityType,
     RetryAction,
     RetryConfig,
     TaskBlockRequest,
@@ -384,6 +385,16 @@ class TaskService(BaseService):
 
         task_response = await self.get_task(task_id)
 
+        # Resolve any pending/failed-delivery notifications for this task so
+        # the retry loop won't re-dispatch stale prompts to a completed task.
+        try:
+            notification_service = NotificationService(self.db)
+            await notification_service._resolve_pending_notifications(
+                NotificationEntityType.TASK, task_id, now=now,
+            )
+        except Exception:
+            pass
+
         # Trigger post-completion autonomy flow for linked tasks and projects.
         await self._trigger_project_execution(task_id, row["title"], result_summary)
 
@@ -620,8 +631,11 @@ class TaskService(BaseService):
 
         Records the reason and full resume instructions so the task can be
         resumed without relying on conversational context.
+
+        When input_schema is provided, creates a task_input approval record
+        so the dashboard can collect structured user input.
         """
-        await self._get_task_row(task_id)
+        row = await self._get_task_row(task_id)
         now = utcnow()
 
         async with self.db.connection(write=True) as connection:
@@ -643,9 +657,13 @@ class TaskService(BaseService):
                 connection,
                 task_id,
                 "blocked",
-                {"reason": payload.reason},
+                {"reason": payload.reason, "has_input_schema": payload.input_schema is not None},
                 now.isoformat(),
             )
+
+        # Create approval record for structured input requests
+        if payload.input_schema is not None:
+            await self._create_task_input_approval(task_id, row, payload, now)
 
         return await self.get_task(task_id)
 
@@ -808,6 +826,47 @@ class TaskService(BaseService):
         return (
             f"This task depends on parent task {parent_id}. "
             "Resume automatically once the parent task has completed."
+        )
+
+    async def _create_task_input_approval(
+        self,
+        task_id: str,
+        task_row: dict[str, Any],
+        payload: TaskBlockRequest,
+        now: Any,
+    ) -> None:
+        """Create a task_input approval record so the dashboard can collect user input."""
+        from uuid import uuid4
+
+        approval_id = str(uuid4())
+        now_iso = now.isoformat()
+        input_schema_json = json_dumps(payload.input_schema.model_dump(mode="json"))
+
+        proposal_data = {
+            "task_id": task_id,
+            "task_title": task_row.get("title", ""),
+            "reason": payload.reason,
+            "resume_instructions": payload.resume_instructions,
+        }
+
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, status, priority, requested_at, requested_by,
+                input_schema, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, 'pending', 'normal', ?, 'system', ?, ?)
+            """,
+            (
+                approval_id,
+                task_id,
+                f"Task input needed: {task_row.get('title', 'Task')}",
+                payload.reason,
+                json_dumps(proposal_data),
+                now_iso,
+                input_schema_json,
+                now_iso,
+            ),
         )
 
     async def _get_task_row(self, task_id: str) -> dict[str, Any]:

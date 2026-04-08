@@ -132,6 +132,7 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
             json={
                 "title": "Proposal work",
                 "aim": "Ship the first customer proposal",
+                "auto_execute": False,
                 "metadata": {
                     "channel": "whatsapp",
                     "session_key": "whatsappgroup-proposals",
@@ -356,6 +357,10 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
         assert initial_spec.status_code == 201
         initial_spec_id = initial_spec.json()["id"]
         approve_spec(client, initial_spec_id)
+
+        # Project is now active after spec approval — pause before updating spec fields
+        pause = client.post(f"/api/v1/projects/{project_id}/pause")
+        assert pause.status_code == 200
 
         revised = client.put(
             f"/api/v1/projects/{project_id}",
@@ -771,7 +776,7 @@ def test_project_blocked_notification_fire_once(
     with make_client(tmp_path) as client:
         project = client.post(
             "/api/v1/projects",
-            json={"title": "Quarterly plan", "aim": "Prepare the quarter"},
+            json={"title": "Quarterly plan", "aim": "Prepare the quarter", "auto_execute": False},
         )
         assert project.status_code == 201
         project_id = project.json()["id"]
@@ -967,7 +972,7 @@ def test_task_assignment_notifications_dispatch_via_derived_target_dm_session(tm
         assert len(assignment_calls) == 1
         assignment_params = assignment_calls[0]["params"]
         assert assignment_calls[0]["expect_final"] is True
-        assert assignment_calls[0]["timeout_seconds"] == 90.0
+        assert assignment_calls[0]["timeout_seconds"] == 180.0
         assert assignment_params["deliver"] is True
         assert assignment_params["channel"] == "whatsapp"
         assert assignment_params["to"] == "+61400111222"
@@ -1173,9 +1178,12 @@ def test_auto_created_project_task_assignments_bootstrap_agent_on_source_session
 
         notifications = client.get("/api/v1/notifications").json()
         assignment = next(item for item in notifications if item["notification_type"] == "task_assignment")
-        assert assignment["metadata"]["delivery_route"] == "source"
+        assert assignment["metadata"]["delivery_route"] == "target"
         assert assignment["metadata"]["auto_created_by_project"] is True
         assert assignment["delivery_status"] == "delivered"
+
+        task_id = assignment["entity_id"]
+        short_project = project_id.replace("-", "")[:8]
 
         assignment_calls = [
             request
@@ -1184,12 +1192,13 @@ def test_auto_created_project_task_assignments_bootstrap_agent_on_source_session
         ]
         assert len(assignment_calls) == 1
         assert assignment_calls[0]["expect_final"] is True
-        assert assignment_calls[0]["timeout_seconds"] == 90.0
+        assert assignment_calls[0]["timeout_seconds"] == 180.0
         assert assignment_calls[0]["params"]["deliver"] is True
         assert assignment_calls[0]["params"]["channel"] == "whatsapp"
         assert assignment_calls[0]["params"]["to"] == "+61456224867"
-        assert assignment_calls[0]["params"]["sessionKey"] == "agent:main:whatsapp:direct:+61456224867"
-        assert "agentId" not in assignment_calls[0]["params"]
+        # Session key should be a cyborg:project:TASK:task:SHORTID pattern
+        assert assignment_calls[0]["params"]["sessionKey"].startswith(f"cyborg:project:{short_project}:task:")
+        assert assignment_calls[0]["params"]["agentId"] == "worker"
 
         sends = [
             request
@@ -1293,6 +1302,7 @@ def test_dashboard_project_detail_shows_prompt_history(tmp_path: Path) -> None:
             json={
                 "title": "Prompt Dashboard Test",
                 "aim": "Verify prompt history shows on dashboard",
+                "auto_execute": False,
             },
         )
         assert project.status_code == 201
@@ -1752,7 +1762,8 @@ def test_auto_task_dispatch_with_phone_number_chat_id_and_no_session_key(
         assert len(assignment_calls) == 1
         assert assignment_calls[0]["params"]["channel"] == "whatsapp"
         assert assignment_calls[0]["params"]["to"] == "+61456224867"
-        assert assignment_calls[0]["params"]["sessionKey"] == "agent:main:whatsapp:direct:+61456224867"
+        short_project = project_id.replace("-", "")[:8]
+        assert assignment_calls[0]["params"]["sessionKey"].startswith(f"cyborg:project:{short_project}:task:")
 
 
 def test_submitting_spec_creates_approval_record(tmp_path: Path) -> None:
@@ -1907,3 +1918,295 @@ def test_dashboard_reject_endpoint_rejects_spec(tmp_path: Path) -> None:
         # Project should still be in planning
         refreshed = client.get(f"/api/v1/projects/{project_id}")
         assert refreshed.json()["state"] == "planning"
+
+
+def test_auto_execute_project_rejected_with_partial_spec_fields(tmp_path: Path) -> None:
+    """Auto-executing projects with partial spec fields (but missing required ones) are rejected."""
+    with make_client(tmp_path) as client:
+        # Has aim + method but no success_criteria → should be rejected
+        response = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Incomplete project",
+                "aim": "Do the thing",
+                "method": "Plan and execute",
+                "auto_execute": True,
+                "metadata": {"session_key": "test", "channel": "whatsapp"},
+            },
+        )
+        assert response.status_code == 409
+        assert "aim, method, and success_criteria" in response.json()["detail"]
+
+        # Same with auto_execute omitted (defaults to True)
+        response2 = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Still incomplete",
+                "aim": "Do another thing",
+                "metadata": {"session_key": "test", "channel": "whatsapp"},
+            },
+        )
+        assert response2.status_code == 409
+
+        # With auto_execute=False, partial fields are fine
+        response3 = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Manual project",
+                "aim": "Do it manually",
+                "method": "Step by step",
+                "auto_execute": False,
+                "metadata": {"session_key": "test", "channel": "whatsapp"},
+            },
+        )
+        assert response3.status_code == 201
+
+        # With complete spec fields, auto_execute is fine
+        response4 = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Complete project",
+                "aim": "Do everything",
+                "method": "All at once",
+                "success_criteria": [
+                    {"check": "done", "description": "It's done"}
+                ],
+                "auto_execute": True,
+                "metadata": {"session_key": "test", "channel": "whatsapp"},
+            },
+        )
+        assert response4.status_code == 201
+
+
+def test_blocking_task_with_input_schema_creates_approval(tmp_path: Path) -> None:
+    """Blocking a task with input_schema creates a task_input approval record."""
+    with make_client(tmp_path) as client:
+        db = client.app.state.db
+
+        task = create_task(
+            client,
+            title="Need user decision",
+            plan="1. Ask user. 2. Continue with answer.",
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-test"},
+        )
+        task_id = str(task["id"])
+
+        # Block the task with a text input schema
+        blocked = client.post(
+            f"/api/v1/tasks/{task_id}/block",
+            json={
+                "reason": "Need user to provide their name",
+                "resume_instructions": "Use the provided name to continue the task.",
+                "input_schema": {
+                    "type": "text",
+                    "prompt": "What is your name?",
+                    "placeholder": "Enter your name here...",
+                },
+            },
+        )
+        assert blocked.status_code == 200
+        assert blocked.json()["status"] == "blocked"
+
+        # Verify the approval record was created
+        approval_row = asyncio.run(
+            db.fetch_one(
+                "SELECT * FROM approvals WHERE entity_id = ? AND approval_type = 'task_input' AND status = 'pending'",
+                (task_id,),
+            )
+        )
+        assert approval_row is not None
+        assert approval_row["input_schema"] is not None
+
+        import json
+
+        input_schema = json.loads(approval_row["input_schema"])
+        assert input_schema["type"] == "text"
+        assert input_schema["prompt"] == "What is your name?"
+        assert input_schema["placeholder"] == "Enter your name here..."
+
+
+def test_blocking_task_with_multi_choice_input_schema(tmp_path: Path) -> None:
+    """Blocking a task with multi_choice input_schema creates the right approval."""
+    with make_client(tmp_path) as client:
+        db = client.app.state.db
+
+        task = create_task(
+            client,
+            title="Choose a design",
+            plan="1. Present options. 2. Build chosen design.",
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-test"},
+        )
+        task_id = str(task["id"])
+
+        blocked = client.post(
+            f"/api/v1/tasks/{task_id}/block",
+            json={
+                "reason": "User needs to choose a design",
+                "resume_instructions": "Build the chosen design option.",
+                "input_schema": {
+                    "type": "multi_choice",
+                    "prompt": "Which design do you prefer?",
+                    "options": [
+                        {"value": "minimal", "label": "Design A - Minimal"},
+                        {"value": "bold", "label": "Design B - Bold"},
+                    ],
+                    "allow_multiple": False,
+                },
+            },
+        )
+        assert blocked.status_code == 200
+        assert blocked.json()["status"] == "blocked"
+
+        approval_row = asyncio.run(
+            db.fetch_one(
+                "SELECT * FROM approvals WHERE entity_id = ? AND approval_type = 'task_input'",
+                (task_id,),
+            )
+        )
+        assert approval_row is not None
+
+        import json
+
+        input_schema = json.loads(approval_row["input_schema"])
+        assert input_schema["type"] == "multi_choice"
+        assert input_schema["prompt"] == "Which design do you prefer?"
+        assert len(input_schema["options"]) == 2
+        assert input_schema["options"][0]["value"] == "minimal"
+        assert input_schema["allow_multiple"] is False
+
+
+def test_blocking_task_without_input_schema_does_not_create_approval(tmp_path: Path) -> None:
+    """Blocking a task without input_schema should NOT create an approval record."""
+    with make_client(tmp_path) as client:
+        db = client.app.state.db
+
+        task = create_task(
+            client,
+            title="Dependency wait",
+            plan="1. Wait for parent. 2. Continue.",
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-test"},
+        )
+        task_id = str(task["id"])
+
+        blocked = client.post(
+            f"/api/v1/tasks/{task_id}/block",
+            json={
+                "reason": "Waiting for dependency",
+                "resume_instructions": "Resume once dependency resolves.",
+            },
+        )
+        assert blocked.status_code == 200
+
+        approval_rows = asyncio.run(
+            db.fetch_all(
+                "SELECT * FROM approvals WHERE entity_id = ?",
+                (task_id,),
+            )
+        )
+        assert len(approval_rows) == 0
+
+
+def test_dashboard_input_resolve_endpoint_unblocks_task(tmp_path: Path) -> None:
+    """Dashboard input resolve endpoint saves response, unblocks task."""
+    with make_client(tmp_path) as client:
+        db = client.app.state.db
+
+        task = create_task(
+            client,
+            title="Need input",
+            plan="1. Ask question. 2. Continue.",
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-test"},
+        )
+        task_id = str(task["id"])
+
+        client.post(
+            f"/api/v1/tasks/{task_id}/block",
+            json={
+                "reason": "Need user's favourite colour",
+                "resume_instructions": "Continue with the colour.",
+                "input_schema": {
+                    "type": "text",
+                    "prompt": "What is your favourite colour?",
+                },
+            },
+        )
+
+        approval_row = asyncio.run(
+            db.fetch_one(
+                "SELECT * FROM approvals WHERE entity_id = ? AND approval_type = 'task_input'",
+                (task_id,),
+            )
+        )
+        assert approval_row is not None
+        approval_id = approval_row["id"]
+
+        # Resolve via dashboard endpoint
+        response = client.post(
+            f"/dashboard/approve/{approval_id}/input",
+            data={"response": "Blue"},
+        )
+        assert response.status_code == 200
+
+        # Verify approval was updated
+        approval_after = asyncio.run(
+            db.fetch_one("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+        )
+        assert approval_after["status"] == "approved"
+
+        import json
+
+        input_response = json.loads(approval_after["input_response"])
+        assert input_response == "Blue"
+
+        # Verify task was unblocked
+        task_after = client.get(f"/api/v1/tasks/{task_id}")
+        assert task_after.json()["status"] in ("active", "pending")
+
+
+def test_dashboard_reject_task_input_unblocks_with_note(tmp_path: Path) -> None:
+    """Rejecting a task_input approval unblocks the task with a declined note."""
+    with make_client(tmp_path) as client:
+        db = client.app.state.db
+
+        task = create_task(
+            client,
+            title="Need input",
+            plan="1. Ask question. 2. Continue.",
+            metadata={"channel": "whatsapp", "session_key": "whatsappgroup-test"},
+        )
+        task_id = str(task["id"])
+
+        client.post(
+            f"/api/v1/tasks/{task_id}/block",
+            json={
+                "reason": "Need user's answer",
+                "resume_instructions": "Continue after answer.",
+                "input_schema": {
+                    "type": "text",
+                    "prompt": "Do you want to proceed?",
+                },
+            },
+        )
+
+        approval_row = asyncio.run(
+            db.fetch_one(
+                "SELECT * FROM approvals WHERE entity_id = ? AND approval_type = 'task_input'",
+                (task_id,),
+            )
+        )
+        assert approval_row is not None
+        approval_id = approval_row["id"]
+
+        # Reject via dashboard
+        response = client.post(f"/dashboard/reject/{approval_id}")
+        assert response.status_code == 200
+
+        # Verify approval was rejected
+        approval_after = asyncio.run(
+            db.fetch_one("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+        )
+        assert approval_after["status"] == "rejected"
+
+        # Verify task was unblocked
+        task_after = client.get(f"/api/v1/tasks/{task_id}")
+        assert task_after.json()["status"] in ("active", "pending")

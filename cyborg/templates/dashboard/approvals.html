@@ -51,6 +51,9 @@
             <a href="/dashboard/approvals?type=follow_up_tasks" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'follow_up_tasks' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
                 Follow-up Tasks
             </a>
+            <a href="/dashboard/approvals?type=task_input" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'task_input' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Task Input
+            </a>
         </div>
     </div>
 </div>
@@ -90,7 +93,56 @@
                 <p class="text-text-secondary text-sm mb-4">{{ approval.description }}</p>
 
                 <!-- Proposal Data Preview -->
-                {% if approval.approval_type == 'project_plan' and approval.proposal %}
+                {% if approval.approval_type == 'task_input' %}
+                <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10 space-y-3">
+                    {% if approval.proposal and approval.proposal.reason %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">REASON</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.reason }}</div>
+                    </div>
+                    {% endif %}
+                    {% if approval.input_schema %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">QUESTION</div>
+                        <div class="text-sm text-text-primary">{{ approval.input_schema.prompt }}</div>
+                    </div>
+                    <!-- Input Form -->
+                    <form method="POST" action="/dashboard/approve/{{ approval.id }}/input" class="space-y-3 mt-3">
+                        {% if approval.input_schema.type == 'text' %}
+                        <textarea name="response"
+                                  rows="3"
+                                  class="w-full bg-bg-card border border-accent-cyan/20 rounded-lg p-3 text-sm text-text-primary placeholder-text-muted focus:border-accent-cyan focus:outline-none"
+                                  {% if approval.input_schema.placeholder %}placeholder="{{ approval.input_schema.placeholder }}"{% endif %}
+                                  required></textarea>
+                        {% elif approval.input_schema.type == 'multi_choice' %}
+                        <div class="space-y-2">
+                            {% for option in approval.input_schema.options %}
+                            <label class="flex items-center gap-3 p-2 rounded-lg hover:bg-bg-card cursor-pointer">
+                                {% if approval.input_schema.allow_multiple %}
+                                <input type="checkbox" name="response" value="{{ option.value }}" class="accent-accent-cyan">
+                                {% else %}
+                                <input type="radio" name="response" value="{{ option.value }}" required class="accent-accent-cyan">
+                                {% endif %}
+                                <span class="text-sm text-text-primary">{{ option.label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                        <div class="flex gap-2">
+                            <button type="submit"
+                                    class="px-4 py-2 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium text-sm">
+                                Submit Response
+                            </button>
+                            <button type="button"
+                                    onclick="this.closest('form').previousElementSibling || this.closest('.glass-card').querySelector('form[action*=reject] > button').click()"
+                                    class="px-4 py-2 bg-bg-card text-text-secondary border border-accent-pink/10 rounded-lg hover:border-accent-pink/30 transition-colors text-sm">
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                    {% endif %}
+                </div>
+                {% elif approval.approval_type == 'project_plan' and approval.proposal %}
                 <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10 space-y-3">
                     {% if approval.proposal.aim %}
                     <div>
@@ -158,6 +210,15 @@
 
             <!-- Actions -->
             <div class="flex flex-row lg:flex-col gap-3 lg:w-48">
+                {% if approval.approval_type == 'task_input' %}
+                <!-- For task_input: only reject (decline), submit is in the form above -->
+                <form method="POST" action="/dashboard/reject/{{ approval.id }}" class="flex-1">
+                    <button type="submit"
+                            class="w-full px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                        Decline
+                    </button>
+                </form>
+                {% else %}
                 {% if approval.review_href %}
                 <a href="{{ approval.review_href }}"
                    class="flex-1 px-4 py-2.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors font-medium text-center">
@@ -176,6 +237,7 @@
                         Reject
                     </button>
                 </form>
+                {% endif %}
             </div>
         </div>
     </div>

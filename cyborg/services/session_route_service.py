@@ -287,11 +287,40 @@ class SessionRouteService(BaseService):
         target_session = metadata.get("target_session")
         if not isinstance(target_session, dict):
             return None
+
         channel = target_session.get("channel")
+        kind = target_session.get("kind")
+
+        # Non-WhatsApp target session with only a session_key
+        # (e.g., cyborg:project:X:task:Y — no channel/kind set)
+        if channel is None and kind is None:
+            session_key = target_session.get("session_key")
+            if isinstance(session_key, str) and session_key.strip():
+                # Resolve channel/to from source metadata for delivery routing
+                source_route = await self.resolve_source_metadata(metadata)
+                if source_route is not None:
+                    return ResolvedSessionRoute(
+                        channel=source_route.channel,
+                        kind=source_route.kind,
+                        to=source_route.to,
+                        session_key=session_key.strip(),
+                        route_source="target_session.session_key",
+                    )
+                # Fallback: try related source routes from project
+                related_route = await self._resolve_related_source_route(metadata)
+                if related_route is not None:
+                    return ResolvedSessionRoute(
+                        channel=related_route.channel,
+                        kind=related_route.kind,
+                        to=related_route.to,
+                        session_key=session_key.strip(),
+                        route_source="target_session.session_key",
+                    )
+                return None
+
         if channel != "whatsapp":
             return None
 
-        kind = target_session.get("kind")
         if kind == SessionRouteKind.GROUP.value:
             chat_id = target_session.get("chat_id")
             session_key = target_session.get("session_key")
@@ -404,6 +433,14 @@ class SessionRouteService(BaseService):
         target_session = metadata.get("target_session")
         if not isinstance(target_session, dict):
             return None
+
+        # Non-WhatsApp target session with only a session_key
+        # (e.g., cyborg:project:X:task:Y — no channel/kind set)
+        if target_session.get("channel") is None and target_session.get("kind") is None:
+            session_key = target_session.get("session_key")
+            if isinstance(session_key, str) and session_key.strip():
+                return session_key.strip()
+
         if target_session.get("channel") != "whatsapp":
             return None
 

@@ -47,6 +47,9 @@ def _approval_review_href(approval_type: str | None, entity_id: str | None) -> s
         return None
     if approval_type in {"project_plan", "strategy_refinement", "follow_up_tasks"}:
         return f"/dashboard/projects/{entity_id}"
+    if approval_type == "task_input":
+        # Link to the parent project for context
+        return None  # Task input is handled inline in the approvals queue
     return None
 
 
@@ -655,6 +658,13 @@ async def approvals(
             except:
                 proposal_preview = a["proposal_data"][:500] if a["proposal_data"] else None
 
+        input_schema = None
+        if a.get("input_schema"):
+            try:
+                input_schema = json.loads(a["input_schema"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         approvals.append({
             "id": a["id"],
             "approval_type": a["approval_type"],
@@ -667,6 +677,7 @@ async def approvals(
             "requested_by": a.get("requested_by"),
             "proposal": proposal_data,
             "proposal_preview": proposal_preview,
+            "input_schema": input_schema,
             "review_href": _approval_review_href(a["approval_type"], a.get("entity_id")),
         })
 
@@ -785,6 +796,20 @@ async def reject_approval(
             reject_payload = ProjectSpecRejectRequest(feedback="Rejected via dashboard")
             await spec_service.reject_spec(str(pending_spec["id"]), reject_payload)
 
+    # If this is a task_input approval, unblock the task with a declined note
+    if approval_type == "task_input" and entity_id:
+        from cyborg.services.task_service import TaskService
+        from cyborg.models import TaskUnblockRequest
+
+        task_service = TaskService(db)
+        try:
+            await task_service.unblock_task(
+                entity_id,
+                TaskUnblockRequest(notes="User declined to provide input via dashboard"),
+            )
+        except Exception:
+            pass
+
     await db.execute(
         """
         UPDATE approvals
@@ -795,6 +820,89 @@ async def reject_approval(
         """,
         (datetime.now(timezone.utc).isoformat(), approval_id),
     )
+
+    # Return empty fragment to remove the row
+    return Response(content="", status_code=200)
+
+
+@router.post("/approve/{approval_id}/input", response_class=HTMLResponse)
+async def resolve_task_input(
+    approval_id: str,
+    request: Request,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Resolve a task_input approval with the user's structured input."""
+    approval = await db.fetch_one(
+        "SELECT * FROM approvals WHERE id = ?",
+        (approval_id,),
+    )
+    if not approval:
+        return Response(content="Approval not found", status_code=404)
+
+    if approval["approval_type"] != "task_input":
+        return Response(content="Not a task input approval", status_code=400)
+
+    entity_id = approval["entity_id"]
+
+    # Parse the submitted form data
+    form = await request.form()
+    response_value = form.get("response", "")
+    if isinstance(response_value, str) and not response_value.strip():
+        return Response(content="Response is required", status_code=400)
+
+    # Determine if multi_choice was used (form sends comma-separated or repeated fields)
+    input_schema_raw = approval.get("input_schema")
+    input_prompt = ""
+    if input_schema_raw:
+        try:
+            input_schema = json.loads(input_schema_raw)
+            input_prompt = input_schema.get("prompt", "")
+            if input_schema.get("type") == "multi_choice" and input_schema.get("allow_multiple"):
+                # Multi-select: collect all response values
+                values = form.getlist("response")
+                response_value = [v.strip() for v in values if v.strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    response_json = json.dumps(response_value if isinstance(response_value, list) else response_value.strip())
+
+    # Update approval with the response
+    await db.execute(
+        """
+        UPDATE approvals
+        SET status = 'approved',
+            input_response = ?,
+            reviewed_at = ?,
+            reviewed_by = 'dashboard_user'
+        WHERE id = ?
+        """,
+        (response_json, now_iso, approval_id),
+    )
+
+    # Unblock the task with the user's input
+    from cyborg.services.task_service import TaskService
+    from cyborg.models import TaskUnblockRequest
+
+    task_service = TaskService(db)
+    response_summary = response_value if isinstance(response_value, str) else ", ".join(response_value)
+    await task_service.unblock_task(
+        entity_id,
+        TaskUnblockRequest(notes=f"User input received: {response_summary}"),
+    )
+
+    # Dispatch input response notification to the task session
+    try:
+        from cyborg.services.notification_service import NotificationService
+        notification_service = NotificationService(db)
+        await notification_service.create_task_input_response_notification(
+            entity_id,
+            response_value if isinstance(response_value, list) else response_value.strip(),
+            input_prompt,
+            approval_id,
+        )
+    except Exception:
+        logger.exception("Failed to dispatch task_input_response notification for approval %s", approval_id)
 
     # Return empty fragment to remove the row
     return Response(content="", status_code=200)

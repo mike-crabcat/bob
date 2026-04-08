@@ -95,6 +95,13 @@ class ProjectService(BaseService):
             plan=payload.plan,
             success_criteria=payload.success_criteria,
         )
+        if payload.auto_execute and spec_payload is None:
+            has_partial = any(v for v in (payload.aim, payload.method, payload.plan, payload.success_criteria))
+            if has_partial:
+                raise ConflictError(
+                    "Auto-executing projects require aim, method, and success_criteria to produce a spec. "
+                    "Provide all three, or disable auto_execute."
+                )
         async with self.db.connection(write=True) as connection:
             await self._validate_task_ids(connection, payload.task_ids)
             project_metadata = await self._inherit_task_source_route_metadata(

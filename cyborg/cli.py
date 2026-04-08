@@ -845,13 +845,21 @@ def task_block(
     id: Annotated[str, typer.Argument(help="Task ID")],
     reason: Annotated[str, typer.Option("--reason", "-r", help="Why the task is blocked")],
     resume_instructions: Annotated[str, typer.Option("--resume-instructions", "-i", help="Full instructions to resume the task")],
+    input_schema_json: Annotated[Optional[str], typer.Option("--input-schema-json", help="Structured input schema as JSON (text or multi_choice)") ] = None,
 ) -> None:
-    """Block a task waiting for user input."""
+    """Block a task waiting for user input.
 
+    Optionally include --input-schema-json to create a structured dashboard approval
+    that the user can respond to from the approvals page.
+    """
+
+    payload: dict[str, Any] = {"reason": reason, "resume_instructions": resume_instructions}
+    if input_schema_json is not None:
+        payload["input_schema"] = _parse_json_option(input_schema_json, "input-schema-json", dict)
     task = _api_call(
         "POST",
         f"/api/v1/tasks/{id}/block",
-        {"reason": reason, "resume_instructions": resume_instructions},
+        payload,
     )["data"]
     typer.echo(f"Task blocked: {task['title']}")
     typer.echo(f"Reason: {task['blocked_reason']}")

@@ -135,13 +135,15 @@ class ProjectExecutionService(BaseService):
         started_at = previous_started_at if previous_state == ProjectState.PAUSED.value else now
 
         # Update project state (keep existing auto_execute setting)
+        from cyborg.services.project_service import short_task_id
+        subagent_key = f"cyborg:project:{short_task_id(project_id)}"
         await self.db.execute(
             """
             UPDATE projects
-            SET state = ?, started_at = ?, updated_at = ?
+            SET state = ?, started_at = ?, subagent_session_key = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.ACTIVE.value, started_at, now, project_id),
+            (ProjectState.ACTIVE.value, started_at, subagent_key, now, project_id),
         )
 
         plan = self._parse_plan(project.get("plan"))
@@ -406,6 +408,11 @@ class ProjectExecutionService(BaseService):
             {"action": action, "reasoning": reasoning, "cycle_count": cycle_count},
         )
 
+    @staticmethod
+    def _build_project_task_session_key(project_id: str, task_short_id: str) -> str:
+        from cyborg.services.project_service import short_task_id
+        return f"cyborg:project:{short_task_id(project_id)}:task:{task_short_id}"
+
     async def _create_reasoned_task(
         self,
         project_id: str,
@@ -422,6 +429,11 @@ class ProjectExecutionService(BaseService):
             priority = TaskPriority(priority_str)
         except ValueError:
             priority = TaskPriority.HIGH
+
+        # Pre-generate task short ID for session key (notification fires during create_task)
+        from uuid import uuid4
+        from cyborg.services.project_service import short_task_id
+        task_short_id = short_task_id(str(uuid4()))
 
         # Resolve output directory
         output_directory: str | None = None
@@ -442,6 +454,7 @@ class ProjectExecutionService(BaseService):
                 f"- Register all output files via the task files API."
             )
 
+        session_key = self._build_project_task_session_key(project_id, task_short_id)
         task_payload = TaskCreate(
             title=title,
             description=description,
@@ -451,6 +464,7 @@ class ProjectExecutionService(BaseService):
             metadata={
                 "auto_created_by_project": True,
                 "source": "reasoning",
+                "target_session": {"session_key": session_key},
             },
         )
 
@@ -478,6 +492,11 @@ class ProjectExecutionService(BaseService):
 
     async def _create_initial_task(self, project_id: str, step: PlanStep) -> None:
         """Create the initial task from plan step 0 (deterministic first task)."""
+        # Pre-generate task short ID for session key (notification fires during create_task)
+        from uuid import uuid4
+        from cyborg.services.project_service import short_task_id
+        task_short_id = short_task_id(str(uuid4()))
+
         # Resolve output directory
         output_directory: str | None = None
         try:
@@ -502,6 +521,7 @@ class ProjectExecutionService(BaseService):
                 f"- Register all output files via the task files API."
             )
 
+        session_key = self._build_project_task_session_key(project_id, task_short_id)
         task_payload = TaskCreate(
             title=step.title,
             description=step.description,
@@ -512,6 +532,7 @@ class ProjectExecutionService(BaseService):
                 "auto_created_by_project": True,
                 "source": "initial_plan_step",
                 "project_step_index": 0,
+                "target_session": {"session_key": session_key},
             },
         )
 

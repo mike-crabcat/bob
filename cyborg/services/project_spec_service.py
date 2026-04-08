@@ -148,69 +148,25 @@ class ProjectSpecService(BaseService):
                     spec_id,
                 ),
             )
-            # Only update plan if the spec provides a non-empty one; otherwise keep the project's existing plan
-            import json as _json
-            spec_has_plan = False
-            if row["plan"] is not None:
-                try:
-                    parsed_plan = _json.loads(row["plan"])
-                    spec_has_plan = isinstance(parsed_plan, list) and len(parsed_plan) > 0
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            if spec_has_plan:
-                await connection.execute(
-                    """
-                    UPDATE projects
-                    SET current_spec_id = ?, aim = ?, method = ?, plan = ?, success_criteria = ?, updated_at = ?
-                    WHERE id = ? AND deleted_at IS NULL
-                    """,
-                    (
-                        spec_id,
-                        row["aim"],
-                        row["method"],
-                        row["plan"],
-                        row["success_criteria"],
-                        now,
-                        project_id,
-                    ),
-                )
-            else:
-                await connection.execute(
-                    """
-                    UPDATE projects
-                    SET current_spec_id = ?, aim = ?, method = ?, success_criteria = ?, updated_at = ?
-                    WHERE id = ? AND deleted_at IS NULL
-                    """,
-                    (
-                        spec_id,
-                        row["aim"],
-                        row["method"],
-                        row["success_criteria"],
-                        now,
-                        project_id,
-                    ),
-                )
+            # Update project with spec content (plan may be NULL, [], or populated — all valid)
+            await connection.execute(
+                """
+                UPDATE projects
+                SET current_spec_id = ?, aim = ?, method = ?, plan = ?, success_criteria = ?, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (
+                    spec_id,
+                    row["aim"],
+                    row["method"],
+                    row["plan"],
+                    row["success_criteria"],
+                    now,
+                    project_id,
+                ),
+            )
 
         project = await self._get_project_row(project_id)
-
-        if not spec_has_plan:
-            # Spec has no execution plan — ask OpenClaw to generate one and
-            # submit it as a new pending spec revision for user approval.
-            # Run in background to avoid blocking the HTTP response, but
-            # wrap with error logging so failures aren't silent.
-            import asyncio
-            import logging
-            _logger = logging.getLogger(__name__)
-
-            async def _bg_generate():
-                try:
-                    await self._generate_plan_revision(project_id, row)
-                except Exception:
-                    _logger.exception("Background plan generation failed for project %s", project_id)
-
-            asyncio.create_task(_bg_generate())
-            return await self.get_spec(spec_id)
 
         if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
             from cyborg.services.project_execution_service import ProjectExecutionService

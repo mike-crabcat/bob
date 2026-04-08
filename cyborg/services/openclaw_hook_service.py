@@ -126,6 +126,26 @@ class OpenClawHookService(BaseService):
             )
             return
 
+        # Task input response notifications use the agent method with input-specific prompt
+        if notification.get("notification_type") == NotificationType.TASK_INPUT_RESPONSE.value:
+            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            metadata = notification.get("metadata", {})
+            await log_prompt(
+                self.db,
+                category="task_input_response",
+                prompt_text=self._render_task_input_response_prompt(notification, route_data, session_key),
+                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                task_id=metadata.get("task_id") or notification.get("entity_id"),
+                session_key=session_key,
+            )
+            await self._send_gateway_request(
+                "agent",
+                self._build_task_input_response_agent_params(notification, route_data, session_key),
+                expect_final=True,
+                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+            )
+            return
+
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
         metadata = notification.get("metadata", {})
@@ -487,7 +507,7 @@ class OpenClawHookService(BaseService):
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
-        if self.settings.agent_id and not self._is_auto_project_source_task_assignment(notification):
+        if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
 
@@ -798,6 +818,101 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_retry_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "low",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
+
+    def _render_task_input_response_prompt(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> str:
+        """Render prompt for task_input_response notifications (user answered an input request)."""
+        metadata = notification.get("metadata", {})
+        input_response = metadata.get("input_response", "")
+        input_prompt = metadata.get("input_prompt", "")
+
+        if isinstance(input_response, list):
+            response_text = ", ".join(input_response)
+        else:
+            response_text = str(input_response)
+
+        lines = [
+            "Cyborg task input: the user has responded to your question.",
+            "",
+            "You asked the user a question and they have provided their answer.",
+            "Resume working on this task using their response.",
+            "",
+            f"Task ID: {metadata.get('task_id') or notification.get('entity_id')}",
+            f"Notification ID: {notification['id']}",
+            f"Session Key: {session_key}",
+            f"Task: {notification['title']}",
+            "",
+            "## Your Question",
+            input_prompt or "(question not available)",
+            "",
+            "## User's Response",
+            response_text,
+        ]
+
+        if metadata.get("parent_project_title"):
+            lines.extend([
+                "",
+                f"Parent project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
+            ])
+
+        # Include output directory instructions if available
+        output_directory = metadata.get("output_directory")
+        if output_directory:
+            task_id = metadata.get("task_id") or notification.get("entity_id")
+            lines.extend([
+                "",
+                "## Output Directory",
+                f"All task artifacts must be written to: `{output_directory}`",
+                "- Use descriptive filenames for each artifact.",
+                "- Put the primary result in `RESULT.md`.",
+            ])
+            if self.cyborg_service_url:
+                lines.append(
+                    f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files"
+                )
+
+        # Submit instructions
+        if self.cyborg_service_url:
+            lines.extend([
+                "",
+                "## Instructions",
+                "- Use the user's response to continue working on the task.",
+                f"- When done, submit: POST {self.cyborg_service_url}/api/v1/tasks/{metadata.get('task_id', '<task-id>')}/submit with JSON {{\"result_summary\":\"<answer>\"}}",
+            ])
+        else:
+            lines.extend([
+                "",
+                "## Instructions",
+                "- Use the user's response to continue working on the task.",
+                f"- When done, submit using: cyborg task submit {metadata.get('task_id', '<task-id>')} --result-summary \"<answer>\".",
+            ])
+
+        return "\n".join(lines)
+
+    def _build_task_input_response_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": self._render_task_input_response_prompt(notification, route, session_key),
             "deliver": True,
             "channel": route["channel"],
             "to": route["to"],

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -194,6 +194,7 @@ class NotificationType(StrEnum):
     TASK_RESULT = "task_result"
     PROJECT_RESULT = "project_result"
     TASK_RETRY = "task_retry"
+    TASK_INPUT_RESPONSE = "task_input_response"
 
 
 class NotificationStatus(StrEnum):
@@ -255,9 +256,73 @@ class TaskFilePurpose(StrEnum):
     OTHER = "other"
 
 
+class MultiChoiceOption(CyborgModel):
+    value: str = Field(min_length=1, max_length=200)
+    label: str = Field(min_length=1, max_length=200)
+
+    @field_validator("value", "label")
+    @classmethod
+    def must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+
+class TextInputSchema(CyborgModel):
+    type: Literal["text"] = "text"
+    prompt: str = Field(min_length=1, description="Question or prompt to show the user")
+    placeholder: str | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("prompt must not be blank")
+        return stripped
+
+
+class MultiChoiceInputSchema(CyborgModel):
+    type: Literal["multi_choice"] = "multi_choice"
+    prompt: str = Field(min_length=1, description="Question or prompt to show the user")
+    options: list[MultiChoiceOption] = Field(min_length=1)
+    allow_multiple: bool = False
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("prompt must not be blank")
+        return stripped
+
+
+TaskInputSchema = Annotated[TextInputSchema | MultiChoiceInputSchema, Field(discriminator="type")]
+
+
+class TaskInputResolveRequest(CyborgModel):
+    """User's response to a task input request submitted via the dashboard."""
+    response: str | list[str]
+
+    @field_validator("response")
+    @classmethod
+    def response_must_not_be_empty(cls, value: str | list[str]) -> str | list[str]:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("response must not be blank")
+            return stripped
+        if isinstance(value, list):
+            if not value or all(not v.strip() for v in value):
+                raise ValueError("response must contain at least one selection")
+            return [v.strip() for v in value if v.strip()]
+        return value
+
+
 class TaskTargetSession(CyborgModel):
-    channel: Literal["whatsapp"]
-    kind: TaskTargetSessionKind
+    channel: Literal["whatsapp"] | None = None
+    kind: TaskTargetSessionKind | None = None
     session_key: str | None = None
     chat_id: str | None = None
     contact_id: UUID | None = None
@@ -274,6 +339,12 @@ class TaskTargetSession(CyborgModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> "TaskTargetSession":
+        # Session-only target (e.g., cyborg:project:X:task:Y) — just needs session_key
+        if self.channel is None and self.kind is None and isinstance(self.session_key, str) and self.session_key.strip():
+            return self
+        # WhatsApp targets require both channel and kind
+        if self.channel is None or self.kind is None:
+            raise ValueError("target_session requires either session_key alone, or channel and kind")
         if self.kind == TaskTargetSessionKind.GROUP:
             if self.session_key is None and self.chat_id is None:
                 raise ValueError("group target_session requires session_key or chat_id")
@@ -488,6 +559,7 @@ class TaskBlockRequest(CyborgModel):
     """
     reason: str = Field(min_length=1, description="Why the task is blocked")
     resume_instructions: str = Field(min_length=1, description="Full instructions on how to resume this task when unblocked")
+    input_schema: TaskInputSchema | None = Field(default=None, description="Optional structured input request to show in the dashboard")
 
     @field_validator("reason")
     @classmethod

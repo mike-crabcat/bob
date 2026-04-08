@@ -352,6 +352,83 @@ class NotificationService(BaseService):
             source_updated_at=source_updated_at,
         )
 
+    # ── Task input response (user answered a task input request) ───
+
+    async def create_task_input_response_notification(
+        self,
+        task_id: str,
+        input_response: str | list[str],
+        input_prompt: str,
+        approval_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Create a TASK_INPUT_RESPONSE notification when the user answers a task input request.
+
+        Dispatches to the same session as the original task assignment so
+        the agent can resume work with the user's input.
+        """
+        row = await self.db.fetch_one(
+            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if row is None:
+            return
+
+        task_metadata = json_loads(row.get("metadata"), {})
+        target_session = task_metadata.get("target_session")
+        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
+        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
+
+        if delivery_route is None:
+            return
+
+        source_updated_at = row.get("updated_at")
+        parent_project = await self._get_parent_project(task_id)
+
+        if isinstance(input_response, list):
+            response_text = ", ".join(input_response)
+        else:
+            response_text = input_response
+
+        message = f"Question: {input_prompt}\n\nUser response: {response_text}"
+
+        output_directory = None
+        if parent_project is not None:
+            try:
+                from cyborg.services.project_service import ProjectService
+
+                project_service = ProjectService(self.db)
+                project_path = await project_service.get_project_path(parent_project["id"])
+                short_id = row["id"].replace("-", "")[:8]
+                output_directory = str(project_path / "tasks" / short_id)
+            except Exception:
+                pass
+
+        metadata = {
+            **task_metadata,
+            "task_id": row["id"],
+            "task_status": "active",
+            "parent_project_id": parent_project["id"] if parent_project else None,
+            "parent_project_title": parent_project["title"] if parent_project else None,
+            "delivery_route": delivery_route,
+            "output_directory": output_directory,
+            "input_response": input_response,
+            "input_prompt": input_prompt,
+            "approval_id": approval_id,
+        }
+
+        await self._create_entity_notification(
+            entity_type=NotificationEntityType.TASK,
+            entity_id=row["id"],
+            notification_type=NotificationType.TASK_INPUT_RESPONSE,
+            title=f"Task input received: {row['title']}",
+            message=message,
+            metadata=metadata,
+            now=now or utcnow(),
+            source_updated_at=source_updated_at,
+        )
+
     # ── Backward-compat shim for process_due_notifications ──────
 
     async def process_due_notifications(self, *, now: datetime | None = None) -> int:
@@ -494,6 +571,29 @@ class NotificationService(BaseService):
             query += f" AND notification_type IN ({placeholders})"
             params.extend(notification_type.value for notification_type in sorted(notification_types, key=lambda value: value.value))
         await self.db.execute(query, tuple(params))
+
+        # Also resolve any failed-delivery notifications so retry won't re-dispatch
+        # to completed/closed entities.
+        failed_query = """
+            UPDATE notifications
+            SET status = ?, resolved_at = ?, updated_at = ?
+            WHERE entity_type = ? AND entity_id = ?
+              AND status = ? AND delivery_status = ?
+        """
+        failed_params: list[Any] = [
+            NotificationStatus.RESOLVED.value,
+            now.isoformat(),
+            now.isoformat(),
+            entity_type.value,
+            entity_id,
+            NotificationStatus.PENDING.value,
+            NotificationDeliveryStatus.FAILED.value,
+        ]
+        if notification_types:
+            placeholders = ", ".join("?" for _ in notification_types)
+            failed_query += f" AND notification_type IN ({placeholders})"
+            failed_params.extend(notification_type.value for notification_type in sorted(notification_types, key=lambda value: value.value))
+        await self.db.execute(failed_query, tuple(failed_params))
 
     # ── Internal: dispatch ──────────────────────────────────────
 
