@@ -517,6 +517,75 @@ class NotificationService(BaseService):
         await self._attempt_dispatch_notification(notification_id, now=reference)
         return notification_id
 
+    # ── Submission review ─────────────────────────────────────────
+
+    async def create_submission_review_notification(
+        self,
+        task_id: str,
+        otp: str,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
+        """Create a SUBMISSION_REVIEW notification to ask the agent to verify a task.
+
+        Returns the notification ID on success, or None if the task has no
+        delivery route.
+        """
+        row = await self.db.fetch_one(
+            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if row is None:
+            return None
+
+        task_metadata = json_loads(row.get("metadata"), {})
+        target_session = task_metadata.get("target_session")
+        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
+        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
+
+        if delivery_route is None:
+            return None
+
+        source_updated_at = row.get("updated_at")
+        parent_project = await self._get_parent_project(task_id)
+
+        output_directory = None
+        if parent_project is not None:
+            try:
+                from cyborg.services.project_service import ProjectService
+
+                project_service = ProjectService(self.db)
+                project_path = await project_service.get_project_path(parent_project["id"])
+                short_id = row["id"].replace("-", "")[:8]
+                output_directory = str(project_path / "tasks" / short_id)
+            except Exception:
+                pass
+
+        metadata = {
+            **task_metadata,
+            "task_id": row["id"],
+            "task_status": row["status"],
+            "parent_project_id": parent_project["id"] if parent_project else None,
+            "parent_project_title": parent_project["title"] if parent_project else None,
+            "delivery_route": delivery_route,
+            "output_directory": output_directory,
+            "submission_review_otp": otp,
+            "result_summary": row.get("result"),
+        }
+
+        reference = now or utcnow()
+        await self._create_entity_notification(
+            entity_type=NotificationEntityType.TASK,
+            entity_id=row["id"],
+            notification_type=NotificationType.SUBMISSION_REVIEW,
+            title=f"Review submission: {row['title']}",
+            message=f"Task submitted for review: {row['title']}",
+            metadata=metadata,
+            now=reference,
+            source_updated_at=source_updated_at,
+        )
+        return None
+
     # ── Backward-compat shim for process_due_notifications ──────
 
     async def process_due_notifications(self, *, now: datetime | None = None) -> int:
@@ -600,6 +669,17 @@ class NotificationService(BaseService):
                     source_updated_at,
                 ),
             )
+
+        # Skip dispatch if the parent project is muted
+        muted_project_id = None
+        if entity_type == NotificationEntityType.PROJECT:
+            muted_project_id = entity_id
+        elif entity_type == NotificationEntityType.TASK:
+            parent = await self._get_parent_project(entity_id)
+            muted_project_id = parent["id"] if parent else None
+
+        if muted_project_id and await self._is_project_muted(muted_project_id):
+            return
 
         await self._attempt_dispatch_notification(notification_id, now=now)
 
@@ -772,6 +852,13 @@ class NotificationService(BaseService):
             """,
             (task_id,),
         )
+
+    async def _is_project_muted(self, project_id: str) -> bool:
+        row = await self.db.fetch_one(
+            "SELECT notifications_muted FROM projects WHERE id = ? AND deleted_at IS NULL",
+            (project_id,),
+        )
+        return bool(row["notifications_muted"]) if row else False
 
     async def _get_notification_row(self, notification_id: str) -> dict[str, Any]:
         row = await self.db.fetch_one("SELECT * FROM notifications WHERE id = ?", (notification_id,))

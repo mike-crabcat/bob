@@ -196,6 +196,7 @@ class NotificationType(StrEnum):
     TASK_RETRY = "task_retry"
     TASK_INPUT_RESPONSE = "task_input_response"
     TASK_TAP = "task_tap"
+    SUBMISSION_REVIEW = "submission_review"
 
 
 class NotificationStatus(StrEnum):
@@ -602,6 +603,14 @@ class TaskRetryRequest(CyborgModel):
     details: MetadataDict = Field(default_factory=dict)
 
 
+class TaskVerifySubmitRequest(CyborgModel):
+    """Request to verify a task submission with a one-time password."""
+    otp: str = Field(min_length=1, description="One-time password from the submission review prompt")
+    approved: bool
+    reason: str | None = Field(default=None, description="Reason for rejection (required when not approved)")
+    issues: list[str] | None = Field(default=None, description="Specific issues found during review")
+
+
 class TaskFileCreate(CyborgModel):
     """Request to register a file produced by a task."""
     filename: str = Field(min_length=1, max_length=255)
@@ -727,6 +736,7 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
     notification_count: int = 0
     last_notification_at: datetime | None = None
     needs_input_since: datetime | None = None
+    notifications_muted: bool = False
 
 
 class ProjectSpecFields(CyborgModel):

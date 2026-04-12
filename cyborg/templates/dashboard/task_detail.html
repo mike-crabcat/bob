@@ -343,13 +343,17 @@
                     {% endif %}
                 </div>
                 <div class="text-sm text-text-primary">
-                    {% if entry.type == 'prompt' and entry.full_text and entry.full_text|length > 200 %}
-                    <span x-show="!expanded">{{ entry.full_text[:200] }}...</span>
-                    <span x-show="expanded" x-cloak class="whitespace-pre-line">{{ entry.full_text }}</span>
-                    <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline ml-1">
-                        <span x-show="!expanded">Show more</span>
-                        <span x-show="expanded" x-cloak>Show less</span>
+                    {% if entry.type == 'prompt' %}
+                    {% if entry.session_key %}
+                    <span class="text-xs text-text-muted font-mono-data">{{ entry.session_key }}</span>
+                    {% endif %}
+                    <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline ml-1 cursor-pointer">
+                        <span x-show="!expanded">Show prompt</span>
+                        <span x-show="expanded" x-cloak>Hide prompt</span>
                     </button>
+                    <div x-show="expanded" x-cloak class="mt-2 p-2 bg-bg-deep rounded-lg whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+                        {{ entry.full_text }}
+                    </div>
                     {% else %}
                     {{ entry.summary }}
                     {% endif %}

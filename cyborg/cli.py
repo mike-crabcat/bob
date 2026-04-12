@@ -867,12 +867,37 @@ def task_submit(
     data = {"result_summary": result_summary} if result_summary else None
     result = _api_call("POST", f"/api/v1/tasks/{id}/submit", data)
     task = result["data"]
+    typer.echo(f"Task submitted for review: {task['title']} (status: {task['status']})")
+
+
+@task_app.command("verify-submit")
+def task_verify_submit(
+    id: Annotated[str, typer.Argument(help="Task ID")],
+    otp: Annotated[str, typer.Option("--otp", help="One-time password from the submission review prompt")],
+    approve: Annotated[bool, typer.Option("--approve", help="Approve the submission")] = False,
+    reject: Annotated[bool, typer.Option("--reject", help="Reject the submission")] = False,
+    reason: Annotated[Optional[str], typer.Option("--reason", "-r", help="Reason for rejection")] = None,
+) -> None:
+    """Verify a task submission with a one-time password (used by AI agents)."""
+
+    if not approve and not reject:
+        typer.echo("Error: specify --approve or --reject", err=True)
+        raise typer.Exit(1)
+    if approve and reject:
+        typer.echo("Error: specify --approve or --reject, not both", err=True)
+        raise typer.Exit(1)
+
+    data: dict[str, Any] = {"otp": otp, "approved": approve}
+    if reject and reason:
+        data["reason"] = reason
+    result = _api_call("POST", f"/api/v1/tasks/{id}/verify-submit", data)
+    task = result["data"]
     if task["status"] == "completed":
-        typer.echo(f"Task submitted and approved: {task['title']}")
+        typer.echo(f"Submission approved: {task['title']}")
     elif task["status"] == "active":
-        typer.echo(f"Task submitted but review requested changes: {task['title']}")
+        typer.echo(f"Submission rejected, task back to active: {task['title']}")
     else:
-        typer.echo(f"Task submitted: {task['title']} (status: {task['status']})")
+        typer.echo(f"Verification result: {task['title']} (status: {task['status']})")
 
 
 @task_app.command("block")
@@ -1330,6 +1355,30 @@ def project_pause(id: Annotated[str, typer.Argument(help="Project ID")]) -> None
 
     result = _api_call("POST", f"/api/v1/projects/{id}/pause")
     typer.echo(f"Project paused: {result['data']['title']}")
+
+
+@project_app.command("resume")
+def project_resume(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
+    """Resume a paused project."""
+
+    result = _api_call("POST", f"/api/v1/projects/{id}/resume")
+    typer.echo(f"Project resumed: {result['data']['title']}")
+
+
+@project_app.command("mute")
+def project_mute(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
+    """Mute project notifications."""
+
+    result = _api_call("POST", f"/api/v1/projects/{id}/mute")
+    typer.echo(f"Project muted: {result['data']['title']}")
+
+
+@project_app.command("unmute")
+def project_unmute(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
+    """Unmute project notifications."""
+
+    result = _api_call("POST", f"/api/v1/projects/{id}/unmute")
+    typer.echo(f"Project unmuted: {result['data']['title']}")
 
 
 @project_app.command("close")

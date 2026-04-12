@@ -116,6 +116,28 @@ async def pause_project(project_id: UUID, service: ProjectService = Depends(get_
     return await service.pause_project(str(project_id))
 
 
+@router.post("/{project_id}/resume", response_model=ProjectResponse)
+async def resume_project(
+    project_id: UUID,
+    service: ProjectService = Depends(get_project_service),
+    background_tasks: BackgroundTasks = None,
+) -> ProjectResponse:
+    response = await service.resume_project(str(project_id))
+    if background_tasks is not None:
+        background_tasks.add_task(service.resume_project_reasoning, str(project_id))
+    return response
+
+
+@router.post("/{project_id}/mute", response_model=ProjectResponse)
+async def mute_project(project_id: UUID, service: ProjectService = Depends(get_project_service)) -> ProjectResponse:
+    return await service.mute_project(str(project_id))
+
+
+@router.post("/{project_id}/unmute", response_model=ProjectResponse)
+async def unmute_project(project_id: UUID, service: ProjectService = Depends(get_project_service)) -> ProjectResponse:
+    return await service.unmute_project(str(project_id))
+
+
 @router.post("/{project_id}/close", response_model=ProjectResponse)
 async def close_project(
     project_id: UUID,

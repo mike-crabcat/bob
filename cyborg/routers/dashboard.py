@@ -624,6 +624,38 @@ async def delete_project(
     )
 
 
+@router.post("/projects/{project_id}/pause")
+async def dashboard_pause_project(
+    project_id: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Pause a project and redirect back to the project detail page."""
+    from cyborg.services.project_service import ProjectService
+    project_service = ProjectService(db)
+    await project_service.pause_project(project_id)
+    return Response(
+        status_code=303,
+        headers={"Location": f"/dashboard/projects/{project_id}"},
+    )
+
+
+@router.post("/projects/{project_id}/resume")
+async def dashboard_resume_project(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Resume a project and redirect back to the project detail page."""
+    from cyborg.services.project_service import ProjectService
+    project_service = ProjectService(db)
+    await project_service.resume_project(project_id)
+    background_tasks.add_task(project_service.resume_project_reasoning, project_id)
+    return Response(
+        status_code=303,
+        headers={"Location": f"/dashboard/projects/{project_id}"},
+    )
+
+
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
 async def task_detail(
     task_id: str,
@@ -703,7 +735,7 @@ async def task_detail(
 
     # 3. Prompt history
     prompt_rows = await db.fetch_all(
-        "SELECT category, prompt_text, token_count_estimate, timestamp FROM prompt_history WHERE task_id = ?",
+        "SELECT category, prompt_text, token_count_estimate, timestamp, session_key FROM prompt_history WHERE task_id = ?",
         (task_id,),
     )
     for row in prompt_rows:
@@ -714,6 +746,7 @@ async def task_detail(
             "summary": row["prompt_text"][:200] if row["prompt_text"] else "",
             "full_text": row["prompt_text"],
             "tokens": row["token_count_estimate"],
+            "session_key": row["session_key"],
         })
 
     # 4. Approvals
