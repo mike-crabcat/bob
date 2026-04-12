@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -45,7 +46,7 @@ def _start_task_assignment_session(
     route, _resolved_session_key = live_openclaw.resolve_target_route(notification)
     session_key = live_openclaw.new_session_key(f"task-assignment-{task_id}")
     hook_service = live_openclaw.make_hook_service(cyborg_service_url=cyborg_service_url)
-    params = hook_service._build_task_assignment_agent_params(notification, route, session_key)
+    params = asyncio.run(hook_service._build_task_assignment_agent_params(notification, route, session_key))
     params["deliver"] = False
     params.pop("channel", None)
     params.pop("to", None)

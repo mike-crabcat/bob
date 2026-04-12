@@ -1460,6 +1460,53 @@ def project_evaluate(project_id: Annotated[str, typer.Argument(help="Project ID"
     typer.echo(f"State: {project['state']}")
 
 
+@project_app.command("decide-next")
+def project_decide_next(
+    project_id: Annotated[str, typer.Argument(help="Project ID")],
+    otp: Annotated[str, typer.Option("--otp", help="One-time password from the next-action prompt")],
+    action: Annotated[str, typer.Option("--action", help="Action: create_task, close_project, or block_project")],
+    reasoning: Annotated[str, typer.Option("--reasoning", "-r", help="Why this action was chosen")] = "",
+    task_title: Annotated[Optional[str], typer.Option("--task-title", help="Title for create_task")] = None,
+    task_description: Annotated[Optional[str], typer.Option("--task-description", help="Description for create_task")] = None,
+    task_plan: Annotated[Optional[str], typer.Option("--task-plan", help="Plan for create_task")] = None,
+    task_priority: Annotated[Optional[str], typer.Option("--task-priority", help="Priority: high, medium, low")] = None,
+    block_reason: Annotated[Optional[str], typer.Option("--block-reason", help="Why blocked (for block_project)")] = None,
+    resume_instructions: Annotated[Optional[str], typer.Option("--resume-instructions", help="How to unblock (for block_project)")] = None,
+) -> None:
+    """Submit a next-action decision for a project (used by AI agents)."""
+
+    valid_actions = ("create_task", "close_project", "block_project")
+    if action not in valid_actions:
+        typer.echo(f"Error: action must be one of {', '.join(valid_actions)}", err=True)
+        raise typer.Exit(1)
+
+    data: dict[str, Any] = {
+        "otp": otp,
+        "action": action,
+        "reasoning": reasoning,
+    }
+    if action == "create_task":
+        if not task_title:
+            typer.echo("Error: --task-title is required for create_task", err=True)
+            raise typer.Exit(1)
+        data["task_title"] = task_title
+        if task_description:
+            data["task_description"] = task_description
+        if task_plan:
+            data["task_plan"] = task_plan
+        if task_priority:
+            data["task_priority"] = task_priority
+    elif action == "block_project":
+        if block_reason:
+            data["block_reason"] = block_reason
+        if resume_instructions:
+            data["resume_instructions"] = resume_instructions
+
+    result = _api_call("POST", f"/api/v1/projects/{project_id}/decide-next", data)
+    project = result["data"]
+    typer.echo(f"Decision applied: {action} for {project['title']} (state: {project['state']})")
+
+
 @project_app.command("delete")
 def project_delete(project_id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
     """Delete (soft delete) a project."""

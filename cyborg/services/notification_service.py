@@ -223,8 +223,7 @@ class NotificationService(BaseService):
         message_parts = []
         if row.get("description"):
             message_parts.append(row["description"])
-        if row.get("plan"):
-            message_parts.append(f"Plan:\n{row['plan']}")
+
         if row.get("requested_by"):
             message_parts.append(f"Requested by: {row['requested_by']}")
         if parent_project is not None:
@@ -585,6 +584,53 @@ class NotificationService(BaseService):
             source_updated_at=source_updated_at,
         )
         return None
+
+    # ── Next action (async reasoning) ───────────────────────────
+
+    async def create_next_action_notification(
+        self,
+        project_id: str,
+        prompt: str,
+        otp: str,
+        completed_task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Create a NEXT_ACTION notification to dispatch the next-action prompt to OpenClaw.
+
+        This is fire-and-forget — the agent responds via `cyborg project decide-next` CLI.
+        """
+        project = await self.db.fetch_one(
+            "SELECT id, title, metadata, updated_at FROM projects WHERE id = ? AND deleted_at IS NULL",
+            (project_id,),
+        )
+        if project is None:
+            return
+
+        project_metadata = json_loads(project.get("metadata"), {})
+        has_source_route = any(project_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
+        if not has_source_route:
+            return
+
+        metadata = {
+            **project_metadata,
+            "project_id": project_id,
+            "completed_task_id": completed_task_id,
+            "delivery_route": "source",
+            "next_action_otp": otp,
+        }
+
+        reference = now or utcnow()
+        await self._create_entity_notification(
+            entity_type=NotificationEntityType.PROJECT,
+            entity_id=project_id,
+            notification_type=NotificationType.NEXT_ACTION,
+            title=f"Decide next action: {project['title']}",
+            message=prompt,
+            metadata=metadata,
+            now=reference,
+            source_updated_at=project.get("updated_at"),
+        )
 
     # ── Backward-compat shim for process_due_notifications ──────
 

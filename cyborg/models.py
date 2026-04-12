@@ -197,6 +197,7 @@ class NotificationType(StrEnum):
     TASK_INPUT_RESPONSE = "task_input_response"
     TASK_TAP = "task_tap"
     SUBMISSION_REVIEW = "submission_review"
+    NEXT_ACTION = "next_action"
 
 
 class NotificationStatus(StrEnum):
@@ -609,6 +610,19 @@ class TaskVerifySubmitRequest(CyborgModel):
     approved: bool
     reason: str | None = Field(default=None, description="Reason for rejection (required when not approved)")
     issues: list[str] | None = Field(default=None, description="Specific issues found during review")
+
+
+class ProjectDecideNextRequest(CyborgModel):
+    """Async response from reasoning with the next action for a project."""
+    otp: str = Field(min_length=1, description="One-time password from the next-action prompt")
+    action: str = Field(description="One of: create_task, close_project, block_project")
+    reasoning: str = Field(default="", description="Why this action was chosen")
+    task_title: str | None = Field(default=None, max_length=200)
+    task_description: str | None = Field(default=None)
+    task_plan: str | None = Field(default=None)
+    task_priority: str | None = Field(default="high")
+    block_reason: str | None = Field(default=None)
+    resume_instructions: str | None = Field(default=None)
 
 
 class TaskFileCreate(CyborgModel):

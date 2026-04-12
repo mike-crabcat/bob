@@ -182,3 +182,17 @@ async def evaluate_project_completion(
     Returns the completed project if auto-completed, None otherwise.
     """
     return await execution_service.evaluate_and_complete(str(project_id))
+
+
+@router.post("/{project_id}/decide-next", response_model=ProjectResponse)
+async def decide_next(
+    project_id: UUID,
+    payload: dict[str, Any],
+    execution_service: ProjectExecutionService = Depends(get_project_execution_service),
+) -> ProjectResponse:
+    """Submit an async next-action decision from reasoning.
+
+    Called by the AI agent after receiving the next-action prompt. Must include
+    a valid one-time password from the prompt.
+    """
+    return await execution_service.verify_decide_next(str(project_id), payload)
