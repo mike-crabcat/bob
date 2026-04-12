@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Response, status
 from pydantic import BaseModel, model_validator
 
 from cyborg.dependencies import get_task_service
+
 from cyborg.models import (
     TaskBlockRequest,
-    TaskCreate,
     TaskFailureRequest,
+    TaskFileCreate,
+    TaskFileListResponse,
+    TaskFileResponse,
     TaskHistoryResponse,
     TaskResponse,
     TaskRetryRequest,
@@ -34,14 +37,6 @@ async def list_tasks(
     service: TaskService = Depends(get_task_service),
 ) -> list[TaskResponse]:
     return await service.list_tasks(status=status, parent_id=str(parent_id) if parent_id else None)
-
-
-@router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-async def create_task(
-    payload: TaskCreate,
-    service: TaskService = Depends(get_task_service),
-) -> TaskResponse:
-    return await service.create_task(payload)
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
@@ -87,6 +82,31 @@ async def complete_task(
     service: TaskService = Depends(get_task_service),
 ) -> TaskResponse:
     return await service.complete_task(str(task_id), payload.result_summary if payload else None)
+
+
+class TaskSubmitRequest(BaseModel):
+    result_summary: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_result_alias(cls, value: object) -> object:
+        if isinstance(value, dict) and "result_summary" not in value and "result" in value:
+            return {**value, "result_summary": value["result"]}
+        return value
+
+
+@router.post("/{task_id}/submit", response_model=TaskResponse)
+async def submit_task(
+    task_id: UUID,
+    payload: TaskSubmitRequest | None = None,
+    service: TaskService = Depends(get_task_service),
+    background_tasks: BackgroundTasks = None,
+) -> TaskResponse:
+    result_summary = payload.result_summary if payload else None
+    response = await service.submit_task(str(task_id), result_summary)
+    if background_tasks is not None:
+        background_tasks.add_task(service._run_submission_review, str(task_id), result_summary)
+    return response
 
 
 @router.post("/{task_id}/fail", response_model=TaskResponse)
@@ -139,15 +159,38 @@ async def upsert_step(
     return await service.upsert_step(str(task_id), payload)
 
 
-@router.post("/{task_id}/subtasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-async def create_subtask(
-    task_id: UUID,
-    payload: TaskCreate,
-    service: TaskService = Depends(get_task_service),
-) -> TaskResponse:
-    return await service.create_subtask(str(task_id), payload)
-
-
 @router.get("/{task_id}/history", response_model=list[TaskHistoryResponse])
 async def list_history(task_id: UUID, service: TaskService = Depends(get_task_service)) -> list[TaskHistoryResponse]:
     return await service.list_history(str(task_id))
+
+
+@router.get("/{task_id}/files", response_model=TaskFileListResponse)
+async def list_task_files(
+    task_id: UUID,
+    service: TaskService = Depends(get_task_service),
+) -> TaskFileListResponse:
+    return await service.list_task_files(str(task_id))
+
+
+class TaskFileRegisterRequest(BaseModel):
+    project_id: UUID
+    file: TaskFileCreate
+
+
+@router.post("/{task_id}/files", response_model=TaskFileResponse, status_code=status.HTTP_201_CREATED)
+async def register_task_file(
+    task_id: UUID,
+    payload: TaskFileRegisterRequest,
+    service: TaskService = Depends(get_task_service),
+) -> TaskFileResponse:
+    return await service.register_task_file(str(task_id), str(payload.project_id), payload.file)
+
+
+@router.delete("/{task_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task_file(
+    task_id: UUID,
+    file_id: UUID,
+    service: TaskService = Depends(get_task_service),
+) -> Response:
+    await service.delete_task_file(str(task_id), str(file_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -9,7 +9,7 @@ The important rule is: do not treat Cyborg as a free-form notes store. It has wo
 ### Projects
 
 - A project is a container for work, routing metadata, journal history, and linked tasks.
-- A project must not be started or auto-executed until it has an approved project spec.
+- Approving a project spec automatically starts execution — no separate start or execute step is needed.
 - A project spec contains the approved:
   - `aim`
   - `method`
@@ -42,7 +42,6 @@ Use project create for:
 - `title`
 - `description`
 - source routing metadata
-- optional `auto_execute`
 
 Do not rely on `project create` alone to make the project executable.
 
@@ -133,22 +132,16 @@ If the spec is rejected:
 - revise the spec
 - submit a new version
 
-### 4. Start or execute only after approval
+### 4. Execution starts automatically on approval
 
-Manual start:
+Approving the spec automatically starts project execution. There is no separate `start` or `execute` command — spec approval triggers:
+- Project state transition to `active`
+- First task creation from the plan
+- Notification sync
 
-```bash
-uv run cyborg project start <project-id>
-```
+If the approved spec does not include an execution `plan`, Cyborg will ask OpenClaw to generate one and submit it as a new pending spec revision. The project will not start executing until the generated plan revision is approved by the user. Plan generation is an OpenClaw reasoning activity — it does not create tasks.
 
-Auto-execution:
-
-```bash
-uv run cyborg project update <project-id> --auto-execute
-uv run cyborg project execute <project-id>
-```
-
-If you try to start or execute without an approved spec, Cyborg will reject the request.
+Just approve and the project runs (or wait for the generated plan if no plan was provided).
 
 ## What makes a good project spec
 
@@ -336,7 +329,7 @@ Group guidance:
 
 Do not:
 
-- start a project before its spec is approved
+- try to start or execute a project manually (spec approval handles this)
 - execute a project with empty success criteria
 - create tasks without a `plan`
 - start a task directly from `planning`
@@ -350,9 +343,8 @@ Do not:
 1. `project create`
 2. `project spec submit`
 3. wait for approval
-4. `project start` or `project execute`
-5. create linked tasks
-6. complete tasks with `result_summary`
+4. create linked tasks (or let auto-execution handle it)
+5. complete tasks with `result_summary`
 
 ### Safe task recipe
 

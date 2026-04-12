@@ -21,7 +21,6 @@ from cyborg.database import Database
 from cyborg.main import create_app
 from cyborg.models import (
     JournalEntryType,
-    PlanApproveRequest,
     ProjectCloseRequest,
     ProjectCreate,
     ProjectJournalEntryCreate,
@@ -33,7 +32,6 @@ from cyborg.models import (
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.openclaw_hook_service import OpenClawHookService
 from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
-from cyborg.services.plan_service import PlanService
 from cyborg.services.project_service import ProjectService
 from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.session_route_service import SessionRouteService
@@ -131,7 +129,6 @@ class AcceptanceBuilder:
         self.db = db
         self.project_service = ProjectService(db)
         self.project_spec_service = ProjectSpecService(db)
-        self.plan_service = PlanService(db)
         self.task_service = TaskService(db)
         self.notification_service = NotificationService(db)
 
@@ -182,9 +179,7 @@ class AcceptanceBuilder:
         success_criteria: list[dict[str, Any]] | None = None,
         plan: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
-        auto_execute: bool = False,
         approve_spec: bool = False,
-        start: bool = False,
         close_conclusion: str | None = None,
     ) -> dict[str, Any]:
         project = _run(
@@ -197,7 +192,6 @@ class AcceptanceBuilder:
                     success_criteria=success_criteria or [],
                     plan=plan or [],
                     metadata=metadata or {},
-                    auto_execute=auto_execute,
                 )
             )
         )
@@ -212,8 +206,6 @@ class AcceptanceBuilder:
                     ProjectSpecApproveRequest(approver="OpenClaw acceptance"),
                 )
             )
-        if start:
-            project = _run(self.project_service.start_project(project_id))
         if close_conclusion is not None:
             project = _run(
                 self.project_service.close_project(
@@ -252,7 +244,7 @@ class AcceptanceBuilder:
         requested_by: str | None = None,
         project_ids: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-        approve_plan: bool = False,
+        approve_plan: bool = False,  # Deprecated: tasks now start in pending
         start: bool = False,
         complete_result: str | None = None,
         fail_result: str | None = None,
@@ -270,16 +262,6 @@ class AcceptanceBuilder:
             )
         )
         task_id = str(task.id)
-        if approve_plan:
-            plan_list = _run(self.plan_service.list_plans(task_id))
-            if not plan_list.plans:
-                raise AssertionError(f"Task {task_id} has no plans to approve")
-            _run(
-                self.plan_service.approve_plan(
-                    str(plan_list.plans[0].id),
-                    PlanApproveRequest(approver="OpenClaw acceptance"),
-                )
-            )
         if start:
             _run(self.task_service.start_task(task_id))
         if complete_result is not None:
@@ -298,15 +280,8 @@ class AcceptanceBuilder:
         return task.model_dump(mode="json")
 
     def approve_initial_plan(self, task_id: str) -> None:
-        plan_list = _run(self.plan_service.list_plans(task_id))
-        if not plan_list.plans:
-            raise AssertionError(f"Task {task_id} has no plans to approve")
-        _run(
-            self.plan_service.approve_plan(
-                str(plan_list.plans[0].id),
-                PlanApproveRequest(approver="OpenClaw acceptance"),
-            )
-        )
+        # Deprecated: tasks now start in pending status, no plan approval needed
+        pass
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         task = _run(self.task_service.start_task(task_id))

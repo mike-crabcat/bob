@@ -1,22 +1,81 @@
 # Cyborg
 
-Cyborg is the autonomy framework for OpenClaw. It provides the structured system-of-record and workflow engine that allows OpenClaw agents to carry out large projects and missions with minimal human input and monitoring.
+Cyborg autonomously executes projects. A human describes an aim and success criteria, Cyborg plans the work into tasks, and the system iterates until the criteria are met. OpenClaw is the brain — it reasons, plans, evaluates, and decides. Cyborg is the body — it stores state, enforces workflows, tracks progress, and drives the execution loop.
 
-## Purpose
+## How it works
 
-OpenClaw is an agent runtime and conversation engine. On its own, it has sessions, transcripts, memory, tools, and webhooks. What it lacks is durable application state and workflow intelligence.
+1. **Define an aim.** You create a project with a goal, a method, and measurable success criteria.
+2. **Generate a plan.** OpenClaw breaks the aim into ordered plan steps, each with its own completion criteria.
+3. **Execute autonomously.** Cyborg creates tasks for each plan step, drives them through to completion, and moves to the next step automatically.
+4. **Evaluate and adapt.** After each task, OpenClaw evaluates whether success criteria are met, refines strategy if needed, and generates follow-up tasks for anything still outstanding.
+5. **Finish.** When all criteria are satisfied, the project closes. OpenClaw extracts learnings for future projects.
 
-Cyborg fills that gap. It gives OpenClaw the ability to:
+You intervene only at approval points or when a task blocks for your input. Otherwise the loop runs on its own.
 
-- **Manage complex, multi-step projects** with autonomous execution, plan step progression, and success criteria evaluation
-- **Coordinate work across sessions** — a task can originate in one session, be actioned in another, and report back to the source
-- **Self-plan and self-correct** through AI-powered plan generation, strategy refinement, health monitoring, and learning from past projects
-- **Enforce workflow rules** such as planning → pending → active state machines, approval gates for project plans, blocked-task resume instructions, and dependency-driven task release
-- **Persist and route notifications** with delivery tracking, repeat throttling, and cross-session routing for prompts, approvals, and task assignments
-- **Provide compact context summaries** built from structured state rather than raw chat history
-- **Support human oversight** through approval gates, a web dashboard, and blocked-task states that pause for user input
+## Cyborg and OpenClaw: the split
 
-The result: a human sets a goal, Cyborg and OpenClaw plan the work, execute the steps, escalate when blocked, and report results — with the human intervening only at approval points or when explicitly needed.
+**OpenClaw** is an agent runtime. It has sessions, transcripts, memory, tools, and webhooks. It can reason and act within a conversation, but it has no durable project state and no workflow engine.
+
+**Cyborg** is the structured system-of-record and execution engine that sits alongside OpenClaw. It provides what OpenClaw alone cannot:
+
+| Responsibility | Owned by |
+|---|---|
+| Reasoning, planning, evaluation, learning | OpenClaw |
+| Storing projects, tasks, plans, journal entries | Cyborg |
+| Driving the execution loop (create task → complete → next step) | Cyborg |
+| Enforcing state machines and approval gates | Cyborg |
+| Building context for reasoning prompts | Cyborg |
+| Routing notifications and task assignments across sessions | Cyborg |
+| Deciding *what* to do next and *whether* criteria are met | OpenClaw |
+| Tracking dependencies and auto-releasing blocked tasks | Cyborg |
+| Persisting insights and learnings from completed work | Cyborg |
+
+In short: OpenClaw decides, Cyborg remembers and drives.
+
+## Reasoning types
+
+All reasoning is performed by OpenClaw. Cyborg builds the context, calls the reasoning service, and acts on the result. There are seven reasoning types:
+
+### Plan generation
+
+Generates a structured execution plan from a project aim and method. Returns an ordered list of plan steps, each with a title, description, and completion criteria. Used when a new project is created or when a plan needs to be regenerated from scratch.
+
+### Criteria evaluation
+
+Semantically evaluates whether a project's success criteria have been met. Takes the full project context — all tasks, journal entries, outputs — and reasons about whether each criterion is satisfied. Returns which criteria are met, which are unmet, and the reasoning behind each judgment. Falls back to rule-based evaluation (numeric comparisons) if OpenClaw is unavailable.
+
+### Strategy refinement
+
+Analyzes a project's progress after each task completion. Determines whether the current approach is working or needs adjustment. Can suggest reprioritizing tasks, adding new tasks, changing the method, or flagging risks. Refinements are auto-applied — new tasks are created and priorities updated without human approval.
+
+### Follow-up generation
+
+When a project's success criteria are not all met, this generates concrete follow-up tasks to address the gaps. Each suggested task includes a title, description, execution plan, and priority. Takes the list of unmet criteria and the current project context to produce targeted next actions.
+
+### Task planning
+
+Generates an execution plan for a single task. Considers the project context, the task's dependencies and output files, and produces a concise set of steps the agent should follow. Used when a task is started and needs a concrete action plan.
+
+### Health analysis
+
+Assesses the overall health of a project. Considers task completion rates, blockers, timeline, and any risks or issues. Returns a health score (0–1), risk level (low/medium/high/critical), identified blockers, and recommendations. Used for monitoring and to flag projects that need attention.
+
+### Learning extraction
+
+Extracts insights from a completed project. Identifies patterns in planning, execution, estimation, communication, technical approach, and coordination. Returns categorized insights with applicability patterns and impact assessments. These learnings are stored and reused when planning future projects with similar aims.
+
+## Context building
+
+Each reasoning call needs project context, and different reasoning types need different amounts. The context builder produces four scopes:
+
+| Scope | Size | Includes |
+|---|---|---|
+| Minimal | 1–2k tokens | Current state, recent milestones and blockers |
+| Standard | 5–10k tokens | Recent activity, key items, important journal entries |
+| Comprehensive | 20–30k tokens | Everything relevant, summarized where needed |
+| Full | 30k+ tokens | All context (rare, for deep analysis) |
+
+The builder assembles project metadata, objectives, plan summary, success criteria, filtered tasks with output files, journal narrative, temporal context, and dependency information into a structured prompt for each reasoning type.
 
 ## Architecture
 
@@ -61,13 +120,6 @@ cyborg/
 - Dependency-driven task release — completing a task automatically unblocks dependent tasks
 - Strategy refinement after task completion for continuous improvement
 - Journal entries (note, milestone, decision, blocker, result) with automatic result entries on task completion
-
-### AI-Powered Planning
-
-- Plan generation from project aims and methods using OpenClaw reasoning
-- Strategy refinement based on task outcomes
-- Success criteria evaluation
-- Follow-up task generation after project milestones
 
 ### Health Monitoring
 

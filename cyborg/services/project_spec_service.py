@@ -17,7 +17,6 @@ from cyborg.models import (
     ProjectState,
 )
 from cyborg.services.base import BaseService, json_dumps, json_loads, utcnow
-from cyborg.services.notification_service import NotificationService
 
 
 class ProjectSpecService(BaseService):
@@ -26,10 +25,7 @@ class ProjectSpecService(BaseService):
     def __init__(self, db: Database) -> None:
         super().__init__(db)
 
-    async def _sync_project_notifications(self, project_id: str, *, immediate: bool = False) -> None:
-        await NotificationService(self.db).sync_project_state(project_id, immediate=immediate)
-
-    async def submit_spec(self, project_id: str, payload: ProjectSpecSubmitRequest) -> ProjectSpecResponse:
+    async def submit_spec(self, project_id: str, payload: ProjectSpecSubmitRequest, *, defer_plan_generation: bool = False) -> ProjectSpecResponse:
         project = await self._get_project_row(project_id)
         if project["state"] == ProjectState.CLOSED.value:
             raise ConflictError(f"Cannot submit a spec for closed project '{project_id}'")
@@ -56,7 +52,7 @@ class ProjectSpecService(BaseService):
                     next_version,
                     payload.aim,
                     payload.method,
-                    json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan else None,
+                    json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan is not None else None,
                     json_dumps([criterion.model_dump(mode="json") for criterion in payload.success_criteria]),
                     ProjectSpecStatus.PENDING_APPROVAL.value,
                     None,
@@ -78,14 +74,30 @@ class ProjectSpecService(BaseService):
                     (
                         payload.aim,
                         payload.method,
-                        json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan else None,
+                        json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan is not None else None,
                         json_dumps([criterion.model_dump(mode="json") for criterion in payload.success_criteria]),
                         now,
                         project_id,
                     ),
                 )
 
-        await self._sync_project_notifications(project_id, immediate=True)
+        await self._create_approval_record(
+            project_id,
+            title=f"Spec v{next_version}: {payload.aim or project.get('title', 'Project spec')}",
+            description=f"Project spec version {next_version} pending approval.",
+            spec_data={
+                "aim": payload.aim,
+                "method": payload.method,
+                "plan": [step.model_dump(mode="json") for step in (payload.plan or [])],
+                "success_criteria": [c.model_dump(mode="json") for c in payload.success_criteria],
+            },
+        )
+
+        # If no plan was provided, trigger reasoning to generate one
+        if not payload.plan and not defer_plan_generation:
+            spec_row = await self._get_spec_row(spec_id)
+            await self._generate_plan_for_spec(project_id, spec_id, spec_row)
+
         return await self.get_spec(spec_id)
 
     async def list_specs(self, project_id: str) -> ProjectSpecListResponse:
@@ -121,6 +133,13 @@ class ProjectSpecService(BaseService):
                 "Spec must be in 'pending_approval' status."
             )
 
+        plan = json_loads(row.get("plan"), [])
+        if not plan:
+            raise ConflictError(
+                f"Cannot approve spec '{spec_id}' without a plan. "
+                "The project must generate or receive a plan before approval."
+            )
+
         now = utcnow().isoformat()
         project_id = row["project_id"]
         async with self.db.connection(write=True) as connection:
@@ -141,6 +160,7 @@ class ProjectSpecService(BaseService):
                     spec_id,
                 ),
             )
+            # Update project with spec content (plan may be NULL, [], or populated — all valid)
             await connection.execute(
                 """
                 UPDATE projects
@@ -158,7 +178,16 @@ class ProjectSpecService(BaseService):
                 ),
             )
 
-        await self._sync_project_notifications(project_id, immediate=False)
+        project = await self._get_project_row(project_id)
+
+        if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+            from cyborg.services.project_execution_service import ProjectExecutionService
+            execution_service = ProjectExecutionService(self.db)
+            # Clean up old auto-created tasks for paused/active projects before re-planning
+            if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+                await execution_service.cleanup_old_plan_tasks(project_id)
+            await execution_service.start_project_execution(project_id)
+
         return await self.get_spec(spec_id)
 
     async def reject_spec(self, spec_id: str, payload: ProjectSpecRejectRequest) -> ProjectSpecResponse:
@@ -183,8 +212,92 @@ class ProjectSpecService(BaseService):
                 ),
             )
 
-        await self._sync_project_notifications(row["project_id"], immediate=True)
         return await self.get_spec(spec_id)
+
+    async def revise_spec_after_rejection(
+        self,
+        project_id: str,
+        feedback: str,
+        *,
+        allow_aim_changes: bool = False,
+        allow_criteria_changes: bool = False,
+    ) -> ProjectSpecResponse | None:
+        """Generate a revised spec based on rejection feedback and submit it.
+
+        Returns the new spec, or None if revision fails (project stays in planning
+        for manual re-submission).
+        """
+        # Get the latest (just-rejected) spec to use as the base
+        latest = await self.db.fetch_one(
+            "SELECT aim, method, plan, success_criteria FROM project_specs "
+            "WHERE project_id = ? ORDER BY version_number DESC LIMIT 1",
+            (project_id,),
+        )
+        if not latest:
+            return None
+
+        from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+        reasoning = OpenClawReasoningService(self.db)
+
+        revised = await reasoning.revise_spec(
+            aim=latest["aim"],
+            method=latest.get("method"),
+            success_criteria=json_loads(latest.get("success_criteria"), []),
+            plan_steps=json_loads(latest.get("plan"), []),
+            feedback=feedback,
+            allow_aim_changes=allow_aim_changes,
+            allow_criteria_changes=allow_criteria_changes,
+            reference_project_id=project_id,
+        )
+
+        if not revised:
+            return None
+
+        # Build and submit the new spec
+        from cyborg.models import (
+            PlanStep,
+            ProjectSpecSubmitRequest,
+            SuccessCriterion,
+        )
+
+        aim = revised.get("aim", latest["aim"]) if allow_aim_changes else latest["aim"]
+
+        raw_criteria = revised.get("success_criteria", [])
+        if allow_criteria_changes and raw_criteria:
+            criteria = [
+                SuccessCriterion(
+                    check=c.get("check", c.get("description", "")),
+                    description=c.get("description", c.get("check", "")),
+                )
+                for c in raw_criteria if isinstance(c, dict)
+            ]
+        else:
+            # Keep original criteria
+            existing = json_loads(latest.get("success_criteria"), [])
+            criteria = [SuccessCriterion(**c) for c in existing]
+
+        raw_steps = revised.get("plan", [])
+        plan = [
+            PlanStep(
+                title=s.get("title", ""),
+                description=s.get("description", ""),
+                criteria=s.get("criteria", ""),
+                order=s.get("order", i),
+            )
+            for i, s in enumerate(raw_steps)
+        ] if raw_steps else []
+
+        method = revised.get("method", latest.get("method")) or latest.get("method")
+
+        payload = ProjectSpecSubmitRequest(
+            aim=aim,
+            method=method,
+            plan=plan,
+            success_criteria=criteria,
+        )
+
+        return await self.submit_spec(project_id, payload, defer_plan_generation=True)
+
 
     async def ensure_project_ready_for_execution(self, project_id: str) -> None:
         project = await self._get_project_row(project_id)
@@ -238,6 +351,27 @@ class ProjectSpecService(BaseService):
         row["latest_spec_status"] = latest["status"] if latest else None
         return row
 
+    async def _create_approval_record(
+        self,
+        project_id: str,
+        title: str,
+        description: str | None = None,
+        spec_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Create a pending approval record so the spec appears in the dashboard queue."""
+        approval_id = str(uuid4())
+        now = utcnow().isoformat()
+        proposal_json = json_dumps(spec_data) if spec_data else None
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, status, priority, requested_at, requested_by, created_at
+            ) VALUES (?, 'project_plan', ?, ?, ?, ?, 'pending', 'normal', ?, 'system', ?)
+            """,
+            (approval_id, project_id, title, description, proposal_json, now, now),
+        )
+
     async def _get_project_row(self, project_id: str) -> dict[str, Any]:
         row = await self.db.fetch_one(
             "SELECT * FROM projects WHERE id = ? AND deleted_at IS NULL",
@@ -261,3 +395,125 @@ class ProjectSpecService(BaseService):
         decoded["success_criteria"] = json_loads(decoded.get("success_criteria"), [])
         decoded["is_current"] = bool(decoded.get("is_current", 0))
         return decoded
+
+    async def generate_plan_if_needed(self, project_id: str) -> None:
+        """Generate a plan for the latest spec if it doesn't already have one.
+
+        Safe to call as a background task — no-ops when the spec already has a plan.
+        """
+        spec_row = await self.db.fetch_one(
+            "SELECT id, aim, method, success_criteria, plan, version_number "
+            "FROM project_specs WHERE project_id = ? ORDER BY version_number DESC LIMIT 1",
+            (project_id,),
+        )
+        if spec_row is None or spec_row["plan"] is not None:
+            return
+        await self._generate_plan_for_spec(project_id, spec_row["id"], dict(spec_row))
+
+    async def _generate_plan_for_spec(
+        self,
+        project_id: str,
+        spec_id: str,
+        spec_row: dict[str, Any],
+    ) -> None:
+        """Ask OpenClaw to generate an execution plan and patch it into the existing spec."""
+        import json as _json
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+
+            reasoning = OpenClawReasoningService(self.db)
+            criteria = json_loads(spec_row.get("success_criteria"), [])
+            criteria_texts = [
+                c.get("description", c.get("check", ""))
+                for c in criteria
+                if isinstance(c, dict)
+            ]
+
+            generated_steps = await reasoning.generate_project_plan(
+                aim=spec_row["aim"],
+                method=spec_row.get("method"),
+                success_criteria=criteria_texts or None,
+                reference_project_id=project_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "OpenClaw plan generation failed for project %s: %s. "
+                "Project will remain in planning until a plan is provided.",
+                project_id,
+                e,
+            )
+            return
+
+        if not generated_steps:
+            logger.warning(
+                "OpenClaw generated no plan steps for project %s. "
+                "Project will remain in planning until a plan is provided.",
+                project_id,
+            )
+            return
+
+        plan_json = json_dumps(generated_steps)
+        now = utcnow().isoformat()
+
+        # Patch the existing spec row with the generated plan
+        await self.db.execute(
+            "UPDATE project_specs SET plan = ? WHERE id = ?",
+            (plan_json, spec_id),
+        )
+
+        # Patch the project row so the project shell reflects the plan
+        await self.db.execute(
+            "UPDATE projects SET plan = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (plan_json, now, project_id),
+        )
+
+        # Update the existing approval record's proposal_data to include the plan
+        await self.db.execute(
+            """
+            UPDATE approvals SET proposal_data = ?, title = ?, description = ?
+            WHERE entity_id = ? AND approval_type = 'project_plan' AND status = 'pending'
+            """,
+            (
+                json_dumps({
+                    "aim": spec_row["aim"],
+                    "method": spec_row.get("method"),
+                    "plan": generated_steps,
+                    "success_criteria": json_loads(spec_row.get("success_criteria"), []),
+                }),
+                f"Spec v{spec_row.get('version_number', 1)}: {spec_row.get('aim', 'Project spec')}",
+                f"Plan generated ({len(generated_steps)} steps). Ready for approval.",
+                project_id,
+            ),
+        )
+
+        # Add a journal entry noting the plan was generated
+        await self.db.execute(
+            """
+            INSERT INTO project_journal_entries (id, project_id, entry_type, content, created_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                "decision",
+                f"OpenClaw generated an execution plan ({len(generated_steps)} steps). "
+                "The spec is ready for approval.",
+                now,
+                json_dumps({
+                    "autonomy_action": "plan_generated",
+                    "spec_id": spec_id,
+                    "step_count": len(generated_steps),
+                }),
+            ),
+        )
+
+        logger.info(
+            "Generated plan for spec %s on project %s (%d steps)",
+            spec_id,
+            project_id,
+            len(generated_steps),
+        )

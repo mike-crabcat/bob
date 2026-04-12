@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from cyborg.config import Settings
 from cyborg.main import create_app
+from cyborg.models import ProjectSpecApproveRequest
+from cyborg.services.project_spec_service import ProjectSpecService
+from cyborg.services.task_service import TaskService
 
 PROJECT_ROUTE_METADATA = {
     "channel": "whatsapp",
@@ -28,9 +32,15 @@ def approve_latest_project_spec(client: TestClient, project_id: str, approver: s
     specs = client.get(f"/api/v1/projects/{project_id}/specs")
     assert specs.status_code == 200
     spec_id = specs.json()["specs"][0]["id"]
-    approved = client.post(f"/api/v1/project-specs/{spec_id}/approve", json={"approver": approver})
-    assert approved.status_code == 200
-    return approved.json()
+    service = ProjectSpecService(client.app.state.db)
+    payload = ProjectSpecApproveRequest(approver=approver)
+    result = asyncio.run(service.approve_spec(spec_id, payload))
+    return result.model_dump(mode="json")
+
+
+def create_task(client: TestClient, **payload: object) -> dict[str, object]:
+    task = asyncio.run(TaskService(client.app.state.db).create_task(payload))
+    return task.model_dump(mode="json")
 
 
 class TestProjectExecution:
@@ -46,7 +56,6 @@ class TestProjectExecution:
                     "aim": "Build a test API",
                     "method": "Define the implementation approach and then execute each step.",
                     "description": "Testing auto-execution",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -73,7 +82,6 @@ class TestProjectExecution:
             assert response.status_code == 201
             data = response.json()
             assert data["title"] == "Test Execution Project"
-            assert data["auto_execute"] is True
             assert len(data["plan"]) == 2
             assert len(data["success_criteria"]) == 1
             assert data["state"] == "planning"
@@ -90,7 +98,6 @@ class TestProjectExecution:
                     "title": "Execution Test",
                     "aim": "Test execution",
                     "method": "Define the first task and execute it.",
-                    "auto_execute": True,
                     "metadata": {
                         "channel": "whatsapp",
                         "session_key": "whatsappgroup-execution",
@@ -114,31 +121,39 @@ class TestProjectExecution:
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
 
-            # Start execution
-            response = client.post(f"/api/v1/projects/{project_id}/execute")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["state"] == "active"
-            assert len(data["task_ids"]) == 1
+            # Spec approval auto-triggers execution
+            project_after = client.get(f"/api/v1/projects/{project_id}").json()
+            assert project_after["state"] == "active"
 
             # Verify task was created
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 1
-            assert tasks[0]["title"] == "Step 1: First Step"
-            assert tasks[0]["status"] == "pending"
-            assert tasks[0]["current_plan_id"] is not None
+            assert tasks[0]["title"] == "First Step"
+            assert tasks[0]["status"] == "active"
+            assert tasks[0]["started_at"] is not None
             assert "Success criteria:" in tasks[0]["plan"]
             assert tasks[0]["metadata"]["project_step_index"] == 0
             assert tasks[0]["metadata"]["channel"] == "whatsapp"
             assert tasks[0]["metadata"]["session_key"] == "whatsappgroup-execution"
-            plans = client.get(f"/api/v1/tasks/{tasks[0]['id']}/plans").json()
-            assert plans["current_plan_id"] == tasks[0]["current_plan_id"]
-            assert len(plans["plans"]) == 1
-            assert plans["plans"][0]["status"] == "approved"
-            assert plans["plans"][0]["is_current"] is True
 
-    def test_task_completion_triggers_next_task(self, tmp_path: Path) -> None:
-        """Test completing a task creates the next task."""
+    def test_task_completion_triggers_next_task(self, tmp_path: Path, monkeypatch) -> None:
+        """Test completing a task triggers reasoning which creates the next task."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            return {
+                "action": "create_task",
+                "reasoning": "Step 1 done, create step 2",
+                "task": {
+                    "title": "Step 2",
+                    "description": "Do step 2",
+                    "plan": "Objective: Step 2\nExecution: Do step 2\nSuccess criteria: Step 2 done",
+                    "priority": "high",
+                },
+            }
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             # Create and start project
             project = client.post(
@@ -147,7 +162,6 @@ class TestProjectExecution:
                     "title": "Multi-step Test",
                     "aim": "Test multi-step",
                     "method": "Work through the plan one step at a time.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -173,29 +187,37 @@ class TestProjectExecution:
             ).json()
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
-            client.post(f"/api/v1/projects/{project_id}/execute")
+
+            # Spec approval auto-triggers execution
 
             # Get first task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             first_task_id = tasks[0]["id"]
 
-            # Start and complete first task
-            client.post(f"/api/v1/tasks/{first_task_id}/start")
+            # Complete first task (already auto-started)
             client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Step 1 completed"},
             )
 
-            # Verify second task was created
+            # Verify second task was created by reasoning
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             assert len(tasks) == 2
             step2 = [t for t in tasks if "Step 2" in t["title"]][0]
-            assert step2["status"] == "pending"
-            assert step2["current_plan_id"] is not None
-            assert step2["metadata"]["project_step_index"] == 1
+            assert step2["status"] == "active"
+            assert step2["started_at"] is not None
+            assert step2["metadata"]["auto_created_by_project"] is True
+            assert step2["metadata"]["source"] == "reasoning"
 
-    def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path) -> None:
+    def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path, monkeypatch) -> None:
         """Test completing all tasks auto-closes the project."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            return {"action": "close_project", "reasoning": "All criteria met. Project complete."}
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             # Create and start project
             project = client.post(
@@ -204,7 +226,6 @@ class TestProjectExecution:
                     "title": "Auto-close Test",
                     "aim": "Test auto-close",
                     "method": "Complete the planned task and evaluate the result.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -224,14 +245,14 @@ class TestProjectExecution:
             ).json()
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
-            client.post(f"/api/v1/projects/{project_id}/execute")
+
+            # Spec approval auto-triggers execution
 
             # Get and complete the only task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             task_id = tasks[0]["id"]
 
-            # Complete task
-            client.post(f"/api/v1/tasks/{task_id}/start")
+            # Complete task (already auto-started)
             client.post(
                 f"/api/v1/tasks/{task_id}/complete",
                 json={"result_summary": "Completed"},
@@ -241,8 +262,6 @@ class TestProjectExecution:
             project = client.get(f"/api/v1/projects/{project_id}").json()
             assert project["state"] == "closed"
             assert project["conclusion"] is not None
-            assert "Accomplishments" in project["conclusion"]
-            assert "Success Criteria Met" in project["conclusion"]
 
             notifications = client.get("/api/v1/notifications")
             assert notifications.status_code == 200
@@ -255,10 +274,26 @@ class TestProjectExecution:
             assert project_result["metadata"]["project_id"] == project_id
             assert project_result["metadata"]["delivery_route"] == "source"
             assert project_result["title"] == "Project completed: Auto-close Test"
-            assert "Accomplishments" in project_result["message"]
+            assert project_result["message"] is not None
 
-    def test_unmet_success_criteria_generate_single_follow_up_task(self, tmp_path: Path) -> None:
-        """Test that unmet criteria create one follow-up task after the last open task completes."""
+    def test_unmet_success_criteria_generate_single_follow_up_task(self, tmp_path: Path, monkeypatch) -> None:
+        """Test that reasoning creates a follow-up task when criteria aren't met."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            return {
+                "action": "create_task",
+                "reasoning": "Only 1 task completed but criteria needs 2, creating follow-up",
+                "task": {
+                    "title": "Advance project criterion: Two tasks have been completed",
+                    "description": "Follow-up task to reach 2 completed tasks",
+                    "plan": "Objective: satisfy the unmet project success criterion 'Two tasks have been completed'.\nSuccess criterion check: completed_task_count >= 2",
+                    "priority": "high",
+                },
+            }
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             project = client.post(
                 "/api/v1/projects",
@@ -266,7 +301,6 @@ class TestProjectExecution:
                     "title": "Autonomy Gap Test",
                     "aim": "Reach two completed tasks",
                     "method": "Finish the planned step, then generate exactly one follow-up task if more work is needed.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -288,13 +322,10 @@ class TestProjectExecution:
             project_id = project.json()["id"]
             approve_latest_project_spec(client, project_id)
 
-            executed = client.post(f"/api/v1/projects/{project_id}/execute")
-            assert executed.status_code == 200
+            # Spec approval auto-triggers execution
 
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
-            started = client.post(f"/api/v1/tasks/{first_task_id}/start")
-            assert started.status_code == 200
             completed = client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Initial step finished"},
@@ -307,18 +338,16 @@ class TestProjectExecution:
             assert len(tasks) == 2
 
             follow_up_tasks = [
-                task for task in tasks if task["metadata"].get("autonomy_reason") == "unmet_success_criteria"
+                task for task in tasks
+                if task["metadata"].get("auto_created_by_project") and task["metadata"].get("source") == "reasoning"
             ]
             assert len(follow_up_tasks) == 1
             follow_up = follow_up_tasks[0]
-            assert follow_up["status"] == "pending"
-            assert follow_up["current_plan_id"] is not None
+            assert follow_up["status"] == "active"
+            assert follow_up["started_at"] is not None
             assert follow_up["project_ids"] == [project_id]
             assert follow_up["metadata"]["auto_created_by_project"] is True
-            assert follow_up["metadata"]["autonomy_cycle_completed_task_count"] == 1
-            assert follow_up["metadata"]["autonomy_criterion_check"] == "completed_task_count >= 2"
-            assert follow_up["metadata"]["autonomy_criterion_description"] == "Two tasks have been completed"
-            assert "Success criterion check: completed_task_count >= 2" in follow_up["plan"]
+            assert "completed_task_count >= 2" in follow_up["plan"]
 
             project_row = client.get(f"/api/v1/projects/{project_id}")
             assert project_row.status_code == 200
@@ -336,8 +365,32 @@ class TestProjectExecution:
                 for item in pending_notifications
             )
 
-    def test_follow_up_task_completion_closes_project_when_criteria_are_met(self, tmp_path: Path) -> None:
+    def test_follow_up_task_completion_closes_project_when_criteria_are_met(self, tmp_path: Path, monkeypatch) -> None:
         """Test that a generated follow-up task can satisfy the project and trigger closure."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+
+        call_count = 0
+
+        async def fake_decide_next_step(self, project_id, completed_task_id):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First task completed — criteria not met, create follow-up
+                return {
+                    "action": "create_task",
+                    "reasoning": "Need 2 tasks, only 1 done",
+                    "task": {
+                        "title": "Follow-up: Reach two completed tasks",
+                        "description": "Complete this to satisfy the success criteria",
+                        "plan": "Complete the follow-up work",
+                        "priority": "high",
+                    },
+                }
+            # Second task completed — close project
+            return {"action": "close_project", "reasoning": "Both tasks done. Success criteria met."}
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
+
         with make_client(tmp_path) as client:
             project = client.post(
                 "/api/v1/projects",
@@ -345,7 +398,6 @@ class TestProjectExecution:
                     "title": "Autonomy Close Test",
                     "aim": "Reach two completed tasks",
                     "method": "Complete the planned step, then the generated follow-up.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -367,12 +419,10 @@ class TestProjectExecution:
             project_id = project.json()["id"]
             approve_latest_project_spec(client, project_id)
 
-            executed = client.post(f"/api/v1/projects/{project_id}/execute")
-            assert executed.status_code == 200
+            # Spec approval auto-triggers execution
 
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
-            assert client.post(f"/api/v1/tasks/{first_task_id}/start").status_code == 200
             assert client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Initial step finished"},
@@ -383,10 +433,9 @@ class TestProjectExecution:
             follow_up = next(
                 task
                 for task in tasks_after_first_completion.json()
-                if task["metadata"].get("autonomy_reason") == "unmet_success_criteria"
+                if task["metadata"].get("auto_created_by_project") and task["metadata"].get("source") == "reasoning"
             )
 
-            assert client.post(f"/api/v1/tasks/{follow_up['id']}/start").status_code == 200
             assert client.post(
                 f"/api/v1/tasks/{follow_up['id']}/complete",
                 json={"result_summary": "Follow-up completed"},
@@ -397,7 +446,7 @@ class TestProjectExecution:
             closed = closed_project.json()
             assert closed["state"] == "closed"
             assert closed["conclusion"] is not None
-            assert "Success Criteria Met" in closed["conclusion"]
+            assert "successfully completed" in closed["conclusion"]
 
             notifications = client.get("/api/v1/notifications")
             assert notifications.status_code == 200
@@ -409,60 +458,6 @@ class TestProjectExecution:
             assert len(project_results) == 1
             assert project_results[0]["entity_id"] == project_id
             assert project_results[0]["metadata"]["project_state"] == "closed"
-
-    def test_non_auto_execute_project_no_progression(self, tmp_path: Path) -> None:
-        """Test that non-auto-execute projects don't auto-progress."""
-        with make_client(tmp_path) as client:
-            # Create project without auto_execute
-            project = client.post(
-                "/api/v1/projects",
-                json={
-                    "title": "Manual Project",
-                    "aim": "Manual work",
-                    "auto_execute": False,
-                    "metadata": PROJECT_ROUTE_METADATA,
-                    "plan": [
-                        {
-                            "title": "Step 1",
-                            "description": "Do step 1",
-                            "criteria": "Done",
-                            "order": 0,
-                        },
-                    ],
-                },
-            ).json()
-            project_id = project["id"]
-
-            # Create a manual task
-            task = client.post(
-                "/api/v1/tasks",
-                json={
-                    "title": "Manual Task",
-                    "description": "A manual task",
-                    "plan": "1. Do the manual task. 2. Report the result.",
-                    "priority": "medium",
-                    "project_ids": [project_id],
-                },
-            ).json()
-            task_id = task["id"]
-
-            # Submit and approve plan
-            plan = client.post(
-                f"/api/v1/tasks/{task_id}/plans",
-                json={"content": "Plan"},
-            ).json()
-            client.post(
-                f"/api/v1/plans/{plan['id']}/approve",
-                json={"approver": "Bob"},
-            )
-
-            # Complete the task
-            client.post(f"/api/v1/tasks/{task_id}/start")
-            client.post(f"/api/v1/tasks/{task_id}/complete")
-
-            # Verify no new task was auto-created
-            tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
-            assert len(tasks) == 1
 
     def test_project_update_plan_and_criteria(self, tmp_path: Path) -> None:
         """Test updating project plan and success criteria."""
@@ -503,22 +498,54 @@ class TestProjectExecution:
             assert len(data["plan"]) == 1
             assert len(data["success_criteria"]) == 1
 
-    def test_evaluate_endpoint(self, tmp_path: Path) -> None:
+    def test_evaluate_endpoint(self, tmp_path: Path, monkeypatch) -> None:
         """Test the evaluate endpoint for manual completion check."""
+        import cyborg.services.openclaw_reasoning_service as reasoning_module
+        import cyborg.services.project_execution_service as execution_module
+
+        async def fake_evaluate_success_criteria(self, project_id):
+            # Check actual completed task count to determine if criteria are met
+            task_rows = await self.db.fetch_all(
+                """
+                SELECT t.status FROM tasks t
+                INNER JOIN project_tasks pt ON pt.task_id = t.id
+                WHERE pt.project_id = ? AND t.deleted_at IS NULL
+                """,
+                (project_id,),
+            )
+            completed = sum(1 for r in task_rows if r["status"] == "completed")
+            if completed >= 1:
+                return {
+                    "all_met": True,
+                    "met_criteria": ["One done"],
+                    "unmet_criteria": [],
+                    "reasoning": "All tasks completed",
+                }
+            return {
+                "all_met": False,
+                "met_criteria": [],
+                "unmet_criteria": ["One done"],
+                "reasoning": "No tasks completed yet",
+            }
+
+        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "evaluate_success_criteria", fake_evaluate_success_criteria)
+        # Suppress autonomy loop so unconfigured OpenClaw doesn't block the project
+        monkeypatch.setattr(execution_module.ProjectExecutionService, "on_task_completed", lambda *a, **kw: [])
+
         with make_client(tmp_path) as client:
-            # Create project WITHOUT auto_execute but start it manually
+            # Create project — the autonomy checkpoint won't auto-close it
+            # until the evaluate endpoint is called manually.
             project = client.post(
                 "/api/v1/projects",
                 json={
                     "title": "Evaluate Test",
                     "aim": "Test evaluate",
                     "method": "Create and complete a manual project task, then evaluate the project.",
-                    "auto_execute": False,  # Disable auto-execution
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
-                            "title": "Step 1",
-                            "description": "Do it",
+                            "title": "Manual step",
+                            "description": "Do the manual task",
                             "criteria": "Done",
                             "order": 0,
                         },
@@ -533,40 +560,33 @@ class TestProjectExecution:
             ).json()
             project_id = project["id"]
 
-            # Start the project manually (sets state to ACTIVE)
+            # Spec approval triggers execution even for non-auto projects
+            # (start_project_execution creates the first task regardless)
             approve_latest_project_spec(client, project_id)
-            client.post(f"/api/v1/projects/{project_id}/start")
+
+            # Get the auto-created step task from execution
+            project_tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
+            auto_task_id = project_tasks[0]["id"]
 
             # Create and complete a task manually
-            task = client.post(
-                "/api/v1/tasks",
-                json={
-                    "title": "Manual Task",
-                    "description": "A task",
-                    "plan": "1. Do the task. 2. Evaluate the result.",
-                    "priority": "medium",
-                    "project_ids": [project_id],
-                },
-            ).json()
-            task_id = task["id"]
-
-            # Submit and approve plan
-            plan = client.post(
-                f"/api/v1/tasks/{task_id}/plans",
-                json={"content": "Plan"},
-            ).json()
-            client.post(
-                f"/api/v1/plans/{plan['id']}/approve",
-                json={"approver": "Bob"},
+            task = create_task(
+                client,
+                title="Manual Task",
+                description="A task",
+                plan="1. Do the task. 2. Evaluate the result.",
+                priority="medium",
+                project_ids=[project_id],
             )
+            task_id = str(task["id"])
 
             # Evaluate before completion - should not close (criteria not met)
             result = client.post(f"/api/v1/projects/{project_id}/evaluate")
             assert result.json() is None
 
-            # Complete the task
-            client.post(f"/api/v1/tasks/{task_id}/start")
-            client.post(f"/api/v1/tasks/{task_id}/complete")
+            # Complete both tasks
+            for tid in [task_id, auto_task_id]:
+                client.post(f"/api/v1/tasks/{tid}/start")
+                client.post(f"/api/v1/tasks/{tid}/complete", json={"result_summary": "Done"})
 
             # Evaluate after completion - should close (criteria met)
             result = client.post(f"/api/v1/projects/{project_id}/evaluate")

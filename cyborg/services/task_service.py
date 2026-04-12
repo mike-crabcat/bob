@@ -11,12 +11,16 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
-    PlanStatus,
+    NotificationEntityType,
     RetryAction,
     RetryConfig,
     TaskBlockRequest,
     TaskCreate,
     TaskFailureRequest,
+    TaskFileCreate,
+    TaskFileListResponse,
+    TaskFilePurpose,
+    TaskFileResponse,
     TaskHistoryResponse,
     TaskResponse,
     TaskRetryRequest,
@@ -30,6 +34,9 @@ from cyborg.models import (
 from cyborg.services.base import BaseService, json_dumps, json_loads, next_cron_occurrence, utcnow
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.project_autonomy_service import DEPENDENCY_BLOCKED_PREFIX
+
+# Task-level notifications (NEEDS_INPUT, TASK_RESULT) have been removed.
+# Only task assignment (reasoning prompt dispatch) remains via NotificationService.
 from cyborg.services.session_route_service import (
     SessionRouteService,
     has_source_route_metadata,
@@ -50,9 +57,6 @@ class TaskService(BaseService):
         if self._webhook_service is None:
             self._webhook_service = WebhookService(self.db)
         return self._webhook_service
-
-    async def _sync_notifications(self, task_id: str, *, immediate: bool = False) -> None:
-        await NotificationService(self.db).sync_task_state(task_id, immediate=immediate)
 
     async def list_tasks(
         self,
@@ -88,13 +92,10 @@ class TaskService(BaseService):
         task = await self.get_task(task_id)
         return await self._resolve_target_session_from_metadata(task.metadata)
 
-    async def create_task(self, payload: TaskCreate) -> TaskResponse:
-        if payload.status != TaskStatus.PLANNING:
-            raise ConflictError("New tasks must start in 'planning' status")
-
+    async def create_task(self, payload: TaskCreate | dict[str, Any]) -> TaskResponse:
+        payload = TaskCreate.model_validate(payload)
         now = utcnow()
         task_id = str(uuid4())
-        plan_id = str(uuid4())
         next_run_at = payload.next_run_at
         if payload.is_recurring and payload.recurrence_rule and next_run_at is None:
             next_run_at = next_cron_occurrence(payload.recurrence_rule, now)
@@ -106,7 +107,6 @@ class TaskService(BaseService):
                 payload.metadata,
                 payload.project_ids,
             )
-            auto_approve_initial_plan = self._should_auto_approve_initial_plan(task_metadata)
             if self._require_source_route_metadata() and not has_source_route_metadata(task_metadata):
                 raise ConflictError(
                     "Tasks require source routing metadata. "
@@ -114,27 +114,15 @@ class TaskService(BaseService):
                 )
             await self._validate_target_session_metadata(connection, task_metadata)
 
-            task_status = payload.status
-            current_plan_id: str | None = None
-            initial_plan_status = PlanStatus.PENDING_APPROVAL
-            initial_plan_approved_at: str | None = None
-            initial_plan_approved_by: str | None = None
-            initial_plan_is_current = 0
+            dependency_ready = await self._dependency_is_satisfied(
+                {"parent_id": str(payload.parent_id) if payload.parent_id else None}
+            )
+            task_status = TaskStatus.PENDING if dependency_ready else TaskStatus.BLOCKED
             blocked_reason = payload.blocked_reason
             blocked_resume_instructions = payload.blocked_resume_instructions
-            if auto_approve_initial_plan:
-                dependency_ready = await self._dependency_is_satisfied(
-                    {"parent_id": str(payload.parent_id) if payload.parent_id else None}
-                )
-                task_status = TaskStatus.PENDING if dependency_ready else TaskStatus.BLOCKED
-                current_plan_id = plan_id
-                initial_plan_status = PlanStatus.APPROVED
-                initial_plan_approved_at = now.isoformat()
-                initial_plan_approved_by = "cyborg:auto"
-                initial_plan_is_current = 1
-                if not dependency_ready and payload.parent_id is not None:
-                    blocked_reason = self.dependency_blocked_reason(str(payload.parent_id))
-                    blocked_resume_instructions = self.dependency_blocked_resume_instructions(str(payload.parent_id))
+            if not dependency_ready and payload.parent_id is not None:
+                blocked_reason = self.dependency_blocked_reason(str(payload.parent_id))
+                blocked_resume_instructions = self.dependency_blocked_resume_instructions(str(payload.parent_id))
 
             await connection.execute(
                 """
@@ -169,35 +157,6 @@ class TaskService(BaseService):
                 ),
             )
             await self._replace_project_links(connection, task_id, payload.project_ids)
-            await connection.execute(
-                """
-                INSERT INTO plans (
-                    id, task_id, version_number, content, status,
-                    feedback, created_at, approved_at, approved_by, is_current
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    plan_id,
-                    task_id,
-                    1,
-                    payload.plan,
-                    initial_plan_status.value,
-                    None,
-                    now.isoformat(),
-                    initial_plan_approved_at,
-                    initial_plan_approved_by,
-                    initial_plan_is_current,
-                ),
-            )
-            if current_plan_id is not None:
-                await connection.execute(
-                    """
-                    UPDATE tasks
-                    SET current_plan_id = ?
-                    WHERE id = ? AND deleted_at IS NULL
-                    """,
-                    (current_plan_id, task_id),
-                )
             await self._add_history(
                 connection,
                 task_id,
@@ -205,7 +164,11 @@ class TaskService(BaseService):
                 {"status": task_status.value, "priority": payload.priority.value},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=not auto_approve_initial_plan)
+        # Dispatch task assignment as a reasoning prompt (fire-once)
+        try:
+            await NotificationService(self.db).create_task_assignment_notification(task_id)
+        except Exception:
+            pass
         return await self.get_task(task_id)
 
     async def update_task(self, task_id: str, payload: TaskUpdate) -> TaskResponse:
@@ -216,7 +179,6 @@ class TaskService(BaseService):
             return await self.get_task(task_id)
 
         now = utcnow()
-        immediate_notification = False
         raw_metadata = values.get("metadata")
         if values.get("is_recurring") and values.get("recurrence_rule") and values.get("next_run_at") is None:
             values["next_run_at"] = next_cron_occurrence(values["recurrence_rule"], now).isoformat()
@@ -231,11 +193,6 @@ class TaskService(BaseService):
         if "status" in values:
             next_status = TaskStatus(values["status"])
             await self._validate_status_transition(task_id, row["status"], next_status)
-            immediate_notification = (
-                next_status.value != row["status"] and next_status in {TaskStatus.PLANNING, TaskStatus.BLOCKED}
-            )
-            if next_status == TaskStatus.PLANNING:
-                values["current_plan_id"] = None
             if next_status == TaskStatus.ACTIVE and "started_at" not in values:
                 values["started_at"] = now.isoformat()
             if next_status == TaskStatus.COMPLETED and "completed_at" not in values:
@@ -243,7 +200,7 @@ class TaskService(BaseService):
         elif row["status"] == TaskStatus.BLOCKED.value and (
             "blocked_reason" in values or "blocked_resume_instructions" in values
         ):
-            immediate_notification = True
+            pass
 
         assignments = ", ".join(f"{field} = ?" for field in values)
         params = tuple(values.values()) + (task_id,)
@@ -257,7 +214,9 @@ class TaskService(BaseService):
                 await self._validate_project_ids(connection, project_ids)
                 await self._replace_project_links(connection, task_id, project_ids)
             await self._add_history(connection, task_id, "updated", payload.model_dump(exclude_unset=True, mode="json"), now.isoformat())
-        await self._sync_notifications(task_id, immediate=immediate_notification)
+        # Trigger project execution flow when status transitions to completed via update
+        if values.get("status") == TaskStatus.COMPLETED.value and row["status"] != TaskStatus.COMPLETED.value:
+            await self._trigger_project_execution(task_id, row["title"])
         return await self.get_task(task_id)
 
     async def delete_task(self, task_id: str) -> None:
@@ -269,10 +228,121 @@ class TaskService(BaseService):
                 (now, now, task_id),
             )
             await self._add_history(connection, task_id, "deleted", {}, now)
-        await self._sync_notifications(task_id, immediate=False)
 
     async def start_task(self, task_id: str) -> TaskResponse:
         return await self._transition_task(task_id, TaskStatus.ACTIVE, "started")
+
+    async def submit_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
+        """Submit a task for review. OpenClaw agents must use this instead of complete.
+
+        Sets status to SUBMITTED, auto-registers output files, and returns
+        immediately. The submission review runs asynchronously — the task
+        transitions to COMPLETED or back to ACTIVE once the review finishes.
+        """
+        row = await self._get_task_row(task_id)
+        if row["status"] != TaskStatus.ACTIVE.value:
+            raise ConflictError(
+                f"Cannot submit task '{task_id}' from '{row['status']}'. Task must be 'active'."
+            )
+
+        now = utcnow()
+
+        # 1. Transition to SUBMITTED
+        async with self.db.connection(write=True) as connection:
+            await connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, result = COALESCE(?, result), submitted_at = ?, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (
+                    TaskStatus.SUBMITTED.value,
+                    result_summary,
+                    now.isoformat(),
+                    now.isoformat(),
+                    task_id,
+                ),
+            )
+            await self._add_history(
+                connection,
+                task_id,
+                "submitted",
+                {"result_summary": result_summary},
+                now.isoformat(),
+            )
+
+        # 2. Auto-register untracked output files
+        output_directory = await self._compute_output_directory(task_id)
+        if output_directory:
+            try:
+                await self._auto_register_untracked_files(task_id, output_directory)
+            except Exception:
+                pass
+
+        # Return immediately — the caller gets the submitted task.
+        # Review runs in the background via _run_submission_review.
+        return await self.get_task(task_id)
+
+    async def _run_submission_review(self, task_id: str, result_summary: str | None = None) -> None:
+        """Run submission review in the background after submit_task returns."""
+        # Run submission review
+        try:
+            from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+
+            reasoning_service = OpenClawReasoningService(self.db)
+            review = await reasoning_service.review_task_submission(task_id, result_summary)
+        except Exception:
+            # If review fails, reject and retry (safe default)
+            review = {
+                "approved": False,
+                "reasoning": "Review call failed - task will be retried",
+                "issues": ["review_call_failed"],
+                "suggestions": ["Try submitting the task again"],
+            }
+
+        # Check task is still in SUBMITTED state (not manually overridden)
+        current = await self._get_task_row(task_id)
+        if not current or current["status"] != TaskStatus.SUBMITTED.value:
+            return
+
+        # Act on review result
+        if review.get("approved"):
+            await self.complete_task(task_id, result_summary)
+            return
+
+        # Rejected - send back to active and notify
+        retry_now = utcnow()
+        async with self.db.connection(write=True) as connection:
+            await connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, submitted_at = NULL, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (
+                    TaskStatus.ACTIVE.value,
+                    retry_now.isoformat(),
+                    task_id,
+                ),
+            )
+            await self._add_history(
+                connection,
+                task_id,
+                "submission_rejected",
+                {
+                    "reasoning": review.get("reasoning", ""),
+                    "issues": review.get("issues", []),
+                },
+                retry_now.isoformat(),
+            )
+
+        # Dispatch retry notification
+        try:
+            await NotificationService(self.db).create_task_retry_notification(
+                task_id, review, now=retry_now
+            )
+        except Exception:
+            pass
 
     async def complete_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
         row = await self._get_task_row(task_id)
@@ -323,13 +393,17 @@ class TaskService(BaseService):
             # Add journal entry to parent projects
             await self._add_completion_journal_entry(connection, task_id, row["title"], result_summary, now.isoformat())
 
-        await self._sync_notifications(task_id, immediate=False)
-        await NotificationService(self.db).create_task_result_notification(
-            task_id,
-            failed=False,
-            result_summary=result_summary,
-        )
         task_response = await self.get_task(task_id)
+
+        # Resolve any pending/failed-delivery notifications for this task so
+        # the retry loop won't re-dispatch stale prompts to a completed task.
+        try:
+            notification_service = NotificationService(self.db)
+            await notification_service._resolve_pending_notifications(
+                NotificationEntityType.TASK, task_id, now=now,
+            )
+        except Exception:
+            pass
 
         # Trigger post-completion autonomy flow for linked tasks and projects.
         await self._trigger_project_execution(task_id, row["title"], result_summary)
@@ -378,7 +452,6 @@ class TaskService(BaseService):
             if retry_config and retry_config.on_failure == RetryAction.RETRY_FROM:
                 updated_config = retry_config.model_copy(update={"current_attempt": retry_config.current_attempt + 1})
                 if updated_config.current_attempt <= updated_config.max_attempts:
-                    await self._verify_plan_approved(task_id, target_status=TaskStatus.ACTIVE)
                     await self._reset_steps_from_retry_point(connection, task_id, updated_config.retry_from_step, now.isoformat())
                     await connection.execute(
                         """
@@ -432,16 +505,9 @@ class TaskService(BaseService):
                         TaskStepStatus.ACTIVE.value,
                     ),
                 )
-        
-        await self._sync_notifications(task_id, immediate=False)
-        if not should_reload:
-            await NotificationService(self.db).create_task_result_notification(
-                task_id,
-                failed=True,
-                result_summary=payload.result,
-            )
+
         task_response = await self.get_task(task_id)
-        
+
         # Trigger webhook notification (only if actually failed, not retrying)
         if not should_reload:
             await self._trigger_webhook(
@@ -461,7 +527,6 @@ class TaskService(BaseService):
         updated_config = retry_config.model_copy(update={"current_attempt": retry_config.current_attempt + 1})
         if updated_config.current_attempt > updated_config.max_attempts:
             raise ConflictError(f"Task '{task_id}' has exhausted its retry budget")
-        await self._verify_plan_approved(task_id, target_status=TaskStatus.ACTIVE)
 
         async with self.db.connection(write=True) as connection:
             if updated_config.on_failure == RetryAction.RETRY_FROM and updated_config.retry_from_step is not None:
@@ -491,7 +556,7 @@ class TaskService(BaseService):
                 ),
             )
             await self._add_history(connection, task_id, "retried", payload.model_dump(mode="json"), now.isoformat())
-        await self._sync_notifications(task_id, immediate=False)
+
         return await self.get_task(task_id)
 
     async def list_steps(self, task_id: str) -> list[TaskStepResponse]:
@@ -576,8 +641,12 @@ class TaskService(BaseService):
 
         Records the reason and full resume instructions so the task can be
         resumed without relying on conversational context.
+
+        Always creates a task_input approval record so the dashboard can
+        display the blocked task. When input_schema is provided the approval
+        includes a structured input form; otherwise it shows an Unblock button.
         """
-        await self._get_task_row(task_id)
+        row = await self._get_task_row(task_id)
         now = utcnow()
 
         async with self.db.connection(write=True) as connection:
@@ -599,10 +668,12 @@ class TaskService(BaseService):
                 connection,
                 task_id,
                 "blocked",
-                {"reason": payload.reason},
+                {"reason": payload.reason, "has_input_schema": payload.input_schema is not None},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=True)
+
+        await self._create_task_input_approval(task_id, row, payload, now)
+
         return await self.get_task(task_id)
 
     async def unblock_task(self, task_id: str, payload: TaskUnblockRequest) -> TaskResponse:
@@ -649,7 +720,7 @@ class TaskService(BaseService):
                 {"status": resumed_status.value, "notes": payload.notes} if payload.notes else {"status": resumed_status.value},
                 now.isoformat(),
             )
-        await self._sync_notifications(task_id, immediate=False)
+
         return await self.get_task(task_id)
 
     async def list_history(self, task_id: str) -> list[TaskHistoryResponse]:
@@ -666,14 +737,12 @@ class TaskService(BaseService):
         now = utcnow().isoformat()
         started_at = now if status == TaskStatus.ACTIVE else None
 
-        # Check plan approval if transitioning to active
         if status == TaskStatus.ACTIVE:
             if row["status"] != TaskStatus.PENDING.value:
                 raise ConflictError(
                     f"Cannot transition task '{task_id}' from '{row['status']}' to 'active'. "
                     "Task must be in 'pending' status."
                 )
-            await self._verify_plan_approved(task_id, target_status=status)
 
         async with self.db.connection(write=True) as connection:
             await connection.execute(
@@ -699,49 +768,13 @@ class TaskService(BaseService):
                     (TaskStepStatus.ACTIVE.value, now, task_id, TaskStepStatus.PENDING.value),
                 )
             await self._add_history(connection, task_id, action, {"status": status.value}, now)
-        await self._sync_notifications(task_id, immediate=False)
-        return await self.get_task(task_id)
 
-    async def _verify_plan_approved(self, task_id: str, *, target_status: TaskStatus) -> None:
-        """Verify that a task has an approved current plan before transition.
-        
-        Raises ConflictError if no approved plan exists.
-        """
-        # Check if there's an approved plan for this task
-        plan_row = await self.db.fetch_one(
-            """
-            SELECT p.status 
-            FROM plans p
-            INNER JOIN tasks t ON t.current_plan_id = p.id
-            WHERE t.id = ? AND p.status = ?
-            """,
-            (task_id, PlanStatus.APPROVED.value),
-        )
-        
-        if plan_row is None:
-            # Check if there's any plan at all
-            any_plan = await self.db.fetch_one(
-                "SELECT status FROM plans WHERE task_id = ? ORDER BY version_number DESC LIMIT 1",
-                (task_id,),
-            )
-            
-            if any_plan is None:
-                raise ConflictError(
-                    f"Cannot transition task '{task_id}' to '{target_status.value}': "
-                    "no approved plan is available. Submit a plan and have it approved first."
-                )
-            else:
-                raise ConflictError(
-                    f"Cannot transition task '{task_id}' to '{target_status.value}': "
-                    f"current plan is not approved (latest plan status: {any_plan['status']}). "
-                    "Wait for approval or submit a new plan."
-                )
+        return await self.get_task(task_id)
 
     async def _validate_status_transition(self, task_id: str, current_status: str, next_status: TaskStatus) -> None:
         if current_status == next_status.value:
             return
         if next_status == TaskStatus.PENDING:
-            await self._verify_plan_approved(task_id, target_status=next_status)
             row = await self._get_task_row(task_id)
             if not await self._dependency_is_satisfied(row):
                 raise ConflictError(
@@ -749,38 +782,37 @@ class TaskService(BaseService):
                 )
             return
         if next_status == TaskStatus.ACTIVE:
-            if current_status != TaskStatus.PENDING.value:
+            if current_status not in (TaskStatus.PENDING.value, TaskStatus.SUBMITTED.value):
                 raise ConflictError(
                     f"Cannot transition task '{task_id}' from '{current_status}' to 'active'. "
-                    "Task must be in 'pending' status."
+                    "Task must be in 'pending' or 'submitted' status."
                 )
-            await self._verify_plan_approved(task_id, target_status=next_status)
             row = await self._get_task_row(task_id)
             if not await self._dependency_is_satisfied(row):
                 raise ConflictError(
                     f"Cannot transition task '{task_id}' to 'active' while its dependency is incomplete."
                 )
+            return
+        if next_status == TaskStatus.SUBMITTED:
+            if current_status != TaskStatus.ACTIVE.value:
+                raise ConflictError(
+                    f"Cannot transition task '{task_id}' from '{current_status}' to 'submitted'. "
+                    "Task must be in 'active' status."
+                )
+            return
+        if next_status == TaskStatus.COMPLETED:
+            if current_status not in (TaskStatus.ACTIVE.value, TaskStatus.SUBMITTED.value):
+                raise ConflictError(
+                    f"Cannot transition task '{task_id}' from '{current_status}' to 'completed'. "
+                    "Task must be in 'active' or 'submitted' status."
+                )
 
     async def _determine_unblocked_status(self, task_id: str, row: dict[str, Any]) -> TaskStatus:
         if not await self._dependency_is_satisfied(row):
             return TaskStatus.BLOCKED
-        if await self._has_approved_current_plan(task_id):
-            if row.get("started_at"):
-                return TaskStatus.ACTIVE
-            return TaskStatus.PENDING
-        return TaskStatus.PLANNING
-
-    async def _has_approved_current_plan(self, task_id: str) -> bool:
-        row = await self.db.fetch_one(
-            """
-            SELECT 1
-            FROM plans p
-            INNER JOIN tasks t ON t.current_plan_id = p.id
-            WHERE t.id = ? AND p.status = ?
-            """,
-            (task_id, PlanStatus.APPROVED.value),
-        )
-        return row is not None
+        if row.get("started_at"):
+            return TaskStatus.ACTIVE
+        return TaskStatus.PENDING
 
     async def _dependency_is_satisfied(self, row: dict[str, Any]) -> bool:
         parent_id = row.get("parent_id")
@@ -805,6 +837,47 @@ class TaskService(BaseService):
             "Resume automatically once the parent task has completed."
         )
 
+    async def _create_task_input_approval(
+        self,
+        task_id: str,
+        task_row: dict[str, Any],
+        payload: TaskBlockRequest,
+        now: Any,
+    ) -> None:
+        """Create a task_input approval record so the dashboard can collect user input."""
+        from uuid import uuid4
+
+        approval_id = str(uuid4())
+        now_iso = now.isoformat()
+        input_schema_json = json_dumps(payload.input_schema.model_dump(mode="json")) if payload.input_schema else None
+
+        proposal_data = {
+            "task_id": task_id,
+            "task_title": task_row.get("title", ""),
+            "reason": payload.reason,
+            "resume_instructions": payload.resume_instructions,
+        }
+
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, status, priority, requested_at, requested_by,
+                input_schema, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, 'pending', 'normal', ?, 'system', ?, ?)
+            """,
+            (
+                approval_id,
+                task_id,
+                f"Task input needed: {task_row.get('title', 'Task')}",
+                payload.reason,
+                json_dumps(proposal_data),
+                now_iso,
+                input_schema_json,
+                now_iso,
+            ),
+        )
+
     async def _get_task_row(self, task_id: str) -> dict[str, Any]:
         row = await self.db.fetch_one("SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL", (task_id,))
         if row is None:
@@ -815,7 +888,10 @@ class TaskService(BaseService):
         row["retry_config"] = json_loads(row.get("retry_config"), None)
         row["metadata"] = json_loads(row.get("metadata"), {})
         row["project_ids"] = await self._get_project_ids(row["id"])
-        # current_plan_id is already in the row from the database
+        row.pop("current_plan_id", None)
+        # Attach output directory and file listings
+        row["output_directory"] = await self._compute_output_directory(row["id"])
+        row["files"] = await self._fetch_task_file_dicts(row["id"])
         return row
 
     async def _get_project_ids(self, task_id: str) -> list[str]:
@@ -934,9 +1010,6 @@ class TaskService(BaseService):
         if isinstance(current, Settings):
             return current.openclaw.enabled
         return False
-
-    def _should_auto_approve_initial_plan(self, metadata: dict[str, Any]) -> bool:
-        return bool(metadata.get("auto_created_by_project"))
 
     async def _replace_project_links(self, connection: Connection, task_id: str, project_ids: list[Any]) -> None:
         unique_project_ids = list(dict.fromkeys(str(project_id) for project_id in project_ids))
@@ -1086,3 +1159,183 @@ class TaskService(BaseService):
         except Exception:
             # Don't let webhook failures affect task operations
             pass
+
+    # ------------------------------------------------------------------
+    # File management
+    # ------------------------------------------------------------------
+
+    async def register_task_file(
+        self,
+        task_id: str,
+        project_id: str,
+        payload: TaskFileCreate,
+    ) -> TaskFileResponse:
+        """Register a file produced by a task in the database."""
+        await self._get_task_row(task_id)
+        now = utcnow().isoformat()
+
+        # Compute the relative path under the project workspace
+        relative_path = f"tasks/{task_id.replace('-', '')[:8]}/{payload.filename}"
+
+        # Determine size if possible
+        size_bytes: int | None = None
+        try:
+            from pathlib import Path
+
+            full_path = Path(f"/home/mike/.openclaw/workspace/projects") / relative_path
+            if full_path.exists():
+                size_bytes = full_path.stat().st_size
+        except Exception:
+            pass
+
+        file_id = str(uuid4())
+        await self.db.execute(
+            """
+            INSERT INTO task_files (
+                id, task_id, project_id, filename, relative_path,
+                purpose, description, content_type, size_bytes,
+                metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                file_id,
+                task_id,
+                project_id,
+                payload.filename,
+                relative_path,
+                payload.purpose.value,
+                payload.description,
+                payload.content_type,
+                size_bytes,
+                json_dumps({}),
+                now,
+                now,
+            ),
+        )
+        row = await self.db.fetch_one("SELECT * FROM task_files WHERE id = ?", (file_id,))
+        return self._task_file_response_from_row(dict(row))
+
+    async def list_task_files(self, task_id: str) -> TaskFileListResponse:
+        """Return all files registered for a task, plus the output directory."""
+        await self._get_task_row(task_id)
+        rows = await self.db.fetch_all(
+            "SELECT * FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+        files = [self._task_file_response_from_row(dict(r)) for r in rows]
+        return TaskFileListResponse(
+            task_id=task_id,
+            output_directory=await self._compute_output_directory(task_id),
+            files=files,
+        )
+
+    async def delete_task_file(self, task_id: str, file_id: str) -> None:
+        """Remove a task-file record from the database (does NOT delete from disk)."""
+        await self._get_task_row(task_id)
+        await self.db.execute(
+            "DELETE FROM task_files WHERE id = ? AND task_id = ?",
+            (file_id, task_id),
+        )
+
+    async def _compute_output_directory(self, task_id: str) -> str | None:
+        """Return the output directory path for a task, or None if no project link."""
+        project_ids = await self._get_project_ids(task_id)
+        if not project_ids:
+            return None
+        project_id = project_ids[0]
+        try:
+            from cyborg.services.project_service import ProjectService
+
+            project_service = ProjectService(self.db)
+            project_path = await project_service.get_project_path(project_id)
+            short_id = task_id.replace("-", "")[:8]
+            return str(project_path / "tasks" / short_id)
+        except Exception:
+            return None
+
+    async def _fetch_task_file_dicts(self, task_id: str) -> list[dict[str, Any]]:
+        """Fetch task file rows as plain dicts suitable for TaskFileResponse validation."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            d = dict(row)
+            d["metadata"] = json_loads(d.get("metadata"), {})
+            result.append(d)
+        return result
+
+    async def _auto_register_untracked_files(self, task_id: str, output_directory: str) -> None:
+        """Scan the output directory for files not yet tracked and register them."""
+        from pathlib import Path
+
+        output_path = Path(output_directory)
+        if not output_path.exists():
+            return
+
+        project_ids = await self._get_project_ids(task_id)
+        if not project_ids:
+            return
+        project_id = project_ids[0]
+
+        # Get already-tracked filenames
+        tracked = await self.db.fetch_all(
+            "SELECT filename FROM task_files WHERE task_id = ?",
+            (task_id,),
+        )
+        tracked_names = {r["filename"] for r in tracked}
+
+        for child in sorted(output_path.iterdir()):
+            if child.is_dir():
+                continue
+            if child.name in tracked_names:
+                continue
+            payload = TaskFileCreate(
+                filename=child.name,
+                purpose=self._guess_purpose(child.name),
+                content_type=self._guess_content_type(child.name),
+            )
+            try:
+                await self.register_task_file(task_id, project_id, payload)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _guess_purpose(filename: str) -> TaskFilePurpose:
+        """Guess a file purpose from its name."""
+        name = filename.lower()
+        if name.endswith((".log",)):
+            return TaskFilePurpose.LOG
+        if name.endswith((".json", ".csv", ".yaml", ".yml", ".toml")):
+            return TaskFilePurpose.ANALYSIS
+        if name.endswith((".md", ".txt", ".rst")):
+            return TaskFilePurpose.RESULT
+        return TaskFilePurpose.ARTIFACT
+
+    @staticmethod
+    def _guess_content_type(filename: str) -> str:
+        """Guess MIME type from filename extension."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        mapping = {
+            "json": "application/json",
+            "csv": "text/csv",
+            "md": "text/markdown",
+            "txt": "text/plain",
+            "html": "text/html",
+            "yaml": "text/yaml",
+            "yml": "text/yaml",
+            "toml": "text/plain",
+            "log": "text/plain",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "pdf": "application/pdf",
+        }
+        return mapping.get(ext, "application/octet-stream")
+
+    @staticmethod
+    def _task_file_response_from_row(row: dict[str, Any]) -> TaskFileResponse:
+        """Build a TaskFileResponse from a raw DB row dict."""
+        row["metadata"] = json_loads(row.get("metadata"), {})
+        return TaskFileResponse.model_validate(row)

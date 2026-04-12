@@ -10,10 +10,11 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from jinja2 import FileSystemLoader
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 
@@ -40,12 +41,21 @@ async def _get_pending_approval_count(db: Database) -> int:
     return int(row["count"]) if row and row["count"] else 0
 
 
+async def _get_project_id_for_task(db: Database, task_id: str) -> str | None:
+    """Look up the project_id for a task via the project_tasks join table."""
+    row = await db.fetch_one("SELECT project_id FROM project_tasks WHERE task_id = ?", (task_id,))
+    return row["project_id"] if row else None
+
+
 def _approval_review_href(approval_type: str | None, entity_id: str | None) -> str | None:
     """Return the best dashboard review link for an approval item."""
     if not entity_id:
         return None
     if approval_type in {"project_plan", "strategy_refinement", "follow_up_tasks"}:
         return f"/dashboard/projects/{entity_id}"
+    if approval_type == "task_input":
+        # Link to the parent project for context
+        return None  # Task input is handled inline in the approvals queue
     return None
 
 
@@ -217,6 +227,12 @@ async def overview(
     pending_approval_items = []
     for item in pending_items:
         approval_type = item.get("approval_type", "unknown")
+        proposal = None
+        if item.get("proposal_data"):
+            try:
+                proposal = json.loads(item["proposal_data"])
+            except (json.JSONDecodeError, TypeError):
+                pass
         pending_approval_items.append({
             "id": item["id"],
             "type": approval_type,
@@ -226,6 +242,7 @@ async def overview(
             "priority": item.get("priority", "normal"),
             "requested_at": _format_time(item["requested_at"]),
             "review_href": _approval_review_href(approval_type, item.get("entity_id")),
+            "proposal": proposal,
         })
 
     task_stats = await db.fetch_all(
@@ -238,7 +255,6 @@ async def overview(
     )
     task_status_counts = {row["status"]: row["count"] for row in task_stats}
     task_status_data = [
-        task_status_counts.get(TaskStatus.PLANNING.value, 0),
         task_status_counts.get("pending", 0),
         task_status_counts.get("active", 0),
         task_status_counts.get("blocked", 0),
@@ -513,6 +529,67 @@ async def project_detail(
         except (json.JSONDecodeError, TypeError):
             project_data["success_criteria"] = []
 
+    # Get prompt history for this project and its tasks
+    prompts = await db.fetch_all(
+        """
+        SELECT ph.* FROM prompt_history ph
+        WHERE ph.project_id = ?
+           OR ph.task_id IN (SELECT pt.task_id FROM project_tasks pt WHERE pt.project_id = ?)
+        ORDER BY ph.timestamp DESC
+        LIMIT 50
+        """,
+        (project_id, project_id),
+    )
+
+    # Scan project workspace for files
+    from cyborg.services.project_service import ProjectService
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+
+    # Build short-id -> title mapping for task file association
+    task_id_map: dict[str, str] = {}
+    for t in tasks:
+        short = t["id"].replace("-", "")[:8]
+        task_id_map[short] = t["title"]
+
+    scanned_files = _scan_project_files(project_path, task_id_map=task_id_map)
+    file_categories = _group_files_by_category(scanned_files)
+
+    # Get specs for this project
+    specs = await db.fetch_all(
+        """
+        SELECT id, version_number, aim, method, plan, success_criteria,
+               status, feedback, created_at, approved_at
+        FROM project_specs
+        WHERE project_id = ?
+        ORDER BY version_number DESC
+        """,
+        (project_id,),
+    )
+    # Parse JSON fields in specs
+    spec_list = []
+    for s in specs:
+        sd = dict(s)
+        for field in ("plan", "success_criteria"):
+            if sd.get(field):
+                try:
+                    sd[field] = json.loads(sd[field])
+                except (json.JSONDecodeError, TypeError):
+                    sd[field] = []
+            else:
+                sd[field] = []
+        spec_list.append(sd)
+
+    # Get pending approval for the latest spec
+    pending_approval = await db.fetch_one(
+        """
+        SELECT id, status FROM approvals
+        WHERE entity_id = ? AND approval_type = 'project_plan' AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (project_id,),
+    )
+
     return _render_template(
         "dashboard/project_detail.html",
         request,
@@ -523,7 +600,222 @@ async def project_detail(
             "tasks": tasks,
             "journal": journal,
             "health_checks": health_checks,
+            "prompts": prompts,
+            "file_categories": file_categories,
+            "file_count": len(scanned_files),
+            "specs": spec_list,
+            "pending_approval": dict(pending_approval) if pending_approval else None,
         },
+    )
+
+
+@router.post("/projects/{project_id}/delete")
+async def delete_project(
+    project_id: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Hard-delete a project and redirect to the projects list."""
+    from cyborg.services.project_service import ProjectService
+    project_service = ProjectService(db)
+    await project_service.delete_project(project_id)
+    return Response(
+        status_code=303,
+        headers={"Location": "/dashboard/projects"},
+    )
+
+
+@router.get("/tasks/{task_id}", response_class=HTMLResponse)
+async def task_detail(
+    task_id: str,
+    request: Request,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Individual task detail view with unified activity timeline."""
+    settings = _get_settings()
+    pending_count = await _get_pending_approval_count(db)
+
+    task = await db.fetch_one(
+        "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
+        (task_id,),
+    )
+    if not task:
+        return _render_template(
+            "dashboard/base.html",
+            request,
+            {"version": settings.version, "pending_count": pending_count},
+        )
+
+    # Parent project for breadcrumb
+    project_row = await db.fetch_one(
+        "SELECT project_id FROM project_tasks WHERE task_id = ?",
+        (task_id,),
+    )
+    project_id = project_row["project_id"] if project_row else None
+    project_info = None
+    if project_id:
+        p = await db.fetch_one("SELECT id, title FROM projects WHERE id = ?", (project_id,))
+        if p:
+            project_info = {"id": p["id"], "title": p.get("title")}
+
+    # Task steps
+    steps = await db.fetch_all(
+        "SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_number ASC",
+        (task_id,),
+    )
+
+    # Task files
+    task_files = await db.fetch_all(
+        "SELECT * FROM task_files WHERE task_id = ? ORDER BY created_at DESC",
+        (task_id,),
+    )
+
+    # Build unified activity timeline from 4 sources
+    timeline: list[dict[str, Any]] = []
+
+    # 1. Task history
+    history_rows = await db.fetch_all(
+        "SELECT action, details, timestamp FROM task_history WHERE task_id = ?",
+        (task_id,),
+    )
+    for row in history_rows:
+        timeline.append({
+            "type": "history",
+            "timestamp": row["timestamp"],
+            "label": row["action"].replace("_", " ").title() if row["action"] else "Event",
+            "summary": row["details"][:200] if row["details"] else "",
+        })
+
+    # 2. Notifications
+    notif_rows = await db.fetch_all(
+        "SELECT notification_type, title, message, status, delivery_status, created_at FROM notifications WHERE entity_type = 'task' AND entity_id = ?",
+        (task_id,),
+    )
+    for row in notif_rows:
+        msg = row["message"] or ""
+        summary = (row["title"] + ": " + msg) if row["title"] else msg
+        timeline.append({
+            "type": "notification",
+            "timestamp": row["created_at"],
+            "label": row["notification_type"].replace("_", " ").title(),
+            "summary": summary[:200],
+            "status": row.get("status"),
+        })
+
+    # 3. Prompt history
+    prompt_rows = await db.fetch_all(
+        "SELECT category, prompt_text, token_count_estimate, timestamp FROM prompt_history WHERE task_id = ?",
+        (task_id,),
+    )
+    for row in prompt_rows:
+        timeline.append({
+            "type": "prompt",
+            "timestamp": row["timestamp"],
+            "label": row["category"].replace("_", " ").title(),
+            "summary": row["prompt_text"][:200] if row["prompt_text"] else "",
+            "full_text": row["prompt_text"],
+            "tokens": row["token_count_estimate"],
+        })
+
+    # 4. Approvals
+    approval_rows = await db.fetch_all(
+        "SELECT id, title, status, input_schema, input_response, requested_at, reviewed_at FROM approvals WHERE approval_type = 'task_input' AND entity_id = ?",
+        (task_id,),
+    )
+    for row in approval_rows:
+        timeline.append({
+            "type": "approval",
+            "timestamp": row["requested_at"],
+            "label": "Input Request",
+            "summary": row["title"] or "Task input requested",
+            "status": row["status"],
+            "approval_id": row["id"],
+        })
+        if row["reviewed_at"]:
+            timeline.append({
+                "type": "approval",
+                "timestamp": row["reviewed_at"],
+                "label": ("Input Approved" if row["status"] == "approved" else "Input Rejected"),
+                "summary": row["title"] or "Task input resolved",
+                "status": row["status"],
+                "approval_id": row["id"],
+            })
+
+    # Sort by timestamp descending
+    timeline.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+    timeline = timeline[:100]
+
+    # Pending approval for inline form
+    pending_approval = None
+    if task["status"] == "blocked":
+        pa = await db.fetch_one(
+            "SELECT id, title, description, input_schema, proposal_data FROM approvals WHERE approval_type = 'task_input' AND entity_id = ? AND status = 'pending' LIMIT 1",
+            (task_id,),
+        )
+        if pa:
+            pending_approval = dict(pa)
+            pending_approval["proposal"] = None
+            if pa.get("proposal_data"):
+                try:
+                    pending_approval["proposal"] = json.loads(pa["proposal_data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            pending_approval["input_schema_parsed"] = None
+            if pa.get("input_schema"):
+                try:
+                    pending_approval["input_schema_parsed"] = json.loads(pa["input_schema"])
+                    # Resolve media URLs if we have a project_id
+                    schema = pending_approval["input_schema_parsed"]
+                    if project_id and schema.get("type") == "multi_choice":
+                        for option in schema.get("options", []):
+                            if option.get("image_url"):
+                                option["image_url"] = f"/dashboard/projects/{project_id}/files/{option['image_url']}"
+                            if option.get("audio_url"):
+                                option["audio_url"] = f"/dashboard/projects/{project_id}/files/{option['audio_url']}"
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    return _render_template(
+        "dashboard/task_detail.html",
+        request,
+        {
+            "version": settings.version,
+            "pending_count": pending_count,
+            "task": dict(task),
+            "project": project_info,
+            "steps": steps,
+            "task_files": task_files,
+            "timeline": timeline,
+            "pending_approval": pending_approval,
+        },
+    )
+
+
+@router.get("/projects/{project_id}/files/{file_path:path}")
+async def serve_project_file(
+    project_id: str,
+    file_path: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Serve a file from the project workspace for browser viewing."""
+    from cyborg.services.project_service import ProjectService
+    from starlette.responses import FileResponse as StarletteFileResponse
+    import mimetypes
+
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+
+    resolved = (project_path / file_path).resolve()
+    workspace_root = project_path.resolve()
+
+    if not str(resolved).startswith(str(workspace_root)):
+        return Response(status_code=403)
+    if not resolved.is_file():
+        return Response(status_code=404)
+
+    content_type, _ = mimetypes.guess_type(str(resolved))
+    return StarletteFileResponse(
+        str(resolved),
+        media_type=content_type or "application/octet-stream",
     )
 
 
@@ -590,6 +882,26 @@ async def approvals(
             except:
                 proposal_preview = a["proposal_data"][:500] if a["proposal_data"] else None
 
+        input_schema = None
+        if a.get("input_schema"):
+            try:
+                input_schema = json.loads(a["input_schema"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Resolve project_id for task_input approvals to build media URLs
+        project_id = None
+        if a["approval_type"] == "task_input" and a.get("entity_id"):
+            project_id = await _get_project_id_for_task(db, a["entity_id"])
+
+        # Prefix media paths with full dashboard URLs
+        if input_schema and project_id and input_schema.get("type") == "multi_choice":
+            for option in input_schema.get("options", []):
+                if option.get("image_url"):
+                    option["image_url"] = f"/dashboard/projects/{project_id}/files/{option['image_url']}"
+                if option.get("audio_url"):
+                    option["audio_url"] = f"/dashboard/projects/{project_id}/files/{option['audio_url']}"
+
         approvals.append({
             "id": a["id"],
             "approval_type": a["approval_type"],
@@ -602,6 +914,8 @@ async def approvals(
             "requested_by": a.get("requested_by"),
             "proposal": proposal_data,
             "proposal_preview": proposal_preview,
+            "input_schema": input_schema,
+            "project_id": project_id,
             "review_href": _approval_review_href(a["approval_type"], a.get("entity_id")),
         })
 
@@ -623,9 +937,69 @@ async def approvals(
 @router.post("/approve/{approval_id}", response_class=HTMLResponse)
 async def approve_approval(
     approval_id: str,
+    request: Request,
     db: Database = Depends(get_database),
 ) -> Response:
     """Approve an item and update the display."""
+    approval = await db.fetch_one(
+        "SELECT * FROM approvals WHERE id = ?",
+        (approval_id,),
+    )
+    if not approval:
+        return Response(content="Approval not found", status_code=404)
+
+    entity_id = approval["entity_id"]
+    approval_type = approval["approval_type"]
+
+    # If this is a project_plan approval, invoke the spec approval service
+    if approval_type == "project_plan" and entity_id:
+        from cyborg.services.project_spec_service import ProjectSpecService
+        from cyborg.models import ProjectSpecApproveRequest
+
+        spec_service = ProjectSpecService(db)
+        pending_spec = await db.fetch_one(
+            """
+            SELECT id FROM project_specs
+            WHERE project_id = ? AND status = 'pending_approval'
+            ORDER BY version_number DESC LIMIT 1
+            """,
+            (entity_id,),
+        )
+        if pending_spec:
+            approve_payload = ProjectSpecApproveRequest(approver="dashboard_user")
+            await spec_service.approve_spec(str(pending_spec["id"]), approve_payload)
+        else:
+            # Spec already approved (e.g. re-approving after a reset) — just trigger execution
+            from cyborg.models import ProjectState
+            project = await db.fetch_one(
+                "SELECT state FROM projects WHERE id = ? AND deleted_at IS NULL",
+                (entity_id,),
+            )
+            if project and project["state"] in (
+                ProjectState.PLANNING.value,
+                ProjectState.PAUSED.value,
+                ProjectState.ACTIVE.value,
+            ):
+                from cyborg.services.project_execution_service import ProjectExecutionService
+                execution_service = ProjectExecutionService(db)
+                if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+                    await execution_service.cleanup_old_plan_tasks(entity_id)
+                await execution_service.start_project_execution(entity_id)
+
+    # If this is a task_input approval, unblock the task
+    if approval_type == "task_input" and entity_id:
+        from cyborg.services.task_service import TaskService
+        from cyborg.models import TaskUnblockRequest
+
+        task_service = TaskService(db)
+        try:
+            await task_service.unblock_task(
+                entity_id,
+                TaskUnblockRequest(notes="Unblocked via dashboard"),
+            )
+        except Exception:
+            pass
+
     await db.execute(
         """
         UPDATE approvals
@@ -637,7 +1011,12 @@ async def approve_approval(
         (datetime.now(timezone.utc).isoformat(), approval_id),
     )
 
-    # Return empty fragment to remove the row
+    # Check if redirected from project detail page
+    next_url = request.query_params.get("next")
+    if next_url:
+        return Response(status_code=303, headers={"Location": next_url})
+
+    # Return empty fragment to remove the row (for HTMX from approvals page)
     return Response(content="", status_code=200)
 
 
@@ -647,6 +1026,48 @@ async def reject_approval(
     db: Database = Depends(get_database),
 ) -> Response:
     """Reject an item and update the display."""
+    approval = await db.fetch_one(
+        "SELECT * FROM approvals WHERE id = ?",
+        (approval_id,),
+    )
+    if not approval:
+        return Response(content="Approval not found", status_code=404)
+
+    entity_id = approval["entity_id"]
+    approval_type = approval["approval_type"]
+
+    # If this is a project_plan approval, invoke the spec reject service
+    if approval_type == "project_plan" and entity_id:
+        from cyborg.services.project_spec_service import ProjectSpecService
+        from cyborg.models import ProjectSpecRejectRequest
+
+        spec_service = ProjectSpecService(db)
+        pending_spec = await db.fetch_one(
+            """
+            SELECT id FROM project_specs
+            WHERE project_id = ? AND status = 'pending_approval'
+            ORDER BY version_number DESC LIMIT 1
+            """,
+            (entity_id,),
+        )
+        if pending_spec:
+            reject_payload = ProjectSpecRejectRequest(feedback="Rejected via dashboard")
+            await spec_service.reject_spec(str(pending_spec["id"]), reject_payload)
+
+    # If this is a task_input approval, unblock the task with a declined note
+    if approval_type == "task_input" and entity_id:
+        from cyborg.services.task_service import TaskService
+        from cyborg.models import TaskUnblockRequest
+
+        task_service = TaskService(db)
+        try:
+            await task_service.unblock_task(
+                entity_id,
+                TaskUnblockRequest(notes="User declined to provide input via dashboard"),
+            )
+        except Exception:
+            pass
+
     await db.execute(
         """
         UPDATE approvals
@@ -660,6 +1081,176 @@ async def reject_approval(
 
     # Return empty fragment to remove the row
     return Response(content="", status_code=200)
+
+
+@router.post("/specs/{spec_id}/reject-and-revise", response_class=HTMLResponse)
+async def reject_and_revise_spec(
+    spec_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Reject a spec with feedback and trigger revision reasoning in the background."""
+    from cyborg.models import ProjectSpecRejectRequest
+    from cyborg.services.project_spec_service import ProjectSpecService
+
+    form = await request.form()
+    feedback = str(form.get("feedback", "")).strip()
+    allow_aim = form.get("allow_aim_changes") is not None
+    allow_criteria = form.get("allow_criteria_changes") is not None
+
+    if not feedback:
+        return Response(content="Feedback is required", status_code=400)
+
+    spec_service = ProjectSpecService(db)
+
+    # Reject the spec (fast — DB only)
+    reject_payload = ProjectSpecRejectRequest(feedback=feedback)
+    await spec_service.reject_spec(spec_id, reject_payload)
+
+    # Mark the approval as rejected
+    spec_row = await db.fetch_one("SELECT project_id FROM project_specs WHERE id = ?", (spec_id,))
+    project_id = spec_row["project_id"] if spec_row else None
+    if project_id:
+        await db.execute(
+            """
+            UPDATE approvals SET status = 'rejected', reviewed_at = ?, reviewed_by = 'dashboard_user'
+            WHERE entity_id = ? AND approval_type = 'project_plan' AND status = 'pending'
+            """,
+            (datetime.now(timezone.utc).isoformat(), project_id),
+        )
+
+        # Trigger revision in background (reasoning is slow)
+        async def _run_revision():
+            try:
+                await spec_service.revise_spec_after_rejection(
+                    project_id,
+                    feedback,
+                    allow_aim_changes=allow_aim,
+                    allow_criteria_changes=allow_criteria,
+                )
+            except Exception:
+                pass  # Revision failure is okay — project stays in planning for manual re-submission
+
+        background_tasks.add_task(_run_revision)
+
+    # Redirect back to project page immediately
+    redirect_id = project_id or ""
+    return Response(
+        status_code=303,
+        headers={"Location": f"/dashboard/projects/{redirect_id}"},
+    )
+
+
+@router.post("/approve/{approval_id}/input", response_class=HTMLResponse)
+async def resolve_task_input(
+    approval_id: str,
+    request: Request,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Resolve a task_input approval with the user's structured input."""
+    approval = await db.fetch_one(
+        "SELECT * FROM approvals WHERE id = ?",
+        (approval_id,),
+    )
+    if not approval:
+        return Response(content="Approval not found", status_code=404)
+
+    if approval["approval_type"] != "task_input":
+        return Response(content="Not a task input approval", status_code=400)
+
+    entity_id = approval["entity_id"]
+
+    # Parse the submitted form data
+    form = await request.form()
+    response_value = form.get("response", "")
+    if isinstance(response_value, str) and not response_value.strip():
+        return Response(content="Response is required", status_code=400)
+
+    # Determine if multi_choice was used (form sends comma-separated or repeated fields)
+    input_schema_raw = approval.get("input_schema")
+    input_prompt = ""
+    if input_schema_raw:
+        try:
+            input_schema = json.loads(input_schema_raw)
+            input_prompt = input_schema.get("prompt", "")
+            if input_schema.get("type") == "multi_choice" and input_schema.get("allow_multiple"):
+                # Multi-select: collect all response values
+                values = form.getlist("response")
+                response_value = [v.strip() for v in values if v.strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    response_json = json.dumps(response_value if isinstance(response_value, list) else response_value.strip())
+
+    # Update approval with the response
+    await db.execute(
+        """
+        UPDATE approvals
+        SET status = 'approved',
+            input_response = ?,
+            reviewed_at = ?,
+            reviewed_by = 'dashboard_user'
+        WHERE id = ?
+        """,
+        (response_json, now_iso, approval_id),
+    )
+
+    # Unblock the task with the user's input
+    from cyborg.services.task_service import TaskService
+    from cyborg.models import TaskUnblockRequest
+
+    task_service = TaskService(db)
+    response_summary = response_value if isinstance(response_value, str) else ", ".join(response_value)
+    await task_service.unblock_task(
+        entity_id,
+        TaskUnblockRequest(notes=f"User input received: {response_summary}"),
+    )
+
+    # Dispatch input response notification to the task session
+    try:
+        from cyborg.services.notification_service import NotificationService
+        notification_service = NotificationService(db)
+        await notification_service.create_task_input_response_notification(
+            entity_id,
+            response_value if isinstance(response_value, list) else response_value.strip(),
+            input_prompt,
+            approval_id,
+        )
+    except Exception:
+        logger.exception("Failed to dispatch task_input_response notification for approval %s", approval_id)
+
+    # Return empty fragment to remove the row
+    return Response(content="", status_code=200)
+
+
+@router.post("/tasks/{task_id}/tap")
+async def tap_task(
+    task_id: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Send a nudge to the OpenClaw session working on an active task."""
+    from fastapi.responses import JSONResponse
+
+    task = await db.fetch_one(
+        "SELECT id, status FROM tasks WHERE id = ? AND deleted_at IS NULL",
+        (task_id,),
+    )
+    if not task:
+        return JSONResponse(content={"error": "Task not found"}, status_code=404)
+
+    if task["status"] != TaskStatus.ACTIVE.value:
+        return JSONResponse(content={"error": "Task is not active"}, status_code=400)
+
+    from cyborg.services.notification_service import NotificationService
+    notification_service = NotificationService(db)
+    notification_id = await notification_service.create_task_tap_notification(task_id)
+
+    if notification_id is None:
+        return JSONResponse(content={"error": "Task has no delivery route"}, status_code=422)
+
+    return JSONResponse(content={"status": "ok", "task_id": task_id})
 
 
 @router.get("/logs", response_class=HTMLResponse)
@@ -1021,6 +1612,8 @@ def _render_template(template_name: str, request: Request, context: dict[str, An
 
     # Register custom filters
     env.filters['relative_time'] = _format_relative_time
+    env.filters['file_size'] = _format_file_size
+    env.filters['file_icon'] = _file_icon
 
     # Add request to context
     context["request"] = request
@@ -1031,7 +1624,18 @@ def _render_template(template_name: str, request: Request, context: dict[str, An
     context.setdefault("pending_count", 0)
 
     template = env.get_template(template_name)
-    return HTMLResponse(content=template.render(context))
+    response = HTMLResponse(content=template.render(context))
+
+    # Set dashboard secret cookie so form submissions are authenticated
+    if settings.dashboard_secret_configured:
+        response.set_cookie(
+            key="cyborg_dashboard_secret",
+            value=settings.dashboard_secret,
+            httponly=True,
+            samesite="strict",
+        )
+
+    return response
 
 
 def _format_time(iso_string: str | None) -> str:
@@ -1081,3 +1685,86 @@ def _format_duration_minutes(avg_minutes: float | None) -> str:
     if minutes == 0:
         return f"{hours}h"
     return f"{hours}h {minutes}m"
+
+
+def _format_file_size(size_bytes: int | None) -> str:
+    """Format a byte count as a human-readable size."""
+    if size_bytes is None:
+        return "--"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _file_icon(filename: str) -> str:
+    """Return a small text icon based on file extension."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    icons = {
+        "md": "\U0001f4c4", "txt": "\U0001f4c4",
+        "png": "\U0001f5bc", "jpg": "\U0001f5bc", "jpeg": "\U0001f5bc",
+        "webp": "\U0001f5bc", "gif": "\U0001f5bc",
+        "mp3": "\U0001f3b5", "wav": "\U0001f3b5", "flac": "\U0001f3b5",
+        "py": "\U0001f40d", "sh": "\u2699",
+        "json": "\U0001f4cb", "csv": "\U0001f4ca",
+        "pdf": "\U0001f4d5",
+    }
+    return icons.get(ext, "\U0001f4ce")
+
+
+_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache"}
+
+
+def _scan_project_files(
+    project_path: Path,
+    *,
+    task_id_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Scan the project workspace for files, returning entries for the template."""
+    from pathlib import Path as _Path
+
+    workspace_root = project_path.resolve()
+    if not workspace_root.exists():
+        return []
+
+    files: list[dict[str, Any]] = []
+    for child in sorted(workspace_root.rglob("*")):
+        if not child.is_file():
+            continue
+        rel_parts = child.relative_to(workspace_root).parts
+        if any(part.startswith(".") or part in _SKIP_DIRS for part in rel_parts):
+            continue
+
+        relative = str(child.relative_to(workspace_root))
+        stat = child.stat()
+        category = rel_parts[0] if len(rel_parts) > 1 else "root"
+
+        entry: dict[str, Any] = {
+            "name": child.name,
+            "relative_path": relative,
+            "category": category,
+            "size_bytes": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+
+        # Annotate task files with their task title
+        if category == "tasks" and len(rel_parts) >= 3 and task_id_map:
+            short_id = rel_parts[1]
+            if short_id in task_id_map:
+                entry["task_short_id"] = short_id
+                entry["task_title"] = task_id_map[short_id]
+
+        files.append(entry)
+
+    return files
+
+
+def _group_files_by_category(files: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group scanned files by their category (first path segment)."""
+    categories: dict[str, list[dict[str, Any]]] = {}
+    for f in files:
+        categories.setdefault(f["category"], []).append(f)
+    return categories

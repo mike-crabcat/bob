@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from cyborg.database import Database
 from cyborg.models import PlanStep, SuccessCriterion
-from cyborg.services.base import BaseService
+from cyborg.services.base import BaseService, json_loads
 from cyborg.services.context_builder import ContextBuilder, ContextScope
 from cyborg.services.prompt_history import log_prompt
 
@@ -39,11 +39,13 @@ class OpenClawReasoningService(BaseService):
     """
 
     # Default timeouts for different reasoning types (seconds)
-    TIMEOUT_PLAN = 60
-    TIMEOUT_EVALUATION = 60
-    TIMEOUT_REFINEMENT = 90
-    TIMEOUT_LEARNING = 75
-    TIMEOUT_DEFAULT = 60
+    TIMEOUT_PLAN = 180
+    TIMEOUT_EVALUATION = 120
+    TIMEOUT_REFINEMENT = 180
+    TIMEOUT_LEARNING = 120
+    TIMEOUT_NEXT_ACTION = 180
+    TIMEOUT_REVIEW = 120
+    TIMEOUT_DEFAULT = 120
 
     def __init__(self, db: Database):
         super().__init__(db)
@@ -118,6 +120,45 @@ class OpenClawReasoningService(BaseService):
         )
 
         return self._parse_evaluation_response(response)
+
+    async def decide_next_step(
+        self,
+        project_id: str,
+        completed_task_id: str,
+    ) -> dict[str, Any]:
+        """Ask OpenClaw what to do next after a task completes.
+
+        Returns one of:
+        - {"action": "create_task", "reasoning": "...", "task": {title, description, plan, priority}}
+        - {"action": "close_project", "reasoning": "..."}
+        - {"action": "block_project", "reasoning": "...", "block_reason": "...", "resume_instructions": "..."}
+        """
+        context = await self.context_builder.build_project_context(
+            project_id=project_id,
+            scope=ContextScope.STANDARD,
+            focus_reasoning="next_action",
+        )
+
+        prompt = self._build_next_step_prompt(context, completed_task_id)
+
+        try:
+            response = await self._call_openclaw(
+                prompt=prompt,
+                response_format="json",
+                timeout=self.TIMEOUT_NEXT_ACTION,
+                reasoning_type="next_action",
+                project_id=project_id,
+                task_id=completed_task_id,
+            )
+            return self._parse_next_step_response(response)
+        except Exception as e:
+            logger.error("decide_next_step failed for project %s: %s", project_id, e)
+            return {
+                "action": "block_project",
+                "reasoning": f"Reasoning call failed: {e}",
+                "block_reason": "Automated reasoning failed — manual review needed",
+                "resume_instructions": "Review project state and manually create next task or close project",
+            }
 
     async def refine_project_strategy(
         self,
@@ -207,7 +248,27 @@ class OpenClawReasoningService(BaseService):
                 focus_reasoning="task_planning",
             )
 
-        prompt = self._build_task_plan_prompt(dict(task), project_context)
+        # Resolve output directory and dependency files from task metadata
+        task_metadata = json_loads(task.get("metadata"), {})
+        output_directory: str | None = task_metadata.get("output_directory")
+        dependency_files: list[dict[str, Any]] | None = task_metadata.get("dependency_output_files")
+
+        # If not in metadata, compute from project link
+        if output_directory is None and project_id_from_task:
+            try:
+                from cyborg.services.task_service import TaskService
+
+                task_service = TaskService(self.db)
+                output_directory = await task_service._compute_output_directory(task_id)
+            except Exception:
+                pass
+
+        prompt = self._build_task_plan_prompt(
+            dict(task),
+            project_context,
+            output_directory=output_directory,
+            dependency_files=dependency_files,
+        )
 
         response = await self._call_openclaw(
             prompt=prompt,
@@ -273,6 +334,118 @@ class OpenClawReasoningService(BaseService):
 
         return self._parse_follow_up_tasks_response(response)
 
+    async def review_task_submission(
+        self,
+        task_id: str,
+        result_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Review a task submission to verify the agent actually completed the work.
+
+        Returns {approved: bool, reasoning: str, issues: [str], suggestions: [str]}.
+        """
+        task = await self.db.fetch_one(
+            "SELECT * FROM tasks WHERE id = ?",
+            (task_id,),
+        )
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+
+        files = await self.db.fetch_all(
+            "SELECT filename, purpose, description, size_bytes FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        )
+
+        steps = await self.db.fetch_all(
+            "SELECT step_number, description, status, result FROM task_steps WHERE task_id = ? ORDER BY step_number ASC",
+            (task_id,),
+        )
+
+        prompt = self._build_submission_review_prompt(dict(task), files, steps, result_summary)
+
+        response = await self._call_openclaw(
+            prompt=prompt,
+            response_format="json",
+            timeout=self.TIMEOUT_REVIEW,
+            reasoning_type="submission_review",
+            task_id=task_id,
+        )
+
+        return self._parse_submission_review_response(response)
+
+    async def revise_spec(
+        self,
+        aim: str,
+        method: str | None,
+        success_criteria: list[dict[str, str]],
+        plan_steps: list[dict[str, Any]],
+        feedback: str,
+        *,
+        allow_aim_changes: bool = False,
+        allow_criteria_changes: bool = False,
+        reference_project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Ask OpenClaw to revise a rejected spec based on user feedback.
+
+        Returns a dict with revised aim, method, success_criteria, and plan,
+        or None if revision fails.
+        """
+        constraints = []
+        if not allow_aim_changes:
+            constraints.append("The aim MUST stay exactly as-is — do not change it.")
+        else:
+            constraints.append("You MAY revise the aim based on the feedback.")
+
+        if not allow_criteria_changes:
+            constraints.append("The success criteria MUST stay exactly as-is — do not change them.")
+        else:
+            constraints.append("You MAY revise the success criteria based on the feedback.")
+
+        criteria_lines = "\n".join(
+            f"  - {c.get('check', c.get('description', ''))}" for c in success_criteria
+        )
+        plan_lines = "\n".join(
+            f"  {i}. {s.get('title', '?')}: {s.get('description', '')}" for i, s in enumerate(plan_steps)
+        )
+
+        prompt = "\n".join([
+            "You are a project planning assistant. A spec was rejected. Revise it based on the feedback.",
+            "",
+            f"Current Aim: {aim}",
+            f"Current Method: {method or 'Not specified'}",
+            "",
+            "Current Success Criteria:",
+            criteria_lines or "  (none)",
+            "",
+            "Current Plan:",
+            plan_lines or "  (none)",
+            "",
+            f"Rejection Feedback: {feedback}",
+            "",
+            "Constraints:",
+        ] + [f"  - {c}" for c in constraints] + [
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "aim": "revised aim (or original if unchanged)",',
+            '  "method": "revised method",',
+            '  "success_criteria": [{"check": "...", "description": "..."}],',
+            '  "plan": [{"order": 0, "title": "...", "description": "...", "criteria": "..."}]',
+            "}",
+        ])
+
+        try:
+            response = await self._call_openclaw(
+                prompt=prompt,
+                response_format="json",
+                timeout=self.TIMEOUT_PLAN,
+                reasoning_type="spec_revision",
+                project_id=reference_project_id,
+            )
+            return self._load_json_payload(response)
+        except Exception as e:
+            logger.warning("Spec revision failed for project %s: %s", reference_project_id, e)
+            return None
+
     async def _call_openclaw(
         self,
         prompt: str,
@@ -290,8 +463,13 @@ class OpenClawReasoningService(BaseService):
         """
         from cyborg.structured_logging import log_reasoning_request
 
-        # Use a dedicated reasoning session
-        reasoning_session = session_key or "cyborg:reasoning"
+        # Use a fresh session for each reasoning call
+        if session_key:
+            reasoning_session = session_key
+        else:
+            short_uuid = str(uuid4())[:8]
+            type_slug = (reasoning_type or "unknown").replace("_", "-")
+            reasoning_session = f"cyborg:reasoning:{type_slug}:{short_uuid}"
 
         if not self.openclaw_service.is_configured():
             log_reasoning_request(
@@ -384,6 +562,54 @@ class OpenClawReasoningService(BaseService):
             logger.error("OpenClaw reasoning call failed: %s", e)
             raise RuntimeError(f"OpenClaw reasoning failed: {e}") from e
 
+    def _format_upstream_context_for_prompt(
+        self,
+        context: dict[str, Any],
+        task_id: str | None = None,
+    ) -> str:
+        """Format upstream task context into prompt-ready text.
+
+        If task_id is provided, only show upstream for that specific task.
+        Otherwise, show all upstream context.
+        """
+        tasks_context = context.get("tasks", {})
+        upstream = tasks_context.get("upstream_context", {})
+        if not upstream:
+            return ""
+
+        parts = ["", "## Upstream Task Results (Prior Work)"]
+
+        targets = {task_id: upstream[task_id]} if (task_id and task_id in upstream) else upstream
+
+        for _dep_task_id, parent_info in targets.items():
+            parts.append(f"### Parent Task: {parent_info.get('title', 'Unknown')}")
+            parts.append(f"Status: {parent_info.get('status', 'unknown')}")
+            if parent_info.get("result"):
+                result_text = parent_info["result"][:500]
+                parts.append(f"Result: {result_text}")
+            if parent_info.get("completed_at"):
+                parts.append(f"Completed: {parent_info['completed_at']}")
+
+            output_files = parent_info.get("output_files", [])
+            if output_files:
+                parts.append("Output Files:")
+                for f in output_files:
+                    path = f.get("relative_path", f.get("filename", "unknown"))
+                    purpose = f.get("purpose", "")
+                    parts.append(f"  - {path} ({purpose})")
+
+            dep_files = parent_info.get("dependency_output_files", [])
+            if dep_files:
+                parts.append("Available Input Files:")
+                for f in dep_files:
+                    path = f.get("relative_path", f.get("filename", "unknown"))
+                    purpose = f.get("purpose", "")
+                    parts.append(f"  - {path} ({purpose})")
+
+            parts.append("")
+
+        return "\n".join(parts)
+
     def _build_plan_prompt(
         self,
         aim: str,
@@ -466,6 +692,14 @@ class OpenClawReasoningService(BaseService):
 
         parts.extend([
             "",
+        ])
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
+        parts.extend([
+            "",
             "Evaluate each criterion based on available evidence.",
             "Respond with valid JSON only:",
             "{",
@@ -499,7 +733,7 @@ class OpenClawReasoningService(BaseService):
         trigger_info = ""
         if trigger_task:
             status = trigger_task.get("status", "unknown")
-            result = trigger_task.get("result", "")[:200]
+            result = (trigger_task.get("result") or "")[:200]
             trigger_info = f"Status: {status}, Result: {result}"
 
         parts = [
@@ -525,6 +759,10 @@ class OpenClawReasoningService(BaseService):
             content = entry.get("content", "")[:150]
             parts.append(f"  - [{entry['entry_type']}] {content}")
 
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
         parts.extend([
             "",
             "Consider:",
@@ -542,6 +780,120 @@ class OpenClawReasoningService(BaseService):
             '  ],',
             '  "new_priorities": {"task_id": "high|medium|low"},',
             '  "risks_identified": ["..."]',
+            "}",
+        ])
+
+        return "\n".join(parts)
+
+    def _build_next_step_prompt(self, context: dict[str, Any], completed_task_id: str) -> str:
+        """Build prompt for deciding the next action after a task completes."""
+
+        core = context["core"]
+        project = core["project"]
+        criteria = core["success_criteria"].get("criteria", [])
+        plan_steps = core["success_criteria"].get("plan_steps", [])
+        tasks = context["tasks"]
+        task_summary = tasks["summary"]
+        journal = context["journal"].get("entries", [])[-10:]
+
+        # Find the completed task in the context
+        completed_task_info = ""
+        all_tasks = tasks.get("all_tasks", [])
+        for t in all_tasks:
+            if t.get("id") == completed_task_id:
+                completed_task_info = f"Title: {t.get('title', 'Unknown')}\nStatus: {t.get('status', 'unknown')}"
+                if t.get("result"):
+                    completed_task_info += f"\nResult: {t['result'][:500]}"
+                break
+
+        # If not found in all_tasks, check upstream
+        if not completed_task_info:
+            upstream = tasks.get("upstream_context", {})
+            if completed_task_id in upstream:
+                info = upstream[completed_task_id]
+                completed_task_info = f"Title: {info.get('title', 'Unknown')}\nStatus: {info.get('status', 'unknown')}"
+                if info.get("result"):
+                    completed_task_info += f"\nResult: {info['result'][:500]}"
+
+        if not completed_task_info:
+            completed_task_info = f"Task ID: {completed_task_id} (details not available)"
+
+        parts = [
+            "You are managing an autonomous project. A task has just completed.",
+            "Decide what should happen next based on the project's aim, plan, and success criteria.",
+            "",
+            "## Project",
+            f"Title: {project['title']}",
+            f"Aim: {project.get('aim', 'N/A')}",
+        ]
+
+        if project.get("method"):
+            parts.append(f"Method: {project['method']}")
+
+        # Plan as reference
+        if plan_steps:
+            parts.extend(["", "## Plan (Reference — use as guidance, not rigid script)"])
+            for i, step in enumerate(plan_steps):
+                title = step.get("title", f"Step {i + 1}")
+                parts.append(f"  {i + 1}. {title}")
+
+        # Success criteria
+        if criteria:
+            parts.extend(["", "## Success Criteria"])
+            for i, c in enumerate(criteria, 1):
+                parts.append(f"  {i}. {c.get('description', '')}")
+
+        # Just completed task
+        parts.extend(["", "## Just Completed", completed_task_info])
+
+        # Completed tasks summary
+        completed_list = [t for t in all_tasks if t.get("status") == "completed"]
+        if completed_list:
+            parts.extend(["", "## All Completed Tasks"])
+            for t in completed_list:
+                result_bit = f": {t['result'][:100]}" if t.get("result") else ""
+                parts.append(f"  - {t.get('title', 'Unknown')}{result_bit}")
+
+        # Current open tasks
+        open_tasks = [t for t in all_tasks if t.get("status") in ("pending", "active", "blocked")]
+        if open_tasks:
+            parts.extend(["", "## Current Open Tasks"])
+            for t in open_tasks:
+                parts.append(f"  - [{t.get('status', '?')}] {t.get('title', 'Unknown')}")
+
+        # Recent journal
+        if journal:
+            parts.extend(["", "## Recent Activity"])
+            for entry in journal[-5:]:
+                content = entry.get("content", "")[:120]
+                parts.append(f"  - [{entry.get('entry_type', '?')}] {content}")
+
+        # Upstream context
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
+        parts.extend([
+            "",
+            "Based on the above, decide the single best next action:",
+            "",
+            "1. **create_task** — The project needs another task to progress toward its aim.",
+            "   Provide a focused task with title, description, and plan.",
+            "2. **close_project** — All success criteria appear to be met. The project is done.",
+            "3. **block_project** — The project needs human input before it can continue.",
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "action": "create_task | close_project | block_project",',
+            '  "reasoning": "Brief explanation of why this action",',
+            '  "task": {',
+            '    "title": "...",',
+            '    "description": "...",',
+            '    "plan": "Objective: ...\\nExecution: ...\\nSuccess criteria: ...",',
+            '    "priority": "high | medium | low"',
+            "  },",
+            '  "block_reason": "Why the project is blocked",',
+            '  "resume_instructions": "What needs to happen to unblock"',
             "}",
         ])
 
@@ -567,8 +919,15 @@ class OpenClawReasoningService(BaseService):
             f"  - Completed: {tasks['completed']}",
             f"  - Failed: {tasks['failed']}",
             "",
-            "Full Journal:",
         ]
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
+        parts.extend([
+            "Full Journal:",
+        ])
 
         for entry in journal[-20:]:  # Last 20 entries
             parts.append(f"  - [{entry['entry_type']}] {entry['content'][:150]}")
@@ -603,6 +962,8 @@ class OpenClawReasoningService(BaseService):
         self,
         task: dict[str, Any],
         project_context: dict[str, Any],
+        output_directory: str | None = None,
+        dependency_files: list[dict[str, Any]] | None = None,
     ) -> str:
         """Build prompt for task-level planning."""
 
@@ -624,6 +985,34 @@ class OpenClawReasoningService(BaseService):
                 ])
             if project.get("aim"):
                 parts.append(f"Project Aim: {project['aim']}")
+
+        if output_directory:
+            parts.extend([
+                "",
+                "## Output Directory",
+                f"All task artifacts must be written to: `{output_directory}`",
+                "- Use descriptive filenames for each artifact.",
+                "- Put the primary result in `RESULT.md`.",
+                "- Register all output files via the task files API.",
+            ])
+
+        if dependency_files:
+            parts.extend([
+                "",
+                "## Input Files from Previous Task",
+                "The following files were produced by a dependency task and are available as inputs:",
+                "",
+            ])
+            for f in dependency_files:
+                parts.append(f"- `{f.get('relative_path', f.get('filename', 'unknown'))}` ({f.get('purpose', 'unknown')})")
+
+        # Include upstream task results from project context
+        upstream_text = self._format_upstream_context_for_prompt(
+            project_context,
+            task_id=task.get("id"),
+        )
+        if upstream_text:
+            parts.append(upstream_text)
 
         parts.extend([
             "",
@@ -664,6 +1053,10 @@ class OpenClawReasoningService(BaseService):
             for task in blocked_tasks[:5]:
                 reason = task.get("blocked_reason", "No reason")[:100]
                 parts.append(f"  - {task['title']}: {reason}")
+
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
 
         parts.extend([
             "",
@@ -740,6 +1133,10 @@ class OpenClawReasoningService(BaseService):
             for entry in journal[-5:]:
                 parts.append(f"  - [{entry['entry_type']}] {entry['content'][:150]}")
 
+        upstream_text = self._format_upstream_context_for_prompt(context)
+        if upstream_text:
+            parts.append(upstream_text)
+
         parts.extend(
             [
                 "",
@@ -785,6 +1182,44 @@ class OpenClawReasoningService(BaseService):
                 "met_criteria": [],
                 "unmet_criteria": [],
                 "reasoning": f"Failed to parse evaluation: {e}"
+            }
+
+    def _parse_next_step_response(self, response: str) -> dict[str, Any]:
+        """Parse JSON next-step decision response."""
+        try:
+            data = self._load_json_payload(response)
+            action = data.get("action", "")
+            if action not in ("create_task", "close_project", "block_project"):
+                logger.warning("Unknown next_step action '%s', defaulting to block_project", action)
+                return {
+                    "action": "block_project",
+                    "reasoning": data.get("reasoning", f"Unknown action '{action}' returned"),
+                    "block_reason": f"Reasoning returned unknown action: {action}",
+                    "resume_instructions": "Review project state manually",
+                }
+            result = {
+                "action": action,
+                "reasoning": data.get("reasoning", ""),
+            }
+            if action == "create_task":
+                task_def = data.get("task", {})
+                result["task"] = {
+                    "title": str(task_def.get("title", "Next step"))[:200],
+                    "description": str(task_def.get("description", ""))[:2000],
+                    "plan": str(task_def.get("plan", "")),
+                    "priority": str(task_def.get("priority", "high")),
+                }
+            elif action == "block_project":
+                result["block_reason"] = str(data.get("block_reason", "Project blocked by reasoning"))[:500]
+                result["resume_instructions"] = str(data.get("resume_instructions", ""))[:2000]
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error("Failed to parse next_step response: %s", e)
+            return {
+                "action": "block_project",
+                "reasoning": f"Failed to parse response: {e}",
+                "block_reason": "Reasoning response could not be parsed",
+                "resume_instructions": "Review project state and manually create next task or close project",
             }
 
     def _parse_refinement_response(self, response: str) -> dict[str, Any]:
@@ -884,6 +1319,92 @@ class OpenClawReasoningService(BaseService):
             ]
         )
         return "\n".join(lines)
+
+    def _build_submission_review_prompt(
+        self,
+        task: dict[str, Any],
+        files: list[Any],
+        steps: list[Any],
+        result_summary: str | None,
+    ) -> str:
+        parts = [
+            "You are reviewing whether an AI agent actually completed a task as requested.",
+            "Be strict but fair. The agent should have done real work, not just restated the plan.",
+            "",
+            "## Task Definition",
+            f"Title: {task.get('title', 'Unknown')}",
+        ]
+        if task.get("description"):
+            parts.append(f"Description: {task['description']}")
+        if task.get("plan"):
+            parts.append(f"Plan: {task['plan'][:1000]}")
+
+        parts.extend([
+            "",
+            "## What the Agent Claims",
+            f"Result summary: {result_summary or '(none provided)'}",
+        ])
+
+        if steps:
+            parts.extend(["", "## Task Steps"])
+            for step in steps:
+                s = step if isinstance(step, dict) else dict(step)
+                parts.append(
+                    f"  Step {s.get('step_number', '?')}: [{s.get('status', '?')}] {s.get('description', '')[:200]}"
+                )
+                if s.get("result"):
+                    parts.append(f"    Result: {str(s['result'])[:300]}")
+
+        if files:
+            parts.extend(["", "## Output Files"])
+            for f in files:
+                fd = f if isinstance(f, dict) else dict(f)
+                size = fd.get("size_bytes")
+                size_str = f" ({size} bytes)" if size else ""
+                parts.append(
+                    f"  - {fd.get('filename', '?')} [{fd.get('purpose', '?')}]{size_str}"
+                )
+                if fd.get("description"):
+                    parts.append(f"    {fd['description'][:200]}")
+        else:
+            parts.extend(["", "## Output Files", "(no files registered)"])
+
+        parts.extend([
+            "",
+            "## Review Checklist",
+            "1. Does the result summary actually address the task title and description?",
+            "2. Were the expected output files created? If the plan mentioned creating files, do they exist?",
+            "3. Were the task steps completed with real results (not just marked done)?",
+            "4. Is the result substantive, not just a restatement of the plan?",
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "approved": true or false,',
+            '  "reasoning": "Brief explanation of the decision",',
+            '  "issues": ["list of specific issues found, empty if approved"],',
+            '  "suggestions": ["specific actions the agent should take to fix issues"]',
+            "}",
+        ])
+
+        return "\n".join(parts)
+
+    def _parse_submission_review_response(self, response: str) -> dict[str, Any]:
+        try:
+            data = self._load_json_payload(response)
+            return {
+                "approved": bool(data.get("approved", False)),
+                "reasoning": str(data.get("reasoning", "")),
+                "issues": [str(i) for i in data.get("issues", [])],
+                "suggestions": [str(s) for s in data.get("suggestions", [])],
+            }
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error("Failed to parse submission review response: %s", e)
+            return {
+                "approved": False,
+                "reasoning": f"Failed to parse review response: {e}",
+                "issues": ["review_parse_failure"],
+                "suggestions": ["Try submitting the task again"],
+            }
 
     def _extract_response_text(self, response: Any) -> str:
         """Extract the most useful text payload from an OpenClaw gateway response."""

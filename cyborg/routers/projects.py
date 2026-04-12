@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Response, status
 
-from cyborg.dependencies import get_project_execution_service, get_project_service, get_task_service
+from cyborg.dependencies import get_project_execution_service, get_project_service, get_project_spec_service
 from cyborg.models import (
     ProjectCloseRequest,
     ProjectCreate,
@@ -15,15 +16,44 @@ from cyborg.models import (
     ProjectResponse,
     ProjectState,
     ProjectUpdate,
-    TaskCreate,
     TaskResponse,
 )
 from cyborg.services.project_execution_service import ProjectExecutionService
+from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.project_service import ProjectService
-from cyborg.services.task_service import TaskService
 
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
+
+
+@router.post("/doctor", response_model=dict[str, Any])
+async def doctor(
+    fix: bool = False,
+    execution_service: ProjectExecutionService = Depends(get_project_execution_service),
+) -> dict[str, Any]:
+    """Diagnose project health problems and optionally fix them.
+
+    Query param `fix=true` to apply fixes (e.g., bootstrap stuck projects).
+    """
+    problems = await execution_service.diagnose()
+    fixes: list[dict[str, Any]] = []
+
+    if fix:
+        for problem in problems:
+            if problem["problem"] == "active_with_no_tasks":
+                try:
+                    result = await execution_service.bootstrap_stuck_project(problem["project_id"])
+                    fixes.append({**problem, **result})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
+            elif problem["problem"] == "blocked_task_without_approval":
+                try:
+                    result = await execution_service.create_missing_approval(problem["task_id"])
+                    fixes.append({**problem, **result})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
+
+    return {"problems": problems, "fixes": fixes}
 
 
 @router.get("", response_model=list[ProjectResponse])
@@ -37,9 +67,22 @@ async def list_projects(
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
+    background_tasks: BackgroundTasks,
     service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
-    return await service.create_project(payload)
+    project = await service.create_project(payload, defer_effects=True)
+    background_tasks.add_task(
+        service._post_create_background_effects,
+        str(project.id),
+        has_spec=service._build_spec_payload(
+            aim=payload.aim,
+            method=payload.method,
+            plan=payload.plan,
+            success_criteria=payload.success_criteria,
+        ) is not None,
+        initial_state=payload.state,
+    )
+    return project
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -51,9 +94,15 @@ async def get_project(project_id: UUID, service: ProjectService = Depends(get_pr
 async def update_project(
     project_id: UUID,
     payload: ProjectUpdate,
+    background_tasks: BackgroundTasks,
     service: ProjectService = Depends(get_project_service),
+    spec_service: ProjectSpecService = Depends(get_project_spec_service),
 ) -> ProjectResponse:
-    return await service.update_project(str(project_id), payload)
+    has_spec_fields = any(v is not None for v in (payload.aim, payload.method, payload.plan, payload.success_criteria))
+    result = await service.update_project(str(project_id), payload, defer_plan_generation=True)
+    if has_spec_fields and payload.plan is None:
+        background_tasks.add_task(spec_service.generate_plan_if_needed, str(project_id))
+    return result
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -62,18 +111,9 @@ async def delete_project(project_id: UUID, service: ProjectService = Depends(get
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/{project_id}/start", response_model=ProjectResponse)
-async def start_project(project_id: UUID, service: ProjectService = Depends(get_project_service)) -> ProjectResponse:
-    project = await service.start_project(str(project_id))
-    await service._update_summary_md(project)
-    return project
-
-
 @router.post("/{project_id}/pause", response_model=ProjectResponse)
 async def pause_project(project_id: UUID, service: ProjectService = Depends(get_project_service)) -> ProjectResponse:
-    project = await service.pause_project(str(project_id))
-    await service._update_summary_md(project)
-    return project
+    return await service.pause_project(str(project_id))
 
 
 @router.post("/{project_id}/close", response_model=ProjectResponse)
@@ -82,9 +122,7 @@ async def close_project(
     payload: ProjectCloseRequest,
     service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
-    project = await service.close_project(str(project_id), payload)
-    await service._update_summary_md(project)
-    return project
+    return await service.close_project(str(project_id), payload)
 
 
 @router.get("/{project_id}/journal", response_model=list[ProjectJournalEntryResponse])
@@ -112,54 +150,13 @@ async def list_project_tasks(
     return await service.list_project_tasks(str(project_id))
 
 
-@router.post("/{project_id}/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-async def create_project_task(
-    project_id: UUID,
-    payload: TaskCreate,
-    project_service: ProjectService = Depends(get_project_service),
-    task_service: TaskService = Depends(get_task_service),
-) -> TaskResponse:
-    """Create a new task associated with this project.
-
-    The task will be automatically linked to the project and will appear
-    in the project's task list. When completed, a journal entry will be
-    added to the project.
-    """
-    # Verify project exists
-    await project_service.get_project(str(project_id))
-
-    # Add project to task's project_ids if not already present
-    task_data = payload.model_dump()
-    project_ids = task_data.get("project_ids", [])
-    if str(project_id) not in project_ids:
-        project_ids.append(str(project_id))
-    task_data["project_ids"] = project_ids
-
-    return await task_service.create_task(TaskCreate.model_validate(task_data))
-
-
-@router.post("/{project_id}/execute", response_model=ProjectResponse)
-async def start_project_execution(
-    project_id: UUID,
-    execution_service: ProjectExecutionService = Depends(get_project_execution_service),
-) -> ProjectResponse:
-    """Start auto-execution for a project.
-    
-    This will:
-    1. Transition project to ACTIVE state
-    2. Create the first task for step 0
-    3. Enable auto-execution mode
-    """
-    return await execution_service.start_project_execution(str(project_id))
-
-
 @router.post("/{project_id}/evaluate", response_model=ProjectResponse | None)
 async def evaluate_project_completion(
     project_id: UUID,
     execution_service: ProjectExecutionService = Depends(get_project_execution_service),
 ) -> ProjectResponse | None:
     """Evaluate success criteria and auto-complete project if all criteria met.
-    
+
     Returns the completed project if auto-completed, None otherwise.
     """
     return await execution_service.evaluate_and_complete(str(project_id))

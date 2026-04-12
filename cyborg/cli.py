@@ -156,7 +156,7 @@ def _api_call(method: str, path: str, data: Optional[dict[str, Any]] = None) -> 
     req = Request(url, data=body, headers=headers, method=method)
 
     try:
-        with urlopen(req) as response:
+        with urlopen(req, timeout=30) as response:
             response_body = response.read()
             if not response_body:
                 return {"data": None}
@@ -173,7 +173,7 @@ def _text_call(path: str) -> str:
     req = Request(url, method="GET")
 
     try:
-        with urlopen(req) as response:
+        with urlopen(req, timeout=30) as response:
             return response.read().decode()
     except HTTPError as exc:
         _handle_http_error(exc)
@@ -407,7 +407,6 @@ def _build_project_payload(
     description: Optional[str] = None,
     state: Optional[str] = None,
     conclusion: Optional[str] = None,
-    auto_execute: Optional[bool] = None,
     plan_json: Optional[str] = None,
     success_criteria_json: Optional[str] = None,
     task_ids: Optional[list[str]] = None,
@@ -429,8 +428,6 @@ def _build_project_payload(
         payload["state"] = state
     if conclusion is not None:
         payload["conclusion"] = conclusion
-    if auto_execute is not None:
-        payload["auto_execute"] = auto_execute
     if plan_json is not None:
         payload["plan"] = _parse_json_option(plan_json, "plan-json", list)
     if success_criteria_json is not None:
@@ -561,20 +558,6 @@ def _find_current_plan(task_id: str) -> dict[str, Any]:
     return plans_data["plans"][0]
 
 
-def _find_pending_project_spec(project_id: str) -> dict[str, Any]:
-    result = _api_call("GET", f"/api/v1/projects/{project_id}/specs")
-    specs_data = result["data"]
-    specs = specs_data.get("specs") if specs_data else None
-    if not specs:
-        typer.echo("No project specs found for this project.", err=True)
-        raise typer.Exit(code=1)
-    for spec in specs:
-        if spec["status"] == "pending_approval":
-            return spec
-    typer.echo("No pending project spec found for this project.", err=True)
-    raise typer.Exit(code=1)
-
-
 @app.command()
 def install(
     host: Annotated[str, typer.Option(help="Host address for the service")] = DEFAULT_HOST,
@@ -663,6 +646,44 @@ def logs(
 
 
 @app.command()
+def doctor(
+    fix: Annotated[bool, typer.Option("--fix", help="Apply fixes to found problems")] = False,
+) -> None:
+    """Diagnose common project problems and optionally fix them."""
+
+    # Reasoning service can be slow when bootstrapping multiple projects
+    settings = Settings.from_env()
+    url = f"http://{settings.host}:{settings.port}/api/v1/projects/doctor{_query_string(fix=fix if fix else None)}"
+    headers = {"Content-Type": "application/json"}
+    req = Request(url, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=120) as response:
+            result = _normalize_api_response(json.loads(response.read().decode()))
+    except HTTPError as exc:
+        _handle_http_error(exc)
+    except URLError as exc:
+        _handle_connection_error(exc)
+    result = result.get("data", result)
+    problems = result.get("problems", [])
+    fixes = result.get("fixes", [])
+
+    if not problems:
+        typer.echo("No problems found.")
+        return
+
+    typer.echo(f"Found {len(problems)} problem(s):")
+    for p in problems:
+        typer.echo(f"  - {p['title']} ({p['project_id'][:8]}): {p['problem']}")
+
+    if fixes:
+        typer.echo(f"\nApplied {len(fixes)} fix(es):")
+        for f in fixes:
+            typer.echo(f"  - {f['title']} ({f['project_id'][:8]}): {f['action']}")
+    elif fix:
+        typer.echo("\nNo fixes needed.")
+
+
+@app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Host address to bind")] = DEFAULT_HOST,
     port: Annotated[int, typer.Option(help="TCP port to bind")] = DEFAULT_PORT,
@@ -692,72 +713,9 @@ def serve(
         log_level=log_level,
         webhooks=env_settings.webhooks,
         openclaw=env_settings.openclaw,
-        notification_dispatch_interval_seconds=env_settings.notification_dispatch_interval_seconds,
+        heartbeat_interval_seconds=env_settings.heartbeat_interval_seconds,
     )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
-
-
-@task_app.command("create")
-def task_create(
-    title: Annotated[str, typer.Argument(help="Task title")],
-    requested_by: Annotated[Optional[str], typer.Option("--requested-by", "-r", help="Who requested the task")] = "Bob",
-    priority: Annotated[Optional[str], typer.Option("--priority", "-p", help="Task priority")] = "medium",
-    description: Annotated[Optional[str], typer.Option("--description", "-d", help="Task description")] = None,
-    plan: Annotated[str, typer.Option(help="Initial execution plan (required)")] = ...,
-    status: Annotated[Optional[str], typer.Option("--status", help="Initial task status")] = None,
-    parent_id: Annotated[Optional[str], typer.Option("--parent-id", help="Parent task ID")] = None,
-    project_ids: Annotated[Optional[list[str]], typer.Option("--project-id", help="Associated project ID")] = None,
-    recurrence_rule: Annotated[Optional[str], typer.Option("--recurring", "--recurrence-rule", help="Cron expression for recurring task")] = None,
-    is_recurring: Annotated[Optional[bool], typer.Option("--is-recurring/--not-recurring", help="Explicitly mark the task as recurring or not")] = None,
-    next_run_at: Annotated[Optional[str], typer.Option("--next-run-at", help="Next scheduled run time (ISO format)")] = None,
-    retry_max_attempts: Annotated[Optional[int], typer.Option("--retry-max-attempts", help="Retry policy max attempts")] = None,
-    retry_current_attempt: Annotated[Optional[int], typer.Option("--retry-current-attempt", help="Current retry attempt count")] = None,
-    retry_on_failure: Annotated[Optional[str], typer.Option("--retry-on-failure", help="Retry action: retry, retry_from, escalate, abort")] = None,
-    retry_from_step: Annotated[Optional[int], typer.Option("--retry-from-step", help="Restart from this step number")] = None,
-    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Extra task metadata as JSON object")] = None,
-    channel: Annotated[Optional[str], typer.Option(help="Source channel for notifications and approvals")] = None,
-    chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for notifications and approvals")] = None,
-    session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
-    target_kind: Annotated[Optional[str], typer.Option("--target-kind", help="Target session kind: group or dm")] = None,
-    target_session_key: Annotated[Optional[str], typer.Option("--target-session-key", help="Target WhatsApp group session key")] = None,
-    target_chat_id: Annotated[Optional[str], typer.Option("--target-chat-id", help="Target WhatsApp chat ID")] = None,
-    target_contact_id: Annotated[Optional[str], typer.Option("--target-contact-id", help="Target contact ID for WhatsApp DM")] = None,
-    blocked_reason: Annotated[Optional[str], typer.Option("--blocked-reason", help="Blocked reason")] = None,
-    blocked_resume_instructions: Annotated[Optional[str], typer.Option("--blocked-resume-instructions", help="How to resume the task")] = None,
-) -> None:
-    """Create a new task."""
-
-    payload = _build_task_payload(
-        title=title,
-        requested_by=requested_by,
-        priority=priority,
-        description=description,
-        plan=plan,
-        status=status,
-        parent_id=parent_id,
-        project_ids=project_ids,
-        recurrence_rule=recurrence_rule,
-        is_recurring=is_recurring,
-        next_run_at=next_run_at,
-        retry_max_attempts=retry_max_attempts,
-        retry_current_attempt=retry_current_attempt,
-        retry_on_failure=retry_on_failure,
-        retry_from_step=retry_from_step,
-        metadata_json=metadata_json,
-        channel=channel,
-        chat_id=chat_id,
-        session_key=session_key,
-        target_kind=target_kind,
-        target_session_key=target_session_key,
-        target_chat_id=target_chat_id,
-        target_contact_id=target_contact_id,
-        blocked_reason=blocked_reason,
-        blocked_resume_instructions=blocked_resume_instructions,
-    )
-    task = _api_call("POST", "/api/v1/tasks", payload)["data"]
-    typer.echo(f"Created task: {task['id']}")
-    typer.echo(f"Title: {task['title']}")
-    typer.echo(f"Status: {task['status']}")
 
 
 @task_app.command("list")
@@ -899,18 +857,44 @@ def task_complete(
     typer.echo(f"Task completed: {result['data']['title']}")
 
 
+@task_app.command("submit")
+def task_submit(
+    id: Annotated[str, typer.Argument(help="Task ID")],
+    result_summary: Annotated[Optional[str], typer.Option("--result-summary", "-s", help="Summary of task results")] = None,
+) -> None:
+    """Submit a task for review (used by AI agents)."""
+
+    data = {"result_summary": result_summary} if result_summary else None
+    result = _api_call("POST", f"/api/v1/tasks/{id}/submit", data)
+    task = result["data"]
+    if task["status"] == "completed":
+        typer.echo(f"Task submitted and approved: {task['title']}")
+    elif task["status"] == "active":
+        typer.echo(f"Task submitted but review requested changes: {task['title']}")
+    else:
+        typer.echo(f"Task submitted: {task['title']} (status: {task['status']})")
+
+
 @task_app.command("block")
 def task_block(
     id: Annotated[str, typer.Argument(help="Task ID")],
     reason: Annotated[str, typer.Option("--reason", "-r", help="Why the task is blocked")],
     resume_instructions: Annotated[str, typer.Option("--resume-instructions", "-i", help="Full instructions to resume the task")],
+    input_schema_json: Annotated[Optional[str], typer.Option("--input-schema-json", help="Structured input schema as JSON (text or multi_choice)") ] = None,
 ) -> None:
-    """Block a task waiting for user input."""
+    """Block a task waiting for user input.
 
+    Optionally include --input-schema-json to create a structured dashboard approval
+    that the user can respond to from the approvals page.
+    """
+
+    payload: dict[str, Any] = {"reason": reason, "resume_instructions": resume_instructions}
+    if input_schema_json is not None:
+        payload["input_schema"] = _parse_json_option(input_schema_json, "input-schema-json", dict)
     task = _api_call(
         "POST",
         f"/api/v1/tasks/{id}/block",
-        {"reason": reason, "resume_instructions": resume_instructions},
+        payload,
     )["data"]
     typer.echo(f"Task blocked: {task['title']}")
     typer.echo(f"Reason: {task['blocked_reason']}")
@@ -1006,64 +990,6 @@ def task_step_add(
     typer.echo(f"Upserted step {step['step_number']} for task {task_id}")
 
 
-@task_app.command("subtask-create")
-def task_subtask_create(
-    task_id: Annotated[str, typer.Argument(help="Parent task ID")],
-    title: Annotated[str, typer.Argument(help="Subtask title")],
-    requested_by: Annotated[Optional[str], typer.Option("--requested-by", "-r", help="Who requested the task")] = "Bob",
-    priority: Annotated[Optional[str], typer.Option("--priority", "-p", help="Task priority")] = "medium",
-    description: Annotated[Optional[str], typer.Option("--description", "-d", help="Task description")] = None,
-    plan: Annotated[str, typer.Option(help="Initial execution plan (required)")] = ...,
-    status: Annotated[Optional[str], typer.Option("--status", help="Initial task status")] = None,
-    project_ids: Annotated[Optional[list[str]], typer.Option("--project-id", help="Associated project ID")] = None,
-    recurrence_rule: Annotated[Optional[str], typer.Option("--recurring", "--recurrence-rule", help="Cron expression for recurring task")] = None,
-    is_recurring: Annotated[Optional[bool], typer.Option("--is-recurring/--not-recurring", help="Explicitly mark the task as recurring or not")] = None,
-    next_run_at: Annotated[Optional[str], typer.Option("--next-run-at", help="Next scheduled run time (ISO format)")] = None,
-    retry_max_attempts: Annotated[Optional[int], typer.Option("--retry-max-attempts", help="Retry policy max attempts")] = None,
-    retry_current_attempt: Annotated[Optional[int], typer.Option("--retry-current-attempt", help="Current retry attempt count")] = None,
-    retry_on_failure: Annotated[Optional[str], typer.Option("--retry-on-failure", help="Retry action: retry, retry_from, escalate, abort")] = None,
-    retry_from_step: Annotated[Optional[int], typer.Option("--retry-from-step", help="Restart from this step number")] = None,
-    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Extra task metadata as JSON object")] = None,
-    channel: Annotated[Optional[str], typer.Option(help="Source channel for notifications and approvals")] = None,
-    chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for notifications and approvals")] = None,
-    session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
-    target_kind: Annotated[Optional[str], typer.Option("--target-kind", help="Target session kind: group or dm")] = None,
-    target_session_key: Annotated[Optional[str], typer.Option("--target-session-key", help="Target WhatsApp group session key")] = None,
-    target_chat_id: Annotated[Optional[str], typer.Option("--target-chat-id", help="Target WhatsApp chat ID")] = None,
-    target_contact_id: Annotated[Optional[str], typer.Option("--target-contact-id", help="Target contact ID for WhatsApp DM")] = None,
-) -> None:
-    """Create a subtask under an existing task."""
-
-    payload = _build_task_payload(
-        title=title,
-        requested_by=requested_by,
-        priority=priority,
-        description=description,
-        plan=plan,
-        status=status,
-        project_ids=project_ids,
-        recurrence_rule=recurrence_rule,
-        is_recurring=is_recurring,
-        next_run_at=next_run_at,
-        retry_max_attempts=retry_max_attempts,
-        retry_current_attempt=retry_current_attempt,
-        retry_on_failure=retry_on_failure,
-        retry_from_step=retry_from_step,
-        metadata_json=metadata_json,
-        channel=channel,
-        chat_id=chat_id,
-        session_key=session_key,
-        target_kind=target_kind,
-        target_session_key=target_session_key,
-        target_chat_id=target_chat_id,
-        target_contact_id=target_contact_id,
-    )
-    task = _api_call("POST", f"/api/v1/tasks/{task_id}/subtasks", payload)["data"]
-    typer.echo(f"Created subtask: {task['id']}")
-    typer.echo(f"Title: {task['title']}")
-    typer.echo(f"Status: {task['status']}")
-
-
 @task_app.command("history")
 def task_history(
     task_id: Annotated[str, typer.Argument(help="Task ID")],
@@ -1092,6 +1018,40 @@ def task_delete(id: Annotated[str, typer.Argument(help="Task ID")]) -> None:
 
     _api_call("DELETE", f"/api/v1/tasks/{id}")
     typer.echo(f"Task deleted: {id}")
+
+
+@task_app.command("file")
+def task_file(
+    id: Annotated[str, typer.Argument(help="Task ID")],
+    project_id: Annotated[str, typer.Option("--project-id", "-p", help="Project ID")],
+    filename: Annotated[str, typer.Option("--filename", "-f", help="Filename")],
+    purpose: Annotated[
+        str,
+        typer.Option(
+            "--purpose",
+            help="File purpose: reasoning, result, analysis, log, artifact, other",
+        ),
+    ] = "artifact",
+    description: Annotated[
+        Optional[str], typer.Option("--description", "-d", help="File description")
+    ] = None,
+) -> None:
+    """Register a file created during task execution."""
+
+    payload = {
+        "project_id": project_id,
+        "file": {
+            "filename": filename,
+            "purpose": purpose,
+            "content_type": "text/plain",
+        },
+    }
+    if description:
+        payload["file"]["description"] = description
+
+    result = _api_call("POST", f"/api/v1/tasks/{id}/files", payload)
+    f = result["data"]
+    typer.echo(f"File registered: {f['filename']} ({f['purpose']}) -> task {id}")
 
 
 @plan_app.command("submit")
@@ -1196,7 +1156,6 @@ def project_create(
     description: Annotated[Optional[str], typer.Option("--description", "-d", help="Project description")] = None,
     state: Annotated[Optional[str], typer.Option("--state", help="Initial project state")] = None,
     conclusion: Annotated[Optional[str], typer.Option("--conclusion", help="Project conclusion")] = None,
-    auto_execute: Annotated[Optional[bool], typer.Option("--auto-execute/--manual", help="Enable or disable auto-execution")] = None,
     plan_json: Annotated[Optional[str], typer.Option("--plan-json", help="Execution plan as JSON array")] = None,
     success_criteria_json: Annotated[Optional[str], typer.Option("--success-criteria-json", help="Success criteria as JSON array")] = None,
     task_ids: Annotated[Optional[list[str]], typer.Option("--task-id", help="Link an existing task ID")] = None,
@@ -1214,7 +1173,6 @@ def project_create(
         description=description,
         state=state,
         conclusion=conclusion,
-        auto_execute=auto_execute,
         plan_json=plan_json,
         success_criteria_json=success_criteria_json,
         task_ids=task_ids,
@@ -1271,8 +1229,6 @@ def project_get(
         typer.echo(f"Method: {project['method']}")
     if project.get("description"):
         typer.echo(f"Description: {project['description']}")
-    if project.get("auto_execute"):
-        typer.echo("Auto Execute: true")
     if project.get("task_ids"):
         typer.echo(f"Tasks: {len(project['task_ids'])} linked")
 
@@ -1284,9 +1240,7 @@ def project_update(
     aim: Annotated[Optional[str], typer.Option("--aim", "-a", help="Project aim/objective")] = None,
     method: Annotated[Optional[str], typer.Option("--method", "-m", help="Project method/plan")] = None,
     description: Annotated[Optional[str], typer.Option("--description", "-d", help="Project description")] = None,
-    state: Annotated[Optional[str], typer.Option("--state", help="Project state")] = None,
     conclusion: Annotated[Optional[str], typer.Option("--conclusion", help="Project conclusion")] = None,
-    auto_execute: Annotated[Optional[bool], typer.Option("--auto-execute/--manual", help="Enable or disable auto-execution")] = None,
     plan_json: Annotated[Optional[str], typer.Option("--plan-json", help="Execution plan as JSON array")] = None,
     success_criteria_json: Annotated[Optional[str], typer.Option("--success-criteria-json", help="Success criteria as JSON array")] = None,
     task_ids: Annotated[Optional[list[str]], typer.Option("--task-id", help="Link an existing task ID")] = None,
@@ -1302,9 +1256,7 @@ def project_update(
         aim=aim,
         method=method,
         description=description,
-        state=state,
         conclusion=conclusion,
-        auto_execute=auto_execute,
         plan_json=plan_json,
         success_criteria_json=success_criteria_json,
         task_ids=task_ids,
@@ -1372,64 +1324,6 @@ def project_spec_get(spec_id: Annotated[str, typer.Argument(help="Project spec I
     _echo_json(_api_call("GET", f"/api/v1/project-specs/{spec_id}")["data"])
 
 
-@project_spec_app.command("approve")
-def project_spec_approve(
-    project_id: Annotated[str, typer.Argument(help="Project ID")],
-    approver: Annotated[str, typer.Option("--approver", "-a", help="Name of approver")] = "Mike",
-) -> None:
-    """Approve the latest pending project spec for a project."""
-
-    spec = _find_pending_project_spec(project_id)
-    approved = _api_call("POST", f"/api/v1/project-specs/{spec['id']}/approve", {"approver": approver})["data"]
-    typer.echo(f"Project spec approved: {approved['id']}")
-    typer.echo(f"Approved by: {approved['approved_by']}")
-
-
-@project_spec_app.command("approve-id")
-def project_spec_approve_id(
-    spec_id: Annotated[str, typer.Argument(help="Project spec ID")],
-    approver: Annotated[str, typer.Option("--approver", "-a", help="Name of approver")] = "Mike",
-) -> None:
-    """Approve a specific project spec by ID."""
-
-    approved = _api_call("POST", f"/api/v1/project-specs/{spec_id}/approve", {"approver": approver})["data"]
-    typer.echo(f"Project spec approved: {approved['id']}")
-    typer.echo(f"Approved by: {approved['approved_by']}")
-
-
-@project_spec_app.command("reject")
-def project_spec_reject(
-    project_id: Annotated[str, typer.Argument(help="Project ID")],
-    feedback: Annotated[str, typer.Option("--feedback", "-f", help="Rejection feedback")] = ...,
-) -> None:
-    """Reject the latest pending project spec for a project."""
-
-    spec = _find_pending_project_spec(project_id)
-    rejected = _api_call("POST", f"/api/v1/project-specs/{spec['id']}/reject", {"feedback": feedback})["data"]
-    typer.echo(f"Project spec rejected: {rejected['id']}")
-    typer.echo(f"Feedback: {rejected['feedback']}")
-
-
-@project_spec_app.command("reject-id")
-def project_spec_reject_id(
-    spec_id: Annotated[str, typer.Argument(help="Project spec ID")],
-    feedback: Annotated[str, typer.Option("--feedback", "-f", help="Rejection feedback")] = ...,
-) -> None:
-    """Reject a specific project spec by ID."""
-
-    rejected = _api_call("POST", f"/api/v1/project-specs/{spec_id}/reject", {"feedback": feedback})["data"]
-    typer.echo(f"Project spec rejected: {rejected['id']}")
-    typer.echo(f"Feedback: {rejected['feedback']}")
-
-
-@project_app.command("start")
-def project_start(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
-    """Start a project."""
-
-    result = _api_call("POST", f"/api/v1/projects/{id}/start")
-    typer.echo(f"Project started: {result['data']['title']}")
-
-
 @project_app.command("pause")
 def project_pause(id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
     """Pause a project."""
@@ -1465,63 +1359,6 @@ def project_tasks(
         typer.echo("No tasks found for this project.")
         return
     _print_task_table(tasks)
-
-
-@project_app.command("task-create")
-def project_task_create(
-    project_id: Annotated[str, typer.Argument(help="Project ID")],
-    title: Annotated[str, typer.Argument(help="Task title")],
-    requested_by: Annotated[Optional[str], typer.Option("--requested-by", "-r", help="Who requested the task")] = "Bob",
-    priority: Annotated[Optional[str], typer.Option("--priority", "-p", help="Task priority")] = "medium",
-    description: Annotated[Optional[str], typer.Option("--description", "-d", help="Task description")] = None,
-    plan: Annotated[str, typer.Option(help="Initial execution plan (required)")] = ...,
-    status: Annotated[Optional[str], typer.Option("--status", help="Initial task status")] = None,
-    recurrence_rule: Annotated[Optional[str], typer.Option("--recurring", "--recurrence-rule", help="Cron expression for recurring task")] = None,
-    is_recurring: Annotated[Optional[bool], typer.Option("--is-recurring/--not-recurring", help="Explicitly mark the task as recurring or not")] = None,
-    next_run_at: Annotated[Optional[str], typer.Option("--next-run-at", help="Next scheduled run time (ISO format)")] = None,
-    retry_max_attempts: Annotated[Optional[int], typer.Option("--retry-max-attempts", help="Retry policy max attempts")] = None,
-    retry_current_attempt: Annotated[Optional[int], typer.Option("--retry-current-attempt", help="Current retry attempt count")] = None,
-    retry_on_failure: Annotated[Optional[str], typer.Option("--retry-on-failure", help="Retry action: retry, retry_from, escalate, abort")] = None,
-    retry_from_step: Annotated[Optional[int], typer.Option("--retry-from-step", help="Restart from this step number")] = None,
-    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Extra task metadata as JSON object")] = None,
-    channel: Annotated[Optional[str], typer.Option(help="Source channel for notifications and approvals")] = None,
-    chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for notifications and approvals")] = None,
-    session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
-    target_kind: Annotated[Optional[str], typer.Option("--target-kind", help="Target session kind: group or dm")] = None,
-    target_session_key: Annotated[Optional[str], typer.Option("--target-session-key", help="Target WhatsApp group session key")] = None,
-    target_chat_id: Annotated[Optional[str], typer.Option("--target-chat-id", help="Target WhatsApp chat ID")] = None,
-    target_contact_id: Annotated[Optional[str], typer.Option("--target-contact-id", help="Target contact ID for WhatsApp DM")] = None,
-) -> None:
-    """Create a task from a project (auto-linked)."""
-
-    payload = _build_task_payload(
-        title=title,
-        requested_by=requested_by,
-        priority=priority,
-        description=description,
-        plan=plan,
-        status=status,
-        recurrence_rule=recurrence_rule,
-        is_recurring=is_recurring,
-        next_run_at=next_run_at,
-        retry_max_attempts=retry_max_attempts,
-        retry_current_attempt=retry_current_attempt,
-        retry_on_failure=retry_on_failure,
-        retry_from_step=retry_from_step,
-        metadata_json=metadata_json,
-        channel=channel,
-        chat_id=chat_id,
-        session_key=session_key,
-        target_kind=target_kind,
-        target_session_key=target_session_key,
-        target_chat_id=target_chat_id,
-        target_contact_id=target_contact_id,
-    )
-    task = _api_call("POST", f"/api/v1/projects/{project_id}/tasks", payload)["data"]
-    typer.echo(f"Created task from project: {task['id']}")
-    typer.echo(f"Title: {task['title']}")
-    typer.echo(f"Status: {task['status']}")
-    typer.echo(f"Auto-linked to project: {project_id}")
 
 
 @project_app.command("journal")
@@ -1560,15 +1397,6 @@ def project_journal_add(
     entry = _api_call("POST", f"/api/v1/projects/{project_id}/journal", payload)["data"]
     typer.echo(f"Added journal entry: {entry['id']}")
     typer.echo(f"Type: {entry['entry_type']}")
-
-
-@project_app.command("execute")
-def project_execute(project_id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
-    """Start project auto-execution."""
-
-    project = _api_call("POST", f"/api/v1/projects/{project_id}/execute")["data"]
-    typer.echo(f"Project execution started: {project['title']}")
-    typer.echo(f"State: {project['state']}")
 
 
 @project_app.command("evaluate")

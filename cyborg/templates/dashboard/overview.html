@@ -130,7 +130,11 @@
                         {% endif %}
                     </div>
                     <div class="text-sm font-medium mb-1">{{ approval.title }}</div>
-                    <div class="text-xs text-text-muted mb-3">{{ approval.description|truncate(80) }}</div>
+                    {% if approval.type == 'project_plan' and approval.proposal and approval.proposal.aim %}
+                    <div class="text-xs text-text-secondary mb-2 whitespace-pre-line">{{ approval.proposal.aim[:120] }}</div>
+                    {% else %}
+                    <div class="text-xs text-text-muted mb-2">{{ approval.description|truncate(80) }}</div>
+                    {% endif %}
                     <div class="flex items-center justify-between gap-2 text-xs">
                         <span class="text-text-muted">Review this item in the appropriate workflow.</span>
                         {% if approval.review_href %}
@@ -313,7 +317,7 @@ new Chart(document.getElementById('projectStatusChart'), {
 new Chart(document.getElementById('taskStatusChart'), {
     type: 'bar',
     data: {
-        labels: ['Planning', 'Pending', 'Active', 'Blocked', 'Completed', 'Failed'],
+        labels: ['Pending', 'Active', 'Blocked', 'Completed', 'Failed'],
         datasets: [{
             label: 'Tasks',
             data: {{ task_status_data|safe }},

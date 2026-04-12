@@ -101,7 +101,6 @@ class ProjectInfoResponse(BaseModel):
     title: str
     aim: str | None
     state: str
-    auto_execute: bool
 
 
 # ============================================================================
@@ -197,7 +196,7 @@ async def refine_project_strategy(
     Trigger strategy refinement analysis for a project.
 
     Uses OpenClaw reasoning to analyze the project state and suggest
-    strategic adjustments. If auto_execute is enabled and should_refine is true,
+    strategic adjustments. If should_refine is true,
     applies the refinements automatically.
     """
     reasoning_service = _get_reasoning_service(db)
@@ -228,8 +227,8 @@ async def refine_project_strategy(
             risks_identified=result.get("risks_identified", []),
         )
 
-        # If project has auto_execute and should_refine, apply changes
-        if project.get("auto_execute") and response.should_refine:
+        # If should_refine, apply changes automatically
+        if response.should_refine:
             # Apply refinements automatically (design decision: auto-accept)
             # This would update project metadata, task priorities, etc.
             # For now, record the decision and return
@@ -266,7 +265,6 @@ async def get_project_status(
             title=project.title,
             aim=project.aim,
             state=project.state.value,
-            auto_execute=project.auto_execute or False,
         )
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")

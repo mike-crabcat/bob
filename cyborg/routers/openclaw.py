@@ -40,7 +40,7 @@ async def get_openclaw_context(
         """
         SELECT id, title, description, status, priority, requested_by
         FROM tasks
-        WHERE status IN ('planning', 'active', 'pending') AND deleted_at IS NULL
+        WHERE status IN ('active', 'pending') AND deleted_at IS NULL
         ORDER BY 
             CASE priority
                 WHEN 'critical' THEN 1
@@ -147,7 +147,7 @@ async def get_openclaw_context_json(
         """
         SELECT id, title, description, status, priority, requested_by
         FROM tasks
-        WHERE status IN ('planning', 'active', 'pending') AND deleted_at IS NULL
+        WHERE status IN ('active', 'pending') AND deleted_at IS NULL
         ORDER BY 
             CASE priority
                 WHEN 'critical' THEN 1

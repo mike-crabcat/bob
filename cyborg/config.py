@@ -131,7 +131,7 @@ class OpenClawHookSettings:
     agent_id: str | None = None
     sender_name: str = "Cyborg"
     wake_mode: str = "now"
-    timeout_seconds: float = 15.0
+    timeout_seconds: float = 120.0
     session_key_prefix: str | None = None
 
     @property
@@ -176,8 +176,13 @@ class Settings:
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
-    notification_dispatch_interval_seconds: float = 60.0
+    heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
+    dashboard_secret: str = ""  # Shared secret for dashboard-only operations
+
+    @property
+    def dashboard_secret_configured(self) -> bool:
+        return bool(self.dashboard_secret.strip())
 
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.expanduser()
@@ -209,7 +214,11 @@ class Settings:
         port = int(os.getenv("CYBORG_PORT", str(DEFAULT_PORT)))
         pool_size = int(os.getenv("CYBORG_DB_POOL_SIZE", str(DEFAULT_POOL_SIZE)))
         log_level = os.getenv("CYBORG_LOG_LEVEL", "info")
-        notification_dispatch_interval_seconds = float(os.getenv("CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS", "60"))
+        # Backward compat: read old env var if new one not set
+        _old_interval = os.getenv("CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS", "")
+        heartbeat_interval_seconds = float(
+            os.getenv("CYBORG_HEARTBEAT_INTERVAL_SECONDS", _old_interval or "60")
+        )
 
         # Logging settings
         log_path_value = os.getenv("CYBORG_LOG_PATH")
@@ -255,10 +264,11 @@ class Settings:
             agent_id=os.getenv("CYBORG_OPENCLAW_AGENT_ID") or None,
             sender_name=os.getenv("CYBORG_OPENCLAW_SENDER_NAME", "Cyborg"),
             wake_mode=os.getenv("CYBORG_OPENCLAW_WAKE_MODE", "now"),
-            timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "15")),
+            timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "120")),
             session_key_prefix=os.getenv("CYBORG_OPENCLAW_SESSION_KEY_PREFIX") or None,
         )
         public_url = os.getenv("CYBORG_PUBLIC_URL", "")
+        dashboard_secret = os.getenv("CYBORG_DASHBOARD_SECRET", "")
 
         return cls(
             host=host,
@@ -272,8 +282,9 @@ class Settings:
             pool_size=pool_size,
             webhooks=webhooks,
             openclaw=openclaw,
-            notification_dispatch_interval_seconds=notification_dispatch_interval_seconds,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
             public_url=public_url,
+            dashboard_secret=dashboard_secret,
         )
 
     def ensure_directories(self) -> None:

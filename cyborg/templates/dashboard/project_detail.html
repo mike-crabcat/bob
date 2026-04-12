@@ -12,13 +12,14 @@
         </h1>
         <div class="flex items-center gap-3 mt-1">
             <span class="font-mono-data text-sm text-text-muted">{{ project.id }}</span>
-            {% if project.state == 'active' %}
+            {% if project.state == 'planning' %}
+            <span class="px-2 py-1 text-xs rounded bg-accent-orange/20 text-accent-orange">PLANNING</span>
+            {% elif project.state == 'active' %}
             <span class="status-info px-2 py-1 text-xs rounded">ACTIVE</span>
             {% elif project.state == 'closed' %}
             <span class="status-success px-2 py-1 text-xs rounded">COMPLETED</span>
-            {% endif %}
-            {% if project.auto_execute %}
-            <span class="text-xs text-accent-purple">◈ Auto-execute</span>
+            {% elif project.state == 'paused' %}
+            <span class="px-2 py-1 text-xs rounded bg-bg-elevated text-text-muted">PAUSED</span>
             {% endif %}
         </div>
     </div>
@@ -74,6 +75,169 @@
         </div>
     </div>
 </div>
+
+<!-- Specs & Planning -->
+{% if project.state == 'planning' or specs %}
+<div class="glass-card neon-border rounded-xl p-6 mb-8" x-data="{ showRejectForm: false }">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-orange">◈</span>
+        Specs & Planning
+    </h2>
+
+    <!-- Planning state banner -->
+    {% if project.state == 'planning' %}
+    <div class="p-3 rounded-lg mb-4
+        {% if not specs %}bg-accent-orange/10 border border-accent-orange/30
+        {% elif specs[0].status == 'rejected' %}bg-accent-red/10 border border-accent-red/30
+        {% elif specs[0].status == 'pending_approval' %}bg-accent-cyan/10 border border-accent-cyan/30
+        {% else %}bg-bg-card{% endif %}">
+        <div class="flex items-center gap-2">
+            {% if not specs %}
+            <span class="text-accent-orange">●</span>
+            <span class="text-sm text-accent-orange">Waiting for spec generation&hellip;</span>
+            {% elif specs[0].status == 'rejected' %}
+            <span class="text-accent-orange pulse">●</span>
+            <span class="text-sm text-accent-orange">Spec rejected — generating revised spec&hellip;</span>
+            {% elif specs[0].status == 'pending_approval' %}
+            <span class="text-accent-cyan">●</span>
+            <span class="text-sm text-accent-cyan">Spec pending approval — review and approve to start execution</span>
+            {% else %}
+            <span class="text-text-muted">●</span>
+            <span class="text-sm text-text-muted">Planning in progress</span>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Spec versions -->
+    {% if specs %}
+    <div class="space-y-4">
+        {% for spec in specs %}
+        <div class="p-4 bg-bg-card rounded-lg
+            {% if spec.status == 'rejected' %}border border-accent-red/20
+            {% elif spec.status == 'approved' %}border border-accent-green/20
+            {% elif spec.status == 'pending_approval' %}border border-accent-cyan/20
+            {% endif %}">
+            <!-- Spec header -->
+            <div class="flex items-center gap-3 mb-3">
+                <span class="text-sm font-medium text-text-secondary">v{{ spec.version_number }}</span>
+                {% if spec.status == 'approved' %}
+                <span class="text-xs px-2 py-0.5 rounded bg-accent-green/20 text-accent-green">APPROVED</span>
+                {% elif spec.status == 'pending_approval' %}
+                <span class="text-xs px-2 py-0.5 rounded bg-accent-cyan/20 text-accent-cyan">PENDING</span>
+                {% elif spec.status == 'rejected' %}
+                <span class="text-xs px-2 py-0.5 rounded bg-accent-red/20 text-accent-red">REJECTED</span>
+                {% endif %}
+                <span class="text-xs text-text-muted ml-auto">{{ spec.created_at[:16] }}</span>
+            </div>
+
+            <!-- Aim -->
+            <div class="text-sm mb-2">
+                <span class="text-text-secondary">Aim:</span>
+                <span class="text-text-primary ml-1">{{ spec.aim }}</span>
+            </div>
+
+            {% if spec.method %}
+            <div class="text-sm mb-2">
+                <span class="text-text-secondary">Method:</span>
+                <span class="text-text-primary ml-1">{{ spec.method }}</span>
+            </div>
+            {% endif %}
+
+            <!-- Plan steps -->
+            {% if spec.plan %}
+            <div class="text-sm mb-2">
+                <span class="text-text-secondary">Plan ({{ spec.plan|length }} steps):</span>
+                <ol class="mt-1 ml-4 space-y-1">
+                    {% for step in spec.plan %}
+                    <li class="text-text-primary">
+                        <span class="text-accent-cyan">{{ step.order + 1 }}.</span>
+                        {{ step.title }}
+                        <span class="text-text-muted">— {{ step.description }}</span>
+                    </li>
+                    {% endfor %}
+                </ol>
+            </div>
+            {% endif %}
+
+            <!-- Success criteria -->
+            {% if spec.success_criteria %}
+            <div class="text-sm">
+                <span class="text-text-secondary">Success Criteria:</span>
+                <ul class="mt-1 ml-4 space-y-1">
+                    {% for c in spec.success_criteria %}
+                    <li class="text-text-primary">
+                        <span class="text-accent-green">○</span>
+                        {{ c.description or c.check }}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            <!-- Rejection feedback -->
+            {% if spec.feedback %}
+            <div class="mt-3 p-2 bg-accent-red/5 rounded border border-accent-red/10">
+                <div class="text-xs text-accent-red mb-1">Rejection Feedback</div>
+                <div class="text-sm text-text-primary">{{ spec.feedback }}</div>
+            </div>
+            {% endif %}
+
+            <!-- Approve / Reject buttons for pending spec -->
+            {% if spec.status == 'pending_approval' and loop.first %}
+            <div class="flex items-center gap-3 mt-4 pt-3 border-t border-bg-elevated">
+                <form method="POST" action="/dashboard/approve/{{ pending_approval.id }}?next=/dashboard/projects/{{ project.id }}" class="inline">
+                    <button type="submit"
+                            class="px-4 py-2 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors text-sm cursor-pointer">
+                        Approve
+                    </button>
+                </form>
+                <button type="button" @click="showRejectForm = !showRejectForm"
+                        class="px-4 py-2 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors text-sm cursor-pointer">
+                    Reject &amp; Revise
+                </button>
+            </div>
+
+            <!-- Reject form (toggled) -->
+            <div x-show="showRejectForm" x-cloak class="mt-4 pt-3 border-t border-bg-elevated">
+                <form method="POST" action="/dashboard/specs/{{ spec.id }}/reject-and-revise">
+                    <div class="mb-3">
+                        <label class="block text-sm text-text-secondary mb-1">What do you want different?</label>
+                        <textarea name="feedback" rows="3" required
+                                  class="w-full bg-bg-deep border border-bg-elevated rounded-lg p-3 text-sm text-text-primary focus:border-accent-cyan/50 focus:outline-none"
+                                  placeholder="Describe what needs to change in the spec..."></textarea>
+                    </div>
+                    <div class="flex items-center gap-4 mb-4">
+                        <label class="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
+                            <input type="checkbox" name="allow_aim_changes" class="accent-accent-cyan">
+                            Allow aim changes
+                        </label>
+                        <label class="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
+                            <input type="checkbox" name="allow_criteria_changes" class="accent-accent-cyan">
+                            Allow success criteria changes
+                        </label>
+                    </div>
+                    <div class="flex gap-2">
+                        <button type="submit"
+                                class="px-4 py-2 bg-accent-red text-white rounded-lg hover:bg-accent-red/80 transition-colors text-sm cursor-pointer">
+                            Reject &amp; Generate Revision
+                        </button>
+                        <button type="button" @click="showRejectForm = false"
+                                class="px-4 py-2 bg-bg-elevated text-text-secondary rounded-lg hover:bg-bg-card transition-colors text-sm cursor-pointer">
+                            Cancel
+                        </button>
+                    </div>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-text-muted text-sm">No specs submitted yet</div>
+    {% endif %}
+</div>
+{% endif %}
 
 <!-- Project Details -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
@@ -132,7 +296,8 @@
     </h2>
     <div class="space-y-2">
         {% for task in tasks[:10] %}
-        <div class="p-3 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors">
+        <a href="/dashboard/tasks/{{ task.id }}"
+           class="p-3 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors cursor-pointer block">
             <div class="w-8 h-8 rounded flex items-center justify-center text-sm
                 {% if task.status == 'completed' %}bg-accent-green/20 text-accent-green
                 {% elif task.status == 'active' %}bg-accent-cyan/20 text-accent-cyan
@@ -150,9 +315,119 @@
             <span class="text-xs px-2 py-1 rounded bg-bg-elevated text-text-muted">
                 {{ task.status|upper }}
             </span>
-        </div>
+        </a>
         {% else %}
         <div class="text-text-muted text-sm">No tasks found</div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Project Files -->
+<div class="glass-card neon-border rounded-xl p-6 mb-8">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-cyan">◈</span>
+        Project Files
+        <span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-accent-cyan/20 text-accent-cyan">{{ file_count }}</span>
+    </h2>
+    {% if file_categories %}
+    <div class="space-y-4">
+        {% for category, files in file_categories.items() %}
+        <div>
+            <h3 class="text-sm font-medium text-text-secondary mb-2 uppercase tracking-wider">{{ category }}/</h3>
+            {% if category == "tasks" %}
+            {% set ns = namespace(grouped=[]) %}
+            {% for f in files %}
+            {% if f.task_title %}
+            {% set ns.grouped = ns.grouped + [f] %}
+            {% endif %}
+            {% endfor %}
+            {% if ns.grouped %}
+            {% for f in ns.grouped %}
+            {% if loop.first or f.task_short_id != ns.grouped[loop.index0 - 1].task_short_id %}
+            <div class="text-xs text-accent-cyan mt-3 mb-1 pl-1">{{ f.task_title }}</div>
+            {% endif %}
+            <a href="/dashboard/projects/{{ project.id }}/files/{{ f.relative_path }}"
+               target="_blank"
+               class="block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors">
+                <span class="text-sm">{{ f.name|file_icon }}</span>
+                <span class="text-sm flex-1 truncate text-text-primary">{{ f.name }}</span>
+                <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
+            </a>
+            {% endfor %}
+            {% endif %}
+            {% else %}
+            <div class="space-y-1">
+                {% for f in files %}
+                <a href="/dashboard/projects/{{ project.id }}/files/{{ f.relative_path }}"
+                   target="_blank"
+                   class="block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors">
+                    <span class="text-sm">{{ f.name|file_icon }}</span>
+                    <span class="text-sm flex-1 truncate text-text-primary">{{ f.name }}</span>
+                    <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-text-muted text-sm">No files found in project workspace</div>
+    {% endif %}
+</div>
+
+<!-- Prompt History -->
+<div class="glass-card neon-border rounded-xl p-6 mb-8">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-orange">◈</span>
+        Prompt History
+        <span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-accent-orange/20 text-accent-orange">{{ prompts|length }}</span>
+    </h2>
+    <div class="space-y-2">
+        {% for prompt in prompts[:20] %}
+        {% set category_colors = {
+            'plan_generation': 'text-accent-cyan bg-accent-cyan/15',
+            'criteria_evaluation': 'text-accent-cyan bg-accent-cyan/15',
+            'strategy_refinement': 'text-accent-cyan bg-accent-cyan/15',
+            'learning_extraction': 'text-accent-cyan bg-accent-cyan/15',
+            'task_planning': 'text-accent-cyan bg-accent-cyan/15',
+            'health_analysis': 'text-accent-cyan bg-accent-cyan/15',
+            'follow_up_generation': 'text-accent-cyan bg-accent-cyan/15',
+            'task_assignment': 'text-accent-purple bg-accent-purple/15',
+            'needs_input': 'text-accent-orange bg-accent-orange/15',
+            'notification': 'text-accent-pink bg-accent-pink/15',
+        } %}
+        <div class="p-3 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors"
+             x-data="{ expanded: false }">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="text-xs px-2 py-0.5 rounded {{ category_colors.get(prompt.category, 'text-text-muted bg-bg-elevated') }}">
+                        {{ prompt.category.replace('_', ' ') }}
+                    </span>
+                    {% if prompt.task_id %}
+                    <a href="/dashboard/projects/{{ project.id }}" class="text-xs text-accent-cyan hover:underline font-mono-data">
+                        {{ prompt.task_id[:8] }}
+                    </a>
+                    {% endif %}
+                    {% if prompt.token_count_estimate %}
+                    <span class="text-xs text-text-muted">{{ prompt.token_count_estimate }} tokens</span>
+                    {% endif %}
+                    <span class="text-xs text-text-muted ml-auto">{{ prompt.timestamp|relative_time }}</span>
+                </div>
+                <div class="text-sm text-text-primary">
+                    <span x-show="!expanded">{{ prompt.prompt_text[:200] }}{% if prompt.prompt_text|length > 200 %}...{% endif %}</span>
+                    <span x-show="expanded" x-cloak>{{ prompt.prompt_text }}</span>
+                </div>
+                {% if prompt.prompt_text|length > 200 %}
+                <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline mt-1">
+                    <span x-show="!expanded">Show more</span>
+                    <span x-show="expanded" x-cloak>Show less</span>
+                </button>
+                {% endif %}
+            </div>
+        </div>
+        {% else %}
+        <div class="text-text-muted text-sm">No prompts logged yet</div>
         {% endfor %}
     </div>
 </div>
@@ -186,6 +461,46 @@
         {% else %}
         <div class="text-text-muted text-sm">No journal entries</div>
         {% endfor %}
+    </div>
+</div>
+
+<!-- Danger Zone -->
+<div class="glass-card rounded-xl p-6 mt-8 border border-red-500/20">
+    <h2 class="text-lg font-semibold mb-2 flex items-center gap-2 text-red-400">
+        <span>&#9888;</span>
+        Danger Zone
+    </h2>
+    <p class="text-text-muted text-sm mb-4">Permanently delete this project and all associated data. This cannot be undone.</p>
+    <button onclick="document.getElementById('delete-modal').classList.remove('hidden')"
+            class="px-4 py-2 bg-red-600/20 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-600/30 transition-colors text-sm cursor-pointer">
+        Delete Project
+    </button>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div id="delete-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+    <div class="glass-card rounded-xl p-6 max-w-md w-full mx-4 border border-red-500/30">
+        <h3 class="text-xl font-bold text-red-400 mb-4">Delete Project?</h3>
+        <p class="text-text-secondary text-sm mb-4">
+            This will <strong class="text-red-400">permanently delete</strong> this project and all of its data:
+        </p>
+        <ul class="text-text-muted text-sm mb-6 space-y-1 list-disc list-inside">
+            <li>The project workspace directory and all files</li>
+            <li>All tasks that belong only to this project</li>
+            <li>All notifications, specs, and journal entries</li>
+        </ul>
+        <p class="text-red-400 text-sm mb-6 font-medium">This action cannot be undone. Use with care.</p>
+        <div class="flex gap-3 justify-end">
+            <button onclick="document.getElementById('delete-modal').classList.add('hidden')"
+                    class="px-4 py-2 bg-bg-elevated text-text-secondary border border-bg-elevated rounded-lg hover:border-accent-cyan/30 transition-colors text-sm cursor-pointer">
+                Cancel
+            </button>
+            <button onclick="document.getElementById('delete-form').submit()"
+                    class="px-4 py-2 bg-red-600 text-white border border-red-500 rounded-lg hover:bg-red-700 transition-colors text-sm cursor-pointer">
+                Yes, Delete Permanently
+            </button>
+        </div>
+        <form id="delete-form" method="POST" action="/dashboard/projects/{{ project.id }}/delete" class="hidden"></form>
     </div>
 </div>
 {% endblock %}

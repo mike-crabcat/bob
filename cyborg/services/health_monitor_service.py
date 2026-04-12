@@ -63,7 +63,7 @@ class HealthMonitorService(BaseService):
         # Get project stats
         project = await self.db.fetch_one(
             """
-            SELECT id, title, aim, method, state, auto_execute, created_at,
+            SELECT id, title, aim, method, state, created_at,
                    (SELECT COUNT(*) FROM project_tasks pt INNER JOIN tasks t ON pt.task_id = t.id
                     WHERE pt.project_id = projects.id AND t.deleted_at IS NULL) as task_count
             FROM projects
@@ -100,7 +100,7 @@ class HealthMonitorService(BaseService):
                 TaskStatus.BLOCKED.value,
                 TaskStatus.ACTIVE.value,
                 TaskStatus.PENDING.value,
-                TaskStatus.PLANNING.value,
+                TaskStatus.PENDING.value,
                 project_id,
             ),
         )
@@ -282,7 +282,7 @@ class HealthMonitorService(BaseService):
         # Get all active projects
         active_projects = await self.db.fetch_all(
             """
-            SELECT id, title, aim, state, auto_execute, created_at
+            SELECT id, title, aim, state, created_at
             FROM projects
             WHERE state = ? AND deleted_at IS NULL
             ORDER BY created_at DESC

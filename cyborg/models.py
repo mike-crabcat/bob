@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -75,11 +75,11 @@ class CyborgModel(BaseModel):
 
 
 class TaskStatus(StrEnum):
-    PLANNING = "planning"
     PENDING = "pending"
     ACTIVE = "active"
     PAUSED = "paused"
     BLOCKED = "blocked"
+    SUBMITTED = "submitted"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -193,6 +193,9 @@ class NotificationType(StrEnum):
     TASK_ASSIGNMENT = "task_assignment"
     TASK_RESULT = "task_result"
     PROJECT_RESULT = "project_result"
+    TASK_RETRY = "task_retry"
+    TASK_INPUT_RESPONSE = "task_input_response"
+    TASK_TAP = "task_tap"
 
 
 class NotificationStatus(StrEnum):
@@ -245,9 +248,96 @@ class RetryConfig(CyborgModel):
         return self
 
 
+class TaskFilePurpose(StrEnum):
+    REASONING = "reasoning"
+    RESULT = "result"
+    ANALYSIS = "analysis"
+    LOG = "log"
+    ARTIFACT = "artifact"
+    OTHER = "other"
+
+
+class MultiChoiceOption(CyborgModel):
+    value: str = Field(min_length=1, max_length=200)
+    label: str = Field(min_length=1, max_length=200)
+    image_url: str | None = Field(default=None, description="Relative path to image in project workspace")
+    audio_url: str | None = Field(default=None, description="Relative path to MP3 in project workspace")
+
+    @field_validator("value", "label")
+    @classmethod
+    def must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+    @field_validator("image_url", "audio_url")
+    @classmethod
+    def must_be_valid_relative_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if ".." in stripped or stripped.startswith("/"):
+            raise ValueError("URL must be a relative path without '..' or leading '/'")
+        return stripped
+
+
+class TextInputSchema(CyborgModel):
+    type: Literal["text"] = "text"
+    prompt: str = Field(min_length=1, description="Question or prompt to show the user")
+    placeholder: str | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("prompt must not be blank")
+        return stripped
+
+
+class MultiChoiceInputSchema(CyborgModel):
+    type: Literal["multi_choice"] = "multi_choice"
+    prompt: str = Field(min_length=1, description="Question or prompt to show the user")
+    options: list[MultiChoiceOption] = Field(min_length=1)
+    allow_multiple: bool = False
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("prompt must not be blank")
+        return stripped
+
+
+TaskInputSchema = Annotated[TextInputSchema | MultiChoiceInputSchema, Field(discriminator="type")]
+
+
+class TaskInputResolveRequest(CyborgModel):
+    """User's response to a task input request submitted via the dashboard."""
+    response: str | list[str]
+
+    @field_validator("response")
+    @classmethod
+    def response_must_not_be_empty(cls, value: str | list[str]) -> str | list[str]:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("response must not be blank")
+            return stripped
+        if isinstance(value, list):
+            if not value or all(not v.strip() for v in value):
+                raise ValueError("response must contain at least one selection")
+            return [v.strip() for v in value if v.strip()]
+        return value
+
+
 class TaskTargetSession(CyborgModel):
-    channel: Literal["whatsapp"]
-    kind: TaskTargetSessionKind
+    channel: Literal["whatsapp"] | None = None
+    kind: TaskTargetSessionKind | None = None
     session_key: str | None = None
     chat_id: str | None = None
     contact_id: UUID | None = None
@@ -264,6 +354,12 @@ class TaskTargetSession(CyborgModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> "TaskTargetSession":
+        # Session-only target (e.g., cyborg:project:X:task:Y) — just needs session_key
+        if self.channel is None and self.kind is None and isinstance(self.session_key, str) and self.session_key.strip():
+            return self
+        # WhatsApp targets require both channel and kind
+        if self.channel is None or self.kind is None:
+            raise ValueError("target_session requires either session_key alone, or channel and kind")
         if self.kind == TaskTargetSessionKind.GROUP:
             if self.session_key is None and self.chat_id is None:
                 raise ValueError("group target_session requires session_key or chat_id")
@@ -314,7 +410,7 @@ class TaskFields(CyborgModel):
     description: str | None = None
     requested_by: str | None = Field(default=None, max_length=200)
     plan: str | None = None
-    status: TaskStatus = TaskStatus.PLANNING
+    status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
     parent_id: UUID | None = None
     retry_config: RetryConfig | None = None
@@ -413,14 +509,16 @@ class TaskResponse(TaskFields, EntityRef, SoftDeleteFields):
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
+    submitted_at: datetime | None = None
     completed_at: datetime | None = None
     result: str | None = None
     project_ids: list[UUID] = Field(default_factory=list)
     blocked_at: datetime | None = None
-    current_plan_id: UUID | None = None
     notification_count: int = 0
     last_notification_at: datetime | None = None
     needs_input_since: datetime | None = None
+    output_directory: str | None = None
+    files: list[TaskFileResponse] = Field(default_factory=list)
 
 
 class TaskStepFields(CyborgModel):
@@ -476,6 +574,7 @@ class TaskBlockRequest(CyborgModel):
     """
     reason: str = Field(min_length=1, description="Why the task is blocked")
     resume_instructions: str = Field(min_length=1, description="Full instructions on how to resume this task when unblocked")
+    input_schema: TaskInputSchema | None = Field(default=None, description="Optional structured input request to show in the dashboard")
 
     @field_validator("reason")
     @classmethod
@@ -503,98 +602,42 @@ class TaskRetryRequest(CyborgModel):
     details: MetadataDict = Field(default_factory=dict)
 
 
-# Plan versioning models
+class TaskFileCreate(CyborgModel):
+    """Request to register a file produced by a task."""
+    filename: str = Field(min_length=1, max_length=255)
+    purpose: TaskFilePurpose = TaskFilePurpose.ARTIFACT
+    description: str | None = None
+    content_type: str = "text/plain"
+
+    @field_validator("filename")
+    @classmethod
+    def filename_must_not_have_path_sep(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("filename must not be blank")
+        if "/" in stripped or "\\" in stripped:
+            raise ValueError("filename must not contain path separators")
+        return stripped
 
 
-class PlanStatus(StrEnum):
-    DRAFT = "draft"
-    PENDING_APPROVAL = "pending_approval"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-
-
-class PlanFields(CyborgModel):
-    """Base fields for plan versions."""
+class TaskFileResponse(CyborgModel, EntityRef):
     task_id: UUID
-    version_number: int = Field(ge=1)
-    content: str = Field(min_length=1)
-    status: PlanStatus = PlanStatus.DRAFT
-    feedback: str | None = None
-    is_current: bool = False
-
-    @field_validator("content")
-    @classmethod
-    def content_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("content must not be blank")
-        return stripped
-
-
-class PlanCreate(CyborgModel):
-    """Request to create a new plan version."""
-    content: str = Field(min_length=1, description="The plan content")
-
-    @field_validator("content")
-    @classmethod
-    def content_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("content must not be blank")
-        return stripped
-
-
-class PlanSubmitRequest(CyborgModel):
-    """Request to submit a plan for approval."""
-    content: str = Field(min_length=1, description="The plan content to submit")
-
-    @field_validator("content")
-    @classmethod
-    def content_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("content must not be blank")
-        return stripped
-
-
-class PlanApproveRequest(CyborgModel):
-    """Request to approve a plan."""
-    approver: str = Field(min_length=1, description="Name of the person approving the plan")
-
-    @field_validator("approver")
-    @classmethod
-    def approver_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("approver must not be blank")
-        return stripped
-
-
-class PlanRejectRequest(CyborgModel):
-    """Request to reject a plan with feedback."""
-    feedback: str = Field(min_length=1, description="Reason for rejection")
-
-    @field_validator("feedback")
-    @classmethod
-    def feedback_must_not_be_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("feedback must not be blank")
-        return stripped
-
-
-class PlanResponse(PlanFields, EntityRef):
-    """Response model for a plan version."""
+    project_id: UUID
+    filename: str
+    relative_path: str
+    purpose: TaskFilePurpose
+    description: str | None = None
+    content_type: str = "text/plain"
+    size_bytes: int | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
     created_at: datetime
-    approved_at: datetime | None = None
-    approved_by: str | None = None
+    updated_at: datetime
 
 
-class PlanListResponse(CyborgModel):
-    """Response for listing plans."""
+class TaskFileListResponse(CyborgModel):
     task_id: UUID
-    plans: list[PlanResponse]
-    current_plan_id: UUID | None = None
+    output_directory: str | None = None
+    files: list[TaskFileResponse] = Field(default_factory=list)
 
 
 class ProjectFields(CyborgModel):
@@ -606,7 +649,6 @@ class ProjectFields(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = Field(default=False, description="Whether to auto-execute when project becomes active")
 
     @field_validator("title")
     @classmethod
@@ -626,7 +668,6 @@ class ProjectCreate(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = Field(default=False)
     task_ids: list[UUID] = Field(default_factory=list)
     metadata: MetadataDict = Field(default_factory=dict)
 
@@ -644,11 +685,9 @@ class ProjectUpdate(CyborgModel):
     description: str | None = None
     aim: str | None = None
     method: str | None = None
-    state: ProjectState | None = None
     conclusion: str | None = None
     plan: list[PlanStep] | None = None
     success_criteria: list[SuccessCriterion] | None = None
-    auto_execute: bool | None = None
     task_ids: list[UUID] | None = None
     metadata: MetadataDict | None = None
 
@@ -672,7 +711,6 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = False
     subagent_session_key: str | None = None
     metadata: MetadataDict = Field(default_factory=dict)
     blocked_reason: str | None = None

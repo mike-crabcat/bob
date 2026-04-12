@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from pathlib import Path
+
 from cyborg.config import Settings
 from cyborg.main import create_app
 from cyborg.services.webhook_service import (
@@ -98,7 +100,7 @@ class TestWebhookServiceSignatures:
         with make_client(tmp_path) as client:
             # Get the app state to access database
             from cyborg.database import Database
-            db = Database(tmp_path / "data" / "cyborg.db")
+            db = client.app.state.db
             
             webhook_service = WebhookService(db)
             
@@ -122,7 +124,7 @@ class TestWebhookServiceSignatures:
         """Test HMAC signature verification."""
         with make_client(tmp_path) as client:
             from cyborg.database import Database
-            db = Database(tmp_path / "data" / "cyborg.db")
+            db = client.app.state.db
             
             webhook_service = WebhookService(db)
             
@@ -293,23 +295,19 @@ class TestWebhookDelivery:
                     "events": [WebhookEvent.TASK_COMPLETED],
                 },
             )
-            
-            # Create a task and complete it
-            task_response = client.post(
-                "/api/v1/tasks",
-                json={
-                    "title": "Test Task",
-                    "requested_by": "Bob",
-                    "priority": "high",
-                },
-            )
-            task_id = task_response.json()["id"]
-            
-            # Mock the HTTP client to avoid actual network calls
-            from cyborg.database import Database
-            db = Database(tmp_path / "data" / "cyborg.db")
+
+            # Create a task via TaskService using the app's connected database
+            from cyborg.services.task_service import TaskService
+            import asyncio
+            db = client.app.state.db
+            task = asyncio.run(TaskService(db).create_task({
+                "title": "Test Task",
+                "plan": "1. Do it.",
+            }))
+            task_id = str(task.id)
+
             webhook_service = WebhookService(db)
-            
+
             with patch.object(webhook_service, '_get_http_client') as mock_get_client:
                 mock_client = AsyncMock()
                 mock_response = MagicMock()
@@ -317,15 +315,14 @@ class TestWebhookDelivery:
                 mock_response.text = "OK"
                 mock_client.post.return_value = mock_response
                 mock_get_client.return_value = mock_client
-                
-                # Complete task (should trigger webhook)
-                import asyncio
+
+                # Trigger webhook event
                 asyncio.run(webhook_service.trigger_event(
                     event=WebhookEvent.TASK_COMPLETED,
                     task_id=task_id,
                     task_title="Test Task",
                 ))
-            
+
             # Verify delivery was created
             deliveries = client.get("/api/v1/webhooks/deliveries")
             assert deliveries.status_code == 200
@@ -339,7 +336,7 @@ class TestWebhookHeaders:
         """Test that signatures are generated correctly."""
         with make_client(tmp_path) as client:
             from cyborg.database import Database
-            db = Database(tmp_path / "data" / "cyborg.db")
+            db = client.app.state.db
             webhook_service = WebhookService(db)
             
             # Create a config

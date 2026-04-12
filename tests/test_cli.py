@@ -43,7 +43,7 @@ class FakeTextResponse:
 
 
 def test_task_list_accepts_raw_list_payload(monkeypatch) -> None:
-    def fake_urlopen(_: object) -> FakeResponse:
+    def fake_urlopen(_: object, **__: object) -> FakeResponse:
         return FakeResponse(
             [
                 {
@@ -67,7 +67,7 @@ def test_task_list_accepts_raw_list_payload(monkeypatch) -> None:
 def test_task_retry_sends_empty_json_object(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "task-1", "title": "Retry sync", "status": "active"})
 
@@ -83,7 +83,7 @@ def test_task_retry_sends_empty_json_object(monkeypatch) -> None:
 def test_project_close_sends_empty_json_object(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "proj-1", "title": "Close me", "state": "closed"})
 
@@ -99,7 +99,7 @@ def test_project_close_sends_empty_json_object(monkeypatch) -> None:
 def test_project_create_builds_metadata(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "proj-1", "title": "Proposal", "state": "planning"})
 
@@ -134,7 +134,7 @@ def test_project_create_builds_metadata(monkeypatch) -> None:
 def test_project_spec_submit_builds_payload(monkeypatch) -> None:
     captured: dict[str, str | bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["url"] = getattr(request, "full_url")
         captured["body"] = getattr(request, "data", None)
         return FakeResponse(
@@ -185,7 +185,7 @@ def test_project_spec_submit_builds_payload(monkeypatch) -> None:
 def test_task_update_builds_extended_payload(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "task-1", "title": "Updated", "status": "pending"})
 
@@ -227,10 +227,10 @@ def test_task_update_builds_extended_payload(monkeypatch) -> None:
     assert payload["metadata"] == {"source": "cli", "channel": "telegram"}
 
 
-def test_task_create_builds_target_session_metadata(monkeypatch) -> None:
+def test_task_update_builds_target_session_metadata(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "task-1", "title": "Reach out", "status": "planning"})
 
@@ -240,10 +240,8 @@ def test_task_create_builds_target_session_metadata(monkeypatch) -> None:
         cli.app,
         [
             "task",
-            "create",
-            "Reach out",
-            "--plan",
-            "1. Message. 2. Wait. 3. Report.",
+            "update",
+            "task-1",
             "--session-key",
             "whatsappgroup-origin",
             "--channel",
@@ -271,7 +269,7 @@ def test_task_create_builds_target_session_metadata(monkeypatch) -> None:
 def test_webhook_create_sends_repeated_events(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "hook-1", "name": "my-webhook"})
 
@@ -301,7 +299,7 @@ def test_webhook_create_sends_repeated_events(monkeypatch) -> None:
 
 
 def test_openclaw_context_text_uses_raw_response(monkeypatch) -> None:
-    def fake_urlopen(_: object) -> FakeTextResponse:
+    def fake_urlopen(_: object, **__: object) -> FakeTextResponse:
         return FakeTextResponse("plain text context")
 
     monkeypatch.setattr(cli, "urlopen", fake_urlopen)
@@ -315,7 +313,7 @@ def test_openclaw_context_text_uses_raw_response(monkeypatch) -> None:
 def test_calendar_create_builds_routing_metadata(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "cal-1", "name": "Family", "metadata": {"session_key": "whatsappgroup-family"}})
 
@@ -346,7 +344,7 @@ def test_calendar_create_builds_routing_metadata(monkeypatch) -> None:
 
 
 def test_context_summary_prints_parent_project(monkeypatch) -> None:
-    def fake_urlopen(_: object) -> FakeResponse:
+    def fake_urlopen(_: object, **__: object) -> FakeResponse:
         return FakeResponse(
             {
                 "generated_at": "2026-03-15T00:00:00+00:00",
@@ -379,7 +377,7 @@ def test_context_summary_prints_parent_project(monkeypatch) -> None:
 def test_contact_create_builds_extended_payload(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse(
             {
@@ -431,7 +429,7 @@ def test_contact_create_builds_extended_payload(monkeypatch) -> None:
 def test_contact_update_can_clear_whatsapp_groups(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse(
             {
@@ -453,7 +451,7 @@ def test_contact_update_can_clear_whatsapp_groups(monkeypatch) -> None:
 
 
 def test_contact_by_whatsapp_group_prints_table(monkeypatch) -> None:
-    def fake_urlopen(_: object) -> FakeResponse:
+    def fake_urlopen(_: object, **__: object) -> FakeResponse:
         return FakeResponse(
             [
                 {
@@ -476,7 +474,7 @@ def test_contact_by_whatsapp_group_prints_table(monkeypatch) -> None:
 def test_contact_by_email_url_encodes_lookup_value(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["url"] = getattr(request, "full_url")
         return FakeResponse(
             {
@@ -497,7 +495,7 @@ def test_contact_by_email_url_encodes_lookup_value(monkeypatch) -> None:
 def test_notification_list_builds_filters(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["url"] = getattr(request, "full_url")
         return FakeResponse(
             [
@@ -536,7 +534,7 @@ def test_notification_list_builds_filters(monkeypatch) -> None:
 def test_notification_ack_sends_acknowledged_by(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"id": "note-1", "status": "acknowledged"})
 
@@ -555,7 +553,7 @@ def test_notification_ack_sends_acknowledged_by(monkeypatch) -> None:
 def test_notification_process_due_calls_endpoint(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["url"] = getattr(request, "full_url")
         captured["body"] = getattr(request, "data", None)
         return FakeResponse({"processed": 3})
@@ -579,6 +577,7 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
         "CYBORG_OPENCLAW_TOKEN",
         "CYBORG_OPENCLAW_HOOK_PATH",
         "CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS",
+        "CYBORG_HEARTBEAT_INTERVAL_SECONDS",
         "CYBORG_ENV_FILE",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -621,7 +620,7 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
     assert settings.openclaw.base_url == "https://openclaw.example"
     assert settings.openclaw.token == "secret-token"
     assert settings.openclaw.hook_path == "/hooks/agent"
-    assert settings.notification_dispatch_interval_seconds == 15.0
+    assert settings.heartbeat_interval_seconds == 15.0
     assert captured["app"] == "fake-app"
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8420
@@ -643,7 +642,7 @@ def test_service_file_contents_exports_config_dir() -> None:
 def test_session_route_create_builds_payload(monkeypatch) -> None:
     captured: dict[str, bytes | None] = {}
 
-    def fake_urlopen(request: object) -> FakeResponse:
+    def fake_urlopen(request: object, **__: object) -> FakeResponse:
         captured["body"] = getattr(request, "data", None)
         return FakeResponse(
             {

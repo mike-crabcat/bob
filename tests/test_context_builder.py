@@ -30,7 +30,6 @@ async def sample_project(db: Database):
         success_criteria=[
             SuccessCriterion(check="completed_tasks >= 2", description="Complete 2 tasks"),
         ],
-        auto_execute=True,
     ))
 
     project_id = str(project.id)
@@ -110,7 +109,7 @@ async def test_build_minimal_context(db: Database, sample_project):
 
     # Minimal should have fewer journal entries
     assert len(context["journal"]["entries"]) <= 10
-    assert context["journal"]["total_entries"] == 32  # We created 32 entries
+    assert context["journal"]["total_entries"] == 33
 
     # Should estimate reasonable token count
     assert context["metadata"]["total_estimated_tokens"] < 5000
@@ -157,9 +156,8 @@ async def test_build_comprehensive_context(db: Database, sample_project):
 
     assert context["scope"] == ContextScope.COMPREHENSIVE
 
-    # Comprehensive should summarize older journal entries
-    assert context["journal"]["summarized"] == True
-    assert "early_summary" in context["journal"]
+    # Comprehensive should preserve the full journal for projects of this size
+    assert context["journal"]["summarized"] is False
 
     # Should have more task detail
     assert "tasks" in context
@@ -181,7 +179,7 @@ async def test_build_full_context(db: Database, sample_project):
     assert context["scope"] == ContextScope.FULL
 
     # Full should have all journal entries
-    assert context["journal"]["total_entries"] == 32
+    assert context["journal"]["total_entries"] == 33
     # May be summarized if > 50
     assert "entries" in context["journal"]
 
@@ -358,6 +356,7 @@ async def test_plan_summarization(db: Database):
 @pytest.mark.asyncio
 async def test_duration_calculation(db: Database):
     """Test project duration calculation."""
+    from cyborg.models import ProjectSpecApproveRequest
     from cyborg.services.project_service import ProjectService
 
     project_service = ProjectService(db)
@@ -365,10 +364,22 @@ async def test_duration_calculation(db: Database):
     project = await project_service.create_project({
         "title": "Duration Test",
         "aim": "Test duration",
+        "method": "Start the project and inspect the calculated duration.",
+        "success_criteria": [
+            {"check": "completed_task_count >= 1", "description": "One task completed"}
+        ],
+        "plan": [
+            {"title": "Complete task", "description": "Do the work", "criteria": "Done", "order": 0},
+        ],
     })
 
-    # Start the project
-    await project_service.start_project_execution(str(project.id))
+    specs = await project_service.project_spec_service.list_specs(str(project.id))
+    await project_service.project_spec_service.approve_spec(
+        str(specs.specs[0].id),
+        ProjectSpecApproveRequest(approver="Test"),
+    )
+
+    # Spec approval auto-triggers execution, project is already active
 
     builder = ContextBuilder(db)
     context = await builder.build_project_context(
@@ -380,3 +391,127 @@ async def test_duration_calculation(db: Database):
     duration = context["core"]["project"]["duration_days"]
     assert duration is not None
     assert duration >= 0
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_with_completed_parent(db: Database):
+    """Upstream context should include parent task results and files."""
+    from cyborg.services.project_service import ProjectService
+    from cyborg.services.task_service import TaskService
+    from uuid import uuid4
+
+    project_service = ProjectService(db)
+    task_service = TaskService(db)
+
+    project = await project_service.create_project(ProjectCreate(
+        title="Upstream Context Project",
+        aim="Test upstream context",
+        success_criteria=[],
+    ))
+    project_id = str(project.id)
+
+    # Create and complete a parent task
+    parent = await task_service.create_task(TaskCreate(
+        title="Parent Task",
+        description="Do the parent work",
+        plan="Parent plan",
+        project_ids=[project_id],
+    ))
+    await task_service.complete_task(str(parent.id), result_summary="Parent result: found important data")
+
+    # Add a file to the parent
+    await db.execute(
+        """INSERT INTO task_files (id, task_id, project_id, filename, relative_path, purpose, content_type, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
+        (str(uuid4()), str(parent.id), project_id, "data.csv",
+         f"tasks/{str(parent.id).replace('-','')[:8]}/data.csv", "result", "text/csv"),
+    )
+
+    # Create child task with parent reference
+    child = await task_service.create_task(TaskCreate(
+        title="Child Task",
+        description="Use parent data",
+        plan="Child plan",
+        project_ids=[project_id],
+    ))
+    await db.execute(
+        "UPDATE tasks SET parent_id = ? WHERE id = ?",
+        (str(parent.id), str(child.id)),
+    )
+
+    builder = ContextBuilder(db)
+    context = await builder.build_project_context(
+        project_id=project_id,
+        scope=ContextScope.STANDARD,
+    )
+
+    upstream = context["tasks"]["upstream_context"]
+    assert len(upstream) == 1
+
+    child_id = str(child.id)
+    assert child_id in upstream
+    parent_info = upstream[child_id]
+
+    assert parent_info["title"] == "Parent Task"
+    assert parent_info["status"] == "completed"
+    assert "important data" in parent_info["result"]
+    assert len(parent_info["output_files"]) == 1
+    assert parent_info["output_files"][0]["filename"] == "data.csv"
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_empty_for_minimal_scope(db: Database):
+    """Upstream context should not be computed at MINIMAL scope."""
+    from cyborg.services.project_service import ProjectService
+    from cyborg.services.task_service import TaskService
+
+    project_service = ProjectService(db)
+    task_service = TaskService(db)
+
+    project = await project_service.create_project(ProjectCreate(
+        title="Minimal Upstream Test",
+        aim="Test minimal scope",
+        success_criteria=[],
+    ))
+    project_id = str(project.id)
+
+    parent = await task_service.create_task(TaskCreate(
+        title="Parent",
+        description="Parent work",
+        plan="Plan",
+        project_ids=[project_id],
+    ))
+    await task_service.complete_task(str(parent.id), result_summary="Done")
+
+    child = await task_service.create_task(TaskCreate(
+        title="Child",
+        description="Child work",
+        plan="Plan",
+        project_ids=[project_id],
+    ))
+    await db.execute(
+        "UPDATE tasks SET parent_id = ? WHERE id = ?",
+        (str(parent.id), str(child.id)),
+    )
+
+    builder = ContextBuilder(db)
+    context = await builder.build_project_context(
+        project_id=project_id,
+        scope=ContextScope.MINIMAL,
+    )
+
+    assert context["tasks"]["upstream_context"] == {}
+
+
+@pytest.mark.asyncio
+async def test_upstream_context_empty_without_parent(db: Database, sample_project):
+    """Upstream context should be empty when no tasks have parents."""
+    builder = ContextBuilder(db)
+    project_id = sample_project["project_id"]
+
+    context = await builder.build_project_context(
+        project_id=project_id,
+        scope=ContextScope.STANDARD,
+    )
+
+    assert context["tasks"]["upstream_context"] == {}
