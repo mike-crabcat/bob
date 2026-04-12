@@ -137,31 +137,16 @@ class TestProjectExecution:
             assert tasks[0]["metadata"]["session_key"] == "whatsappgroup-execution"
 
     def test_task_completion_triggers_next_task(self, tmp_path: Path, monkeypatch) -> None:
-        """Test completing a task triggers reasoning which creates the next task."""
-        import cyborg.services.openclaw_reasoning_service as reasoning_module
-
-        async def fake_decide_next_step(self, project_id, completed_task_id):
-            return {
-                "action": "create_task",
-                "reasoning": "Step 1 done, create step 2",
-                "task": {
-                    "title": "Step 2",
-                    "description": "Do step 2",
-                    "plan": "Objective: Step 2\nExecution: Do step 2\nSuccess criteria: Step 2 done",
-                    "priority": "high",
-                },
-            }
-
-        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
-
+        """Test completing a task dispatches next-action prompt, then decide-next creates the task."""
         with make_client(tmp_path) as client:
-            # Create and start project
             project = client.post(
                 "/api/v1/projects",
                 json={
-                    "title": "Multi-step Test",
-                    "aim": "Test multi-step",
-                    "method": "Work through the plan one step at a time.",
+                    "title": "Multi-step project",
+                    "description": "Test task chain",
+                    "aim": "Complete two steps",
+                    "method": "Execute two steps sequentially",
+                    "state": "planning",
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -188,8 +173,6 @@ class TestProjectExecution:
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
 
-            # Spec approval auto-triggers execution
-
             # Get first task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             first_task_id = tasks[0]["id"]
@@ -199,6 +182,34 @@ class TestProjectExecution:
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Step 1 completed"},
             )
+
+            # Get OTP from DB
+            import sqlite3
+            db_path = tmp_path / "data" / "cyborg.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT reasoning_otp FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            otp = row["reasoning_otp"] if row else None
+            conn.close()
+            assert otp is not None
+
+            # Simulate the agent calling decide-next to create a task
+            decide_resp = client.post(
+                f"/api/v1/projects/{project_id}/decide-next",
+                json={
+                    "otp": otp,
+                    "action": "create_task",
+                    "reasoning": "Step 1 done, create step 2",
+                    "task_title": "Step 2",
+                    "task_description": "Do step 2",
+                    "task_plan": "Objective: Step 2\nExecution: Do step 2\nSuccess criteria: Step 2 done",
+                    "task_priority": "high",
+                },
+            )
+            assert decide_resp.status_code == 200
 
             # Verify second task was created by reasoning
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
@@ -210,14 +221,7 @@ class TestProjectExecution:
             assert step2["metadata"]["source"] == "reasoning"
 
     def test_all_tasks_complete_auto_closes_project(self, tmp_path: Path, monkeypatch) -> None:
-        """Test completing all tasks auto-closes the project."""
-        import cyborg.services.openclaw_reasoning_service as reasoning_module
-
-        async def fake_decide_next_step(self, project_id, completed_task_id):
-            return {"action": "close_project", "reasoning": "All criteria met. Project complete."}
-
-        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
-
+        """Test completing all tasks, then decide-next closes the project."""
         with make_client(tmp_path) as client:
             # Create and start project
             project = client.post(
@@ -246,8 +250,6 @@ class TestProjectExecution:
             project_id = project["id"]
             approve_latest_project_spec(client, project_id)
 
-            # Spec approval auto-triggers execution
-
             # Get and complete the only task
             tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
             task_id = tasks[0]["id"]
@@ -257,6 +259,30 @@ class TestProjectExecution:
                 f"/api/v1/tasks/{task_id}/complete",
                 json={"result_summary": "Completed"},
             )
+
+            # Get OTP from DB
+            import sqlite3
+            db_path = tmp_path / "data" / "cyborg.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT reasoning_otp FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            otp = row["reasoning_otp"] if row else None
+            conn.close()
+            assert otp is not None
+
+            # Simulate agent deciding to close the project
+            decide_resp = client.post(
+                f"/api/v1/projects/{project_id}/decide-next",
+                json={
+                    "otp": otp,
+                    "action": "close_project",
+                    "reasoning": "All criteria met. Project complete.",
+                },
+            )
+            assert decide_resp.status_code == 200
 
             # Verify project is closed
             project = client.get(f"/api/v1/projects/{project_id}").json()
@@ -277,23 +303,7 @@ class TestProjectExecution:
             assert project_result["message"] is not None
 
     def test_unmet_success_criteria_generate_single_follow_up_task(self, tmp_path: Path, monkeypatch) -> None:
-        """Test that reasoning creates a follow-up task when criteria aren't met."""
-        import cyborg.services.openclaw_reasoning_service as reasoning_module
-
-        async def fake_decide_next_step(self, project_id, completed_task_id):
-            return {
-                "action": "create_task",
-                "reasoning": "Only 1 task completed but criteria needs 2, creating follow-up",
-                "task": {
-                    "title": "Advance project criterion: Two tasks have been completed",
-                    "description": "Follow-up task to reach 2 completed tasks",
-                    "plan": "Objective: satisfy the unmet project success criterion 'Two tasks have been completed'.\nSuccess criterion check: completed_task_count >= 2",
-                    "priority": "high",
-                },
-            }
-
-        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
-
+        """Test that decide-next creates a follow-up task when criteria aren't met."""
         with make_client(tmp_path) as client:
             project = client.post(
                 "/api/v1/projects",
@@ -322,8 +332,6 @@ class TestProjectExecution:
             project_id = project.json()["id"]
             approve_latest_project_spec(client, project_id)
 
-            # Spec approval auto-triggers execution
-
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
             completed = client.post(
@@ -331,6 +339,34 @@ class TestProjectExecution:
                 json={"result_summary": "Initial step finished"},
             )
             assert completed.status_code == 200
+
+            # Get OTP from DB
+            import sqlite3
+            db_path = tmp_path / "data" / "cyborg.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT reasoning_otp FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            otp = row["reasoning_otp"] if row else None
+            conn.close()
+            assert otp is not None
+
+            # Simulate agent deciding to create a follow-up task
+            decide_resp = client.post(
+                f"/api/v1/projects/{project_id}/decide-next",
+                json={
+                    "otp": otp,
+                    "action": "create_task",
+                    "reasoning": "Only 1 task completed but criteria needs 2, creating follow-up",
+                    "task_title": "Advance project criterion: Two tasks have been completed",
+                    "task_description": "Follow-up task to reach 2 completed tasks",
+                    "task_plan": "Objective: satisfy the unmet project success criterion 'Two tasks have been completed'.\nSuccess criterion check: completed_task_count >= 2",
+                    "task_priority": "high",
+                },
+            )
+            assert decide_resp.status_code == 200
 
             project_tasks = client.get(f"/api/v1/projects/{project_id}/tasks")
             assert project_tasks.status_code == 200
@@ -367,30 +403,6 @@ class TestProjectExecution:
 
     def test_follow_up_task_completion_closes_project_when_criteria_are_met(self, tmp_path: Path, monkeypatch) -> None:
         """Test that a generated follow-up task can satisfy the project and trigger closure."""
-        import cyborg.services.openclaw_reasoning_service as reasoning_module
-
-        call_count = 0
-
-        async def fake_decide_next_step(self, project_id, completed_task_id):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # First task completed — criteria not met, create follow-up
-                return {
-                    "action": "create_task",
-                    "reasoning": "Need 2 tasks, only 1 done",
-                    "task": {
-                        "title": "Follow-up: Reach two completed tasks",
-                        "description": "Complete this to satisfy the success criteria",
-                        "plan": "Complete the follow-up work",
-                        "priority": "high",
-                    },
-                }
-            # Second task completed — close project
-            return {"action": "close_project", "reasoning": "Both tasks done. Success criteria met."}
-
-        monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "decide_next_step", fake_decide_next_step)
-
         with make_client(tmp_path) as client:
             project = client.post(
                 "/api/v1/projects",
@@ -419,14 +431,39 @@ class TestProjectExecution:
             project_id = project.json()["id"]
             approve_latest_project_spec(client, project_id)
 
-            # Spec approval auto-triggers execution
-
             first_task = client.get(f"/api/v1/projects/{project_id}/tasks").json()[0]
             first_task_id = first_task["id"]
             assert client.post(
                 f"/api/v1/tasks/{first_task_id}/complete",
                 json={"result_summary": "Initial step finished"},
             ).status_code == 200
+
+            # Get OTP and create follow-up task via decide-next
+            import sqlite3
+            db_path = tmp_path / "data" / "cyborg.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT reasoning_otp FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            otp = row["reasoning_otp"] if row else None
+            conn.close()
+            assert otp is not None
+
+            decide_resp = client.post(
+                f"/api/v1/projects/{project_id}/decide-next",
+                json={
+                    "otp": otp,
+                    "action": "create_task",
+                    "reasoning": "Need 2 tasks, only 1 done",
+                    "task_title": "Follow-up: Reach two completed tasks",
+                    "task_description": "Complete this to satisfy the success criteria",
+                    "task_plan": "Complete the follow-up work",
+                    "task_priority": "high",
+                },
+            )
+            assert decide_resp.status_code == 200
 
             tasks_after_first_completion = client.get(f"/api/v1/projects/{project_id}/tasks")
             assert tasks_after_first_completion.status_code == 200
@@ -440,6 +477,28 @@ class TestProjectExecution:
                 f"/api/v1/tasks/{follow_up['id']}/complete",
                 json={"result_summary": "Follow-up completed"},
             ).status_code == 200
+
+            # Get new OTP (generated by the second decide_next_action dispatch)
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row2 = conn.execute(
+                "SELECT reasoning_otp FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            otp2 = row2["reasoning_otp"] if row2 else None
+            conn.close()
+            assert otp2 is not None
+
+            # Close the project via decide-next
+            decide_resp2 = client.post(
+                f"/api/v1/projects/{project_id}/decide-next",
+                json={
+                    "otp": otp2,
+                    "action": "close_project",
+                    "reasoning": "Both tasks done. Success criteria met.",
+                },
+            )
+            assert decide_resp2.status_code == 200
 
             closed_project = client.get(f"/api/v1/projects/{project_id}")
             assert closed_project.status_code == 200

@@ -181,9 +181,8 @@ async def test_journal_records_all_decisions(db: Database, autonomous_project):
 
 @pytest.mark.asyncio
 async def test_task_completion_triggers_reasoning(db: Database):
-    """Test that task completion triggers reasoning for auto-execute projects."""
+    """Test that task completion dispatches next-action prompt, then decide-next closes the project."""
     from cyborg.services.task_service import TaskService
-    import cyborg.services.openclaw_reasoning_service as reasoning_module
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -215,17 +214,26 @@ async def test_task_completion_triggers_reasoning(db: Database):
     })
 
     autonomy_service = ProjectAutonomyService(db)
+    await autonomy_service.on_task_completed(
+        str(task.id),
+        "Trigger Task",
+        "Done",
+    )
 
-    async def fake_decide_next_step(self, project_id, completed_task_id):
-        return {"action": "close_project", "reasoning": "Done"}
+    # Project should still be active (next-action prompt was dispatched)
+    project_data = await db.fetch_one("SELECT state, reasoning_otp FROM projects WHERE id = ?", (project_id,))
+    assert project_data["state"] == "active"
+    assert project_data["reasoning_otp"] is not None
 
-    with patch.object(reasoning_module.OpenClawReasoningService, 'decide_next_step', fake_decide_next_step):
-        await autonomy_service.on_task_completed(
-            str(task.id),
-            "Trigger Task",
-            "Done",
-        )
+    # Simulate the agent's decide-next response
+    from cyborg.services.project_execution_service import ProjectExecutionService
+    execution_service = ProjectExecutionService(db)
+    await execution_service.verify_decide_next(project_id, {
+        "otp": project_data["reasoning_otp"],
+        "action": "close_project",
+        "reasoning": "Done",
+    })
 
-    # Verify project was closed by reasoning
+    # Verify project was closed
     project_data = await db.fetch_one("SELECT state FROM projects WHERE id = ?", (project_id,))
     assert project_data["state"] == "closed"

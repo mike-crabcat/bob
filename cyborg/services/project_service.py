@@ -490,6 +490,8 @@ class ProjectService(BaseService):
     async def _decode_project_row(self, row: dict[str, Any]) -> dict[str, Any]:
         decoded = dict(row)
         decoded.pop("auto_execute", None)
+        decoded.pop("reasoning_otp", None)
+        decoded.pop("reasoning_otp_created_at", None)
         decoded["task_ids"] = await self._get_task_ids(decoded["id"])
         decoded["notifications_muted"] = bool(decoded.get("notifications_muted", 0))
         decoded["plan"] = json_loads(decoded.get("plan"), [])

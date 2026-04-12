@@ -454,6 +454,39 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
         client.post(f"/api/v1/tasks/{auto_task_id}/start")
         client.post(f"/api/v1/tasks/{auto_task_id}/complete", json={"result_summary": "Step done"})
 
+        # The project is still active — next-action prompt was dispatched but
+        # no synchronous reasoning happens anymore. Simulate the agent's
+        # decide-next response via the new endpoint.
+        refreshed = client.get(f"/api/v1/projects/{project_id}")
+        assert refreshed.status_code == 200
+        project_data = refreshed.json()
+        assert project_data["state"] == "active"
+
+        # Get the OTP from the database directly
+        import sqlite3
+        db_path = tmp_path / "data" / "cyborg.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT reasoning_otp FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+        otp = row["reasoning_otp"] if row else None
+        conn.close()
+
+        assert otp is not None, "Project should have a reasoning OTP after next-action dispatch"
+
+        # Simulate the agent calling decide-next to close the project
+        decide_resp = client.post(
+            f"/api/v1/projects/{project_id}/decide-next",
+            json={
+                "otp": otp,
+                "action": "close_project",
+                "reasoning": "All tasks completed, success criteria met",
+            },
+        )
+        assert decide_resp.status_code == 200
+
         refreshed_project = client.get(f"/api/v1/projects/{project_id}")
         assert refreshed_project.status_code == 200
         assert refreshed_project.json()["state"] == "closed"
@@ -979,8 +1012,8 @@ def test_task_assignment_notifications_dispatch_via_derived_target_dm_session(tm
         ]
         assert len(assignment_calls) == 1
         assignment_params = assignment_calls[0]["params"]
-        assert assignment_calls[0]["expect_final"] is True
-        assert assignment_calls[0]["timeout_seconds"] == 180.0
+        assert assignment_calls[0]["expect_final"] is False
+        assert assignment_calls[0]["timeout_seconds"] == 30.0
         assert assignment_params["deliver"] is True
         assert assignment_params["channel"] == "whatsapp"
         assert assignment_params["to"] == "+61400111222"
@@ -1088,7 +1121,7 @@ def test_task_assignment_notifications_prefer_registered_dm_session_route(tmp_pa
             if request["method"] == "agent" and request["params"].get("idempotencyKey") == assignment["id"]
         ]
         assert len(assignment_calls) == 1
-        assert assignment_calls[0]["expect_final"] is True
+        assert assignment_calls[0]["expect_final"] is False
         assert assignment_calls[0]["params"]["deliver"] is True
         assert assignment_calls[0]["params"]["channel"] == "whatsapp"
         assert assignment_calls[0]["params"]["to"] == "+61400111222"
@@ -1198,8 +1231,8 @@ def test_auto_created_project_task_assignments_bootstrap_agent_on_source_session
             if request["method"] == "agent" and request["params"].get("idempotencyKey") == assignment["id"]
         ]
         assert len(assignment_calls) == 1
-        assert assignment_calls[0]["expect_final"] is True
-        assert assignment_calls[0]["timeout_seconds"] == 180.0
+        assert assignment_calls[0]["expect_final"] is False
+        assert assignment_calls[0]["timeout_seconds"] == 30.0
         assert assignment_calls[0]["params"]["deliver"] is True
         assert assignment_calls[0]["params"]["channel"] == "whatsapp"
         assert assignment_calls[0]["params"]["to"] == "+61456224867"

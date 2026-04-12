@@ -27,6 +27,7 @@ class OpenClawHookService(BaseService):
     GATEWAY_CLIENT_MODE = "backend"
     GATEWAY_SCOPES = ["operator.write"]
     BOOTSTRAP_TIMEOUT_SECONDS = 180.0
+    DISPATCH_ACCEPT_TIMEOUT = 30.0  # Max wait for gateway to accept a notification
 
     def __init__(
         self,
@@ -75,16 +76,15 @@ class OpenClawHookService(BaseService):
                 await log_prompt(
                     self.db,
                     category="task_assignment",
-                    prompt_text=self._render_task_assignment_prompt(notification, route_data, delivery_session_key),
+                    prompt_text=await self._render_task_assignment_prompt(notification, route_data, delivery_session_key),
                     project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
                     task_id=metadata.get("task_id") or notification.get("entity_id"),
                     session_key=delivery_session_key,
                 )
             await self._send_gateway_request(
                 "agent",
-                self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
-                expect_final=True,
-                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+                await self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
@@ -104,8 +104,7 @@ class OpenClawHookService(BaseService):
             await self._send_gateway_request(
                 "agent",
                 self._build_needs_input_agent_params(notification, route_data, session_key),
-                expect_final=True,
-                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
@@ -125,8 +124,7 @@ class OpenClawHookService(BaseService):
             await self._send_gateway_request(
                 "agent",
                 self._build_task_retry_agent_params(notification, route_data, session_key),
-                expect_final=True,
-                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
@@ -146,8 +144,7 @@ class OpenClawHookService(BaseService):
             await self._send_gateway_request(
                 "agent",
                 self._build_task_input_response_agent_params(notification, route_data, session_key),
-                expect_final=True,
-                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
@@ -167,8 +164,7 @@ class OpenClawHookService(BaseService):
             await self._send_gateway_request(
                 "agent",
                 self._build_task_tap_agent_params(notification, route_data, session_key),
-                expect_final=True,
-                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
@@ -188,8 +184,27 @@ class OpenClawHookService(BaseService):
             await self._send_gateway_request(
                 "agent",
                 self._build_submission_review_agent_params(notification, route_data, session_key),
-                expect_final=True,
-                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
+            )
+            return
+
+        # Next-action prompts are dispatched to the project's source session
+        if notification.get("notification_type") == NotificationType.NEXT_ACTION.value:
+            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="next_action",
+                    prompt_text=notification["message"],
+                    project_id=metadata.get("project_id"),
+                    task_id=metadata.get("completed_task_id"),
+                    session_key=session_key,
+                )
+            await self._send_gateway_request(
+                "agent",
+                self._build_next_action_agent_params(notification, route_data, session_key),
+                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
@@ -250,7 +265,7 @@ class OpenClawHookService(BaseService):
         # Agent-type dispatches (task_assignment, needs_input) send a full prompt
         # to OpenClaw. Retrying too quickly sends duplicate prompts that confuse
         # the agent. Wait at least 1 hour between retries for these.
-        if notification_type in ("task_assignment", "needs_input", "task_retry", "task_tap"):
+        if notification_type in ("task_assignment", "needs_input", "task_retry", "task_tap", "next_action"):
             delay = timedelta(hours=max(1, min(6, attempt_count)))
         else:
             delay = timedelta(minutes=min(360, max(1, 2 ** max(attempt_count - 1, 0))))
@@ -538,7 +553,7 @@ class OpenClawHookService(BaseService):
             params["sessionKey"] = session_key
         return params
 
-    def _build_task_assignment_agent_params(
+    async def _build_task_assignment_agent_params(
         self,
         notification: dict[str, Any],
         route: dict[str, Any],
@@ -546,7 +561,7 @@ class OpenClawHookService(BaseService):
     ) -> dict[str, Any]:
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
-            "message": self._render_task_assignment_prompt(notification, route, session_key),
+            "message": await self._render_task_assignment_prompt(notification, route, session_key),
             "deliver": True,
             "channel": route["channel"],
             "to": route["to"],
@@ -605,7 +620,7 @@ class OpenClawHookService(BaseService):
             )
         return "\n".join(part for part in parts if part is not None)
 
-    def _render_task_assignment_prompt(
+    async def _render_task_assignment_prompt(
         self,
         notification: dict[str, Any],
         route: dict[str, Any],
@@ -641,11 +656,13 @@ class OpenClawHookService(BaseService):
                 f"Notification ID: {notification['id']}",
                 f"Session Key: {session_key}",
                 f"Task: {notification['title']}",
-                "",
-                "Task brief:",
-                notification["message"],
             ]
         )
+
+        # Add description if present in notification message
+        if notification.get("message"):
+            lines.extend(["", notification["message"]])
+
         if metadata.get("parent_project_title"):
             lines.extend(
                 [
@@ -655,6 +672,13 @@ class OpenClawHookService(BaseService):
             )
         if metadata.get("requested_by"):
             lines.extend(["", f"Requested by: {metadata['requested_by']}"])
+
+        # For internal project tasks, include prior completed tasks and their files
+        if is_internal and metadata.get("parent_project_id"):
+            prior_lines = await self._render_prior_work_section(metadata["parent_project_id"], task_id)
+            if prior_lines:
+                lines.extend([""] + prior_lines)
+
         if is_internal:
             lines.extend(
                 [
@@ -730,6 +754,45 @@ class OpenClawHookService(BaseService):
                 ]
             )
         return "\n".join(lines)
+
+    async def _render_prior_work_section(
+        self,
+        project_id: str,
+        exclude_task_id: str,
+    ) -> list[str]:
+        """Render a section listing prior completed tasks and their files in a project."""
+        completed_tasks = await self.db.fetch_all(
+            """
+            SELECT t.id, t.title, t.result
+            FROM tasks t
+            INNER JOIN project_tasks pt ON pt.task_id = t.id
+            WHERE pt.project_id = ?
+              AND t.status = 'completed'
+              AND t.deleted_at IS NULL
+              AND t.id != ?
+            ORDER BY t.completed_at ASC
+            """,
+            (project_id, exclude_task_id),
+        )
+        if not completed_tasks:
+            return []
+
+        lines = ["## Prior work in this project"]
+        for task in completed_tasks:
+            result_bit = f": {task['result'][:200]}" if task.get("result") else ""
+            lines.append(f"  - {task['title']}{result_bit}")
+
+            # Fetch files for this task
+            files = await self.db.fetch_all(
+                "SELECT filename, relative_path, purpose, description FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
+                (task["id"],),
+            )
+            if files:
+                for f in files:
+                    desc = f" ({f['description']})" if f.get("description") else ""
+                    lines.append(f"    - {f['relative_path']} [{f['purpose']}]{desc}")
+
+        return lines
 
     def _render_needs_input_prompt(
         self,
@@ -1147,6 +1210,27 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_submission_review_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "low",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
+
+    def _build_next_action_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": notification["message"],
             "deliver": True,
             "channel": route["channel"],
             "to": route["to"],

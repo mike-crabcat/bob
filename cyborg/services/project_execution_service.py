@@ -367,14 +367,16 @@ class ProjectExecutionService(BaseService):
         completed_task_title: str,
         result_summary: str | None = None,
     ) -> None:
-        """Invoke reasoning to decide what to do after a task completes.
+        """Dispatch a next-action prompt to OpenClaw (fire-and-forget).
 
-        Reasoning returns one of:
-        - create_task: create a new task and dispatch it
-        - close_project: all success criteria are met
-        - block_project: need human input
+        Instead of waiting for the LLM to respond synchronously, this generates
+        a one-time password, builds a prompt with full project context, and
+        dispatches it via the notification pipeline. The agent responds
+        asynchronously via `cyborg project decide-next`.
         """
+        import secrets
         from cyborg.structured_logging import log_autonomy_decision
+        from cyborg.services.context_builder import ContextBuilder, ContextScope
 
         project = await self._get_project_row(project_id)
         if not project or project["state"] != ProjectState.ACTIVE.value:
@@ -393,44 +395,180 @@ class ProjectExecutionService(BaseService):
             await self._block_project_cycle_limit(project_id, cycle_count)
             return
 
-        # Increment cycle count
-        project_metadata["reasoning_cycle_count"] = cycle_count
+        # Generate OTP and store on project
+        otp = secrets.token_urlsafe(24)
+        now = utcnow()
         await self.db.execute(
-            "UPDATE projects SET metadata = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
-            (json.dumps(project_metadata), utcnow().isoformat(), project_id),
+            "UPDATE projects SET reasoning_otp = ?, reasoning_otp_created_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (otp, now.isoformat(), now.isoformat(), project_id),
         )
 
-        # Ask reasoning what to do next
-        decision = await self.reasoning_service.decide_next_step(project_id, completed_task_id)
-        action = decision.get("action", "block_project")
-        reasoning = decision.get("reasoning", "")
+        # Build context for the prompt
+        context_builder = ContextBuilder(self.db)
+        context = await context_builder.build_project_context(
+            project_id=project_id,
+            scope=ContextScope.STANDARD,
+            focus_reasoning="next_action",
+        )
+
+        prompt = self._build_next_action_prompt(context, completed_task_id, project_id, otp)
+
+        # Dispatch via notification service (fire-and-forget)
+        try:
+            from cyborg.services.notification_service import NotificationService
+            notification_service = NotificationService(self.db)
+            await notification_service.create_next_action_notification(
+                project_id,
+                prompt,
+                otp,
+                completed_task_id,
+                now=now,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to dispatch next-action prompt for project %s",
+                project_id,
+                exc_info=True,
+            )
 
         log_autonomy_decision(
             _get_structured_logger(),
-            f"next_action_{action}",
+            "next_action_dispatched",
             project_id,
             trigger_task_id=completed_task_id,
-            reasoning=reasoning[:200],
             cycle_count=cycle_count,
         )
 
-        if action == "create_task":
-            task_def = decision.get("task", {})
-            await self._create_reasoned_task(project_id, task_def, reasoning)
-        elif action == "close_project":
-            await self._close_project_from_reasoning(project_id, reasoning, decision)
-        elif action == "block_project":
-            block_reason = decision.get("block_reason", "Project blocked by reasoning")
-            resume_instructions = decision.get("resume_instructions", "")
-            await self._block_project_from_reasoning(project_id, block_reason, resume_instructions, reasoning)
-
-        # Record decision in journal
         await self._add_journal_entry(
             project_id,
             JournalEntryType.DECISION,
-            f"Reasoning decision: {action}. {reasoning[:300]}",
-            {"action": action, "reasoning": reasoning, "cycle_count": cycle_count},
+            f"Dispatched next-action prompt (cycle {cycle_count}).",
+            {"cycle_count": cycle_count, "completed_task_id": completed_task_id},
         )
+
+    def _build_next_action_prompt(
+        self,
+        context: dict[str, Any],
+        completed_task_id: str,
+        project_id: str,
+        otp: str,
+    ) -> str:
+        """Build the next-action prompt with context and OTP-secured CLI instructions."""
+        core = context["core"]
+        project = core["project"]
+        criteria = core["success_criteria"].get("criteria", [])
+        plan_steps = core["success_criteria"].get("plan_steps", [])
+        tasks = context["tasks"]
+        all_tasks = tasks.get("all_tasks", [])
+        journal = context["journal"].get("entries", [])[-10:]
+
+        # Find the completed task in the context
+        completed_task_info = ""
+        for t in all_tasks:
+            if t.get("id") == completed_task_id:
+                completed_task_info = f"Title: {t.get('title', 'Unknown')}\nStatus: {t.get('status', 'unknown')}"
+                if t.get("result"):
+                    completed_task_info += f"\nResult: {t['result'][:500]}"
+                break
+        if not completed_task_info:
+            completed_task_info = f"Task ID: {completed_task_id} (details not available)"
+
+        parts = [
+            "You are managing an autonomous project. A task has just completed.",
+            "Decide what should happen next based on the project's aim, plan, and success criteria.",
+            "",
+            "## Project",
+            f"Title: {project['title']}",
+            f"Aim: {project.get('aim', 'N/A')}",
+        ]
+
+        if project.get("method"):
+            parts.append(f"Method: {project['method']}")
+
+        if plan_steps:
+            parts.extend(["", "## Plan (Reference — use as guidance, not rigid script)"])
+            for i, step in enumerate(plan_steps):
+                title = step.get("title", f"Step {i + 1}")
+                parts.append(f"  {i + 1}. {title}")
+
+        if criteria:
+            parts.extend(["", "## Success Criteria"])
+            for i, c in enumerate(criteria, 1):
+                parts.append(f"  {i}. {c.get('description', '')}")
+
+        parts.extend(["", "## Just Completed", completed_task_info])
+
+        completed_list = [t for t in all_tasks if t.get("status") == "completed"]
+        if completed_list:
+            parts.extend(["", "## All Completed Tasks"])
+            for t in completed_list:
+                result_bit = f": {t['result'][:100]}" if t.get("result") else ""
+                parts.append(f"  - {t.get('title', 'Unknown')}{result_bit}")
+
+        open_tasks = [t for t in all_tasks if t.get("status") in ("pending", "active", "blocked")]
+        if open_tasks:
+            parts.extend(["", "## Current Open Tasks"])
+            for t in open_tasks:
+                parts.append(f"  - [{t.get('status', '?')}] {t.get('title', 'Unknown')}")
+
+        if journal:
+            parts.extend(["", "## Recent Activity"])
+            for entry in journal[-5:]:
+                content = entry.get("content", "")[:120]
+                parts.append(f"  - [{entry.get('entry_type', '?')}] {content}")
+
+        parts.extend([
+            "",
+            "Based on the above, decide the single best next action:",
+            "",
+            "1. **create_task** — The project needs another task to progress toward its aim.",
+            "2. **close_project** — All success criteria appear to be met. The project is done.",
+            "3. **block_project** — The project needs human input before it can continue.",
+            "",
+            "## Your Action",
+            "After deciding, submit your decision using the cyborg CLI with the one-time password below.",
+            "This is the ONLY way to submit your decision — do not reply with the decision as text.",
+            "",
+            f"**One-time password:** `{otp}`",
+            f"**Project ID:** `{project_id}`",
+            "",
+        ])
+
+        parts.extend([
+            "### Option 1: Create a new task",
+            f"  cyborg project decide-next {project_id} --otp {otp} --action create_task \\",
+            '    --task-title "Task title" \\',
+            '    --task-description "What the task should do" \\',
+            '    --task-plan "Objective: ...\\nExecution: ...\\nSuccess criteria: ..." \\',
+            "    --reasoning \"Why this task is needed\" \\",
+            "    --task-priority high",
+            "",
+            "### Option 2: Close the project",
+            f"  cyborg project decide-next {project_id} --otp {otp} --action close_project \\",
+            '    --reasoning "Why all criteria are met"',
+            "",
+            "### Option 3: Block the project",
+            f"  cyborg project decide-next {project_id} --otp {otp} --action block_project \\",
+            '    --block-reason "Why blocked" \\',
+            '    --resume-instructions "What needs to happen to unblock" \\',
+            '    --reasoning "Why human input is needed"',
+            "",
+            "You can also use the HTTP API:",
+            f"  POST /api/v1/projects/{project_id}/decide-next",
+            "  {",
+            f'    "otp": "{otp}",',
+            '    "action": "create_task|close_project|block_project",',
+            '    "reasoning": "...",',
+            '    "task_title": "...",  // for create_task',
+            '    "task_description": "...",  // for create_task',
+            '    "task_plan": "...",  // for create_task',
+            '    "task_priority": "high|medium|low",  // for create_task',
+            '    "block_reason": "...",  // for block_project',
+            '    "resume_instructions": "..."  // for block_project',
+            "  }",
+        ])
+
+        return "\n".join(parts)
 
     @staticmethod
     def _build_project_task_session_key(project_id: str, task_short_id: str) -> str:
@@ -693,6 +831,8 @@ class ProjectExecutionService(BaseService):
 
         # Parse JSON fields
         row.pop("auto_execute", None)
+        row.pop("reasoning_otp", None)
+        row.pop("reasoning_otp_created_at", None)
         row["plan"] = self._parse_plan(row.get("plan"))
         row["success_criteria"] = self._parse_success_criteria(row.get("success_criteria"))
         row["metadata"] = json_loads(row.get("metadata"), {})
@@ -912,6 +1052,75 @@ class ProjectExecutionService(BaseService):
         )
 
         return {"project_id": project_id, "action": "bootstrapped"}
+
+    async def verify_decide_next(self, project_id: str, payload: Any) -> ProjectResponse:
+        """Process an async next-action response from reasoning.
+
+        Validates the OTP, clears it (one-time use), then executes the
+        chosen action (create_task, close_project, or block_project).
+        """
+        from cyborg.exceptions import ConflictError
+        from cyborg.models import ProjectDecideNextRequest
+
+        req = ProjectDecideNextRequest.model_validate(payload)
+        project = await self._get_project_row(project_id)
+        if not project:
+            raise ConflictError(f"Project '{project_id}' not found")
+        if project["state"] != ProjectState.ACTIVE.value:
+            raise ConflictError(f"Project is '{project['state']}', expected 'active'")
+
+        # Validate OTP
+        stored_otp = project.get("reasoning_otp")
+        if not stored_otp or req.otp != stored_otp:
+            raise ConflictError("Invalid or expired reasoning OTP")
+
+        # Clear OTP (one-time use)
+        now = utcnow().isoformat()
+        await self.db.execute(
+            "UPDATE projects SET reasoning_otp = NULL, reasoning_otp_created_at = NULL, updated_at = ? WHERE id = ?",
+            (now, project_id),
+        )
+
+        action = req.action
+        reasoning = req.reasoning or ""
+
+        # Increment cycle count
+        project_metadata = json_loads(project.get("metadata"), {})
+        cycle_count = int(project_metadata.get("reasoning_cycle_count", 0)) + 1
+        project_metadata["reasoning_cycle_count"] = cycle_count
+        await self.db.execute(
+            "UPDATE projects SET metadata = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (json.dumps(project_metadata), now, project_id),
+        )
+
+        if action == "create_task":
+            task_def = {
+                "title": req.task_title or "Next step",
+                "description": req.task_description or "",
+                "plan": req.task_plan or "",
+                "priority": req.task_priority or "high",
+            }
+            await self._create_reasoned_task(project_id, task_def, reasoning)
+        elif action == "close_project":
+            await self._close_project_from_reasoning(project_id, reasoning, {"action": action})
+        elif action == "block_project":
+            await self._block_project_from_reasoning(
+                project_id,
+                req.block_reason or "Project blocked by reasoning",
+                req.resume_instructions or "",
+                reasoning,
+            )
+        else:
+            raise ConflictError(f"Unknown action: {action}")
+
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.DECISION,
+            f"Reasoning decision (async): {action}. {reasoning[:300]}",
+            {"action": action, "reasoning": reasoning, "cycle_count": cycle_count},
+        )
+
+        return await self._build_project_response(await self._get_project_row(project_id))
 
     async def create_missing_approval(self, task_id: str) -> dict[str, Any]:
         """Create a task_input approval for a blocked task that lacks one."""
