@@ -60,6 +60,7 @@ class OpenClawHookService(BaseService):
         return self.settings.enabled
 
     async def dispatch_notification(self, notification: dict[str, Any]) -> None:
+        is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
         route = await self.routing_service.resolve_notification_route(notification.get("metadata", {}))
         if route is None:
             raise ValueError("No delivery route could be resolved for the notification")
@@ -69,15 +70,16 @@ class OpenClawHookService(BaseService):
 
         # Task assignments and plan approvals use the agent method with detailed prompt
         if self._should_use_task_assignment_agent(notification, delivery_session_key):
-            metadata = notification.get("metadata", {})
-            await log_prompt(
-                self.db,
-                category="task_assignment",
-                prompt_text=self._render_task_assignment_prompt(notification, route_data, delivery_session_key),
-                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                task_id=metadata.get("task_id") or notification.get("entity_id"),
-                session_key=delivery_session_key,
-            )
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="task_assignment",
+                    prompt_text=self._render_task_assignment_prompt(notification, route_data, delivery_session_key),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                    task_id=metadata.get("task_id") or notification.get("entity_id"),
+                    session_key=delivery_session_key,
+                )
             await self._send_gateway_request(
                 "agent",
                 self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
@@ -89,15 +91,16 @@ class OpenClawHookService(BaseService):
         # Needs input notifications (plan approvals, etc.) also use agent method for context
         if notification.get("notification_type") == "needs_input":
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            metadata = notification.get("metadata", {})
-            await log_prompt(
-                self.db,
-                category="needs_input",
-                prompt_text=self._render_needs_input_prompt(notification, route_data, session_key),
-                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                task_id=metadata.get("task_id") or notification.get("entity_id"),
-                session_key=session_key,
-            )
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="needs_input",
+                    prompt_text=self._render_needs_input_prompt(notification, route_data, session_key),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                    task_id=metadata.get("task_id") or notification.get("entity_id"),
+                    session_key=session_key,
+                )
             await self._send_gateway_request(
                 "agent",
                 self._build_needs_input_agent_params(notification, route_data, session_key),
@@ -109,15 +112,16 @@ class OpenClawHookService(BaseService):
         # Task retry notifications use the agent method with retry-specific prompt
         if notification.get("notification_type") == NotificationType.TASK_RETRY.value:
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            metadata = notification.get("metadata", {})
-            await log_prompt(
-                self.db,
-                category="task_retry",
-                prompt_text=self._render_task_retry_prompt(notification, route_data, session_key),
-                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                task_id=metadata.get("task_id") or notification.get("entity_id"),
-                session_key=session_key,
-            )
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="task_retry",
+                    prompt_text=self._render_task_retry_prompt(notification, route_data, session_key),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                    task_id=metadata.get("task_id") or notification.get("entity_id"),
+                    session_key=session_key,
+                )
             await self._send_gateway_request(
                 "agent",
                 self._build_task_retry_agent_params(notification, route_data, session_key),
@@ -129,15 +133,16 @@ class OpenClawHookService(BaseService):
         # Task input response notifications use the agent method with input-specific prompt
         if notification.get("notification_type") == NotificationType.TASK_INPUT_RESPONSE.value:
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            metadata = notification.get("metadata", {})
-            await log_prompt(
-                self.db,
-                category="task_input_response",
-                prompt_text=self._render_task_input_response_prompt(notification, route_data, session_key),
-                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                task_id=metadata.get("task_id") or notification.get("entity_id"),
-                session_key=session_key,
-            )
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="task_input_response",
+                    prompt_text=self._render_task_input_response_prompt(notification, route_data, session_key),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                    task_id=metadata.get("task_id") or notification.get("entity_id"),
+                    session_key=session_key,
+                )
             await self._send_gateway_request(
                 "agent",
                 self._build_task_input_response_agent_params(notification, route_data, session_key),
@@ -149,15 +154,16 @@ class OpenClawHookService(BaseService):
         # Task tap notifications nudge the agent to continue or submit
         if notification.get("notification_type") == NotificationType.TASK_TAP.value:
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            metadata = notification.get("metadata", {})
-            await log_prompt(
-                self.db,
-                category="task_tap",
-                prompt_text=self._render_task_tap_prompt(notification, route_data, session_key),
-                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                task_id=metadata.get("task_id") or notification.get("entity_id"),
-                session_key=session_key,
-            )
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="task_tap",
+                    prompt_text=self._render_task_tap_prompt(notification, route_data, session_key),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                    task_id=metadata.get("task_id") or notification.get("entity_id"),
+                    session_key=session_key,
+                )
             await self._send_gateway_request(
                 "agent",
                 self._build_task_tap_agent_params(notification, route_data, session_key),
@@ -166,17 +172,39 @@ class OpenClawHookService(BaseService):
             )
             return
 
+        # Submission review notifications ask the agent to verify its own work
+        if notification.get("notification_type") == NotificationType.SUBMISSION_REVIEW.value:
+            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            if not is_retry:
+                metadata = notification.get("metadata", {})
+                await log_prompt(
+                    self.db,
+                    category="submission_review",
+                    prompt_text=self._render_submission_review_prompt(notification, route_data, session_key),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                    task_id=metadata.get("task_id") or notification.get("entity_id"),
+                    session_key=session_key,
+                )
+            await self._send_gateway_request(
+                "agent",
+                self._build_submission_review_agent_params(notification, route_data, session_key),
+                expect_final=True,
+                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+            )
+            return
+
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
-        metadata = notification.get("metadata", {})
-        await log_prompt(
-            self.db,
-            category="notification",
-            prompt_text=self._render_message(notification),
-            project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-            task_id=metadata.get("task_id") or notification.get("entity_id"),
-            session_key=visible_session_key,
-        )
+        if not is_retry:
+            metadata = notification.get("metadata", {})
+            await log_prompt(
+                self.db,
+                category="notification",
+                prompt_text=self._render_message(notification),
+                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                task_id=metadata.get("task_id") or notification.get("entity_id"),
+                session_key=visible_session_key,
+            )
         await self._send_gateway_request(
             "send",
             self._build_send_params(
@@ -1029,6 +1057,96 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_tap_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "low",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
+
+    def _render_submission_review_prompt(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> str:
+        """Render prompt for submission_review notifications."""
+        metadata = notification.get("metadata", {})
+        task_id = metadata.get("task_id") or notification.get("entity_id")
+        otp = metadata.get("submission_review_otp", "")
+        result_summary = metadata.get("result_summary", "")
+
+        lines = [
+            "A task has been submitted for your review. You must verify whether the work was actually completed.",
+            "Be strict but fair. The agent should have done real work, not just restated the plan.",
+            "",
+            f"Task ID: {task_id}",
+            f"Task: {notification['title']}",
+        ]
+
+        if metadata.get("parent_project_title"):
+            lines.append(f"Parent project: {metadata['parent_project_title']}")
+
+        if result_summary:
+            lines.extend(["", f"## What the Agent Claims", result_summary])
+
+        output_directory = metadata.get("output_directory")
+        if output_directory:
+            lines.extend([
+                "",
+                "## Output Directory",
+                f"Check the files in: `{output_directory}`",
+            ])
+
+        lines.extend([
+            "",
+            "## Review Checklist",
+            "1. Does the result actually address the task?",
+            "2. Were expected output files created with real content?",
+            "3. Is the result substantive, not just a restatement of the plan?",
+            "",
+            "## Your Action",
+            "After reviewing the task output, call the verification command with the one-time password below.",
+            "",
+            f"**One-time password:** `{otp}`",
+            "",
+        ])
+
+        if self.cyborg_service_url:
+            lines.extend([
+                "Approve (if the work is satisfactory):",
+                f"  POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/verify-submit",
+                f'  {{\"otp\": \"{otp}\", \"approved\": true}}',
+                "",
+                "Reject (if issues found):",
+                f"  POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/verify-submit",
+                f'  {{\"otp\": \"{otp}\", \"approved\": false, \"reason\": \"<explain issues>\", \"issues\": [\"<issue1>\"]}}',
+            ])
+        else:
+            lines.extend([
+                "Approve (if the work is satisfactory):",
+                f"  cyborg task verify-submit {task_id} --otp {otp} --approve",
+                "",
+                "Reject (if issues found):",
+                f"  cyborg task verify-submit {task_id} --otp {otp} --reject --reason \"<explain issues>\"",
+            ])
+
+        return "\n".join(lines)
+
+    def _build_submission_review_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": self._render_submission_review_prompt(notification, route, session_key),
             "deliver": True,
             "channel": route["channel"],
             "to": route["to"],

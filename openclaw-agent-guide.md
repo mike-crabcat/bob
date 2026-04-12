@@ -256,6 +256,33 @@ uv run cyborg task fail <task-id> --details-json '{"reason":"missing data"}' --r
 
 Use `result_summary` on completion. Do not use a made-up field name.
 
+## Task submission review
+
+When you call `cyborg task submit`, the task enters `submitted` status and Cyborg sends a review prompt to the agent session. The prompt includes a one-time password (OTP). You must review the work and then call the verification command.
+
+Review and approve (the work is satisfactory):
+
+```bash
+cyborg task verify-submit <task-id> --otp <otp> --approve
+```
+
+Review and reject (issues found):
+
+```bash
+cyborg task verify-submit <task-id> --otp <otp> --reject --reason "Explain what is wrong"
+```
+
+API:
+
+```
+POST /api/v1/tasks/{task_id}/verify-submit
+{"otp": "<otp>", "approved": true}
+POST /api/v1/tasks/{task_id}/verify-submit
+{"otp": "<otp>", "approved": false, "reason": "issues found", "issues": ["issue1"]}
+```
+
+The OTP is single-use. If rejected, the task returns to `active` and you receive a retry notification with feedback.
+
 ## Linking tasks to projects
 
 If work belongs to a project, link it.
@@ -324,6 +351,44 @@ DM guidance:
 Group guidance:
 
 - use a real OpenClaw group session key or a concrete group `chat_id`
+
+## Muting project notifications
+
+When a project's tasks are malfunctioning and causing excessive notification noise in the target channel (e.g. a WhatsApp group), you can mute the project to stop all outbound notifications while the reasoning loop continues.
+
+Muting only affects notification delivery. The reasoning loop, task execution, and autonomy decisions continue as normal — no messages reach the channel.
+
+Mute:
+
+```bash
+uv run cyborg project mute <project-id>
+```
+
+API:
+
+```
+POST /api/v1/projects/{project_id}/mute
+```
+
+Unmute when the issue is resolved:
+
+```bash
+uv run cyborg project unmute <project-id>
+```
+
+API:
+
+```
+POST /api/v1/projects/{project_id}/unmute
+```
+
+Use mute when:
+
+- Tasks are in a retry loop sending repeated notifications
+- A task is generating garbled or incorrect messages
+- The channel is being spammed and you need to stop the noise while investigating
+
+Remember to unmute once the issue is resolved so normal notifications resume.
 
 ## What the agent should avoid
 

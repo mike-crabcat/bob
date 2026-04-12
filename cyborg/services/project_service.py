@@ -311,6 +311,36 @@ class ProjectService(BaseService):
     async def pause_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.PAUSED)
 
+    async def resume_project(self, project_id: str) -> ProjectResponse:
+        return await self._transition_project(project_id, ProjectState.ACTIVE)
+
+    async def resume_project_reasoning(self, project_id: str) -> None:
+        """Trigger reasoning to continue work after resume. Safe to call as a background task."""
+        try:
+            from cyborg.services.project_execution_service import ProjectExecutionService
+            execution_service = ProjectExecutionService(self.db)
+            await execution_service.on_project_resumed(project_id)
+        except Exception:
+            pass
+
+    async def mute_project(self, project_id: str) -> ProjectResponse:
+        await self._get_project_row(project_id)
+        now = utcnow().isoformat()
+        await self.db.execute(
+            "UPDATE projects SET notifications_muted = 1, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (now, project_id),
+        )
+        return await self.get_project(project_id)
+
+    async def unmute_project(self, project_id: str) -> ProjectResponse:
+        await self._get_project_row(project_id)
+        now = utcnow().isoformat()
+        await self.db.execute(
+            "UPDATE projects SET notifications_muted = 0, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (now, project_id),
+        )
+        return await self.get_project(project_id)
+
     async def close_project(self, project_id: str, payload: ProjectCloseRequest) -> ProjectResponse:
         await self._get_project_row(project_id)
         now = utcnow().isoformat()
@@ -429,6 +459,7 @@ class ProjectService(BaseService):
             row["metadata"] = json_loads(row["metadata"], {})
             row["project_ids"] = await self._get_project_ids_for_task(row["id"])
             row.pop("current_plan_id", None)
+            row.pop("submission_review_otp", None)
             tasks.append(TaskResponse.model_validate(row))
         return tasks
 
@@ -460,6 +491,7 @@ class ProjectService(BaseService):
         decoded = dict(row)
         decoded.pop("auto_execute", None)
         decoded["task_ids"] = await self._get_task_ids(decoded["id"])
+        decoded["notifications_muted"] = bool(decoded.get("notifications_muted", 0))
         decoded["plan"] = json_loads(decoded.get("plan"), [])
         decoded["success_criteria"] = json_loads(decoded.get("success_criteria"), [])
         decoded["metadata"] = json_loads(decoded.get("metadata"), {})

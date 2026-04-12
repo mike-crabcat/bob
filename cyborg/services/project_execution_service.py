@@ -91,6 +91,33 @@ class ProjectExecutionService(BaseService):
     async def _sync_notifications(self, project_id: str) -> None:
         await NotificationService(self.db).sync_project_state(project_id)
 
+    async def on_project_resumed(self, project_id: str) -> None:
+        """Resume reasoning after a project is unpaused.
+
+        Looks at the current task state and triggers the appropriate next step:
+        - If all tasks are completed, runs decide_next_action to create more or close
+        - If there are no tasks, starts execution from the plan
+        - Active/submitted/pending tasks should already have their notifications
+        """
+        project = await self._get_project_row(project_id)
+        if not project or project["state"] != ProjectState.ACTIVE.value:
+            return
+
+        latest_task = await self.db.fetch_one(
+            """
+            SELECT t.id, t.title, t.status FROM tasks t
+            INNER JOIN project_tasks pt ON pt.task_id = t.id
+            WHERE pt.project_id = ? AND t.deleted_at IS NULL
+            ORDER BY t.created_at DESC LIMIT 1
+            """,
+            (project_id,),
+        )
+
+        if latest_task and latest_task["status"] == TaskStatus.COMPLETED.value:
+            await self.decide_next_action(project_id, latest_task["id"], latest_task["title"])
+        elif not latest_task:
+            await self.start_project_execution(project_id)
+
     async def on_task_completed(self, task_id: str, task_title: str, result_summary: str | None = None) -> list[ProjectResponse]:
         """Hook called when a task is completed.
 

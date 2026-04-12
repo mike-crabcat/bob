@@ -24,9 +24,21 @@
         </div>
     </div>
     <div class="flex gap-2">
-        <a href="#" class="px-4 py-2 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors text-sm">
-            Edit Project
-        </a>
+        {% if project.state == 'active' %}
+        <form method="POST" action="/dashboard/projects/{{ project.id }}/pause" class="inline">
+            <button type="submit"
+                    class="px-4 py-2 bg-accent-orange/20 text-accent-orange border border-accent-orange/30 rounded-lg hover:bg-accent-orange/30 transition-colors text-sm cursor-pointer">
+                Pause
+            </button>
+        </form>
+        {% elif project.state == 'paused' %}
+        <form method="POST" action="/dashboard/projects/{{ project.id }}/resume" class="inline">
+            <button type="submit"
+                    class="px-4 py-2 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors text-sm cursor-pointer">
+                Resume
+            </button>
+        </form>
+        {% endif %}
     </div>
 </div>
 
@@ -397,33 +409,31 @@
             'needs_input': 'text-accent-orange bg-accent-orange/15',
             'notification': 'text-accent-pink bg-accent-pink/15',
         } %}
-        <div class="p-3 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors"
+        <div class="p-3 bg-bg-card rounded-lg hover:bg-bg-elevated transition-colors"
              x-data="{ expanded: false }">
-            <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="text-xs px-2 py-0.5 rounded {{ category_colors.get(prompt.category, 'text-text-muted bg-bg-elevated') }}">
-                        {{ prompt.category.replace('_', ' ') }}
-                    </span>
-                    {% if prompt.task_id %}
-                    <a href="/dashboard/projects/{{ project.id }}" class="text-xs text-accent-cyan hover:underline font-mono-data">
-                        {{ prompt.task_id[:8] }}
-                    </a>
-                    {% endif %}
-                    {% if prompt.token_count_estimate %}
-                    <span class="text-xs text-text-muted">{{ prompt.token_count_estimate }} tokens</span>
-                    {% endif %}
-                    <span class="text-xs text-text-muted ml-auto">{{ prompt.timestamp|relative_time }}</span>
-                </div>
-                <div class="text-sm text-text-primary">
-                    <span x-show="!expanded">{{ prompt.prompt_text[:200] }}{% if prompt.prompt_text|length > 200 %}...{% endif %}</span>
-                    <span x-show="expanded" x-cloak>{{ prompt.prompt_text }}</span>
-                </div>
-                {% if prompt.prompt_text|length > 200 %}
-                <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline mt-1">
-                    <span x-show="!expanded">Show more</span>
-                    <span x-show="expanded" x-cloak>Show less</span>
-                </button>
+            <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs px-2 py-0.5 rounded {{ category_colors.get(prompt.category, 'text-text-muted bg-bg-elevated') }}">
+                    {{ prompt.category.replace('_', ' ') }}
+                </span>
+                {% if prompt.session_key %}
+                <span class="text-xs text-text-muted font-mono-data" title="Session key">{{ prompt.session_key }}</span>
                 {% endif %}
+                {% if prompt.task_id %}
+                <a href="/dashboard/tasks/{{ prompt.task_id }}" class="text-xs text-accent-cyan hover:underline font-mono-data" title="View task">
+                    task:{{ prompt.task_id[:8] }}
+                </a>
+                {% endif %}
+                {% if prompt.token_count_estimate %}
+                <span class="text-xs text-text-muted">{{ prompt.token_count_estimate }} tokens</span>
+                {% endif %}
+                <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline ml-1 cursor-pointer">
+                    <span x-show="!expanded">Show prompt</span>
+                    <span x-show="expanded" x-cloak>Hide prompt</span>
+                </button>
+                <span class="text-xs text-text-muted ml-auto">{{ prompt.timestamp|relative_time }}</span>
+            </div>
+            <div x-show="expanded" x-cloak class="text-sm text-text-primary mt-2 p-2 bg-bg-deep rounded-lg whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+                {{ prompt.prompt_text }}
             </div>
         </div>
         {% else %}

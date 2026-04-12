@@ -235,10 +235,12 @@ class TaskService(BaseService):
     async def submit_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
         """Submit a task for review. OpenClaw agents must use this instead of complete.
 
-        Sets status to SUBMITTED, auto-registers output files, and returns
-        immediately. The submission review runs asynchronously — the task
-        transitions to COMPLETED or back to ACTIVE once the review finishes.
+        Sets status to SUBMITTED, auto-registers output files, generates a one-time
+        password for verification, and dispatches a submission review notification
+        to the agent session. The agent then calls verify_submit with the OTP.
         """
+        import secrets
+
         row = await self._get_task_row(task_id)
         if row["status"] != TaskStatus.ACTIVE.value:
             raise ConflictError(
@@ -246,13 +248,15 @@ class TaskService(BaseService):
             )
 
         now = utcnow()
+        otp = secrets.token_urlsafe(24)
 
-        # 1. Transition to SUBMITTED
+        # 1. Transition to SUBMITTED and store OTP
         async with self.db.connection(write=True) as connection:
             await connection.execute(
                 """
                 UPDATE tasks
-                SET status = ?, result = COALESCE(?, result), submitted_at = ?, updated_at = ?
+                SET status = ?, result = COALESCE(?, result), submitted_at = ?, updated_at = ?,
+                    submission_review_otp = ?
                 WHERE id = ? AND deleted_at IS NULL
                 """,
                 (
@@ -260,6 +264,7 @@ class TaskService(BaseService):
                     result_summary,
                     now.isoformat(),
                     now.isoformat(),
+                    otp,
                     task_id,
                 ),
             )
@@ -279,39 +284,53 @@ class TaskService(BaseService):
             except Exception:
                 pass
 
-        # Return immediately — the caller gets the submitted task.
-        # Review runs in the background via _run_submission_review.
+        # 3. Dispatch submission review notification to the agent session
+        try:
+            await NotificationService(self.db).create_submission_review_notification(
+                task_id, otp, now=now,
+            )
+        except Exception:
+            pass
+
         return await self.get_task(task_id)
 
-    async def _run_submission_review(self, task_id: str, result_summary: str | None = None) -> None:
-        """Run submission review in the background after submit_task returns."""
-        # Run submission review
-        try:
-            from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
+    async def verify_submit(self, task_id: str, payload: TaskVerifySubmitRequest) -> TaskResponse:
+        """Verify a task submission using the one-time password.
 
-            reasoning_service = OpenClawReasoningService(self.db)
-            review = await reasoning_service.review_task_submission(task_id, result_summary)
-        except Exception:
-            # If review fails, reject and retry (safe default)
-            review = {
-                "approved": False,
-                "reasoning": "Review call failed - task will be retried",
-                "issues": ["review_call_failed"],
-                "suggestions": ["Try submitting the task again"],
-            }
+        Called by the agent after reviewing the task work. The OTP must match
+        the one generated during submit_task.
+        """
+        from cyborg.models import TaskVerifySubmitRequest as _  # noqa: F811 — already imported
 
-        # Check task is still in SUBMITTED state (not manually overridden)
-        current = await self._get_task_row(task_id)
-        if not current or current["status"] != TaskStatus.SUBMITTED.value:
-            return
+        row = await self._get_task_row(task_id)
+        if row["status"] != TaskStatus.SUBMITTED.value:
+            raise ConflictError(
+                f"Cannot verify task '{task_id}' from '{row['status']}'. Task must be 'submitted'."
+            )
 
-        # Act on review result
-        if review.get("approved"):
-            await self.complete_task(task_id, result_summary)
-            return
+        stored_otp = row.get("submission_review_otp")
+        if not stored_otp or payload.otp != stored_otp:
+            raise ConflictError("Invalid or expired verification code")
+
+        # Clear the OTP (one-time use)
+        now = utcnow()
+        async with self.db.connection(write=True) as connection:
+            await connection.execute(
+                "UPDATE tasks SET submission_review_otp = NULL, updated_at = ? WHERE id = ?",
+                (now.isoformat(), task_id),
+            )
+
+        if payload.approved:
+            result_summary = row.get("result")
+            return await self.complete_task(task_id, result_summary)
 
         # Rejected - send back to active and notify
-        retry_now = utcnow()
+        review = {
+            "approved": False,
+            "reasoning": payload.reason or "Submission rejected by reviewer",
+            "issues": payload.issues or [],
+            "suggestions": [],
+        }
         async with self.db.connection(write=True) as connection:
             await connection.execute(
                 """
@@ -321,7 +340,7 @@ class TaskService(BaseService):
                 """,
                 (
                     TaskStatus.ACTIVE.value,
-                    retry_now.isoformat(),
+                    now.isoformat(),
                     task_id,
                 ),
             )
@@ -330,19 +349,21 @@ class TaskService(BaseService):
                 task_id,
                 "submission_rejected",
                 {
-                    "reasoning": review.get("reasoning", ""),
-                    "issues": review.get("issues", []),
+                    "reasoning": review["reasoning"],
+                    "issues": review["issues"],
                 },
-                retry_now.isoformat(),
+                now.isoformat(),
             )
 
         # Dispatch retry notification
         try:
             await NotificationService(self.db).create_task_retry_notification(
-                task_id, review, now=retry_now
+                task_id, review, now=now
             )
         except Exception:
             pass
+
+        return await self.get_task(task_id)
 
     async def complete_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
         row = await self._get_task_row(task_id)
@@ -889,6 +910,7 @@ class TaskService(BaseService):
         row["metadata"] = json_loads(row.get("metadata"), {})
         row["project_ids"] = await self._get_project_ids(row["id"])
         row.pop("current_plan_id", None)
+        row.pop("submission_review_otp", None)
         # Attach output directory and file listings
         row["output_directory"] = await self._compute_output_directory(row["id"])
         row["files"] = await self._fetch_task_file_dicts(row["id"])
