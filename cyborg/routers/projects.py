@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Response, status
 
-from cyborg.dependencies import get_project_execution_service, get_project_service
+from cyborg.dependencies import get_project_execution_service, get_project_service, get_project_spec_service
 from cyborg.models import (
     ProjectCloseRequest,
     ProjectCreate,
@@ -18,10 +19,41 @@ from cyborg.models import (
     TaskResponse,
 )
 from cyborg.services.project_execution_service import ProjectExecutionService
+from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.project_service import ProjectService
 
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
+
+
+@router.post("/doctor", response_model=dict[str, Any])
+async def doctor(
+    fix: bool = False,
+    execution_service: ProjectExecutionService = Depends(get_project_execution_service),
+) -> dict[str, Any]:
+    """Diagnose project health problems and optionally fix them.
+
+    Query param `fix=true` to apply fixes (e.g., bootstrap stuck projects).
+    """
+    problems = await execution_service.diagnose()
+    fixes: list[dict[str, Any]] = []
+
+    if fix:
+        for problem in problems:
+            if problem["problem"] == "active_with_no_tasks":
+                try:
+                    result = await execution_service.bootstrap_stuck_project(problem["project_id"])
+                    fixes.append({**problem, **result})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
+            elif problem["problem"] == "blocked_task_without_approval":
+                try:
+                    result = await execution_service.create_missing_approval(problem["task_id"])
+                    fixes.append({**problem, **result})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
+
+    return {"problems": problems, "fixes": fixes}
 
 
 @router.get("", response_model=list[ProjectResponse])
@@ -62,9 +94,15 @@ async def get_project(project_id: UUID, service: ProjectService = Depends(get_pr
 async def update_project(
     project_id: UUID,
     payload: ProjectUpdate,
+    background_tasks: BackgroundTasks,
     service: ProjectService = Depends(get_project_service),
+    spec_service: ProjectSpecService = Depends(get_project_spec_service),
 ) -> ProjectResponse:
-    return await service.update_project(str(project_id), payload)
+    has_spec_fields = any(v is not None for v in (payload.aim, payload.method, payload.plan, payload.success_criteria))
+    result = await service.update_project(str(project_id), payload, defer_plan_generation=True)
+    if has_spec_fields and payload.plan is None:
+        background_tasks.add_task(spec_service.generate_plan_if_needed, str(project_id))
+    return result
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

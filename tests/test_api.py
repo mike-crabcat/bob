@@ -132,7 +132,6 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
             json={
                 "title": "Proposal work",
                 "aim": "Ship the first customer proposal",
-                "auto_execute": False,
                 "metadata": {
                     "channel": "whatsapp",
                     "session_key": "whatsappgroup-proposals",
@@ -349,6 +348,9 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
             json={
                 "aim": "Ship the first proposal",
                 "method": "Draft, review, and send the proposal.",
+                "plan": [
+                    {"title": "Draft proposal", "description": "Write the draft", "criteria": "Draft written", "order": 0}
+                ],
                 "success_criteria": [
                     {"check": "completed_task_count >= 1", "description": "Proposal task complete"}
                 ],
@@ -403,7 +405,6 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
             json={
                 "title": "Manual close test",
                 "description": "Close when the last linked task completes",
-                "auto_execute": True,
             },
         )
         assert project.status_code == 201
@@ -776,7 +777,7 @@ def test_project_blocked_notification_fire_once(
     with make_client(tmp_path) as client:
         project = client.post(
             "/api/v1/projects",
-            json={"title": "Quarterly plan", "aim": "Prepare the quarter", "auto_execute": False},
+            json={"title": "Quarterly plan", "aim": "Prepare the quarter"},
         )
         assert project.status_code == 201
         project_id = project.json()["id"]
@@ -785,6 +786,9 @@ def test_project_blocked_notification_fire_once(
             json={
                 "aim": "Prepare the quarter",
                 "method": "Gather inputs, draft the quarterly plan, and review it.",
+                "plan": [
+                    {"title": "Draft quarterly plan", "description": "Write the quarterly plan", "criteria": "Plan written", "order": 0}
+                ],
                 "success_criteria": [
                     {"check": "completed_task_count >= 1", "description": "At least one planning task is complete"}
                 ],
@@ -793,10 +797,14 @@ def test_project_blocked_notification_fire_once(
         assert project_spec.status_code == 201
         approve_spec(client, project_spec.json()["id"])
 
-        # No notifications for planning/active projects
+        # Approval triggers task creation, which may produce a task_assignment notification
         notifications = client.get("/api/v1/notifications?status=pending")
         assert notifications.status_code == 200
-        assert notifications.json() == []
+        # Only task assignment notifications from execution, no project-level needs_input
+        assert all(
+            n.get("notification_type") != "needs_input"
+            for n in notifications.json()
+        )
 
 
 def test_notification_list_handles_naive_event_datetimes(tmp_path: Path, monkeypatch) -> None:
@@ -1147,7 +1155,6 @@ def test_auto_created_project_task_assignments_bootstrap_agent_on_source_session
                 "title": "Execution Test",
                 "aim": "Test execution bootstrap",
                 "method": "Create an automatic task and have Claw work it in the same session.",
-                "auto_execute": True,
                 "metadata": {
                     "channel": "whatsapp",
                     "session_key": "agent:main:whatsapp:direct:+61456224867",
@@ -1302,7 +1309,6 @@ def test_dashboard_project_detail_shows_prompt_history(tmp_path: Path) -> None:
             json={
                 "title": "Prompt Dashboard Test",
                 "aim": "Verify prompt history shows on dashboard",
-                "auto_execute": False,
             },
         )
         assert project.status_code == 201
@@ -1721,7 +1727,6 @@ def test_auto_task_dispatch_with_phone_number_chat_id_and_no_session_key(
                 "title": "Phone routing test",
                 "aim": "Verify dispatch works without explicit session_key",
                 "method": "Create a task and verify it dispatches.",
-                "auto_execute": True,
                 "metadata": {
                     "channel": "whatsapp",
                     "chat_id": "+61456224867",
@@ -1920,49 +1925,23 @@ def test_dashboard_reject_endpoint_rejects_spec(tmp_path: Path) -> None:
         assert refreshed.json()["state"] == "planning"
 
 
-def test_auto_execute_project_rejected_with_partial_spec_fields(tmp_path: Path) -> None:
-    """Auto-executing projects with partial spec fields (but missing required ones) are rejected."""
+def test_project_with_partial_spec_fields_accepted(tmp_path: Path) -> None:
+    """Projects with partial spec fields are accepted — spec can be completed later."""
     with make_client(tmp_path) as client:
-        # Has aim + method but no success_criteria → should be rejected
+        # Has aim + method but no success_criteria → accepted, no spec submitted
         response = client.post(
             "/api/v1/projects",
             json={
                 "title": "Incomplete project",
                 "aim": "Do the thing",
                 "method": "Plan and execute",
-                "auto_execute": True,
                 "metadata": {"session_key": "test", "channel": "whatsapp"},
             },
         )
-        assert response.status_code == 409
-        assert "aim, method, and success_criteria" in response.json()["detail"]
+        assert response.status_code == 201
 
-        # Same with auto_execute omitted (defaults to True)
+        # With complete spec fields, project is accepted and spec is submitted
         response2 = client.post(
-            "/api/v1/projects",
-            json={
-                "title": "Still incomplete",
-                "aim": "Do another thing",
-                "metadata": {"session_key": "test", "channel": "whatsapp"},
-            },
-        )
-        assert response2.status_code == 409
-
-        # With auto_execute=False, partial fields are fine
-        response3 = client.post(
-            "/api/v1/projects",
-            json={
-                "title": "Manual project",
-                "aim": "Do it manually",
-                "method": "Step by step",
-                "auto_execute": False,
-                "metadata": {"session_key": "test", "channel": "whatsapp"},
-            },
-        )
-        assert response3.status_code == 201
-
-        # With complete spec fields, auto_execute is fine
-        response4 = client.post(
             "/api/v1/projects",
             json={
                 "title": "Complete project",
@@ -1971,11 +1950,10 @@ def test_auto_execute_project_rejected_with_partial_spec_fields(tmp_path: Path) 
                 "success_criteria": [
                     {"check": "done", "description": "It's done"}
                 ],
-                "auto_execute": True,
                 "metadata": {"session_key": "test", "channel": "whatsapp"},
             },
         )
-        assert response4.status_code == 201
+        assert response2.status_code == 201
 
 
 def test_blocking_task_with_input_schema_creates_approval(tmp_path: Path) -> None:
@@ -2075,8 +2053,8 @@ def test_blocking_task_with_multi_choice_input_schema(tmp_path: Path) -> None:
         assert input_schema["allow_multiple"] is False
 
 
-def test_blocking_task_without_input_schema_does_not_create_approval(tmp_path: Path) -> None:
-    """Blocking a task without input_schema should NOT create an approval record."""
+def test_blocking_task_without_input_schema_creates_approval_without_schema(tmp_path: Path) -> None:
+    """Blocking a task without input_schema creates an approval but with no input_schema."""
     with make_client(tmp_path) as client:
         db = client.app.state.db
 
@@ -2103,7 +2081,8 @@ def test_blocking_task_without_input_schema_does_not_create_approval(tmp_path: P
                 (task_id,),
             )
         )
-        assert len(approval_rows) == 0
+        assert len(approval_rows) == 1
+        assert approval_rows[0]["input_schema"] is None
 
 
 def test_dashboard_input_resolve_endpoint_unblocks_task(tmp_path: Path) -> None:
@@ -2210,3 +2189,98 @@ def test_dashboard_reject_task_input_unblocks_with_note(tmp_path: Path) -> None:
         # Verify task was unblocked
         task_after = client.get(f"/api/v1/tasks/{task_id}")
         assert task_after.json()["status"] in ("active", "pending")
+
+
+def test_task_tap_creates_notification(tmp_path: Path, monkeypatch) -> None:
+    """Tapping an active task inserts a task_tap notification row into the database."""
+    captured_gateway_requests: list[dict[str, object]] = []
+
+    async def fake_send_gateway_request(
+        self,
+        method: str,
+        params: dict[str, object],
+        *,
+        expect_final: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        captured_gateway_requests.append(
+            {
+                "method": method,
+                "params": params,
+                "expect_final": expect_final,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        openclaw_hook_service_module.OpenClawHookService,
+        "_send_gateway_request",
+        fake_send_gateway_request,
+    )
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        db_path=tmp_path / "data" / "cyborg.db",
+        openclaw=OpenClawHookSettings(
+            base_url="https://openclaw.example",
+            token="secret",
+            session_key_prefix="cyborg:",
+        ),
+        heartbeat_interval_seconds=0,
+    )
+
+    with make_client(tmp_path, settings) as client:
+        # Create an active task with routing metadata
+        task = create_task(
+            client,
+            title="Tap me",
+            plan="1. Do work. 2. Report back.",
+            metadata={
+                "channel": "whatsapp",
+                "session_key": "agent:main:whatsapp:group:test-group@g.us",
+            },
+        )
+        task_id = str(task["id"])
+
+        # Activate the task (created in PENDING status; tap requires ACTIVE)
+        started = client.post(f"/api/v1/tasks/{task_id}/start")
+        assert started.status_code == 200
+        assert started.json()["status"] == "active"
+
+        # Tap the task via the dashboard endpoint
+        response = client.post(f"/dashboard/tasks/{task_id}/tap")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+        assert response.json()["task_id"] == task_id
+
+        # Verify the task_tap notification was persisted
+        notifications = client.get("/api/v1/notifications").json()
+        tap_notifications = [
+            n for n in notifications if n["notification_type"] == "task_tap"
+        ]
+        assert len(tap_notifications) == 1
+        tap = tap_notifications[0]
+        assert tap["entity_id"] == task_id
+        assert tap["status"] == "acknowledged"
+        assert tap["metadata"]["delivery_route"] == "source"
+
+        # Verify a second tap returns 200 (notification row inserted again)
+        response2 = client.post(f"/dashboard/tasks/{task_id}/tap")
+        assert response2.status_code == 200
+
+        # Non-existent task → 404
+        assert client.post("/dashboard/tasks/00000000-0000-0000-0000-000000000000/tap").status_code == 404
+
+        # Task without routing metadata → 422
+        no_route_settings = Settings(
+            data_dir=tmp_path / "data2",
+            config_dir=tmp_path / "config2",
+            db_path=tmp_path / "data2" / "cyborg.db",
+        )
+        with make_client(tmp_path, no_route_settings) as client2:
+            bare_task = create_task(client2, title="No route", plan="1. Nothing.")
+            client2.post(f"/api/v1/tasks/{bare_task['id']}/start")
+            bare_response = client2.post(f"/dashboard/tasks/{bare_task['id']}/tap")
+            assert bare_response.status_code == 422

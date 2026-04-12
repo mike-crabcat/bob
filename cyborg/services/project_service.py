@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,6 +16,8 @@ from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
+    NotificationEntityType,
+    NotificationStatus,
     ProjectSpecSubmitRequest,
     ProjectCloseRequest,
     ProjectCreate,
@@ -31,6 +35,8 @@ from cyborg.services.session_route_service import (
     has_source_route_metadata,
     merge_source_route_metadata,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _slugify(text: str) -> str:
@@ -95,13 +101,6 @@ class ProjectService(BaseService):
             plan=payload.plan,
             success_criteria=payload.success_criteria,
         )
-        if payload.auto_execute and spec_payload is None:
-            has_partial = any(v for v in (payload.aim, payload.method, payload.plan, payload.success_criteria))
-            if has_partial:
-                raise ConflictError(
-                    "Auto-executing projects require aim, method, and success_criteria to produce a spec. "
-                    "Provide all three, or disable auto_execute."
-                )
         async with self.db.connection(write=True) as connection:
             await self._validate_task_ids(connection, payload.task_ids)
             project_metadata = await self._inherit_task_source_route_metadata(
@@ -117,9 +116,9 @@ class ProjectService(BaseService):
             await connection.execute(
                 """
                 INSERT INTO projects (
-                    id, title, description, aim, method, state, plan, success_criteria, auto_execute,
+                    id, title, description, aim, method, state, plan, success_criteria,
                     created_at, updated_at, started_at, paused_at, closed_at, conclusion, deleted_at, metadata, current_spec_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL)
                 """,
                 (
                     project_id,
@@ -130,7 +129,6 @@ class ProjectService(BaseService):
                     payload.state.value,
                     json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan else None,
                     json_dumps([c.model_dump(mode="json") for c in payload.success_criteria]) if payload.success_criteria else None,
-                    1 if payload.auto_execute else 0,
                     now,
                     now,
                     payload.conclusion,
@@ -139,9 +137,12 @@ class ProjectService(BaseService):
             )
             await self._replace_task_links(connection, project_id, payload.task_ids)
         # Spec submission is fast (DB-only), keep synchronous so the response
-        # includes the latest spec status.
+        # includes the latest spec status.  Defer plan generation to the
+        # background task so OpenClaw reasoning doesn't block the HTTP response.
         if spec_payload is not None:
-            await self.project_spec_service.submit_spec(project_id, spec_payload)
+            await self.project_spec_service.submit_spec(
+                project_id, spec_payload, defer_plan_generation=defer_effects
+            )
         if defer_effects:
             project = await self.get_project(project_id)
             return project
@@ -154,13 +155,15 @@ class ProjectService(BaseService):
         return project
 
     async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState) -> None:
-        """Run notification sync and summary update (can be deferred to background)."""
-        if not has_spec:
+        """Run notification sync, plan generation, and summary update in the background."""
+        if has_spec:
+            await self.project_spec_service.generate_plan_if_needed(project_id)
+        else:
             await self._sync_notifications(project_id)
         project = await self.get_project(project_id)
         await self._update_summary_md(project)
 
-    async def update_project(self, project_id: str, payload: ProjectUpdate) -> ProjectResponse:
+    async def update_project(self, project_id: str, payload: ProjectUpdate, *, defer_plan_generation: bool = False) -> ProjectResponse:
         existing = await self._get_project_row(project_id)
         values = payload.model_dump(exclude_unset=True, mode="json")
         task_ids = values.pop("task_ids", None)
@@ -194,10 +197,8 @@ class ProjectService(BaseService):
             if raw_success_criteria is not None:
                 values["success_criteria"] = json_dumps(raw_success_criteria)
 
-        
+
         # Convert plan and success_criteria to JSON
-        if "auto_execute" in values and values["auto_execute"] is not None:
-            values["auto_execute"] = 1 if values["auto_execute"] else 0
         if "metadata" in values and values["metadata"] is not None:
             values["metadata"] = json_dumps(values["metadata"])
             
@@ -215,7 +216,9 @@ class ProjectService(BaseService):
                 await self._validate_task_ids(connection, task_ids)
                 await self._replace_task_links(connection, project_id, task_ids)
         if spec_payload is not None:
-            await self.project_spec_service.submit_spec(project_id, spec_payload)
+            await self.project_spec_service.submit_spec(
+                project_id, spec_payload, defer_plan_generation=defer_plan_generation
+            )
         else:
             await self._sync_notifications(project_id)
         project = await self.get_project(project_id)
@@ -223,13 +226,87 @@ class ProjectService(BaseService):
         return project
 
     async def delete_project(self, project_id: str) -> None:
-        await self._get_project_row(project_id)
-        now = utcnow().isoformat()
-        await self.db.execute(
-            "UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
-            (now, now, project_id),
+        """Hard-delete a project and cascade to all related data.
+
+        Removes the project, orphan tasks, notifications, specs, journal entries,
+        and the workspace directory. Tasks shared with other projects are unlinked
+        but not deleted.
+        """
+        row = await self._get_project_row(project_id)
+        slug = _slugify(row["title"])
+        task_ids = await self._get_task_ids(project_id)
+
+        notification_service = NotificationService(self.db)
+        now = utcnow()
+
+        async with self.db.connection(write=True) as conn:
+            # 1. Resolve and delete all notifications for this project
+            await conn.execute(
+                "UPDATE notifications SET status = ?, resolved_at = ?, updated_at = ? "
+                "WHERE entity_type = ? AND entity_id = ? AND status = ?",
+                (NotificationStatus.RESOLVED.value, now.isoformat(), now.isoformat(),
+                 NotificationEntityType.PROJECT.value, project_id, NotificationStatus.PENDING.value),
+            )
+            await conn.execute(
+                "DELETE FROM notifications WHERE entity_type = ? AND entity_id = ?",
+                (NotificationEntityType.PROJECT.value, project_id),
+            )
+
+            # 2. Find orphan tasks (only belong to this project) vs shared tasks
+            orphan_task_ids: list[str] = []
+            shared_task_ids: list[str] = []
+            for tid in task_ids:
+                cursor = await conn.execute(
+                    "SELECT COUNT(DISTINCT project_id) AS cnt FROM project_tasks WHERE task_id = ?",
+                    (tid,),
+                )
+                count_row = await cursor.fetchone()
+                await cursor.close()
+                if count_row and count_row["cnt"] <= 1:
+                    orphan_task_ids.append(tid)
+                else:
+                    shared_task_ids.append(tid)
+
+            # 3. Resolve and delete notifications for orphan tasks
+            for tid in orphan_task_ids:
+                await conn.execute(
+                    "UPDATE notifications SET status = ?, resolved_at = ?, updated_at = ? "
+                    "WHERE entity_type = ? AND entity_id = ? AND status = ?",
+                    (NotificationStatus.RESOLVED.value, now.isoformat(), now.isoformat(),
+                     NotificationEntityType.TASK.value, tid, NotificationStatus.PENDING.value),
+                )
+                await conn.execute(
+                    "DELETE FROM notifications WHERE entity_type = ? AND entity_id = ?",
+                    (NotificationEntityType.TASK.value, tid),
+                )
+
+            # 4. Delete orphan task data
+            for tid in orphan_task_ids:
+                await conn.execute("DELETE FROM task_steps WHERE task_id = ?", (tid,))
+                await conn.execute("DELETE FROM task_history WHERE task_id = ?", (tid,))
+                await conn.execute("DELETE FROM task_files WHERE task_id = ?", (tid,))
+                await conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+
+            # 5. Unlink all tasks from this project in the join table
+            await conn.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
+
+            # 6. Delete specs and journal entries
+            await conn.execute("DELETE FROM project_specs WHERE project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM project_journal_entries WHERE project_id = ?", (project_id,))
+
+            # 7. Delete the project itself
+            await conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+        # 8. Delete workspace directory (outside transaction)
+        workspace_path = Path(f"/home/mike/.openclaw/workspace/projects/{slug}")
+        if workspace_path.exists():
+            shutil.rmtree(workspace_path)
+            logger.info("Deleted workspace directory: %s", workspace_path)
+
+        logger.info(
+            "Hard-deleted project %s: %d orphan tasks removed, %d shared tasks unlinked",
+            project_id, len(orphan_task_ids), len(shared_task_ids),
         )
-        await self._sync_notifications(project_id)
 
     async def pause_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.PAUSED)
@@ -381,10 +458,10 @@ class ProjectService(BaseService):
 
     async def _decode_project_row(self, row: dict[str, Any]) -> dict[str, Any]:
         decoded = dict(row)
+        decoded.pop("auto_execute", None)
         decoded["task_ids"] = await self._get_task_ids(decoded["id"])
         decoded["plan"] = json_loads(decoded.get("plan"), [])
         decoded["success_criteria"] = json_loads(decoded.get("success_criteria"), [])
-        decoded["auto_execute"] = bool(decoded.get("auto_execute", 0))
         decoded["metadata"] = json_loads(decoded.get("metadata"), {})
         decoded = await self.project_spec_service.populate_project_spec_fields(decoded)
         return decoded
@@ -515,7 +592,6 @@ class ProjectService(BaseService):
             lines.append(f"- **Closed:** {project.closed_at}")
         if project.conclusion:
             lines.append(f"- **Conclusion:** {project.conclusion}")
-        lines.append(f"- **Auto Execute:** {'Yes' if project.auto_execute else 'No'}")
         lines.append("")
 
         # Linked tasks section (fetch early for plan progress calculation)

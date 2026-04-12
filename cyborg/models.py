@@ -195,6 +195,7 @@ class NotificationType(StrEnum):
     PROJECT_RESULT = "project_result"
     TASK_RETRY = "task_retry"
     TASK_INPUT_RESPONSE = "task_input_response"
+    TASK_TAP = "task_tap"
 
 
 class NotificationStatus(StrEnum):
@@ -259,6 +260,8 @@ class TaskFilePurpose(StrEnum):
 class MultiChoiceOption(CyborgModel):
     value: str = Field(min_length=1, max_length=200)
     label: str = Field(min_length=1, max_length=200)
+    image_url: str | None = Field(default=None, description="Relative path to image in project workspace")
+    audio_url: str | None = Field(default=None, description="Relative path to MP3 in project workspace")
 
     @field_validator("value", "label")
     @classmethod
@@ -266,6 +269,18 @@ class MultiChoiceOption(CyborgModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("value must not be blank")
+        return stripped
+
+    @field_validator("image_url", "audio_url")
+    @classmethod
+    def must_be_valid_relative_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if ".." in stripped or stripped.startswith("/"):
+            raise ValueError("URL must be a relative path without '..' or leading '/'")
         return stripped
 
 
@@ -634,7 +649,6 @@ class ProjectFields(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = Field(default=True, description="Whether to auto-execute when project becomes active")
 
     @field_validator("title")
     @classmethod
@@ -654,7 +668,6 @@ class ProjectCreate(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = Field(default=True)
     task_ids: list[UUID] = Field(default_factory=list)
     metadata: MetadataDict = Field(default_factory=dict)
 
@@ -675,7 +688,6 @@ class ProjectUpdate(CyborgModel):
     conclusion: str | None = None
     plan: list[PlanStep] | None = None
     success_criteria: list[SuccessCriterion] | None = None
-    auto_execute: bool | None = None
     task_ids: list[UUID] | None = None
     metadata: MetadataDict | None = None
 
@@ -699,7 +711,6 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
     conclusion: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    auto_execute: bool = True
     subagent_session_key: str | None = None
     metadata: MetadataDict = Field(default_factory=dict)
     blocked_reason: str | None = None

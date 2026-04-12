@@ -235,8 +235,9 @@ class TaskService(BaseService):
     async def submit_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
         """Submit a task for review. OpenClaw agents must use this instead of complete.
 
-        Sets status to SUBMITTED, auto-registers output files, runs a reasoning
-        review, and either completes the task or rejects and retries.
+        Sets status to SUBMITTED, auto-registers output files, and returns
+        immediately. The submission review runs asynchronously — the task
+        transitions to COMPLETED or back to ACTIVE once the review finishes.
         """
         row = await self._get_task_row(task_id)
         if row["status"] != TaskStatus.ACTIVE.value:
@@ -278,7 +279,13 @@ class TaskService(BaseService):
             except Exception:
                 pass
 
-        # 3. Run submission review
+        # Return immediately — the caller gets the submitted task.
+        # Review runs in the background via _run_submission_review.
+        return await self.get_task(task_id)
+
+    async def _run_submission_review(self, task_id: str, result_summary: str | None = None) -> None:
+        """Run submission review in the background after submit_task returns."""
+        # Run submission review
         try:
             from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
 
@@ -293,10 +300,15 @@ class TaskService(BaseService):
                 "suggestions": ["Try submitting the task again"],
             }
 
-        # 4. Act on review result
+        # Check task is still in SUBMITTED state (not manually overridden)
+        current = await self._get_task_row(task_id)
+        if not current or current["status"] != TaskStatus.SUBMITTED.value:
+            return
+
+        # Act on review result
         if review.get("approved"):
-            # Approved - complete the task normally
-            return await self.complete_task(task_id, result_summary)
+            await self.complete_task(task_id, result_summary)
+            return
 
         # Rejected - send back to active and notify
         retry_now = utcnow()
@@ -331,8 +343,6 @@ class TaskService(BaseService):
             )
         except Exception:
             pass
-
-        return await self.get_task(task_id)
 
     async def complete_task(self, task_id: str, result_summary: str | None = None) -> TaskResponse:
         row = await self._get_task_row(task_id)
@@ -632,8 +642,9 @@ class TaskService(BaseService):
         Records the reason and full resume instructions so the task can be
         resumed without relying on conversational context.
 
-        When input_schema is provided, creates a task_input approval record
-        so the dashboard can collect structured user input.
+        Always creates a task_input approval record so the dashboard can
+        display the blocked task. When input_schema is provided the approval
+        includes a structured input form; otherwise it shows an Unblock button.
         """
         row = await self._get_task_row(task_id)
         now = utcnow()
@@ -661,9 +672,7 @@ class TaskService(BaseService):
                 now.isoformat(),
             )
 
-        # Create approval record for structured input requests
-        if payload.input_schema is not None:
-            await self._create_task_input_approval(task_id, row, payload, now)
+        await self._create_task_input_approval(task_id, row, payload, now)
 
         return await self.get_task(task_id)
 
@@ -840,7 +849,7 @@ class TaskService(BaseService):
 
         approval_id = str(uuid4())
         now_iso = now.isoformat()
-        input_schema_json = json_dumps(payload.input_schema.model_dump(mode="json"))
+        input_schema_json = json_dumps(payload.input_schema.model_dump(mode="json")) if payload.input_schema else None
 
         proposal_data = {
             "task_id": task_id,

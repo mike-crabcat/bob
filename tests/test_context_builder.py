@@ -30,7 +30,6 @@ async def sample_project(db: Database):
         success_criteria=[
             SuccessCriterion(check="completed_tasks >= 2", description="Complete 2 tasks"),
         ],
-        auto_execute=True,
     ))
 
     project_id = str(project.id)

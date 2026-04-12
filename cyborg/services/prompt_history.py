@@ -23,6 +23,8 @@ PROMPT_CATEGORIES = frozenset({
     "notification",
     "submission_review",
     "task_retry",
+    "task_tap",
+    "task_input_response",
 })
 
 

@@ -81,7 +81,7 @@ class ContextBuilder(BaseService):
             """
             SELECT id, title, aim, method, state, plan, success_criteria,
                    conclusion, created_at, started_at, paused_at, closed_at,
-                   metadata, auto_execute
+                   metadata
             FROM projects
             WHERE id = ? AND deleted_at IS NULL
             """,
@@ -102,7 +102,6 @@ class ContextBuilder(BaseService):
                 "aim": project.get("aim"),
                 "method": project.get("method"),
                 "state": project["state"],
-                "is_auto_executing": bool(project.get("auto_execute", 0)),
                 "started_at": project.get("started_at"),
                 "duration_days": self._calculate_duration(project),
             },

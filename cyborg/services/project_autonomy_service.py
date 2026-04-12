@@ -162,13 +162,12 @@ class ProjectAutonomyService(BaseService):
     async def _released_status(self, connection: Connection, task_id: str) -> TaskStatus:
         """Determine the status for a dependency-released task.
 
-        Returns ACTIVE if the task belongs to an auto-executing project,
-        PENDING otherwise.
+        Returns ACTIVE if the task belongs to a project, PENDING otherwise.
         """
         project_row = await self._fetch_one_connection(
             connection,
             """
-            SELECT p.auto_execute
+            SELECT p.id
             FROM projects AS p
             INNER JOIN project_tasks AS pt ON pt.project_id = p.id
             WHERE pt.task_id = ? AND p.deleted_at IS NULL
@@ -176,7 +175,7 @@ class ProjectAutonomyService(BaseService):
             """,
             (task_id,),
         )
-        if project_row and bool(project_row.get("auto_execute", 0)):
+        if project_row:
             return TaskStatus.ACTIVE
         return TaskStatus.PENDING
 

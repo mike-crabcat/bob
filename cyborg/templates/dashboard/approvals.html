@@ -107,7 +107,10 @@
                         <div class="text-sm text-text-primary">{{ approval.input_schema.prompt }}</div>
                     </div>
                     <!-- Input Form -->
-                    <form method="POST" action="/dashboard/approve/{{ approval.id }}/input" class="space-y-3 mt-3">
+                    <form hx-post="/dashboard/approve/{{ approval.id }}/input"
+                          hx-target="#approval-{{ approval.id }}"
+                          hx-swap="outerHTML"
+                          class="space-y-3 mt-3">
                         {% if approval.input_schema.type == 'text' %}
                         <textarea name="response"
                                   rows="3"
@@ -117,13 +120,38 @@
                         {% elif approval.input_schema.type == 'multi_choice' %}
                         <div class="space-y-2">
                             {% for option in approval.input_schema.options %}
-                            <label class="flex items-center gap-3 p-2 rounded-lg hover:bg-bg-card cursor-pointer">
-                                {% if approval.input_schema.allow_multiple %}
-                                <input type="checkbox" name="response" value="{{ option.value }}" class="accent-accent-cyan">
-                                {% else %}
-                                <input type="radio" name="response" value="{{ option.value }}" required class="accent-accent-cyan">
-                                {% endif %}
-                                <span class="text-sm text-text-primary">{{ option.label }}</span>
+                            <label class="flex items-start gap-3 p-3 rounded-lg hover:bg-bg-card cursor-pointer border border-transparent hover:border-accent-cyan/10 transition-colors">
+                                <div class="pt-0.5">
+                                    {% if approval.input_schema.allow_multiple %}
+                                    <input type="checkbox" name="response" value="{{ option.value }}" class="accent-accent-cyan">
+                                    {% else %}
+                                    <input type="radio" name="response" value="{{ option.value }}" required class="accent-accent-cyan">
+                                    {% endif %}
+                                </div>
+                                <div class="flex-1 space-y-2">
+                                    <span class="text-sm text-text-primary">{{ option.label }}</span>
+                                    {% if option.image_url %}
+                                    <div class="mt-1">
+                                        <img src="{{ option.image_url }}"
+                                             alt="{{ option.label }}"
+                                             class="max-w-xs max-h-48 rounded-lg border border-accent-cyan/20 object-contain"
+                                             loading="lazy"
+                                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                        <span class="text-xs text-accent-red hidden">Image failed to load</span>
+                                    </div>
+                                    {% endif %}
+                                    {% if option.audio_url %}
+                                    <div class="mt-1">
+                                        <audio controls
+                                               class="h-8 w-full max-w-xs"
+                                               preload="metadata"
+                                               style="filter: hue-rotate(160deg) saturate(2);">
+                                            <source src="{{ option.audio_url }}" type="audio/mpeg">
+                                            <span class="text-xs text-text-muted">Audio playback not supported</span>
+                                        </audio>
+                                    </div>
+                                    {% endif %}
+                                </div>
                             </label>
                             {% endfor %}
                         </div>
@@ -211,13 +239,29 @@
             <!-- Actions -->
             <div class="flex flex-row lg:flex-col gap-3 lg:w-48">
                 {% if approval.approval_type == 'task_input' %}
-                <!-- For task_input: only reject (decline), submit is in the form above -->
-                <form method="POST" action="/dashboard/reject/{{ approval.id }}" class="flex-1">
-                    <button type="submit"
-                            class="w-full px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
-                        Decline
-                    </button>
-                </form>
+                {% if approval.input_schema %}
+                <!-- Has input schema: Decline only (submit is in the form above) -->
+                <button hx-post="/dashboard/reject/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                    Decline
+                </button>
+                {% else %}
+                <!-- No input schema: simple unblock/dismiss -->
+                <button hx-post="/dashboard/approve/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
+                    Unblock
+                </button>
+                <button hx-post="/dashboard/reject/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                    Dismiss
+                </button>
+                {% endif %}
                 {% else %}
                 {% if approval.review_href %}
                 <a href="{{ approval.review_href }}"
@@ -225,18 +269,24 @@
                     Review Context
                 </a>
                 {% endif %}
-                <form method="POST" action="/dashboard/approve/{{ approval.id }}" class="flex-1">
-                    <button type="submit"
-                            class="w-full px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
-                        Approve
-                    </button>
-                </form>
-                <form method="POST" action="/dashboard/reject/{{ approval.id }}" class="flex-1">
-                    <button type="submit"
-                            class="w-full px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
-                        Reject
-                    </button>
-                </form>
+                {% if approval.approval_type == 'project_plan' and approval.proposal and not approval.proposal.plan %}
+                <div class="flex-1 px-4 py-2.5 bg-bg-card text-text-muted border border-accent-green/10 rounded-lg text-center text-sm cursor-not-allowed">
+                    Plan pending generation...
+                </div>
+                {% else %}
+                <button hx-post="/dashboard/approve/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
+                    Approve
+                </button>
+                {% endif %}
+                <button hx-post="/dashboard/reject/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                    Reject
+                </button>
                 {% endif %}
             </div>
         </div>

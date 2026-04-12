@@ -146,6 +146,26 @@ class OpenClawHookService(BaseService):
             )
             return
 
+        # Task tap notifications nudge the agent to continue or submit
+        if notification.get("notification_type") == NotificationType.TASK_TAP.value:
+            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            metadata = notification.get("metadata", {})
+            await log_prompt(
+                self.db,
+                category="task_tap",
+                prompt_text=self._render_task_tap_prompt(notification, route_data, session_key),
+                project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                task_id=metadata.get("task_id") or notification.get("entity_id"),
+                session_key=session_key,
+            )
+            await self._send_gateway_request(
+                "agent",
+                self._build_task_tap_agent_params(notification, route_data, session_key),
+                expect_final=True,
+                timeout_seconds=self.BOOTSTRAP_TIMEOUT_SECONDS,
+            )
+            return
+
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
         metadata = notification.get("metadata", {})
@@ -202,7 +222,7 @@ class OpenClawHookService(BaseService):
         # Agent-type dispatches (task_assignment, needs_input) send a full prompt
         # to OpenClaw. Retrying too quickly sends duplicate prompts that confuse
         # the agent. Wait at least 1 hour between retries for these.
-        if notification_type in ("task_assignment", "needs_input", "task_retry"):
+        if notification_type in ("task_assignment", "needs_input", "task_retry", "task_tap"):
             delay = timedelta(hours=max(1, min(6, attempt_count)))
         else:
             delay = timedelta(minutes=min(360, max(1, 2 ** max(attempt_count - 1, 0))))
@@ -503,7 +523,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "off",
+            "thinking": "low" if notification.get("metadata", {}).get("auto_created_by_project") else "off",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -565,22 +585,39 @@ class OpenClawHookService(BaseService):
     ) -> str:
         metadata = notification.get("metadata", {})
         target_session = metadata.get("target_session")
-        lines = [
-            "Cyborg task assignment for this session.",
-            "",
-            "You are responsible for handling this task in the current session.",
-            "Use the user's replies here as task input, ask focused follow-up questions if needed,",
-            "and complete or fail the Cyborg task once you have a clear answer.",
-            "This turn should send the first natural user-facing message to the recipient.",
-            "",
-            f"Task ID: {metadata.get('task_id') or notification.get('entity_id')}",
-            f"Notification ID: {notification['id']}",
-            f"Session Key: {session_key}",
-            f"Task: {notification['title']}",
-            "",
-            "Task brief:",
-            notification["message"],
-        ]
+        is_internal = bool(metadata.get("auto_created_by_project"))
+        task_id = metadata.get("task_id") or notification.get("entity_id")
+
+        if is_internal:
+            lines = [
+                "Cyborg internal task assignment for this session.",
+                "",
+                "This is an auto-created project task. Work autonomously to complete it.",
+                "Do NOT send messages to the user or wait for replies in this session.",
+                "If you need human input, block the task using the block API with an input_schema.",
+                "",
+            ]
+        else:
+            lines = [
+                "Cyborg task assignment for this session.",
+                "",
+                "You are responsible for handling this task in the current session.",
+                "Use the user's replies here as task input, ask focused follow-up questions if needed,",
+                "and complete or fail the Cyborg task once you have a clear answer.",
+                "This turn should send the first natural user-facing message to the recipient.",
+                "",
+            ]
+        lines.extend(
+            [
+                f"Task ID: {task_id}",
+                f"Notification ID: {notification['id']}",
+                f"Session Key: {session_key}",
+                f"Task: {notification['title']}",
+                "",
+                "Task brief:",
+                notification["message"],
+            ]
+        )
         if metadata.get("parent_project_title"):
             lines.extend(
                 [
@@ -590,43 +627,38 @@ class OpenClawHookService(BaseService):
             )
         if metadata.get("requested_by"):
             lines.extend(["", f"Requested by: {metadata['requested_by']}"])
-        if metadata.get("session_key") or metadata.get("chat_id"):
+        if is_internal:
             lines.extend(
                 [
                     "",
-                    "Source session:",
-                    f"- channel: {metadata.get('channel') or 'unknown'}",
-                    f"- session_key: {metadata.get('session_key') or 'unknown'}",
-                    f"- chat_id: {metadata.get('chat_id') or 'unknown'}",
+                    "Instructions:",
+                    "- Work autonomously to complete the task. Do not send messages or wait for user replies.",
+                    "- If you can complete the task independently, do so and submit the result.",
+                    "- If you genuinely need human input, block the task with an input_schema:",
+                    f"  POST {self.cyborg_service_url or ''}/api/v1/tasks/{task_id}/block"
+                    '  {"reason":"<why blocked>","resume_instructions":"<how to resume>",'
+                    '"input_schema":{"type":"text","prompt":"<question>"}}',
+                    "  (input_schema can also be"
+                    ' {"type":"multi_choice","prompt":"...","options":[{"label":"A","value":"a"}],"allow_multiple":false})',
+                    "- The block creates an approval in the Cyborg dashboard where the user can respond.",
+                    "- When the user responds, you will receive a task_input_response notification to resume.",
                 ]
             )
-        if isinstance(target_session, dict):
+        else:
             lines.extend(
                 [
                     "",
-                    "Target session:",
-                    f"- kind: {target_session.get('kind') or 'unknown'}",
-                    f"- session_key: {session_key}",
-                    f"- recipient: {route.get('to') or 'unknown'}",
+                    "Instructions:",
+                    "- Send one concise natural message now that asks the first question needed to progress the task.",
+                    "- Do not mention Cyborg, hidden setup, task IDs, notification IDs, or internal routing.",
+                    "- Treat the next user reply in this session as work on this task.",
+                    "- If the answer is incomplete, ask one focused follow-up at a time.",
                 ]
             )
-            if route.get("contact_name"):
-                lines.append(f"- contact_name: {route['contact_name']}")
-        lines.extend(
-            [
-                "",
-                "Instructions:",
-                "- Send one concise natural message now that asks the first question needed to progress the task.",
-                "- Do not mention Cyborg, hidden setup, task IDs, notification IDs, or internal routing.",
-                "- Treat the next user reply in this session as work on this task.",
-                "- If the answer is incomplete, ask one focused follow-up at a time.",
-            ]
-        )
 
         # Include output directory instructions if available
         output_directory = metadata.get("output_directory")
         if output_directory:
-            task_id = metadata.get("task_id") or notification.get("entity_id")
             lines.extend(
                 [
                     "",
@@ -663,11 +695,12 @@ class OpenClawHookService(BaseService):
                     '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/submit with JSON {"result_summary":"<answer>"}.',
                 ]
             )
-        lines.extend(
-            [
-                "- Keep the tone natural for the channel and recipient.",
-            ]
-        )
+        if not is_internal:
+            lines.extend(
+                [
+                    "- Keep the tone natural for the channel and recipient.",
+                ]
+            )
         return "\n".join(lines)
 
     def _render_needs_input_prompt(
@@ -913,6 +946,89 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_input_response_prompt(notification, route, session_key),
+            "deliver": True,
+            "channel": route["channel"],
+            "to": route["to"],
+            "sessionKey": session_key,
+            "thinking": "low",
+            "timeout": timeout_seconds,
+            "idempotencyKey": notification["id"],
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return params
+
+    def _render_task_tap_prompt(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> str:
+        """Render prompt for task_tap notifications (operator nudge)."""
+        metadata = notification.get("metadata", {})
+        task_id = metadata.get("task_id") or notification.get("entity_id")
+
+        lines = [
+            "Cyborg task status check: the operator is nudging you on an active task.",
+            "",
+            "Please check your progress. If you have finished, register any output files and submit the task.",
+            "If you are still working, continue — no extra action needed beyond eventual completion.",
+            "If you are stuck or need clarification, block the task with an input_schema.",
+            "",
+            f"Task ID: {task_id}",
+            f"Notification ID: {notification['id']}",
+            f"Session Key: {session_key}",
+            f"Task: {notification['title']}",
+        ]
+
+        if metadata.get("parent_project_title"):
+            lines.extend([
+                "",
+                f"Parent project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
+            ])
+
+        output_directory = metadata.get("output_directory")
+        if output_directory:
+            lines.extend([
+                "",
+                "## Output Directory",
+                f"All task artifacts must be written to: `{output_directory}`",
+                "- Use descriptive filenames for each artifact.",
+                "- Put the primary result in `RESULT.md`.",
+            ])
+            if self.cyborg_service_url:
+                lines.append(
+                    f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files"
+                )
+
+        if self.cyborg_service_url:
+            lines.extend([
+                "",
+                "## Instructions",
+                f"- If finished, submit now: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/submit with JSON {{\"result_summary\":\"<answer>\"}}",
+                "- If still working, continue and submit when done.",
+                "- If stuck, block the task with an input_schema so the operator can help.",
+            ])
+        else:
+            lines.extend([
+                "",
+                "## Instructions",
+                f"- If finished, submit using: cyborg task submit {task_id} --result-summary \"<answer>\".",
+                "- If still working, continue and submit when done.",
+                "- If stuck, block the task with an input_schema so the operator can help.",
+            ])
+
+        return "\n".join(lines)
+
+    def _build_task_tap_agent_params(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+        session_key: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": self._render_task_tap_prompt(notification, route, session_key),
             "deliver": True,
             "channel": route["channel"],
             "to": route["to"],

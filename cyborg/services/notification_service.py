@@ -429,6 +429,94 @@ class NotificationService(BaseService):
             source_updated_at=source_updated_at,
         )
 
+    # ── Task tap (operator nudge) ───────────────────────────────────
+
+    async def create_task_tap_notification(
+        self,
+        task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
+        """Create a TASK_TAP notification to nudge an agent on an active task.
+
+        Returns the notification ID on success, or None if the task has no
+        delivery route.
+        """
+        row = await self.db.fetch_one(
+            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if row is None:
+            return None
+
+        task_metadata = json_loads(row.get("metadata"), {})
+        target_session = task_metadata.get("target_session")
+        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
+        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
+
+        if delivery_route is None:
+            return None
+
+        source_updated_at = row.get("updated_at")
+        parent_project = await self._get_parent_project(task_id)
+
+        output_directory = None
+        if parent_project is not None:
+            try:
+                from cyborg.services.project_service import ProjectService
+
+                project_service = ProjectService(self.db)
+                project_path = await project_service.get_project_path(parent_project["id"])
+                short_id = row["id"].replace("-", "")[:8]
+                output_directory = str(project_path / "tasks" / short_id)
+            except Exception:
+                pass
+
+        metadata = {
+            **task_metadata,
+            "task_id": row["id"],
+            "task_status": row["status"],
+            "parent_project_id": parent_project["id"] if parent_project else None,
+            "parent_project_title": parent_project["title"] if parent_project else None,
+            "delivery_route": delivery_route,
+            "output_directory": output_directory,
+        }
+
+        notification_id = str(uuid4())
+        reference = now or utcnow()
+        now_iso = reference.isoformat()
+
+        async with self.db.connection(write=True) as connection:
+            await connection.execute(
+                """
+                INSERT INTO notifications (
+                    id, entity_type, entity_id, notification_type, status,
+                    delivery_status, delivery_attempt_count, last_delivery_at, last_delivery_error, next_delivery_at,
+                    title, message, metadata, sequence_number,
+                    created_at, updated_at, acknowledged_at, acknowledged_by, resolved_at, source_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+                """,
+                (
+                    notification_id,
+                    NotificationEntityType.TASK.value,
+                    row["id"],
+                    NotificationType.TASK_TAP.value,
+                    NotificationStatus.PENDING.value,
+                    NotificationDeliveryStatus.PENDING.value,
+                    now_iso,
+                    f"Task tap: {row['title']}",
+                    f"Status check on active task: {row['title']}",
+                    json_dumps(metadata),
+                    None,
+                    now_iso,
+                    now_iso,
+                    source_updated_at,
+                ),
+            )
+
+        await self._attempt_dispatch_notification(notification_id, now=reference)
+        return notification_id
+
     # ── Backward-compat shim for process_due_notifications ──────
 
     async def process_due_notifications(self, *, now: datetime | None = None) -> int:

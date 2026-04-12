@@ -105,9 +105,6 @@ class ProjectExecutionService(BaseService):
             if not project or project["state"] != ProjectState.ACTIVE.value:
                 continue
 
-            if not project.get("auto_execute"):
-                continue
-
             # Invoke reasoning to decide next action
             await self.decide_next_action(project_id, task_id, task_title, result_summary)
             affected_projects.append(await self._build_project_response(project))
@@ -134,7 +131,7 @@ class ProjectExecutionService(BaseService):
         # Preserve original started_at when resuming from paused
         started_at = previous_started_at if previous_state == ProjectState.PAUSED.value else now
 
-        # Update project state (keep existing auto_execute setting)
+        # Update project state
         from cyborg.services.project_service import short_task_id
         subagent_key = f"cyborg:project:{short_task_id(project_id)}"
         await self.db.execute(
@@ -318,9 +315,9 @@ class ProjectExecutionService(BaseService):
         return len(task_ids)
 
     async def _auto_start_task(self, task_id: str, project_id: str) -> None:
-        """Start a task immediately if the project has auto_execute enabled."""
+        """Start a task immediately after creation."""
         project = await self._get_project_row(project_id)
-        if not project or not project.get("auto_execute"):
+        if not project:
             return
         # Skip if task already completed (e.g. subagent finished during creation)
         task_row = await self.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
@@ -668,9 +665,9 @@ class ProjectExecutionService(BaseService):
             raise NotFoundError("Project not found")
 
         # Parse JSON fields
+        row.pop("auto_execute", None)
         row["plan"] = self._parse_plan(row.get("plan"))
         row["success_criteria"] = self._parse_success_criteria(row.get("success_criteria"))
-        row["auto_execute"] = bool(row.get("auto_execute", 0))
         row["metadata"] = json_loads(row.get("metadata"), {})
         row = await self.project_spec_service.populate_project_spec_fields(row)
         
@@ -809,3 +806,132 @@ class ProjectExecutionService(BaseService):
         except Exception:
             # Don't let webhook failures affect project operations
             pass
+
+    # ------------------------------------------------------------------
+    # Doctor: diagnose and fix stuck projects
+    # ------------------------------------------------------------------
+
+    async def diagnose(self) -> list[dict[str, Any]]:
+        """Scan for common project health problems.
+
+        Detects:
+        - active projects with an approved spec but zero tasks
+        - blocked tasks without a pending approval record
+        """
+        problems: list[dict[str, Any]] = []
+
+        rows = await self.db.fetch_all(
+            """
+            SELECT p.id, p.title
+            FROM projects p
+            LEFT JOIN project_tasks pt ON pt.project_id = p.id
+            WHERE p.state = 'active'
+              AND p.current_spec_id IS NOT NULL
+              AND p.deleted_at IS NULL
+            GROUP BY p.id
+            HAVING COUNT(pt.task_id) = 0
+            """,
+        )
+        for row in rows:
+            problems.append({"project_id": row["id"], "title": row["title"], "problem": "active_with_no_tasks"})
+
+        blocked_rows = await self.db.fetch_all(
+            """
+            SELECT t.id as task_id, t.title, t.blocked_reason, pt.project_id, p.title as project_title
+            FROM tasks t
+            INNER JOIN project_tasks pt ON pt.task_id = t.id
+            INNER JOIN projects p ON p.id = pt.project_id
+            WHERE t.status = 'blocked' AND t.deleted_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.entity_id = t.id AND a.status = 'pending')
+            """,
+        )
+        for row in blocked_rows:
+            problems.append({
+                "task_id": row["task_id"],
+                "title": row["title"],
+                "project_id": row["project_id"],
+                "project_title": row["project_title"],
+                "blocked_reason": row["blocked_reason"],
+                "problem": "blocked_task_without_approval",
+            })
+
+        return problems
+
+    async def bootstrap_stuck_project(self, project_id: str) -> dict[str, Any]:
+        """Bootstrap a stuck project by invoking reasoning to create the first task.
+
+        Only works for active projects with zero tasks.
+        """
+        project = await self._get_project_row(project_id)
+        if not project or project["state"] != ProjectState.ACTIVE.value:
+            return {"project_id": project_id, "action": "skipped", "reason": "not active"}
+
+        # Confirm zero tasks
+        task_count = await self.db.fetch_one(
+            "SELECT COUNT(*) as cnt FROM project_tasks WHERE project_id = ?",
+            (project_id,),
+        )
+        if task_count and task_count["cnt"] > 0:
+            return {"project_id": project_id, "action": "skipped", "reason": "has tasks"}
+
+        # Invoke reasoning via decide_next_action with a sentinel completed task ID
+        await self.decide_next_action(project_id, "__bootstrap__", "Project bootstrap", None)
+
+        await self._add_journal_entry(
+            project_id,
+            JournalEntryType.DECISION,
+            "Doctor bootstrapped stuck project — reasoning invoked to create first task",
+            {"source": "doctor", "problem": "active_with_no_tasks"},
+        )
+
+        return {"project_id": project_id, "action": "bootstrapped"}
+
+    async def create_missing_approval(self, task_id: str) -> dict[str, Any]:
+        """Create a task_input approval for a blocked task that lacks one."""
+        from uuid import uuid4
+
+        row = await self.db.fetch_one(
+            "SELECT id, title, blocked_reason, blocked_resume_instructions FROM tasks WHERE id = ? AND status = 'blocked' AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if not row:
+            return {"task_id": task_id, "action": "skipped", "reason": "not blocked"}
+
+        # Check if an approval already exists
+        existing = await self.db.fetch_one(
+            "SELECT id FROM approvals WHERE entity_id = ? AND status = 'pending'",
+            (task_id,),
+        )
+        if existing:
+            return {"task_id": task_id, "action": "skipped", "reason": "approval already exists"}
+
+        approval_id = str(uuid4())
+        now_iso = utcnow().isoformat()
+        reason = row["blocked_reason"] or "Task is blocked"
+        proposal_data = json_dumps({
+            "task_id": task_id,
+            "task_title": row["title"],
+            "reason": reason,
+            "resume_instructions": row["blocked_resume_instructions"],
+        })
+
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, status, priority, requested_at, requested_by,
+                input_schema, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, 'pending', 'normal', ?, 'doctor', NULL, ?)
+            """,
+            (
+                approval_id,
+                task_id,
+                f"Task blocked: {row['title']}",
+                reason,
+                proposal_data,
+                now_iso,
+                now_iso,
+            ),
+        )
+
+        return {"task_id": task_id, "action": "approval_created", "approval_id": approval_id}

@@ -29,7 +29,6 @@ async def autonomous_project(db: Database):
                 "description": "Complete at least 2 tasks"
             },
         ],
-        "auto_execute": True,
         "plan": [
             {
                 "title": "Complete tasks",
@@ -71,7 +70,6 @@ async def test_dependency_release_and_autonomy(db: Database):
         "title": "Dependency Test",
         "aim": "Test dependency handling",
         "success_criteria": [],
-        "auto_execute": True,
     })
 
     project_id = str(project.id)
@@ -128,7 +126,6 @@ async def test_max_autonomy_cycles_limit(db: Database):
         "success_criteria": [
             {"check": "completed_tasks >= 10", "description": "Need 10 tasks"}
         ],
-        "auto_execute": True,
         "metadata": {"max_autonomy_cycles": 3},
     })
 
@@ -144,45 +141,6 @@ async def test_max_autonomy_cycles_limit(db: Database):
     import json
     metadata = json.loads(project_data["metadata"])
     assert metadata.get("max_autonomy_cycles") == 3
-
-
-@pytest.mark.asyncio
-async def test_project_without_auto_execute_skips_autonomy(db: Database):
-    """Test that projects without auto_execute don't trigger autonomy."""
-    from cyborg.services.project_service import ProjectService
-    from cyborg.services.task_service import TaskService
-
-    project_service = ProjectService(db)
-    task_service = TaskService(db)
-
-    # Create project WITHOUT auto_execute
-    project = await project_service.create_project({
-        "title": "Manual Project",
-        "aim": "Manual execution",
-        "success_criteria": [],
-        "auto_execute": False,  # Not auto-executing
-    })
-
-    project_id = str(project.id)
-
-    task = await task_service.create_task({
-        "title": "Task",
-        "description": "Test",
-        "plan": "Plan",
-        "project_ids": [project_id],
-    })
-
-    await task_service.complete_task(str(task.id), result_summary="Done")
-
-    # The autonomy service should not trigger reasoning for non-auto projects
-    autonomy_service = ProjectAutonomyService(db)
-    # on_task_completed should still run (releasing dependents) but not
-    # invoke reasoning since the project is not auto_execute
-    await autonomy_service.on_task_completed(str(task.id), "Task", "Done")
-
-    # Project should still be in its original state (not closed or blocked by reasoning)
-    project_data = await db.fetch_one("SELECT state FROM projects WHERE id = ?", (project_id,))
-    assert project_data["state"] != "closed"
 
 
 @pytest.mark.asyncio
@@ -236,7 +194,6 @@ async def test_task_completion_triggers_reasoning(db: Database):
         "method": "Complete a task and trigger reasoning.",
         "success_criteria": [{"check": "completed_task_count >= 1", "description": "One task done"}],
         "plan": [{"title": "Trigger Task", "description": "Should trigger reasoning", "criteria": "Done", "order": 0}],
-        "auto_execute": True,
     })
 
     project_id = str(project.id)

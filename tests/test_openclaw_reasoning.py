@@ -57,7 +57,6 @@ async def sample_project_with_data(db: Database):
                 description="No failed tasks"
             ),
         ],
-        auto_execute=True,
     ))
 
     project_id = str(project.id)

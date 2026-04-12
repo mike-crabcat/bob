@@ -407,7 +407,6 @@ def _build_project_payload(
     description: Optional[str] = None,
     state: Optional[str] = None,
     conclusion: Optional[str] = None,
-    auto_execute: Optional[bool] = None,
     plan_json: Optional[str] = None,
     success_criteria_json: Optional[str] = None,
     task_ids: Optional[list[str]] = None,
@@ -429,8 +428,6 @@ def _build_project_payload(
         payload["state"] = state
     if conclusion is not None:
         payload["conclusion"] = conclusion
-    if auto_execute is not None:
-        payload["auto_execute"] = auto_execute
     if plan_json is not None:
         payload["plan"] = _parse_json_option(plan_json, "plan-json", list)
     if success_criteria_json is not None:
@@ -646,6 +643,44 @@ def logs(
         return
     result = _run_command(command)
     typer.echo(result.stdout)
+
+
+@app.command()
+def doctor(
+    fix: Annotated[bool, typer.Option("--fix", help="Apply fixes to found problems")] = False,
+) -> None:
+    """Diagnose common project problems and optionally fix them."""
+
+    # Reasoning service can be slow when bootstrapping multiple projects
+    settings = Settings.from_env()
+    url = f"http://{settings.host}:{settings.port}/api/v1/projects/doctor{_query_string(fix=fix if fix else None)}"
+    headers = {"Content-Type": "application/json"}
+    req = Request(url, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=120) as response:
+            result = _normalize_api_response(json.loads(response.read().decode()))
+    except HTTPError as exc:
+        _handle_http_error(exc)
+    except URLError as exc:
+        _handle_connection_error(exc)
+    result = result.get("data", result)
+    problems = result.get("problems", [])
+    fixes = result.get("fixes", [])
+
+    if not problems:
+        typer.echo("No problems found.")
+        return
+
+    typer.echo(f"Found {len(problems)} problem(s):")
+    for p in problems:
+        typer.echo(f"  - {p['title']} ({p['project_id'][:8]}): {p['problem']}")
+
+    if fixes:
+        typer.echo(f"\nApplied {len(fixes)} fix(es):")
+        for f in fixes:
+            typer.echo(f"  - {f['title']} ({f['project_id'][:8]}): {f['action']}")
+    elif fix:
+        typer.echo("\nNo fixes needed.")
 
 
 @app.command()
@@ -1121,7 +1156,6 @@ def project_create(
     description: Annotated[Optional[str], typer.Option("--description", "-d", help="Project description")] = None,
     state: Annotated[Optional[str], typer.Option("--state", help="Initial project state")] = None,
     conclusion: Annotated[Optional[str], typer.Option("--conclusion", help="Project conclusion")] = None,
-    auto_execute: Annotated[Optional[bool], typer.Option("--auto-execute/--manual", help="Enable or disable auto-execution")] = None,
     plan_json: Annotated[Optional[str], typer.Option("--plan-json", help="Execution plan as JSON array")] = None,
     success_criteria_json: Annotated[Optional[str], typer.Option("--success-criteria-json", help="Success criteria as JSON array")] = None,
     task_ids: Annotated[Optional[list[str]], typer.Option("--task-id", help="Link an existing task ID")] = None,
@@ -1139,7 +1173,6 @@ def project_create(
         description=description,
         state=state,
         conclusion=conclusion,
-        auto_execute=auto_execute,
         plan_json=plan_json,
         success_criteria_json=success_criteria_json,
         task_ids=task_ids,
@@ -1196,8 +1229,6 @@ def project_get(
         typer.echo(f"Method: {project['method']}")
     if project.get("description"):
         typer.echo(f"Description: {project['description']}")
-    if project.get("auto_execute"):
-        typer.echo("Auto Execute: true")
     if project.get("task_ids"):
         typer.echo(f"Tasks: {len(project['task_ids'])} linked")
 
@@ -1210,7 +1241,6 @@ def project_update(
     method: Annotated[Optional[str], typer.Option("--method", "-m", help="Project method/plan")] = None,
     description: Annotated[Optional[str], typer.Option("--description", "-d", help="Project description")] = None,
     conclusion: Annotated[Optional[str], typer.Option("--conclusion", help="Project conclusion")] = None,
-    auto_execute: Annotated[Optional[bool], typer.Option("--auto-execute/--manual", help="Enable or disable auto-execution")] = None,
     plan_json: Annotated[Optional[str], typer.Option("--plan-json", help="Execution plan as JSON array")] = None,
     success_criteria_json: Annotated[Optional[str], typer.Option("--success-criteria-json", help="Success criteria as JSON array")] = None,
     task_ids: Annotated[Optional[list[str]], typer.Option("--task-id", help="Link an existing task ID")] = None,
@@ -1227,7 +1257,6 @@ def project_update(
         method=method,
         description=description,
         conclusion=conclusion,
-        auto_execute=auto_execute,
         plan_json=plan_json,
         success_criteria_json=success_criteria_json,
         task_ids=task_ids,

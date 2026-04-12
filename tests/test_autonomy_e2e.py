@@ -55,7 +55,6 @@ async def create_test_project(
     aim: str = "Test aim",
     method: str = "Test method",
     success_criteria: list[dict] | None = None,
-    auto_execute: bool = True,
 ) -> dict:
     """Helper to create a test project with spec."""
     project_id = str(uuid4())
@@ -64,10 +63,10 @@ async def create_test_project(
     import json
     await db.execute(
         """
-        INSERT INTO projects (id, title, aim, method, state, auto_execute, success_criteria, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO projects (id, title, aim, method, state, success_criteria, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (project_id, title, aim, method, "planning", 1 if auto_execute else 0, json.dumps(success_criteria or []), utcnow().isoformat()),
+        (project_id, title, aim, method, "planning", json.dumps(success_criteria or []), utcnow().isoformat()),
     )
 
     # Create spec
@@ -140,7 +139,6 @@ async def test_full_autonomy_loop_project_completion(test_db: Database, mock_llm
         success_criteria=[
             {"check": "completed_task_count >= 2", "description": "Complete at least 2 tasks"},
         ],
-        auto_execute=True,
     )
     project_id = project["id"]
 
@@ -175,7 +173,6 @@ async def test_evaluate_does_not_close_when_criteria_unmet(test_db: Database, mo
         success_criteria=[
             {"check": "completed_task_count >= 5", "description": "Complete at least 5 tasks"},
         ],
-        auto_execute=True,
     )
     project_id = project["id"]
 
@@ -208,7 +205,6 @@ async def test_concurrent_projects_evaluate_independently(test_db: Database, moc
         aim="Test project 1",
         method="Execute",
         success_criteria=[{"check": "completed_task_count >= 1", "description": "Complete 1 task"}],
-        auto_execute=True,
     )
 
     project2 = await create_test_project(
@@ -217,7 +213,6 @@ async def test_concurrent_projects_evaluate_independently(test_db: Database, moc
         aim="Test project 2",
         method="Execute",
         success_criteria=[{"check": "completed_task_count >= 2", "description": "Complete 2 tasks"}],
-        auto_execute=True,
     )
 
     project3 = await create_test_project(
@@ -226,7 +221,6 @@ async def test_concurrent_projects_evaluate_independently(test_db: Database, moc
         aim="Test project 3",
         method="Execute",
         success_criteria=[{"check": "completed_task_count >= 3", "description": "Complete 3 tasks"}],
-        auto_execute=True,
     )
 
     # Create tasks for each project

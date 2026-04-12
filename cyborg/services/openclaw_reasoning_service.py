@@ -372,6 +372,80 @@ class OpenClawReasoningService(BaseService):
 
         return self._parse_submission_review_response(response)
 
+    async def revise_spec(
+        self,
+        aim: str,
+        method: str | None,
+        success_criteria: list[dict[str, str]],
+        plan_steps: list[dict[str, Any]],
+        feedback: str,
+        *,
+        allow_aim_changes: bool = False,
+        allow_criteria_changes: bool = False,
+        reference_project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Ask OpenClaw to revise a rejected spec based on user feedback.
+
+        Returns a dict with revised aim, method, success_criteria, and plan,
+        or None if revision fails.
+        """
+        constraints = []
+        if not allow_aim_changes:
+            constraints.append("The aim MUST stay exactly as-is — do not change it.")
+        else:
+            constraints.append("You MAY revise the aim based on the feedback.")
+
+        if not allow_criteria_changes:
+            constraints.append("The success criteria MUST stay exactly as-is — do not change them.")
+        else:
+            constraints.append("You MAY revise the success criteria based on the feedback.")
+
+        criteria_lines = "\n".join(
+            f"  - {c.get('check', c.get('description', ''))}" for c in success_criteria
+        )
+        plan_lines = "\n".join(
+            f"  {i}. {s.get('title', '?')}: {s.get('description', '')}" for i, s in enumerate(plan_steps)
+        )
+
+        prompt = "\n".join([
+            "You are a project planning assistant. A spec was rejected. Revise it based on the feedback.",
+            "",
+            f"Current Aim: {aim}",
+            f"Current Method: {method or 'Not specified'}",
+            "",
+            "Current Success Criteria:",
+            criteria_lines or "  (none)",
+            "",
+            "Current Plan:",
+            plan_lines or "  (none)",
+            "",
+            f"Rejection Feedback: {feedback}",
+            "",
+            "Constraints:",
+        ] + [f"  - {c}" for c in constraints] + [
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "aim": "revised aim (or original if unchanged)",',
+            '  "method": "revised method",',
+            '  "success_criteria": [{"check": "...", "description": "..."}],',
+            '  "plan": [{"order": 0, "title": "...", "description": "...", "criteria": "..."}]',
+            "}",
+        ])
+
+        try:
+            response = await self._call_openclaw(
+                prompt=prompt,
+                response_format="json",
+                timeout=self.TIMEOUT_PLAN,
+                reasoning_type="spec_revision",
+                project_id=reference_project_id,
+            )
+            return self._load_json_payload(response)
+        except Exception as e:
+            logger.warning("Spec revision failed for project %s: %s", reference_project_id, e)
+            return None
+
     async def _call_openclaw(
         self,
         prompt: str,

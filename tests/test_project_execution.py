@@ -56,7 +56,6 @@ class TestProjectExecution:
                     "aim": "Build a test API",
                     "method": "Define the implementation approach and then execute each step.",
                     "description": "Testing auto-execution",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -83,7 +82,6 @@ class TestProjectExecution:
             assert response.status_code == 201
             data = response.json()
             assert data["title"] == "Test Execution Project"
-            assert data["auto_execute"] is True
             assert len(data["plan"]) == 2
             assert len(data["success_criteria"]) == 1
             assert data["state"] == "planning"
@@ -100,7 +98,6 @@ class TestProjectExecution:
                     "title": "Execution Test",
                     "aim": "Test execution",
                     "method": "Define the first task and execute it.",
-                    "auto_execute": True,
                     "metadata": {
                         "channel": "whatsapp",
                         "session_key": "whatsappgroup-execution",
@@ -165,7 +162,6 @@ class TestProjectExecution:
                     "title": "Multi-step Test",
                     "aim": "Test multi-step",
                     "method": "Work through the plan one step at a time.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -230,7 +226,6 @@ class TestProjectExecution:
                     "title": "Auto-close Test",
                     "aim": "Test auto-close",
                     "method": "Complete the planned task and evaluate the result.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -306,7 +301,6 @@ class TestProjectExecution:
                     "title": "Autonomy Gap Test",
                     "aim": "Reach two completed tasks",
                     "method": "Finish the planned step, then generate exactly one follow-up task if more work is needed.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -404,7 +398,6 @@ class TestProjectExecution:
                     "title": "Autonomy Close Test",
                     "aim": "Reach two completed tasks",
                     "method": "Complete the planned step, then the generated follow-up.",
-                    "auto_execute": True,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {
@@ -466,48 +459,6 @@ class TestProjectExecution:
             assert project_results[0]["entity_id"] == project_id
             assert project_results[0]["metadata"]["project_state"] == "closed"
 
-    def test_non_auto_execute_project_no_progression(self, tmp_path: Path) -> None:
-        """Test that non-auto-execute projects don't auto-progress."""
-        with make_client(tmp_path) as client:
-            # Create project without auto_execute
-            project = client.post(
-                "/api/v1/projects",
-                json={
-                    "title": "Manual Project",
-                    "aim": "Manual work",
-                    "auto_execute": False,
-                    "metadata": PROJECT_ROUTE_METADATA,
-                    "plan": [
-                        {
-                            "title": "Step 1",
-                            "description": "Do step 1",
-                            "criteria": "Done",
-                            "order": 0,
-                        },
-                    ],
-                },
-            ).json()
-            project_id = project["id"]
-
-            # Create a manual task
-            task = create_task(
-                client,
-                title="Manual Task",
-                description="A manual task",
-                plan="1. Do the manual task. 2. Report the result.",
-                priority="medium",
-                project_ids=[project_id],
-            )
-            task_id = str(task["id"])
-
-            # Complete the task
-            client.post(f"/api/v1/tasks/{task_id}/start")
-            client.post(f"/api/v1/tasks/{task_id}/complete")
-
-            # Verify no new task was auto-created
-            tasks = client.get(f"/api/v1/projects/{project_id}/tasks").json()
-            assert len(tasks) == 1
-
     def test_project_update_plan_and_criteria(self, tmp_path: Path) -> None:
         """Test updating project plan and success criteria."""
         with make_client(tmp_path) as client:
@@ -548,8 +499,9 @@ class TestProjectExecution:
             assert len(data["success_criteria"]) == 1
 
     def test_evaluate_endpoint(self, tmp_path: Path, monkeypatch) -> None:
-        """Test the evaluate endpoint for manual completion check on non-auto-execute projects."""
+        """Test the evaluate endpoint for manual completion check."""
         import cyborg.services.openclaw_reasoning_service as reasoning_module
+        import cyborg.services.project_execution_service as execution_module
 
         async def fake_evaluate_success_criteria(self, project_id):
             # Check actual completed task count to determine if criteria are met
@@ -577,17 +529,18 @@ class TestProjectExecution:
             }
 
         monkeypatch.setattr(reasoning_module.OpenClawReasoningService, "evaluate_success_criteria", fake_evaluate_success_criteria)
+        # Suppress autonomy loop so unconfigured OpenClaw doesn't block the project
+        monkeypatch.setattr(execution_module.ProjectExecutionService, "on_task_completed", lambda *a, **kw: [])
 
         with make_client(tmp_path) as client:
-            # Create project with auto_execute=False so the autonomy checkpoint
-            # won't auto-close it — the evaluate endpoint must be called manually.
+            # Create project — the autonomy checkpoint won't auto-close it
+            # until the evaluate endpoint is called manually.
             project = client.post(
                 "/api/v1/projects",
                 json={
                     "title": "Evaluate Test",
                     "aim": "Test evaluate",
                     "method": "Create and complete a manual project task, then evaluate the project.",
-                    "auto_execute": False,
                     "metadata": PROJECT_ROUTE_METADATA,
                     "plan": [
                         {

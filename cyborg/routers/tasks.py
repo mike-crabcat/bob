@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Response, status
 from pydantic import BaseModel, model_validator
 
 from cyborg.dependencies import get_task_service
@@ -100,8 +100,13 @@ async def submit_task(
     task_id: UUID,
     payload: TaskSubmitRequest | None = None,
     service: TaskService = Depends(get_task_service),
+    background_tasks: BackgroundTasks = None,
 ) -> TaskResponse:
-    return await service.submit_task(str(task_id), payload.result_summary if payload else None)
+    result_summary = payload.result_summary if payload else None
+    response = await service.submit_task(str(task_id), result_summary)
+    if background_tasks is not None:
+        background_tasks.add_task(service._run_submission_review, str(task_id), result_summary)
+    return response
 
 
 @router.post("/{task_id}/fail", response_model=TaskResponse)

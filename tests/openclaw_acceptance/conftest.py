@@ -179,7 +179,6 @@ class AcceptanceBuilder:
         success_criteria: list[dict[str, Any]] | None = None,
         plan: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
-        auto_execute: bool = True,
         approve_spec: bool = False,
         close_conclusion: str | None = None,
     ) -> dict[str, Any]:
@@ -193,7 +192,6 @@ class AcceptanceBuilder:
                     success_criteria=success_criteria or [],
                     plan=plan or [],
                     metadata=metadata or {},
-                    auto_execute=auto_execute,
                 )
             )
         )
