@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from jinja2 import FileSystemLoader
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
@@ -656,6 +657,61 @@ async def dashboard_resume_project(
     )
 
 
+@router.post("/projects/{project_id}/revise-spec")
+async def dashboard_revise_spec(
+    project_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Submit revision guidance for a paused/closed project spec and trigger reasoning."""
+    from cyborg.services.project_spec_service import ProjectSpecService
+
+    form = await request.form()
+    feedback = str(form.get("feedback", "")).strip()
+    allow_aim = form.get("allow_aim_changes") is not None
+    allow_criteria = form.get("allow_criteria_changes") is not None
+
+    if not feedback:
+        return Response(content="Feedback is required", status_code=400)
+
+    spec_service = ProjectSpecService(db)
+
+    # Transition to PLANNING synchronously so the user sees immediate feedback
+    project = await db.fetch_one(
+        "SELECT state FROM projects WHERE id = ? AND deleted_at IS NULL",
+        (project_id,),
+    )
+    if project and project["state"] in ("closed", "paused"):
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "UPDATE projects SET state = 'planning', closed_at = NULL, conclusion = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (now, project_id),
+        )
+        await db.execute(
+            "INSERT INTO project_journal_entries (id, project_id, entry_type, content, created_at, metadata) VALUES (?, ?, 'NOTE', ?, ?, ?)",
+            (str(uuid4()), project_id, f"Spec revision requested: {feedback[:200]}", now, "{}"),
+        )
+
+    async def _run_revision():
+        try:
+            await spec_service.revise_spec_after_rejection(
+                project_id,
+                feedback,
+                allow_aim_changes=allow_aim,
+                allow_criteria_changes=allow_criteria,
+            )
+        except Exception:
+            pass  # Revision failure is okay — user can retry
+
+    background_tasks.add_task(_run_revision)
+
+    return Response(
+        status_code=303,
+        headers={"Location": f"/dashboard/projects/{project_id}"},
+    )
+
+
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
 async def task_detail(
     task_id: str,
@@ -1015,7 +1071,7 @@ async def approve_approval(
             ):
                 from cyborg.services.project_execution_service import ProjectExecutionService
                 execution_service = ProjectExecutionService(db)
-                if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+                if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
                     await execution_service.cleanup_old_plan_tasks(entity_id)
                 await execution_service.start_project_execution(entity_id)
 

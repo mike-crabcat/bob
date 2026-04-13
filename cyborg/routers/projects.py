@@ -105,12 +105,6 @@ async def update_project(
     return result
 
 
-@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: UUID, service: ProjectService = Depends(get_project_service)) -> Response:
-    await service.delete_project(str(project_id))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
 @router.post("/{project_id}/pause", response_model=ProjectResponse)
 async def pause_project(project_id: UUID, service: ProjectService = Depends(get_project_service)) -> ProjectResponse:
     return await service.pause_project(str(project_id))

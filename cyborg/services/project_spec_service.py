@@ -27,8 +27,13 @@ class ProjectSpecService(BaseService):
 
     async def submit_spec(self, project_id: str, payload: ProjectSpecSubmitRequest, *, defer_plan_generation: bool = False) -> ProjectSpecResponse:
         project = await self._get_project_row(project_id)
-        if project["state"] == ProjectState.CLOSED.value:
-            raise ConflictError(f"Cannot submit a spec for closed project '{project_id}'")
+        if project["state"] in (ProjectState.CLOSED.value, ProjectState.PAUSED.value):
+            # Reopen closed project for spec revision
+            now = utcnow().isoformat()
+            await self.db.execute(
+                "UPDATE projects SET state = ?, closed_at = NULL, conclusion = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                (ProjectState.PLANNING.value, now, project_id),
+            )
 
         now = utcnow().isoformat()
         spec_id = str(uuid4())
@@ -183,8 +188,8 @@ class ProjectSpecService(BaseService):
         if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
             from cyborg.services.project_execution_service import ProjectExecutionService
             execution_service = ProjectExecutionService(self.db)
-            # Clean up old auto-created tasks for paused/active projects before re-planning
-            if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+            # Clean up old auto-created tasks before re-planning (also PLANNING — reopened closed projects)
+            if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
                 await execution_service.cleanup_old_plan_tasks(project_id)
             await execution_service.start_project_execution(project_id)
 
@@ -222,12 +227,12 @@ class ProjectSpecService(BaseService):
         allow_aim_changes: bool = False,
         allow_criteria_changes: bool = False,
     ) -> ProjectSpecResponse | None:
-        """Generate a revised spec based on rejection feedback and submit it.
+        """Generate a revised spec based on feedback and submit it.
 
         Returns the new spec, or None if revision fails (project stays in planning
         for manual re-submission).
         """
-        # Get the latest (just-rejected) spec to use as the base
+        # Get the latest spec to use as the base
         latest = await self.db.fetch_one(
             "SELECT aim, method, plan, success_criteria FROM project_specs "
             "WHERE project_id = ? ORDER BY version_number DESC LIMIT 1",
@@ -235,6 +240,21 @@ class ProjectSpecService(BaseService):
         )
         if not latest:
             return None
+
+        # Fetch current non-deprecated tasks so reasoning can identify obsolete ones
+        task_rows = await self.db.fetch_all(
+            """
+            SELECT t.id, t.title, t.status, t.result
+            FROM tasks t
+            INNER JOIN project_tasks pt ON pt.task_id = t.id
+            WHERE pt.project_id = ?
+              AND t.deleted_at IS NULL
+              AND t.status NOT IN ('deprecated', 'failed')
+            ORDER BY t.created_at
+            """,
+            (project_id,),
+        )
+        current_tasks = [dict(r) for r in task_rows] if task_rows else []
 
         from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
         reasoning = OpenClawReasoningService(self.db)
@@ -248,10 +268,22 @@ class ProjectSpecService(BaseService):
             allow_aim_changes=allow_aim_changes,
             allow_criteria_changes=allow_criteria_changes,
             reference_project_id=project_id,
+            current_tasks=current_tasks,
         )
 
         if not revised:
             return None
+
+        # Deprecate tasks identified as obsolete by reasoning
+        deprecated_ids = revised.get("deprecated_task_ids", [])
+        if deprecated_ids:
+            now = utcnow().isoformat()
+            for tid in deprecated_ids:
+                if isinstance(tid, str):
+                    await self.db.execute(
+                        "UPDATE tasks SET status = 'deprecated', updated_at = ? WHERE id = ? AND deleted_at IS NULL AND status NOT IN ('deprecated')",
+                        (now, tid),
+                    )
 
         # Build and submit the new spec
         from cyborg.models import (
@@ -406,7 +438,10 @@ class ProjectSpecService(BaseService):
             "FROM project_specs WHERE project_id = ? ORDER BY version_number DESC LIMIT 1",
             (project_id,),
         )
-        if spec_row is None or spec_row["plan"] is not None:
+        if spec_row is None:
+            return
+        existing_plan = json_loads(spec_row.get("plan"), [])
+        if existing_plan:
             return
         await self._generate_plan_for_spec(project_id, spec_row["id"], dict(spec_row))
 

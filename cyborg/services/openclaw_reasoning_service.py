@@ -345,11 +345,13 @@ class OpenClawReasoningService(BaseService):
         allow_aim_changes: bool = False,
         allow_criteria_changes: bool = False,
         reference_project_id: str | None = None,
+        current_tasks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        """Ask OpenClaw to revise a rejected spec based on user feedback.
+        """Ask OpenClaw to revise a spec based on feedback.
 
-        Returns a dict with revised aim, method, success_criteria, and plan,
-        or None if revision fails.
+        Returns a dict with revised aim, method, success_criteria, plan,
+        and optionally deprecated_task_ids for tasks made obsolete by the revision.
+        Returns None if revision fails.
         """
         constraints = []
         if not allow_aim_changes:
@@ -369,8 +371,8 @@ class OpenClawReasoningService(BaseService):
             f"  {i}. {s.get('title', '?')}: {s.get('description', '')}" for i, s in enumerate(plan_steps)
         )
 
-        prompt = "\n".join([
-            "You are a project planning assistant. A spec was rejected. Revise it based on the feedback.",
+        parts = [
+            "You are a project planning assistant. Revise the spec based on the feedback below.",
             "",
             f"Current Aim: {aim}",
             f"Current Method: {method or 'Not specified'}",
@@ -380,20 +382,40 @@ class OpenClawReasoningService(BaseService):
             "",
             "Current Plan:",
             plan_lines or "  (none)",
+        ]
+
+        # Include current project tasks so reasoning can identify obsolete ones
+        if current_tasks:
+            parts.extend(["", "Current Project Tasks:"])
+            for t in current_tasks:
+                status = t.get("status", "?")
+                title = t.get("title", "Untitled")
+                result = f": {t['result'][:100]}" if t.get("result") else ""
+                parts.append(f'  - [{t["id"]}] [{status}] {title}{result}')
+
+        parts.extend([
             "",
-            f"Rejection Feedback: {feedback}",
+            f"Feedback: {feedback}",
             "",
             "Constraints:",
         ] + [f"  - {c}" for c in constraints] + [
+            "",
+            "Important: If the revised spec makes any existing tasks obsolete (e.g. the aim changed",
+            "direction, criteria were replaced, or the feedback requests a different approach), list",
+            "their IDs in deprecated_task_ids. Deprecated tasks will be excluded from future reasoning.",
+            "Do NOT deprecate tasks whose output is still relevant or could be built upon.",
             "",
             "Respond with valid JSON only:",
             "{",
             '  "aim": "revised aim (or original if unchanged)",',
             '  "method": "revised method",',
             '  "success_criteria": [{"check": "...", "description": "..."}],',
-            '  "plan": [{"order": 0, "title": "...", "description": "...", "criteria": "..."}]',
+            '  "plan": [{"order": 0, "title": "...", "description": "...", "criteria": "..."}],',
+            '  "deprecated_task_ids": ["task-id-1", "task-id-2"]',
             "}",
         ])
+
+        prompt = "\n".join(parts)
 
         try:
             response = await self._call_openclaw(

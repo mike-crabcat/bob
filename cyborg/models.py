@@ -82,6 +82,7 @@ class TaskStatus(StrEnum):
     SUBMITTED = "submitted"
     COMPLETED = "completed"
     FAILED = "failed"
+    DEPRECATED = "deprecated"
 
 
 class TaskPriority(StrEnum):

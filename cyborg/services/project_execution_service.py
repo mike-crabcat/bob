@@ -306,9 +306,10 @@ class ProjectExecutionService(BaseService):
         return []
 
     async def cleanup_old_plan_tasks(self, project_id: str) -> int:
-        """Remove all auto-created tasks from a previous plan before re-planning.
+        """Remove deprecated auto-created tasks from a previous plan before re-planning.
 
-        Soft-deletes them, preserving history via journal entries.
+        Only soft-deletes tasks that were explicitly deprecated by reasoning (e.g. during
+        spec revision). Tasks whose output is still relevant are preserved.
         Returns count of tasks cleaned up.
         """
         rows = await self.db.fetch_all(
@@ -319,6 +320,7 @@ class ProjectExecutionService(BaseService):
             WHERE pt.project_id = ?
               AND t.deleted_at IS NULL
               AND t.metadata LIKE '%auto_created_by_project%'
+              AND t.status = 'deprecated'
             """,
             (project_id,),
         )
@@ -336,7 +338,7 @@ class ProjectExecutionService(BaseService):
         await self._add_journal_entry(
             project_id,
             JournalEntryType.DECISION,
-            f"Cleaned up {len(task_ids)} auto-created tasks from previous plan before re-planning.",
+            f"Cleaned up {len(task_ids)} deprecated tasks from previous plan.",
             {"replan_reason": "new plan approved"},
         )
         return len(task_ids)

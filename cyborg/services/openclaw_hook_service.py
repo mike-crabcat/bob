@@ -168,29 +168,34 @@ class OpenClawHookService(BaseService):
             )
             return
 
-        # Submission review notifications ask the agent to verify its own work
+        # Submission review notifications use a fresh session for unbiased review
         if notification.get("notification_type") == NotificationType.SUBMISSION_REVIEW.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            # Derive a fresh review session key (not the task's execution session)
+            task_id = notification.get("metadata", {}).get("task_id") or notification.get("entity_id", "")
+            from cyborg.services.project_service import short_task_id
+            review_session_key = f"cyborg:review:{short_task_id(task_id)}"
             if not is_retry:
                 metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="submission_review",
-                    prompt_text=self._render_submission_review_prompt(notification, route_data, session_key),
+                    prompt_text=self._render_submission_review_prompt(notification, route_data, review_session_key),
                     project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
                     task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=session_key,
+                    session_key=review_session_key,
                 )
             await self._send_gateway_request(
                 "agent",
-                self._build_submission_review_agent_params(notification, route_data, session_key),
+                self._build_submission_review_agent_params(notification, route_data, review_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
-        # Next-action prompts are dispatched to the project's source session
+        # Next-action prompts use a fresh reasoning session (not the source channel)
         if notification.get("notification_type") == NotificationType.NEXT_ACTION.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            from cyborg.services.project_service import short_task_id
+            project_id = notification.get("metadata", {}).get("project_id", "")
+            next_action_session_key = f"cyborg:next-action:{short_task_id(project_id)}"
             if not is_retry:
                 metadata = notification.get("metadata", {})
                 await log_prompt(
@@ -199,11 +204,11 @@ class OpenClawHookService(BaseService):
                     prompt_text=notification["message"],
                     project_id=metadata.get("project_id"),
                     task_id=metadata.get("completed_task_id"),
-                    session_key=session_key,
+                    session_key=next_action_session_key,
                 )
             await self._send_gateway_request(
                 "agent",
-                self._build_next_action_agent_params(notification, route_data, session_key),
+                self._build_next_action_agent_params(notification, route_data, next_action_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return

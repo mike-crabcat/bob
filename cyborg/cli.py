@@ -1507,13 +1507,6 @@ def project_decide_next(
     typer.echo(f"Decision applied: {action} for {project['title']} (state: {project['state']})")
 
 
-@project_app.command("delete")
-def project_delete(project_id: Annotated[str, typer.Argument(help="Project ID")]) -> None:
-    """Delete (soft delete) a project."""
-
-    _api_call("DELETE", f"/api/v1/projects/{project_id}")
-    typer.echo(f"Project deleted: {project_id}")
-
 
 # ============================================================================
 # Planning Commands (AI-powered project planning)

@@ -132,7 +132,7 @@ class ContextBuilder(BaseService):
                 t.metadata, t.parent_id, t.created_at, t.updated_at
             FROM tasks t
             INNER JOIN project_tasks pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.deleted_at IS NULL
+            WHERE pt.project_id = ? AND t.deleted_at IS NULL AND t.status != 'deprecated'
             ORDER BY t.created_at
             """,
             (project_id,)
