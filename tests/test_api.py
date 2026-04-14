@@ -114,7 +114,7 @@ def test_task_creation_routes_are_not_available(tmp_path: Path) -> None:
         direct_task = client.post("/api/v1/tasks", json={"title": "Need a plan", "plan": "1. Plan. 2. Do."})
         assert direct_task.status_code == 405
 
-        project = client.post("/api/v1/projects", json={"title": "Route removal"})
+        project = client.post("/api/v1/projects", json={"title": "Route removal", "aim": "Test routing", "success_criteria": [{"check": "done", "description": "Done"}]})
         assert project.status_code == 201
         project_id = project.json()["id"]
 
@@ -132,6 +132,7 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
             json={
                 "title": "Proposal work",
                 "aim": "Ship the first customer proposal",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {
                     "channel": "whatsapp",
                     "session_key": "whatsappgroup-proposals",
@@ -182,7 +183,7 @@ def test_project_and_context_endpoints(tmp_path: Path) -> None:
         assert tasks_context.json()["tasks"][0]["parent_project_title"] == "Proposal work"
 
 
-def test_project_create_requires_source_route_or_linked_task(tmp_path: Path) -> None:
+def test_project_create_without_source_route_succeeds(tmp_path: Path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         config_dir=tmp_path / "config",
@@ -194,10 +195,12 @@ def test_project_create_requires_source_route_or_linked_task(tmp_path: Path) -> 
             "/api/v1/projects",
             json={
                 "title": "Unrouted project",
+                "aim": "Test routing",
+                "success_criteria": [{"check": "done", "description": "Done"}],
             },
         )
-        assert project.status_code == 409
-        assert "source routing metadata" in project.json()["detail"]
+        assert project.status_code == 201
+        assert project.json()["state"] == "planning"
 
 
 def test_project_can_infer_source_route_from_linked_task(tmp_path: Path) -> None:
@@ -206,6 +209,8 @@ def test_project_can_infer_source_route_from_linked_task(tmp_path: Path) -> None
             "/api/v1/projects",
             json={
                 "title": "Source route holder",
+                "aim": "Test routing",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {
                     "channel": "whatsapp",
                     "session_key": "whatsappgroup-source",
@@ -228,6 +233,8 @@ def test_project_can_infer_source_route_from_linked_task(tmp_path: Path) -> None
             "/api/v1/projects",
             json={
                 "title": "Inferred route project",
+                "aim": "Test routing inference",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "task_ids": [task_id],
             },
         )
@@ -244,6 +251,8 @@ def test_notification_route_can_fall_back_to_parent_project_session_key(tmp_path
             "/api/v1/projects",
             json={
                 "title": "Parent routed project",
+                "aim": "Test routing",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {
                     "channel": "whatsapp",
                     "session_key": "agent:main:whatsapp:group:120363423288899302@g.us",
@@ -285,12 +294,14 @@ def test_project_spec_approval_required_for_start_and_execute(tmp_path: Path) ->
             json={
                 "title": "Launch plan",
                 "description": "Prepare a launch",
+                "aim": "Ship the launch checklist",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {"session_key": "whatsappgroup-main", "channel": "whatsapp"},
             },
         )
         assert project.status_code == 201
         project_id = project.json()["id"]
-        assert project.json()["latest_spec_status"] is None
+        assert project.json()["latest_spec_status"] == "pending_approval"
 
         submitted = client.post(
             f"/api/v1/projects/{project_id}/specs",
@@ -338,6 +349,8 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
             json={
                 "title": "Proposal work",
                 "description": "Prepare the proposal",
+                "aim": "Ship the first proposal",
+                "success_criteria": [{"check": "done", "description": "Done"}],
             },
         )
         assert project.status_code == 201
@@ -381,7 +394,7 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
 
         specs = client.get(f"/api/v1/projects/{project_id}/specs")
         assert specs.status_code == 200
-        assert len(specs.json()["specs"]) == 2
+        assert len(specs.json()["specs"]) == 3  # auto-created at creation + manual submit + revision
         assert specs.json()["specs"][0]["status"] == "pending_approval"
         assert specs.json()["specs"][1]["status"] == "approved"
 
@@ -405,6 +418,8 @@ def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: P
             json={
                 "title": "Manual close test",
                 "description": "Close when the last linked task completes",
+                "aim": "Finish the manual close test",
+                "success_criteria": [{"check": "done", "description": "Done"}],
             },
         )
         assert project.status_code == 201
@@ -810,7 +825,7 @@ def test_project_blocked_notification_fire_once(
     with make_client(tmp_path) as client:
         project = client.post(
             "/api/v1/projects",
-            json={"title": "Quarterly plan", "aim": "Prepare the quarter"},
+            json={"title": "Quarterly plan", "aim": "Prepare the quarter", "success_criteria": [{"check": "done", "description": "Done"}]},
         )
         assert project.status_code == 201
         project_id = project.json()["id"]
@@ -1019,7 +1034,7 @@ def test_task_assignment_notifications_dispatch_via_derived_target_dm_session(tm
         assert assignment_params["to"] == "+61400111222"
         assert assignment_params["sessionKey"] == "agent:main:whatsapp:direct:+61400111222"
         assert assignment_params["idempotencyKey"] == assignment["id"]
-        assert assignment_params["thinking"] == "off"
+        assert assignment_params["thinking"] == "high"
         assert "You are responsible for handling this task in the current session." in str(assignment_params["message"])
         assert "Send one concise natural message now" in str(assignment_params["message"])
 
@@ -1342,6 +1357,7 @@ def test_dashboard_project_detail_shows_prompt_history(tmp_path: Path) -> None:
             json={
                 "title": "Prompt Dashboard Test",
                 "aim": "Verify prompt history shows on dashboard",
+                "success_criteria": [{"check": "done", "description": "Done"}],
             },
         )
         assert project.status_code == 201
@@ -1813,6 +1829,8 @@ def test_submitting_spec_creates_approval_record(tmp_path: Path) -> None:
             "/api/v1/projects",
             json={
                 "title": "Approval queue test",
+                "aim": "Test approval queue",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {"session_key": "test", "channel": "whatsapp"},
             },
         )
@@ -1852,6 +1870,8 @@ def test_dashboard_approve_endpoint_approves_spec(tmp_path: Path) -> None:
             "/api/v1/projects",
             json={
                 "title": "Dashboard approval test",
+                "aim": "Test dashboard approval",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {"session_key": "test", "channel": "whatsapp"},
             },
         )
@@ -1911,6 +1931,8 @@ def test_dashboard_reject_endpoint_rejects_spec(tmp_path: Path) -> None:
             "/api/v1/projects",
             json={
                 "title": "Dashboard reject test",
+                "aim": "Test dashboard rejection",
+                "success_criteria": [{"check": "done", "description": "Done"}],
                 "metadata": {"session_key": "test", "channel": "whatsapp"},
             },
         )
@@ -1958,28 +1980,40 @@ def test_dashboard_reject_endpoint_rejects_spec(tmp_path: Path) -> None:
         assert refreshed.json()["state"] == "planning"
 
 
-def test_project_with_partial_spec_fields_accepted(tmp_path: Path) -> None:
-    """Projects with partial spec fields are accepted — spec can be completed later."""
+def test_project_creation_requires_aim_and_success_criteria(tmp_path: Path) -> None:
+    """Projects require aim and success_criteria at creation time."""
     with make_client(tmp_path) as client:
-        # Has aim + method but no success_criteria → accepted, no spec submitted
+        # Missing success_criteria → rejected
         response = client.post(
             "/api/v1/projects",
             json={
-                "title": "Incomplete project",
+                "title": "Missing criteria",
                 "aim": "Do the thing",
                 "method": "Plan and execute",
                 "metadata": {"session_key": "test", "channel": "whatsapp"},
             },
         )
-        assert response.status_code == 201
+        assert response.status_code == 409
+        assert "success-criteria" in response.json()["detail"].lower()
 
-        # With complete spec fields, project is accepted and spec is submitted
+        # Missing aim → rejected
+        response_aim = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Missing aim",
+                "success_criteria": [{"check": "done", "description": "Done"}],
+                "metadata": {"session_key": "test", "channel": "whatsapp"},
+            },
+        )
+        assert response_aim.status_code == 409
+        assert "aim" in response_aim.json()["detail"].lower()
+
+        # With aim + success_criteria (no method) → accepted, spec submitted
         response2 = client.post(
             "/api/v1/projects",
             json={
                 "title": "Complete project",
                 "aim": "Do everything",
-                "method": "All at once",
                 "success_criteria": [
                     {"check": "done", "description": "It's done"}
                 ],

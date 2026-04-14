@@ -56,7 +56,7 @@ class ProjectSpecService(BaseService):
                     project_id,
                     next_version,
                     payload.aim,
-                    payload.method,
+                    payload.method or "",
                     json_dumps([step.model_dump(mode="json") for step in payload.plan]) if payload.plan is not None else None,
                     json_dumps([criterion.model_dump(mode="json") for criterion in payload.success_criteria]),
                     ProjectSpecStatus.PENDING_APPROVAL.value,
@@ -356,8 +356,6 @@ class ProjectSpecService(BaseService):
         criteria = json_loads(spec.get("success_criteria"), [])
         if not spec.get("aim") or not spec["aim"].strip():
             raise ConflictError(f"Project '{project_id}' cannot start or execute without an approved aim.")
-        if not spec.get("method") or not spec["method"].strip():
-            raise ConflictError(f"Project '{project_id}' cannot start or execute without an approved method.")
         if not criteria:
             raise ConflictError(
                 f"Project '{project_id}' cannot start or execute without approved success criteria."

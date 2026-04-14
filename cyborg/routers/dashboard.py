@@ -689,7 +689,7 @@ async def dashboard_revise_spec(
             (now, project_id),
         )
         await db.execute(
-            "INSERT INTO project_journal_entries (id, project_id, entry_type, content, created_at, metadata) VALUES (?, ?, 'NOTE', ?, ?, ?)",
+            "INSERT INTO project_journal_entries (id, project_id, entry_type, content, created_at, metadata) VALUES (?, ?, 'note', ?, ?, ?)",
             (str(uuid4()), project_id, f"Spec revision requested: {feedback[:200]}", now, "{}"),
         )
 
@@ -1075,19 +1075,36 @@ async def approve_approval(
                     await execution_service.cleanup_old_plan_tasks(entity_id)
                 await execution_service.start_project_execution(entity_id)
 
-    # If this is a task_input approval, unblock the task
+    # If this is a task_input approval, unblock the entity
     if approval_type == "task_input" and entity_id:
-        from cyborg.services.task_service import TaskService
-        from cyborg.models import TaskUnblockRequest
+        approval_metadata = json.loads(approval.get("metadata") or "{}")
+        is_project_block = approval_metadata.get("entity_kind") == "project"
 
-        task_service = TaskService(db)
-        try:
-            await task_service.unblock_task(
-                entity_id,
-                TaskUnblockRequest(notes="Unblocked via dashboard"),
-            )
-        except Exception:
-            pass
+        if is_project_block:
+            # Resume the blocked project
+            from cyborg.services.project_service import ProjectService
+
+            project_service = ProjectService(db)
+            try:
+                await project_service.resume_project(entity_id)
+                try:
+                    await project_service.resume_project_reasoning(entity_id)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            from cyborg.services.task_service import TaskService
+            from cyborg.models import TaskUnblockRequest
+
+            task_service = TaskService(db)
+            try:
+                await task_service.unblock_task(
+                    entity_id,
+                    TaskUnblockRequest(notes="Unblocked via dashboard"),
+                )
+            except Exception:
+                pass
 
     await db.execute(
         """
@@ -1143,19 +1160,34 @@ async def reject_approval(
             reject_payload = ProjectSpecRejectRequest(feedback="Rejected via dashboard")
             await spec_service.reject_spec(str(pending_spec["id"]), reject_payload)
 
-    # If this is a task_input approval, unblock the task with a declined note
+    # If this is a task_input approval, handle based on entity kind
     if approval_type == "task_input" and entity_id:
-        from cyborg.services.task_service import TaskService
-        from cyborg.models import TaskUnblockRequest
+        approval_metadata = json.loads(approval.get("metadata") or "{}")
+        is_project_block = approval_metadata.get("entity_kind") == "project"
 
-        task_service = TaskService(db)
-        try:
-            await task_service.unblock_task(
-                entity_id,
-                TaskUnblockRequest(notes="User declined to provide input via dashboard"),
-            )
-        except Exception:
-            pass
+        if is_project_block:
+            from cyborg.services.project_service import ProjectService
+
+            project_service = ProjectService(db)
+            try:
+                await project_service.close_project(
+                    entity_id,
+                    conclusion="User declined to provide input via dashboard",
+                )
+            except Exception:
+                pass
+        else:
+            from cyborg.services.task_service import TaskService
+            from cyborg.models import TaskUnblockRequest
+
+            task_service = TaskService(db)
+            try:
+                await task_service.unblock_task(
+                    entity_id,
+                    TaskUnblockRequest(notes="User declined to provide input via dashboard"),
+                )
+            except Exception:
+                pass
 
     await db.execute(
         """

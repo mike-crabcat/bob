@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
-from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
@@ -92,6 +91,10 @@ class ProjectService(BaseService):
         payload = ProjectCreate.model_validate(payload)
         if payload.state == ProjectState.ACTIVE:
             raise ConflictError("Projects cannot be created directly in 'active' state. Create the project, submit a spec, approve it, then start or execute it.")
+        if not payload.aim or not payload.aim.strip():
+            raise ConflictError("Project creation requires --aim (what success looks like).")
+        if not payload.success_criteria:
+            raise ConflictError("Project creation requires --success-criteria-json (how to verify completion).")
 
         project_id = str(uuid4())
         now = utcnow().isoformat()
@@ -108,11 +111,6 @@ class ProjectService(BaseService):
                 payload.metadata,
                 payload.task_ids,
             )
-            if self._require_source_route_metadata() and not has_source_route_metadata(project_metadata):
-                raise ConflictError(
-                    "Projects require source routing metadata. "
-                    "Provide metadata.channel plus session_key/chat_id, or link an existing routed task."
-                )
             await connection.execute(
                 """
                 INSERT INTO projects (
@@ -290,6 +288,9 @@ class ProjectService(BaseService):
             # 5. Unlink all tasks from this project in the join table
             await conn.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
 
+            # 5b. Delete task files referencing this project (shared tasks keep their project files)
+            await conn.execute("DELETE FROM task_files WHERE project_id = ?", (project_id,))
+
             # 6. Delete specs and journal entries
             await conn.execute("DELETE FROM project_specs WHERE project_id = ?", (project_id,))
             await conn.execute("DELETE FROM project_journal_entries WHERE project_id = ?", (project_id,))
@@ -435,12 +436,6 @@ class ProjectService(BaseService):
                 return merged_metadata
         return merged_metadata
 
-    def _require_source_route_metadata(self) -> bool:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current.openclaw.enabled
-        return False
-
     async def list_project_tasks(self, project_id: str) -> list[TaskResponse]:
         await self._get_project_row(project_id)
         rows = await self.db.fetch_all(
@@ -510,12 +505,12 @@ class ProjectService(BaseService):
     ) -> ProjectSpecSubmitRequest | None:
         if aim is None and method is None and plan is None and success_criteria is None:
             return None
-        if not aim or not method or not success_criteria:
+        if not aim or not success_criteria:
             return None
         return ProjectSpecSubmitRequest.model_validate(
             {
                 "aim": aim,
-                "method": method,
+                "method": method or "",
                 "plan": plan or [],
                 "success_criteria": success_criteria,
             }

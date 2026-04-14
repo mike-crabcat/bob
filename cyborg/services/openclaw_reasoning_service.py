@@ -38,14 +38,7 @@ class OpenClawReasoningService(BaseService):
     Cyborg builds context → OpenClaw does reasoning → Cyborg parses result
     """
 
-    # Default timeouts for different reasoning types (seconds)
-    TIMEOUT_PLAN = 180
-    TIMEOUT_EVALUATION = 120
-    TIMEOUT_REFINEMENT = 180
-    TIMEOUT_LEARNING = 120
-    TIMEOUT_NEXT_ACTION = 180
-    TIMEOUT_REVIEW = 120
-    TIMEOUT_DEFAULT = 120
+    TIMEOUT_DEFAULT = 10800
 
     def __init__(self, db: Database):
         super().__init__(db)
@@ -85,7 +78,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_PLAN,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="plan_generation",
             project_id=reference_project_id,
         )
@@ -114,7 +107,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_EVALUATION,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="criteria_evaluation",
             project_id=project_id,
         )
@@ -145,7 +138,7 @@ class OpenClawReasoningService(BaseService):
             response = await self._call_openclaw(
                 prompt=prompt,
                 response_format="json",
-                timeout=self.TIMEOUT_NEXT_ACTION,
+                timeout=self.TIMEOUT_DEFAULT,
                 reasoning_type="next_action",
                 project_id=project_id,
                 task_id=completed_task_id,
@@ -183,7 +176,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_REFINEMENT,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="strategy_refinement",
             project_id=project_id,
             task_id=trigger_task_id,
@@ -210,7 +203,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_LEARNING,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="learning_extraction",
             project_id=project_id,
         )
@@ -300,7 +293,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_EVALUATION,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="health_analysis",
             project_id=project_id,
         )
@@ -327,7 +320,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_PLAN,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="follow_up_generation",
             project_id=project_id,
         )
@@ -421,7 +414,7 @@ class OpenClawReasoningService(BaseService):
             response = await self._call_openclaw(
                 prompt=prompt,
                 response_format="json",
-                timeout=self.TIMEOUT_PLAN,
+                timeout=self.TIMEOUT_DEFAULT,
                 reasoning_type="spec_revision",
                 project_id=reference_project_id,
             )
@@ -471,7 +464,7 @@ class OpenClawReasoningService(BaseService):
             "message": prompt,
             "deliver": False,  # Not delivering to a user
             "sessionKey": reasoning_session,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout * 1000,
             "idempotencyKey": str(uuid4()),
         }

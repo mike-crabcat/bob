@@ -756,11 +756,11 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
 
 class ProjectSpecFields(CyborgModel):
     aim: str = Field(min_length=1)
-    method: str = Field(min_length=1)
+    method: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(min_length=1)
 
-    @field_validator("aim", "method")
+    @field_validator("aim")
     @classmethod
     def project_spec_text_must_not_be_blank(cls, value: str) -> str:
         stripped = value.strip()

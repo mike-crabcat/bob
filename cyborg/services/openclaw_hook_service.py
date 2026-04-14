@@ -26,7 +26,7 @@ class OpenClawHookService(BaseService):
     GATEWAY_CLIENT_ID = "gateway-client"
     GATEWAY_CLIENT_MODE = "backend"
     GATEWAY_SCOPES = ["operator.write"]
-    BOOTSTRAP_TIMEOUT_SECONDS = 180.0
+    BOOTSTRAP_TIMEOUT_SECONDS = 10800.0
     DISPATCH_ACCEPT_TIMEOUT = 30.0  # Max wait for gateway to accept a notification
 
     def __init__(
@@ -571,7 +571,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low" if notification.get("metadata", {}).get("auto_created_by_project") else "off",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -593,7 +593,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -951,7 +951,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1046,7 +1046,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1129,7 +1129,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1150,8 +1150,9 @@ class OpenClawHookService(BaseService):
         result_summary = metadata.get("result_summary", "")
 
         lines = [
-            "A task has been submitted for your review. You must verify whether the work was actually completed.",
-            "Be strict but fair. The agent should have done real work, not just restated the plan.",
+            "## Review Only — Do Not Do Any Work",
+            "A task has been submitted for review. Your job is strictly to read what was done and judge if it meets the criteria.",
+            "Do NOT write code, create files, run commands, or attempt to fix or complete anything. Only review and approve/reject.",
             "",
             f"Task ID: {task_id}",
             f"Task: {notification['title']}",
@@ -1219,7 +1220,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1240,7 +1241,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }

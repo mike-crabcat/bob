@@ -886,6 +886,35 @@ class ProjectExecutionService(BaseService):
             f"Project blocked: {reason}",
             {"resume_instructions": resume_instructions} if resume_instructions else {},
         )
+
+        # Create an approval record so the block shows in the dashboard
+        from uuid import uuid4
+
+        proposal_data = {
+            "project_id": project_id,
+            "project_title": project["title"],
+            "reason": reason,
+            "resume_instructions": resume_instructions,
+        }
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, status, priority, requested_at, requested_by,
+                metadata, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                f"Project blocked: {project['title']}",
+                reason,
+                json_dumps(proposal_data),
+                now,
+                json_dumps({"entity_kind": "project", "resume_instructions": resume_instructions}),
+                now,
+            ),
+        )
         
         # Trigger webhook notification
         await self._trigger_project_webhook(
@@ -1027,7 +1056,7 @@ class ProjectExecutionService(BaseService):
         return problems
 
     async def bootstrap_stuck_project(self, project_id: str) -> dict[str, Any]:
-        """Bootstrap a stuck project by invoking reasoning to create the first task.
+        """Bootstrap a stuck project by creating the first task from plan step 0.
 
         Only works for active projects with zero tasks.
         """
@@ -1043,13 +1072,17 @@ class ProjectExecutionService(BaseService):
         if task_count and task_count["cnt"] > 0:
             return {"project_id": project_id, "action": "skipped", "reason": "has tasks"}
 
-        # Invoke reasoning via decide_next_action with a sentinel completed task ID
-        await self.decide_next_action(project_id, "__bootstrap__", "Project bootstrap", None)
+        # Create the first task deterministically from plan step 0
+        plan = self._parse_plan(project.get("plan"))
+        if not plan:
+            return {"project_id": project_id, "action": "skipped", "reason": "no plan"}
+
+        await self._create_initial_task(project_id, plan[0])
 
         await self._add_journal_entry(
             project_id,
             JournalEntryType.DECISION,
-            "Doctor bootstrapped stuck project — reasoning invoked to create first task",
+            "Doctor bootstrapped stuck project — created first task from plan step 0",
             {"source": "doctor", "problem": "active_with_no_tasks"},
         )
 
