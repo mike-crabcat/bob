@@ -315,12 +315,12 @@ class ProjectService(BaseService):
     async def resume_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.ACTIVE)
 
-    async def resume_project_reasoning(self, project_id: str) -> None:
+    async def resume_project_reasoning(self, project_id: str, *, resumed_from_block: bool = False) -> None:
         """Trigger reasoning to continue work after resume. Safe to call as a background task."""
         try:
             from cyborg.services.project_execution_service import ProjectExecutionService
             execution_service = ProjectExecutionService(self.db)
-            await execution_service.on_project_resumed(project_id)
+            await execution_service.on_project_resumed(project_id, resumed_from_block=resumed_from_block)
         except Exception:
             pass
 

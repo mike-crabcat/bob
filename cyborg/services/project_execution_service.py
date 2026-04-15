@@ -91,13 +91,16 @@ class ProjectExecutionService(BaseService):
     async def _sync_notifications(self, project_id: str) -> None:
         await NotificationService(self.db).sync_project_state(project_id)
 
-    async def on_project_resumed(self, project_id: str) -> None:
+    async def on_project_resumed(self, project_id: str, *, resumed_from_block: bool = False) -> None:
         """Resume reasoning after a project is unpaused.
 
         Looks at the current task state and triggers the appropriate next step:
         - If all tasks are completed, runs decide_next_action to create more or close
         - If there are no tasks, starts execution from the plan
         - Active/submitted/pending tasks should already have their notifications
+
+        When resumed_from_block is True (project was just unblocked after user approval),
+        tries auto-completion first before asking reasoning, to prevent re-blocking loops.
         """
         project = await self._get_project_row(project_id)
         if not project or project["state"] != ProjectState.ACTIVE.value:
@@ -114,7 +117,18 @@ class ProjectExecutionService(BaseService):
         )
 
         if latest_task and latest_task["status"] == TaskStatus.COMPLETED.value:
-            await self.decide_next_action(project_id, latest_task["id"], latest_task["title"])
+            # When resuming from a block with all tasks done, try auto-completion first
+            if resumed_from_block:
+                try:
+                    result = await self.evaluate_and_complete(project_id)
+                    if result is not None:
+                        return  # Auto-completed, no reasoning needed
+                except Exception:
+                    pass  # Fall through to decide_next_action
+            await self.decide_next_action(
+                project_id, latest_task["id"], latest_task["title"],
+                resumed_from_block=resumed_from_block,
+            )
         elif not latest_task:
             await self.start_project_execution(project_id)
 
@@ -368,6 +382,8 @@ class ProjectExecutionService(BaseService):
         completed_task_id: str,
         completed_task_title: str,
         result_summary: str | None = None,
+        *,
+        resumed_from_block: bool = False,
     ) -> None:
         """Dispatch a next-action prompt to OpenClaw (fire-and-forget).
 
@@ -413,7 +429,7 @@ class ProjectExecutionService(BaseService):
             focus_reasoning="next_action",
         )
 
-        prompt = self._build_next_action_prompt(context, completed_task_id, project_id, otp)
+        prompt = self._build_next_action_prompt(context, completed_task_id, project_id, otp, resumed_from_block=resumed_from_block)
 
         # Dispatch via notification service (fire-and-forget)
         try:
@@ -454,6 +470,8 @@ class ProjectExecutionService(BaseService):
         completed_task_id: str,
         project_id: str,
         otp: str,
+        *,
+        resumed_from_block: bool = False,
     ) -> str:
         """Build the next-action prompt with context and OTP-secured CLI instructions."""
         core = context["core"]
@@ -475,14 +493,28 @@ class ProjectExecutionService(BaseService):
         if not completed_task_info:
             completed_task_info = f"Task ID: {completed_task_id} (details not available)"
 
-        parts = [
-            "You are managing an autonomous project. A task has just completed.",
-            "Decide what should happen next based on the project's aim, plan, and success criteria.",
-            "",
-            "## Project",
-            f"Title: {project['title']}",
-            f"Aim: {project.get('aim', 'N/A')}",
-        ]
+        if resumed_from_block:
+            parts = [
+                "You are managing an autonomous project that was previously blocked waiting for user input.",
+                "The user has now approved/resumed the project. Decide what should happen next.",
+                "",
+                "**IMPORTANT:** The user chose to approve the block (not reject it), meaning they want",
+                "the project to continue. Do NOT block the project again unless there is a genuinely",
+                "new reason that did not exist before. Prefer create_task or close_project.",
+                "",
+                "## Project",
+                f"Title: {project['title']}",
+                f"Aim: {project.get('aim', 'N/A')}",
+            ]
+        else:
+            parts = [
+                "You are managing an autonomous project. A task has just completed.",
+                "Decide what should happen next based on the project's aim, plan, and success criteria.",
+                "",
+                "## Project",
+                f"Title: {project['title']}",
+                f"Aim: {project.get('aim', 'N/A')}",
+            ]
 
         if project.get("method"):
             parts.append(f"Method: {project['method']}")
@@ -767,14 +799,46 @@ class ProjectExecutionService(BaseService):
         reasoning: str,
     ) -> None:
         """Block a project based on reasoning decision."""
+        project = await self._get_project_row(project_id)
+        project_title = project["title"] if project else "Unknown"
+
         now = utcnow().isoformat()
         await self.db.execute(
             """
             UPDATE projects
-            SET state = ?, blocked_reason = ?, updated_at = ?
+            SET state = ?, blocked_reason = ?, blocked_resume_instructions = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.PAUSED.value, block_reason, now, project_id),
+            (ProjectState.PAUSED.value, block_reason, resume_instructions, now, project_id),
+        )
+
+        # Create a task_input approval with text input so the user can respond
+        input_schema = json_dumps({"type": "text", "prompt": "How should the project proceed?"})
+        proposal_data = json_dumps({
+            "project_id": project_id,
+            "project_title": project_title,
+            "reason": block_reason,
+            "resume_instructions": resume_instructions,
+        })
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, input_schema, status, priority, requested_at, requested_by,
+                metadata, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                f"Project blocked: {project_title}",
+                block_reason,
+                proposal_data,
+                input_schema,
+                now,
+                json_dumps({"entity_kind": "project", "resume_instructions": resume_instructions}),
+                now,
+            ),
         )
 
         await self._add_journal_entry(
@@ -788,6 +852,9 @@ class ProjectExecutionService(BaseService):
 
     async def _block_project_cycle_limit(self, project_id: str, cycle_count: int) -> None:
         """Block a project that exceeded the reasoning cycle limit."""
+        project = await self._get_project_row(project_id)
+        project_title = project["title"] if project else "Unknown"
+
         now = utcnow().isoformat()
         block_reason = f"Project exceeded maximum reasoning cycles ({cycle_count}). Manual review required."
         await self.db.execute(
@@ -797,6 +864,35 @@ class ProjectExecutionService(BaseService):
             WHERE id = ? AND deleted_at IS NULL
             """,
             (ProjectState.PAUSED.value, block_reason, now, project_id),
+        )
+
+        # Create a task_input approval with text input so the user can respond
+        input_schema = json_dumps({"type": "text", "prompt": "The project hit the reasoning cycle limit. How should it proceed?"})
+        proposal_data = json_dumps({
+            "project_id": project_id,
+            "project_title": project_title,
+            "reason": block_reason,
+            "cycle_count": cycle_count,
+        })
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, input_schema, status, priority, requested_at, requested_by,
+                metadata, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                f"Cycle limit reached: {project_title}",
+                block_reason,
+                proposal_data,
+                input_schema,
+                now,
+                json_dumps({"entity_kind": "project"}),
+                now,
+            ),
         )
 
         await self._add_journal_entry(
@@ -896,13 +992,14 @@ class ProjectExecutionService(BaseService):
             "reason": reason,
             "resume_instructions": resume_instructions,
         }
+        input_schema = json_dumps({"type": "text", "prompt": "How should the project proceed?"})
         await self.db.execute(
             """
             INSERT INTO approvals (
                 id, approval_type, entity_id, title, description,
-                proposal_data, status, priority, requested_at, requested_by,
+                proposal_data, input_schema, status, priority, requested_at, requested_by,
                 metadata, created_at
-            ) VALUES (?, 'task_input', ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
             """,
             (
                 str(uuid4()),
@@ -910,6 +1007,7 @@ class ProjectExecutionService(BaseService):
                 f"Project blocked: {project['title']}",
                 reason,
                 json_dumps(proposal_data),
+                input_schema,
                 now,
                 json_dumps({"entity_kind": "project", "resume_instructions": resume_instructions}),
                 now,

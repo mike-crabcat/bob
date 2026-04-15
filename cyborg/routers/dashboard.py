@@ -48,14 +48,16 @@ async def _get_project_id_for_task(db: Database, task_id: str) -> str | None:
     return row["project_id"] if row else None
 
 
-def _approval_review_href(approval_type: str | None, entity_id: str | None) -> str | None:
+def _approval_review_href(approval_type: str | None, entity_id: str | None, metadata: dict | None = None) -> str | None:
     """Return the best dashboard review link for an approval item."""
     if not entity_id:
         return None
     if approval_type in {"project_plan", "strategy_refinement", "follow_up_tasks"}:
         return f"/dashboard/projects/{entity_id}"
     if approval_type == "task_input":
-        # Link to the parent project for context
+        # For project-level blocks, entity_id IS the project_id
+        if metadata and metadata.get("entity_kind") == "project":
+            return f"/dashboard/projects/{entity_id}"
         return None  # Task input is handled inline in the approvals queue
     return None
 
@@ -980,8 +982,19 @@ async def approvals(
 
         # Resolve project_id for task_input approvals to build media URLs
         project_id = None
+        approval_metadata = None
+        if a.get("metadata"):
+            try:
+                approval_metadata = json.loads(a["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         if a["approval_type"] == "task_input" and a.get("entity_id"):
-            project_id = await _get_project_id_for_task(db, a["entity_id"])
+            # For project-level blocks, entity_id IS the project_id
+            if approval_metadata and approval_metadata.get("entity_kind") == "project":
+                project_id = a["entity_id"]
+            else:
+                project_id = await _get_project_id_for_task(db, a["entity_id"])
 
         # Prefix media paths with full dashboard URLs
         if input_schema and project_id and input_schema.get("type") == "multi_choice":
@@ -1005,7 +1018,7 @@ async def approvals(
             "proposal_preview": proposal_preview,
             "input_schema": input_schema,
             "project_id": project_id,
-            "review_href": _approval_review_href(a["approval_type"], a.get("entity_id")),
+            "review_href": _approval_review_href(a["approval_type"], a.get("entity_id"), approval_metadata),
         })
 
     return _render_template(
@@ -1083,12 +1096,23 @@ async def approve_approval(
         if is_project_block:
             # Resume the blocked project
             from cyborg.services.project_service import ProjectService
+            from cyborg.services.project_execution_service import ProjectExecutionService
+            from cyborg.models import JournalEntryType
+
+            # Add journal entry so reasoning knows the project was unblocked by user
+            execution_service = ProjectExecutionService(db)
+            await execution_service._add_journal_entry(
+                entity_id,
+                JournalEntryType.DECISION,
+                f"User approved project block (resuming). Block reason: {approval.get('description', '')}",
+                {"action": "block_approved", "approval_id": approval_id},
+            )
 
             project_service = ProjectService(db)
             try:
                 await project_service.resume_project(entity_id)
                 try:
-                    await project_service.resume_project_reasoning(entity_id)
+                    await project_service.resume_project_reasoning(entity_id, resumed_from_block=True)
                 except Exception:
                     pass
             except Exception:
@@ -1318,29 +1342,59 @@ async def resolve_task_input(
         (response_json, now_iso, approval_id),
     )
 
-    # Unblock the task with the user's input
-    from cyborg.services.task_service import TaskService
-    from cyborg.models import TaskUnblockRequest
+    # Unblock the entity with the user's input
+    approval_metadata = json.loads(approval.get("metadata") or "{}")
+    is_project_block = approval_metadata.get("entity_kind") == "project"
 
-    task_service = TaskService(db)
     response_summary = response_value if isinstance(response_value, str) else ", ".join(response_value)
-    await task_service.unblock_task(
-        entity_id,
-        TaskUnblockRequest(notes=f"User input received: {response_summary}"),
-    )
 
-    # Dispatch input response notification to the task session
-    try:
-        from cyborg.services.notification_service import NotificationService
-        notification_service = NotificationService(db)
-        await notification_service.create_task_input_response_notification(
+    if is_project_block:
+        # Unblock the project and feed user response into reasoning
+        from cyborg.services.project_service import ProjectService
+        from cyborg.services.project_execution_service import ProjectExecutionService
+        from cyborg.models import JournalEntryType
+
+        # Add journal entry with user's response so reasoning can use it
+        execution_service = ProjectExecutionService(db)
+        await execution_service._add_journal_entry(
             entity_id,
-            response_value if isinstance(response_value, list) else response_value.strip(),
-            input_prompt,
-            approval_id,
+            JournalEntryType.DECISION,
+            f"User response to block: {response_summary}",
+            {"user_response": response_summary, "approval_id": approval_id},
         )
-    except Exception:
-        logger.exception("Failed to dispatch task_input_response notification for approval %s", approval_id)
+
+        project_service = ProjectService(db)
+        try:
+            await project_service.resume_project(entity_id)
+        except Exception:
+            pass
+        try:
+            await project_service.resume_project_reasoning(entity_id, resumed_from_block=True)
+        except Exception:
+            pass
+    else:
+        # Unblock the task with the user's input
+        from cyborg.services.task_service import TaskService
+        from cyborg.models import TaskUnblockRequest
+
+        task_service = TaskService(db)
+        await task_service.unblock_task(
+            entity_id,
+            TaskUnblockRequest(notes=f"User input received: {response_summary}"),
+        )
+
+        # Dispatch input response notification to the task session
+        try:
+            from cyborg.services.notification_service import NotificationService
+            notification_service = NotificationService(db)
+            await notification_service.create_task_input_response_notification(
+                entity_id,
+                response_value if isinstance(response_value, list) else response_value.strip(),
+                input_prompt,
+                approval_id,
+            )
+        except Exception:
+            logger.exception("Failed to dispatch task_input_response notification for approval %s", approval_id)
 
     # Return empty fragment to remove the row
     return Response(content="", status_code=200)
