@@ -28,49 +28,45 @@ The important rule is: do not treat Cyborg as a free-form notes store. It has wo
 
 Use this sequence.
 
-1. Create the project shell.
-2. Submit a project spec.
-3. Wait for user approval or rejection.
-4. If rejected, revise and resubmit the project spec.
-5. Only after approval, start the project or execute it.
-6. Create and complete linked tasks as the project proceeds.
+1. Create the project with aim and success criteria (spec v1 is created automatically).
+2. Wait for user approval or rejection.
+3. If rejected, revise and resubmit the project spec.
+4. Once approved, Cyborg runs the project automatically.
+5. Create and complete linked tasks as the project proceeds.
 
-### 1. Create the project shell
+### 1. Create the project
 
-Use project create for:
+Use `project create` with `--aim` and `--success-criteria-json`. Spec v1 is created automatically — you do not need a separate `spec submit` step.
 
+Required:
 - `title`
-- `description`
-- source routing metadata
+- `--aim`: what success means
+- `--success-criteria-json`: explicit measurable criteria
 
-Do not rely on `project create` alone to make the project executable.
+Optional:
+- `--method`: how the work will be approached (defaults to empty if not provided)
+- `--plan-json`: execution plan (Cyborg can generate one via OpenClaw reasoning if omitted)
+- `--description`: project description
+- source routing metadata (`--channel`, `--session-key`, `--chat-id`)
+
+It is fine and expected to submit only aim and success criteria. Plan and method are optional — Cyborg will handle plan generation after approval if needed.
 
 CLI example:
 
 ```bash
 uv run cyborg project create "Q1 Data Migration" \
+  --aim "Migrate the customer records to the new schema without losing data." \
+  --success-criteria-json '[{"check":"records_migrated > 0","description":"Customer records were migrated"},{"check":"failed_task_count == 0","description":"No migration task failed"}]' \
   --description "Move customer records to the new schema" \
   --channel whatsapp \
   --session-key whatsappgroup-main
 ```
 
-### 2. Submit a project spec
-
-Use `project spec submit` once you have a concrete proposal for the work.
-
-The spec must include:
-
-- `aim`: what success means
-- `method`: how the work will be approached
-- `success_criteria`: explicit measurable criteria
-- optional `plan`: a first-pass ordered execution outline
-
-CLI example:
+With an optional plan:
 
 ```bash
-uv run cyborg project spec submit <project-id> \
+uv run cyborg project create "Q1 Data Migration" \
   --aim "Migrate the customer records to the new schema without losing data." \
-  --method "Export the legacy records, transform them, import them into the new schema, and verify record counts and sample rows." \
   --success-criteria-json '[{"check":"records_migrated > 0","description":"Customer records were migrated"},{"check":"failed_task_count == 0","description":"No migration task failed"}]' \
   --plan-json '[{"title":"Extract","description":"Export source data","criteria":"source export exists","order":0},{"title":"Transform","description":"Normalize the data","criteria":"normalized output exists","order":1},{"title":"Load","description":"Import into the new schema","criteria":"records imported","order":2}]'
 ```
@@ -78,30 +74,61 @@ uv run cyborg project spec submit <project-id> \
 API example:
 
 ```json
-POST /api/v1/projects/{project_id}/specs
+POST /api/v1/projects
 {
+  "title": "Q1 Data Migration",
   "aim": "Migrate the customer records to the new schema without losing data.",
-  "method": "Export, transform, import, and verify the records.",
   "success_criteria": [
     {
       "check": "records_migrated > 0",
       "description": "Customer records were migrated"
     }
-  ],
-  "plan": [
-    {
-      "title": "Extract",
-      "description": "Export source data",
-      "criteria": "source export exists",
-      "order": 0
-    }
   ]
 }
 ```
 
-### 3. Approval and rejection
+### 2. Wait for approval
 
-After submitting a project spec:
+After creating the project:
+
+- do not start the project
+- do not execute the project
+- do not assume the spec is approved
+- wait for the user to approve or reject
+
+Check spec status with:
+
+```bash
+uv run cyborg project spec list <project-id>
+uv run cyborg project get <project-id>
+```
+
+Approval:
+
+```bash
+uv run cyborg project spec approve <project-id> --approver Mike
+```
+
+Rejection:
+
+```bash
+uv run cyborg project spec reject <project-id> --feedback "The success criteria are too vague. Add a clear verification condition."
+```
+
+### 3. Submit a revised spec (only if rejected)
+
+Use `project spec submit` only when the user rejects the spec and changes are needed.
+
+CLI example:
+
+```bash
+uv run cyborg project spec submit <project-id> \
+  --aim "Revised aim" \
+  --method "Revised method" \
+  --success-criteria-json '[{"check":"revised_check","description":"Revised criteria"}]'
+```
+
+### 4. Execution starts automatically on approval
 
 - do not start the project
 - do not execute the project
@@ -143,11 +170,11 @@ If the approved spec does not include an execution `plan`, Cyborg will ask OpenC
 
 Just approve and the project runs (or wait for the generated plan if no plan was provided).
 
-## What makes a good project spec
+## What makes a good project
 
-The agent should not submit weak specs.
+The agent should not submit weak projects.
 
-### Aim
+### Aim (required)
 
 Good aims are concrete and outcome-oriented.
 
@@ -161,19 +188,7 @@ Bad:
 - "Work on the project."
 - "Figure some things out."
 
-### Method
-
-The method should summarize the intended approach, not just restate the aim.
-
-Good:
-
-- "Collect venue options, compare them against the family's timing constraints, propose two choices, and confirm a final selection."
-
-Bad:
-
-- "Complete the project."
-
-### Success criteria
+### Success criteria (required)
 
 Success criteria must be explicit enough that Cyborg or a reviewer can tell whether the project is done.
 
@@ -189,6 +204,22 @@ Bad:
 - "We did enough."
 
 Do not leave success criteria empty for projects you expect to start or execute.
+
+### Method (optional)
+
+If provided, the method should summarize the intended approach, not just restate the aim.
+
+Good:
+
+- "Collect venue options, compare them against the family's timing constraints, propose two choices, and confirm a final selection."
+
+Bad:
+
+- "Complete the project."
+
+### Plan (optional)
+
+An execution plan can be included, but is not required. If omitted, Cyborg will generate one via OpenClaw reasoning after the spec is approved.
 
 ## Correct Task Workflow
 
@@ -405,9 +436,9 @@ Do not:
 
 ### Safe project recipe
 
-1. `project create`
-2. `project spec submit`
-3. wait for approval
+1. `project create --aim ... --success-criteria-json ...` (spec v1 auto-created)
+2. wait for approval
+3. Cyborg runs the project (or wait for generated plan if no plan was provided)
 4. create linked tasks (or let auto-execution handle it)
 5. complete tasks with `result_summary`
 
@@ -427,4 +458,4 @@ If the user request is vague:
 - prefer a better draft spec over a premature one
 - do not hide uncertainty inside vague success criteria
 
-The project system is only useful if the approved `aim`, `method`, and `success_criteria` are explicit enough to govern later autonomy.
+The project system is only useful if the approved `aim` and `success_criteria` are explicit enough to govern later autonomy.

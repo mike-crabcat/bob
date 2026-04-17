@@ -1210,6 +1210,8 @@ def project_create(
     typer.echo(f"Created project: {project['id']}")
     typer.echo(f"Title: {project['title']}")
     typer.echo(f"State: {project['state']}")
+    if project.get("current_spec_id"):
+        typer.echo("Spec v1 submitted automatically. Wait for user approval — Cyborg will run the project once approved.")
 
 
 @project_app.command("list")
