@@ -673,12 +673,14 @@ def doctor(
 
     typer.echo(f"Found {len(problems)} problem(s):")
     for p in problems:
-        typer.echo(f"  - {p['title']} ({p['project_id'][:8]}): {p['problem']}")
+        pid = p.get("project_id", p.get("approval_id", "?"))
+        typer.echo(f"  - {p['title']} ({pid[:8]}): {p['problem']}")
 
     if fixes:
         typer.echo(f"\nApplied {len(fixes)} fix(es):")
         for f in fixes:
-            typer.echo(f"  - {f['title']} ({f['project_id'][:8]}): {f['action']}")
+            fid = f.get("project_id", f.get("approval_id", "?"))
+            typer.echo(f"  - {f['title']} ({fid[:8]}): {f['action']}")
     elif fix:
         typer.echo("\nNo fixes needed.")
 

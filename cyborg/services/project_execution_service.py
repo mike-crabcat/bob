@@ -1151,6 +1151,41 @@ class ProjectExecutionService(BaseService):
                 "problem": "blocked_task_without_approval",
             })
 
+        # Obsolete approvals: pending approvals whose entity can't accept them
+        obsolete_rows = await self.db.fetch_all(
+            """
+            SELECT a.id as approval_id, a.approval_type, a.title, a.entity_id,
+                   a.metadata, a.requested_at,
+                   p.id as project_id, p.title as project_title, p.state as project_state,
+                   p.blocked_reason as project_blocked_reason
+            FROM approvals a
+            LEFT JOIN projects p ON p.id = a.entity_id AND p.deleted_at IS NULL
+            LEFT JOIN tasks t ON t.id = a.entity_id AND t.deleted_at IS NULL
+            WHERE a.status = 'pending'
+              AND (
+                (a.approval_type = 'project_plan' AND (p.state = 'closed' OR p.id IS NULL))
+                OR (a.approval_type = 'task_input'
+                    AND json_extract(a.metadata, '$.entity_kind') = 'project'
+                    AND (p.state = 'closed' OR p.id IS NULL OR p.blocked_reason IS NULL))
+                OR (a.approval_type = 'task_input'
+                    AND (json_extract(a.metadata, '$.entity_kind') IS NULL
+                         OR json_extract(a.metadata, '$.entity_kind') != 'project')
+                    AND (t.id IS NULL OR t.status != 'blocked'))
+              )
+            """,
+        )
+        for row in obsolete_rows:
+            problems.append({
+                "approval_id": row["approval_id"],
+                "approval_type": row["approval_type"],
+                "title": row["title"],
+                "entity_id": row["entity_id"],
+                "project_id": row["project_id"],
+                "project_title": row["project_title"],
+                "project_state": row["project_state"],
+                "problem": "obsolete_approval",
+            })
+
         return problems
 
     async def bootstrap_stuck_project(self, project_id: str) -> dict[str, Any]:
@@ -1304,3 +1339,18 @@ class ProjectExecutionService(BaseService):
         )
 
         return {"task_id": task_id, "action": "approval_created", "approval_id": approval_id}
+
+    async def cancel_obsolete_approval(self, approval_id: str) -> dict[str, Any]:
+        """Cancel a pending approval whose target entity can no longer accept it."""
+        approval = await self.db.fetch_one(
+            "SELECT id, approval_type, entity_id FROM approvals WHERE id = ? AND status = 'pending'",
+            (approval_id,),
+        )
+        if not approval:
+            return {"approval_id": approval_id, "action": "skipped", "reason": "not pending"}
+
+        await self.db.execute(
+            "UPDATE approvals SET status = 'cancelled', reviewed_at = ?, reviewed_by = 'doctor' WHERE id = ?",
+            (utcnow().isoformat(), approval_id),
+        )
+        return {"approval_id": approval_id, "action": "cancelled"}

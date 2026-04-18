@@ -171,17 +171,22 @@
 
             <!-- Plan steps -->
             {% if spec.plan %}
-            <div class="text-sm mb-2">
-                <span class="text-text-secondary">Plan ({{ spec.plan|length }} steps):</span>
-                <ol class="mt-1 ml-4 space-y-1">
-                    {% for step in spec.plan %}
-                    <li class="text-text-primary">
-                        <span class="text-accent-cyan">{{ step.order + 1 }}.</span>
-                        {{ step.title }}
-                        <span class="text-text-muted">— {{ step.description }}</span>
-                    </li>
-                    {% endfor %}
-                </ol>
+            <div class="text-sm mb-2" x-data="{ showPlan: false }">
+                <button type="button" @click="showPlan = !showPlan"
+                        class="text-text-secondary cursor-pointer hover:text-text-primary transition-colors">
+                    <span x-text="showPlan ? '▾ Hide plan' : '▸ Show plan ({{ spec.plan|length }} steps)'"></span>
+                </button>
+                <div x-show="showPlan" x-cloak>
+                    <ol class="mt-1 ml-4 space-y-1">
+                        {% for step in spec.plan %}
+                        <li class="text-text-primary">
+                            <span class="text-accent-cyan">{{ step.order + 1 }}.</span>
+                            {{ step.title }}
+                            <span class="text-text-muted">— {{ step.description }}</span>
+                        </li>
+                        {% endfor %}
+                    </ol>
+                </div>
             </div>
             {% endif %}
 
@@ -364,8 +369,22 @@
             {% endif %}
             {% endfor %}
             {% if ns.grouped %}
+            {% set fi = namespace(tid='', total=0) %}
             {% for f in ns.grouped %}
-            {% if loop.first or f.task_short_id != ns.grouped[loop.index0 - 1].task_short_id %}
+            {% set is_new = fi.tid != f.task_short_id %}
+            {% if is_new %}
+            {% if fi.tid %}
+            {% if fi.total > 3 %}
+            <button type="button" onclick="loadTaskFiles(this, '{{ project.id }}', '{{ fi.tid }}')"
+                    class="text-xs text-text-muted pl-1 mt-1 cursor-pointer hover:text-accent-cyan">
+                ... show all {{ fi.total }} files
+            </button>
+            {% endif %}
+            </div>
+            {% endif %}
+            {% set fi.tid = f.task_short_id %}
+            {% set fi.total = f.task_file_count %}
+            <div>
             <div class="text-xs text-accent-cyan mt-3 mb-1 pl-1">{{ f.task_title }}</div>
             {% endif %}
             <a href="/dashboard/projects/{{ project.id }}/files/{{ f.relative_path }}"
@@ -376,6 +395,15 @@
                 <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
             </a>
             {% endfor %}
+            {% if fi.tid %}
+            {% if fi.total > 3 %}
+            <button type="button" onclick="loadTaskFiles(this, '{{ project.id }}', '{{ fi.tid }}')"
+                    class="text-xs text-text-muted pl-1 mt-1 cursor-pointer hover:text-accent-cyan">
+                ... show all {{ fi.total }} files
+            </button>
+            {% endif %}
+            </div>
+            {% endif %}
             {% endif %}
             {% else %}
             <div class="space-y-1">
@@ -387,6 +415,12 @@
                     <span class="text-sm flex-1 truncate text-text-primary">{{ f.name }}</span>
                     <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
                 </a>
+                {% if loop.last and f.category_file_count and f.category_file_count > 10 %}
+                <button type="button" onclick="loadCategoryFiles(this, '{{ project.id }}', '{{ category }}')"
+                        class="text-xs text-text-muted pl-1 mt-1 cursor-pointer hover:text-accent-cyan">
+                    ... show all {{ f.category_file_count }} files
+                </button>
+                {% endif %}
                 {% endfor %}
             </div>
             {% endif %}
@@ -523,4 +557,63 @@
         <form id="delete-form" method="POST" action="/dashboard/projects/{{ project.id }}/delete" class="hidden"></form>
     </div>
 </div>
+
+<script>
+function formatFileSize(bytes) {
+    if (!bytes) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    let size = bytes;
+    while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+    return size.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function loadTaskFiles(btn, projectId, taskShortId) {
+    if (btn.dataset.loaded) { btn.remove(); return; }
+    btn.textContent = 'loading...';
+    try {
+        const resp = await fetch(`/dashboard/projects/${projectId}/task-files/${taskShortId}`);
+        const data = await resp.json();
+        const container = btn.parentElement;
+        data.files.slice(3).forEach(f => {
+            const a = document.createElement('a');
+            a.href = `/dashboard/projects/${projectId}/files/${f.relative_path}`;
+            a.target = '_blank';
+            a.className = 'block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors';
+            a.innerHTML = `<span class="text-sm">${f.name}</span>`
+                + `<span class="text-sm flex-1 truncate text-text-primary"></span>`
+                + `<span class="text-xs text-text-muted font-mono-data">${formatFileSize(f.size_bytes)}</span>`;
+            container.insertBefore(a, btn);
+        });
+        btn.textContent = 'show less';
+        btn.dataset.loaded = '1';
+    } catch (e) {
+        btn.textContent = 'failed to load';
+    }
+}
+
+async function loadCategoryFiles(btn, projectId, category) {
+    if (btn.dataset.loaded) { btn.remove(); return; }
+    btn.textContent = 'loading...';
+    try {
+        const resp = await fetch(`/dashboard/projects/${projectId}/category-files/${category}`);
+        const data = await resp.json();
+        const container = btn.parentElement;
+        data.files.slice(10).forEach(f => {
+            const a = document.createElement('a');
+            a.href = `/dashboard/projects/${projectId}/files/${f.relative_path}`;
+            a.target = '_blank';
+            a.className = 'block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors';
+            a.innerHTML = `<span class="text-sm">${f.name}</span>`
+                + `<span class="text-sm flex-1 truncate text-text-primary"></span>`
+                + `<span class="text-xs text-text-muted font-mono-data">${formatFileSize(f.size_bytes)}</span>`;
+            container.insertBefore(a, btn);
+        });
+        btn.textContent = 'show less';
+        btn.dataset.loaded = '1';
+    } catch (e) {
+        btn.textContent = 'failed to load';
+    }
+}
+</script>
 {% endblock %}

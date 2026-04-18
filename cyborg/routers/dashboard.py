@@ -555,7 +555,7 @@ async def project_detail(
         short = t["id"].replace("-", "")[:8]
         task_id_map[short] = t["title"]
 
-    scanned_files = _scan_project_files(project_path, task_id_map=task_id_map)
+    scanned_files = _scan_project_files(project_path, task_id_map=task_id_map, task_file_limit=3, category_file_limit=10)
     file_categories = _group_files_by_category(scanned_files)
 
     # Get specs for this project
@@ -625,6 +625,52 @@ async def delete_project(
         status_code=303,
         headers={"Location": "/dashboard/projects"},
     )
+
+
+@router.get("/projects/{project_id}/task-files/{task_short_id}")
+async def dashboard_task_files_api(
+    project_id: str,
+    task_short_id: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Return files for a specific task within a project as JSON."""
+    from fastapi.responses import JSONResponse
+    from cyborg.services.project_service import ProjectService
+
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+    if not project_path:
+        return JSONResponse(content={"files": []}, status_code=404)
+
+    scanned = _scan_project_files(project_path)
+    task_files = [
+        f for f in scanned
+        if f.get("task_short_id") == task_short_id
+    ]
+    return JSONResponse(content={"files": task_files})
+
+
+@router.get("/projects/{project_id}/category-files/{category}")
+async def dashboard_category_files_api(
+    project_id: str,
+    category: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Return files for a specific category within a project as JSON."""
+    from fastapi.responses import JSONResponse
+    from cyborg.services.project_service import ProjectService
+
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+    if not project_path:
+        return JSONResponse(content={"files": []}, status_code=404)
+
+    scanned = _scan_project_files(project_path)
+    cat_files = [
+        f for f in scanned
+        if f.get("category") == category and "task_short_id" not in f
+    ]
+    return JSONResponse(content={"files": cat_files})
 
 
 @router.post("/projects/{project_id}/pause")
@@ -1890,15 +1936,23 @@ def _file_icon(filename: str) -> str:
     return icons.get(ext, "\U0001f4ce")
 
 
-_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache"}
+_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".mypy_cache"}
 
 
 def _scan_project_files(
     project_path: Path,
     *,
     task_id_map: dict[str, str] | None = None,
+    task_file_limit: int = 0,
+    category_file_limit: int = 0,
 ) -> list[dict[str, Any]]:
-    """Scan the project workspace for files, returning entries for the template."""
+    """Scan the project workspace for files, returning entries for the template.
+
+    Args:
+        task_file_limit: If > 0, cap task files to this many per task.
+        category_file_limit: If > 0, cap non-task files to this many per category.
+            Both limits attach a ``_file_count`` field with the true total.
+    """
     from pathlib import Path as _Path
 
     workspace_root = project_path.resolve()
@@ -1906,6 +1960,8 @@ def _scan_project_files(
         return []
 
     files: list[dict[str, Any]] = []
+    task_file_counts: dict[str, int] = {}
+    cat_file_counts: dict[str, int] = {}
     for child in sorted(workspace_root.rglob("*")):
         if not child.is_file():
             continue
@@ -1926,13 +1982,38 @@ def _scan_project_files(
         }
 
         # Annotate task files with their task title
+        is_task_file = False
         if category == "tasks" and len(rel_parts) >= 3 and task_id_map:
             short_id = rel_parts[1]
             if short_id in task_id_map:
                 entry["task_short_id"] = short_id
                 entry["task_title"] = task_id_map[short_id]
+                is_task_file = True
+
+                if task_file_limit > 0:
+                    task_file_counts[short_id] = task_file_counts.get(short_id, 0) + 1
+                    if task_file_counts[short_id] > task_file_limit:
+                        continue
+
+        # Cap non-task files per category
+        if not is_task_file and category_file_limit > 0:
+            cat_file_counts[category] = cat_file_counts.get(category, 0) + 1
+            if cat_file_counts[category] > category_file_limit:
+                continue
 
         files.append(entry)
+
+    # Attach true counts so templates know whether to show "show all"
+    if task_file_limit > 0:
+        for f in files:
+            tid = f.get("task_short_id")
+            if tid and tid in task_file_counts:
+                f["task_file_count"] = task_file_counts[tid]
+    if category_file_limit > 0:
+        for f in files:
+            cat = f.get("category")
+            if cat and cat in cat_file_counts and "task_short_id" not in f:
+                f["category_file_count"] = cat_file_counts[cat]
 
     return files
 

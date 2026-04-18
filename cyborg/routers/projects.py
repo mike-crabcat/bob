@@ -52,6 +52,12 @@ async def doctor(
                     fixes.append({**problem, **result})
                 except Exception as exc:
                     fixes.append({**problem, "action": "error", "error": str(exc)})
+            elif problem["problem"] == "obsolete_approval":
+                try:
+                    result = await execution_service.cancel_obsolete_approval(problem["approval_id"])
+                    fixes.append({**problem, **result})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
 
     return {"problems": problems, "fixes": fixes}
 
