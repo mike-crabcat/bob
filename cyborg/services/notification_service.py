@@ -610,9 +610,6 @@ class NotificationService(BaseService):
             return
 
         project_metadata = json_loads(project.get("metadata"), {})
-        has_source_route = any(project_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        if not has_source_route:
-            return
 
         metadata = {
             **project_metadata,

@@ -10,6 +10,7 @@ from cyborg.exceptions import ForbiddenError
 from cyborg.services.calendar_service import CalendarService
 from cyborg.services.notification_service import NotificationService
 from cyborg.services.project_execution_service import ProjectExecutionService
+from cyborg.services.source_discovery_service import SourceDiscoveryService
 from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.project_service import ProjectService
 from cyborg.services.session_route_service import SessionRouteService
@@ -76,3 +77,8 @@ def get_project_execution_service(database: Database = Depends(get_database)) ->
     """Build a project execution service for the current request."""
 
     return ProjectExecutionService(database)
+
+def get_source_discovery_service(database: Database = Depends(get_database)) -> SourceDiscoveryService:
+    """Build a source discovery service for the current request."""
+
+    return SourceDiscoveryService(database)

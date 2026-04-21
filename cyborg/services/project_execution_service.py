@@ -1186,6 +1186,33 @@ class ProjectExecutionService(BaseService):
                 "problem": "obsolete_approval",
             })
 
+        # Duplicate pending approvals: more than one pending approval of the
+        # same type for the same entity.
+        duplicate_rows = await self.db.fetch_all(
+            """
+            SELECT a.approval_type, a.entity_id, COUNT(*) AS cnt,
+                   MIN(a.id) AS keep_id,
+                   GROUP_CONCAT(a.id) AS approval_ids,
+                   GROUP_CONCAT(a.title, ' | ') AS titles
+            FROM approvals a
+            WHERE a.status = 'pending'
+            GROUP BY a.approval_type, a.entity_id
+            HAVING cnt > 1
+            """,
+        )
+        for row in duplicate_rows:
+            approval_ids = row["approval_ids"].split(",")
+            keep_id = row["keep_id"]
+            cancel_ids = [aid for aid in approval_ids if aid != keep_id]
+            problems.append({
+                "approval_type": row["approval_type"],
+                "entity_id": row["entity_id"],
+                "title": row["titles"],
+                "problem": "duplicate_pending_approvals",
+                "keep_approval_id": keep_id,
+                "cancel_approval_ids": cancel_ids,
+            })
+
         return problems
 
     async def bootstrap_stuck_project(self, project_id: str) -> dict[str, Any]:

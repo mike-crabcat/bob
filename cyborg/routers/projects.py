@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Response, status
 
-from cyborg.dependencies import get_project_execution_service, get_project_service, get_project_spec_service
+from cyborg.dependencies import get_project_execution_service, get_project_service, get_project_spec_service, get_source_discovery_service
 from cyborg.models import (
     ProjectCloseRequest,
     ProjectCreate,
@@ -16,11 +16,14 @@ from cyborg.models import (
     ProjectResponse,
     ProjectState,
     ProjectUpdate,
+    SourceOutputItem,
+    SourceProjectResponse,
     TaskResponse,
 )
 from cyborg.services.project_execution_service import ProjectExecutionService
 from cyborg.services.project_spec_service import ProjectSpecService
 from cyborg.services.project_service import ProjectService
+from cyborg.services.source_discovery_service import SourceDiscoveryService
 
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -58,6 +61,14 @@ async def doctor(
                     fixes.append({**problem, **result})
                 except Exception as exc:
                     fixes.append({**problem, "action": "error", "error": str(exc)})
+            elif problem["problem"] == "duplicate_pending_approvals":
+                try:
+                    cancel_ids = problem.get("cancel_approval_ids", [])
+                    for aid in cancel_ids:
+                        await execution_service.cancel_obsolete_approval(aid)
+                    fixes.append({**problem, "action": "cancelled_duplicates", "cancelled_count": len(cancel_ids)})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
 
     return {"problems": problems, "fixes": fixes}
 
@@ -87,6 +98,7 @@ async def create_project(
             success_criteria=payload.success_criteria,
         ) is not None,
         initial_state=payload.state,
+        payload=payload,
     )
     return project
 
@@ -196,3 +208,48 @@ async def decide_next(
     a valid one-time password from the prompt.
     """
     return await execution_service.verify_decide_next(str(project_id), payload)
+
+
+# --- Source project endpoints ---
+
+
+@router.get("/{project_id}/sources", response_model=list[SourceProjectResponse])
+async def list_sources(
+    project_id: UUID,
+    service: SourceDiscoveryService = Depends(get_source_discovery_service),
+) -> list[SourceProjectResponse]:
+    """List all source projects linked to this derived project."""
+    return await service.get_sources(str(project_id))
+
+
+@router.post("/{project_id}/sources", response_model=list[SourceProjectResponse], status_code=status.HTTP_201_CREATED)
+async def link_sources(
+    project_id: UUID,
+    payload: dict[str, Any],
+    service: SourceDiscoveryService = Depends(get_source_discovery_service),
+) -> list[SourceProjectResponse]:
+    """Link one or more source projects to this derived project."""
+    source_ids = [str(sid) for sid in payload.get("source_project_ids", [])]
+    result = await service.link_sources(str(project_id), source_ids)
+    await service.scan_source_outputs(str(project_id))
+    return result
+
+
+@router.delete("/{project_id}/sources/{source_project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unlink_source(
+    project_id: UUID,
+    source_project_id: UUID,
+    service: SourceDiscoveryService = Depends(get_source_discovery_service),
+) -> Response:
+    """Remove a source project link."""
+    await service.unlink_sources(str(project_id), [str(source_project_id)])
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{project_id}/sources/scan", response_model=list[SourceOutputItem])
+async def scan_source_outputs(
+    project_id: UUID,
+    service: SourceDiscoveryService = Depends(get_source_discovery_service),
+) -> list[SourceOutputItem]:
+    """Rescan all linked source projects for outputs."""
+    return await service.scan_source_outputs(str(project_id))

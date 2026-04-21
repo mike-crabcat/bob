@@ -134,6 +134,7 @@ class ProjectService(BaseService):
                 ),
             )
             await self._replace_task_links(connection, project_id, payload.task_ids)
+
         # Spec submission is fast (DB-only), keep synchronous so the response
         # includes the latest spec status.  Defer plan generation to the
         # background task so OpenClaw reasoning doesn't block the HTTP response.
@@ -142,24 +143,48 @@ class ProjectService(BaseService):
                 project_id, spec_payload, defer_plan_generation=defer_effects
             )
         if defer_effects:
+            # Link source projects in background — auto-discovery makes a
+            # slow LLM call (~60s) that must not block the HTTP response.
             project = await self.get_project(project_id)
             return project
         await self._post_create_background_effects(
             project_id,
             has_spec=spec_payload is not None,
             initial_state=payload.state,
+            payload=payload,
         )
         project = await self.get_project(project_id)
         return project
 
-    async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState) -> None:
-        """Run notification sync, plan generation, and summary update in the background."""
+    async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState, payload: ProjectCreate | None = None) -> None:
+        """Run notification sync, plan generation, source linking, and summary update in the background."""
+        if payload:
+            try:
+                await self._link_source_projects(project_id, payload)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Source linking failed for project %s: %s", project_id, exc)
         if has_spec:
             await self.project_spec_service.generate_plan_if_needed(project_id)
         else:
             await self._sync_notifications(project_id)
         project = await self.get_project(project_id)
         await self._update_summary_md(project)
+
+    async def _link_source_projects(self, project_id: str, payload: ProjectCreate) -> None:
+        """Link source projects to a newly created derived project."""
+        from cyborg.services.source_discovery_service import SourceDiscoveryService
+        discovery = SourceDiscoveryService(self.db)
+
+        source_ids = [str(sid) for sid in payload.source_project_ids]
+        if source_ids:
+            await discovery.link_sources(project_id, source_ids)
+            await discovery.scan_source_outputs(project_id)
+        elif payload.auto_discover_sources:
+            await discovery.auto_discover_sources(
+                project_id, payload.aim, payload.method,
+            )
+            await discovery.scan_source_outputs(project_id)
 
     async def update_project(self, project_id: str, payload: ProjectUpdate, *, defer_plan_generation: bool = False) -> ProjectResponse:
         existing = await self._get_project_row(project_id)
@@ -294,6 +319,10 @@ class ProjectService(BaseService):
             # 6. Delete specs and journal entries
             await conn.execute("DELETE FROM project_specs WHERE project_id = ?", (project_id,))
             await conn.execute("DELETE FROM project_journal_entries WHERE project_id = ?", (project_id,))
+
+            # 6b. Delete source links (both directions)
+            await conn.execute("DELETE FROM project_sources WHERE derived_project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM project_sources WHERE source_project_id = ?", (project_id,))
 
             # 7. Delete the project itself
             await conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
@@ -493,6 +522,11 @@ class ProjectService(BaseService):
         decoded["success_criteria"] = json_loads(decoded.get("success_criteria"), [])
         decoded["metadata"] = json_loads(decoded.get("metadata"), {})
         decoded = await self.project_spec_service.populate_project_spec_fields(decoded)
+        # Source project data
+        from cyborg.services.source_discovery_service import SourceDiscoveryService
+        discovery = SourceDiscoveryService(self.db)
+        decoded["source_projects"] = await discovery.get_sources(decoded["id"])
+        decoded["derived_outputs"] = await discovery._get_cached_outputs(decoded["id"])
         return decoded
 
     def _build_spec_payload(

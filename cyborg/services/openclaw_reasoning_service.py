@@ -66,13 +66,14 @@ class OpenClawReasoningService(BaseService):
         method: str | None = None,
         success_criteria: list[str] | None = None,
         reference_project_id: str | None = None,
+        source_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Ask OpenClaw to generate a project plan.
         """
 
         # Build minimal prompt
-        prompt = self._build_plan_prompt(aim, method, success_criteria)
+        prompt = self._build_plan_prompt(aim, method, success_criteria, source_context=source_context)
 
         # Call OpenClaw
         response = await self._call_openclaw(
@@ -84,6 +85,112 @@ class OpenClawReasoningService(BaseService):
         )
 
         return self._parse_plan_response(response)
+
+    async def discover_sources(
+        self,
+        aim: str,
+        method: str | None,
+        closed_projects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Ask OpenClaw which closed projects are relevant sources for a new project.
+
+        Returns a list of dicts with keys: project_id, confidence, reason.
+        Fails gracefully — returns an empty list on error.
+        """
+        prompt = self._build_source_discovery_prompt(aim, method, closed_projects)
+
+        try:
+            response = await self._call_openclaw(
+                prompt=prompt,
+                response_format="json",
+                timeout=self.TIMEOUT_DEFAULT,
+                reasoning_type="source_discovery",
+            )
+            return self._parse_source_discovery_response(response)
+        except Exception as e:
+            logger.warning("Source discovery LLM call failed: %s", e)
+            return []
+
+    def _build_source_discovery_prompt(
+        self,
+        aim: str,
+        method: str | None,
+        closed_projects: list[dict[str, Any]],
+    ) -> str:
+        """Build prompt for source project discovery."""
+        parts = [
+            "You are a project planning assistant. A new project is being created.",
+            "Determine which completed projects could serve as useful sources.",
+            "",
+            f"New Project Aim: {aim}",
+        ]
+        if method:
+            parts.append(f"New Project Method: {method}")
+
+        parts.extend([
+            "",
+            "Completed Projects:",
+        ])
+
+        for p in closed_projects:
+            parts.append(f"  - ID: {p['id']}")
+            parts.append(f"    Title: {p['title']}")
+            if p.get("aim"):
+                parts.append(f"    Aim: {p['aim'][:200]}")
+            if p.get("method"):
+                parts.append(f"    Method: {p['method'][:100]}")
+            if p.get("conclusion"):
+                parts.append(f"    Conclusion: {p['conclusion'][:200]}")
+            parts.append(f"    Output files: {p.get('file_count', 0)}")
+            parts.append("")
+
+        parts.extend([
+            "Identify projects whose outputs (code, venv, scripts, reports, data) would be",
+            "useful as inputs for the new project. Consider:",
+            "- Does the new project need the same programming environment or tools?",
+            "- Can the new project build on top of code, scripts, or data from a completed one?",
+            "- Do the topics or domains overlap significantly?",
+            "",
+            "Only include high-confidence matches (confidence >= 0.7).",
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "matches": [',
+            '    {"project_id": "...", "confidence": 0.85, "reason": "brief explanation"},',
+            '    ...',
+            '  ]',
+            "}",
+        ])
+
+        return "\n".join(parts)
+
+    def _parse_source_discovery_response(self, response: str) -> list[dict[str, Any]]:
+        """Parse source discovery response."""
+        try:
+            data = self._load_json_payload(response)
+            if isinstance(data, dict) and "matches" in data:
+                matches = data["matches"]
+            elif isinstance(data, list):
+                matches = data
+            else:
+                return []
+
+            results = []
+            for m in matches:
+                if not isinstance(m, dict):
+                    continue
+                pid = str(m.get("project_id", ""))
+                confidence = float(m.get("confidence", 0))
+                if pid and confidence >= 0.7:
+                    results.append({
+                        "project_id": pid,
+                        "confidence": confidence,
+                        "reason": str(m.get("reason", "")),
+                    })
+            return results
+        except Exception as e:
+            logger.warning("Failed to parse source discovery response: %s", e)
+            return []
 
     async def evaluate_success_criteria(
         self,
@@ -592,6 +699,7 @@ class OpenClawReasoningService(BaseService):
         aim: str,
         method: str | None,
         success_criteria: list[str] | None,
+        source_context: dict[str, Any] | None = None,
     ) -> str:
         """Build prompt for plan generation."""
 
@@ -609,6 +717,34 @@ class OpenClawReasoningService(BaseService):
             parts.append("Success Criteria:")
             for i, criterion in enumerate(success_criteria, 1):
                 parts.append(f"  {i}. {criterion}")
+
+        # Inject source project outputs if available
+        if source_context and source_context.get("source_projects"):
+            parts.append("")
+            parts.append("## Source Project Outputs Available")
+            parts.append("")
+            parts.append(
+                "This project is derived from completed projects whose outputs are available for reuse."
+            )
+            for sp in source_context["source_projects"]:
+                parts.append("")
+                parts.append(f"### Source: {sp.get('title', 'Unknown')}")
+                if sp.get("aim"):
+                    parts.append(f"Aim: {sp['aim']}")
+                if sp.get("conclusion"):
+                    parts.append(f"Conclusion: {sp['conclusion']}")
+                if sp.get("relevance_reason"):
+                    parts.append(f"Relevance: {sp['relevance_reason']}")
+                outputs = sp.get("outputs", [])
+                if outputs:
+                    parts.append("")
+                    parts.append("Available Outputs:")
+                    for out in outputs:
+                        parts.append(f"  - {out['type']}: {out['path']}" + (f" ({out['description']})" if out.get("description") else ""))
+                parts.append("")
+            parts.append("Consider how to best leverage these existing resources in the execution plan.")
+            parts.append("Reference outputs by their absolute path in the plan steps where relevant.")
+            parts.append("")
 
         parts.extend([
             "",

@@ -414,6 +414,8 @@ def _build_project_payload(
     channel: Optional[str] = None,
     chat_id: Optional[str] = None,
     session_key: Optional[str] = None,
+    source_project_ids: Optional[list[str]] = None,
+    auto_discover_sources: bool = True,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if title is not None:
@@ -439,6 +441,9 @@ def _build_project_payload(
     metadata = _build_metadata(metadata_json, channel, chat_id, session_key)
     if metadata is not None:
         payload["metadata"] = metadata
+    if source_project_ids is not None:
+        payload["source_project_ids"] = source_project_ids
+    payload["auto_discover_sources"] = auto_discover_sources
     return payload
 
 
@@ -1190,6 +1195,8 @@ def project_create(
     channel: Annotated[Optional[str], typer.Option(help="Source channel for approvals and notifications")] = None,
     chat_id: Annotated[Optional[str], typer.Option(help="Source chat ID for approvals and notifications")] = None,
     session_key: Annotated[Optional[str], typer.Option(help="Source session key for routing")] = None,
+    source_project_ids: Annotated[Optional[list[str]], typer.Option("--source-project", help="UUID of a source project to derive from")] = None,
+    auto_discover_sources: Annotated[bool, typer.Option("--auto-discover/--no-auto-discover", help="Auto-discover matching closed projects as sources")] = True,
 ) -> None:
     """Create a new project."""
 
@@ -1207,6 +1214,8 @@ def project_create(
         channel=channel,
         chat_id=chat_id,
         session_key=session_key,
+        source_project_ids=source_project_ids,
+        auto_discover_sources=auto_discover_sources,
     )
     project = _api_call("POST", "/api/v1/projects", payload)["data"]
     typer.echo(f"Created project: {project['id']}")
@@ -1511,6 +1520,60 @@ def project_decide_next(
     typer.echo(f"Decision applied: {action} for {project['title']} (state: {project['state']})")
 
 
+@project_app.command("list-sources")
+def project_list_sources(
+    project_id: Annotated[str, typer.Argument(help="Project ID")],
+) -> None:
+    """List source projects for a derived project."""
+    result = _api_call("GET", f"/api/v1/projects/{project_id}/sources")
+    sources = result["data"]
+    if not sources:
+        typer.echo("No source projects linked.")
+        return
+    for s in sources:
+        auto = " (auto)" if s.get("auto_discovered") else ""
+        score = f" [{s['relevance_score']:.2f}]" if s.get("relevance_score") else ""
+        typer.echo(f"  {s['source_project_id']}  {s['source_project_title']}{auto}{score}")
+        if s.get("relevance_reason"):
+            typer.echo(f"    Reason: {s['relevance_reason']}")
+
+
+@project_app.command("add-source")
+def project_add_source(
+    project_id: Annotated[str, typer.Argument(help="Derived project ID")],
+    source_ids: Annotated[list[str], typer.Argument(help="Source project UUID(s)")],
+) -> None:
+    """Link one or more source projects to a derived project."""
+    payload = {"source_project_ids": source_ids}
+    result = _api_call("POST", f"/api/v1/projects/{project_id}/sources", payload)
+    linked = result["data"]
+    typer.echo(f"Linked {len(linked)} source project(s).")
+
+
+@project_app.command("remove-source")
+def project_remove_source(
+    project_id: Annotated[str, typer.Argument(help="Derived project ID")],
+    source_id: Annotated[str, typer.Argument(help="Source project UUID to unlink")],
+) -> None:
+    """Remove a source project link."""
+    _api_call("DELETE", f"/api/v1/projects/{project_id}/sources/{source_id}")
+    typer.echo("Source removed.")
+
+
+@project_app.command("scan-sources")
+def project_scan_sources(
+    project_id: Annotated[str, typer.Argument(help="Project ID")],
+) -> None:
+    """Rescan all linked source projects for outputs."""
+    result = _api_call("POST", f"/api/v1/projects/{project_id}/sources/scan")
+    outputs = result["data"]
+    if not outputs:
+        typer.echo("No outputs found.")
+        return
+    for o in outputs:
+        typer.echo(f"  [{o['output_type']}] {o['path']}")
+        if o.get("description"):
+            typer.echo(f"    {o['description']}")
 
 # ============================================================================
 # Planning Commands (AI-powered project planning)

@@ -389,8 +389,14 @@ class ProjectSpecService(BaseService):
         spec_data: dict[str, Any] | None = None,
     ) -> None:
         """Create a pending approval record so the spec appears in the dashboard queue."""
-        approval_id = str(uuid4())
         now = utcnow().isoformat()
+        # Cancel any existing pending project_plan approval to prevent duplicates
+        await self.db.execute(
+            "UPDATE approvals SET status = 'superseded' "
+            "WHERE entity_id = ? AND approval_type = 'project_plan' AND status = 'pending'",
+            (project_id,),
+        )
+        approval_id = str(uuid4())
         proposal_json = json_dumps(spec_data) if spec_data else None
         await self.db.execute(
             """
@@ -466,11 +472,21 @@ class ProjectSpecService(BaseService):
                 if isinstance(c, dict)
             ]
 
+            # Build source context for plan generation
+            source_context = None
+            try:
+                from cyborg.services.source_discovery_service import SourceDiscoveryService
+                discovery = SourceDiscoveryService(self.db)
+                source_context = await discovery.get_derived_outputs_for_context(project_id)
+            except Exception:
+                pass
+
             generated_steps = await reasoning.generate_project_plan(
                 aim=spec_row["aim"],
                 method=spec_row.get("method"),
                 success_criteria=criteria_texts or None,
                 reference_project_id=project_id,
+                source_context=source_context or None,
             )
         except Exception as e:
             logger.warning(

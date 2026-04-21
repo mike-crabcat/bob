@@ -67,6 +67,12 @@ class OpenClawHookService(BaseService):
             raise ValueError("No delivery route could be resolved for the notification")
 
         route_data = route.model_dump(mode="json")
+        is_channel_less = route_data.get("channel") is None
+
+        # User-facing notifications require a channel; agent dispatches do not
+        if is_channel_less and not self._is_agent_dispatch_type(notification):
+            raise ValueError("No channel route could be resolved for user-facing notification")
+
         delivery_session_key = await self._resolve_delivery_session_key(notification, route_data)
 
         # Task assignments and plan approvals use the agent method with detailed prompt
@@ -302,6 +308,8 @@ class OpenClawHookService(BaseService):
     ) -> str | None:
         if self._is_target_task_assignment(notification):
             session_key = await self.routing_service.resolve_target_session_key(notification.get("metadata", {}))
+            if session_key is None:
+                session_key = route.get("session_key")
             if session_key is None:
                 raise ValueError("Task assignment delivery requires a resolvable target OpenClaw session key")
             return session_key
@@ -565,16 +573,19 @@ class OpenClawHookService(BaseService):
         session_key: str,
     ) -> dict[str, Any]:
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        is_channel_less = route.get("channel") is None
         params: dict[str, Any] = {
             "message": await self._render_task_assignment_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": not is_channel_less,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -947,14 +958,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_retry_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1042,14 +1055,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_input_response_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1125,14 +1140,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_tap_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1216,14 +1233,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_submission_review_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1254,6 +1273,17 @@ class OpenClawHookService(BaseService):
         return (
             notification.get("notification_type") == NotificationType.TASK_ASSIGNMENT.value
             and metadata.get("delivery_route") == "target"
+        )
+
+    def _is_agent_dispatch_type(self, notification: dict[str, Any]) -> bool:
+        """Check if this notification type dispatches to an agent (not a user)."""
+        return notification.get("notification_type") in (
+            NotificationType.TASK_ASSIGNMENT.value,
+            NotificationType.TASK_RETRY.value,
+            NotificationType.TASK_INPUT_RESPONSE.value,
+            NotificationType.TASK_TAP.value,
+            NotificationType.SUBMISSION_REVIEW.value,
+            NotificationType.NEXT_ACTION.value,
         )
 
     def _is_auto_project_source_task_assignment(self, notification: dict[str, Any]) -> bool:
