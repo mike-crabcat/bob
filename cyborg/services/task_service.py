@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
-from cyborg.config import Settings
 from cyborg.database import Database
 from cyborg.exceptions import ConflictError, NotFoundError
 from cyborg.models import (
@@ -107,11 +106,6 @@ class TaskService(BaseService):
                 payload.metadata,
                 payload.project_ids,
             )
-            if self._require_source_route_metadata() and not has_source_route_metadata(task_metadata):
-                raise ConflictError(
-                    "Tasks require source routing metadata. "
-                    "Provide metadata.channel plus session_key/chat_id, or attach the task to a routed project."
-                )
             await self._validate_target_session_metadata(connection, task_metadata)
 
             dependency_ready = await self._dependency_is_satisfied(
@@ -1026,12 +1020,6 @@ class TaskService(BaseService):
         await cursor.close()
         if len(rows) != len(unique_project_ids):
             raise NotFoundError("One or more project_ids do not refer to active projects")
-
-    def _require_source_route_metadata(self) -> bool:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current.openclaw.enabled
-        return False
 
     async def _replace_project_links(self, connection: Connection, task_id: str, project_ids: list[Any]) -> None:
         unique_project_ids = list(dict.fromkeys(str(project_id) for project_id in project_ids))

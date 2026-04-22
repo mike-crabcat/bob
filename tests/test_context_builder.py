@@ -338,7 +338,7 @@ async def test_plan_summarization(db: Database):
         "title": "Long Plan Project",
         "aim": "Test plan summarization",
         "plan": long_plan,
-        "success_criteria": [],
+        "success_criteria": [{"check": "done", "description": "Done"}],
     })
 
     builder = ContextBuilder(db)
@@ -406,7 +406,7 @@ async def test_upstream_context_with_completed_parent(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Upstream Context Project",
         aim="Test upstream context",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
     project_id = str(project.id)
 
@@ -471,7 +471,7 @@ async def test_upstream_context_empty_for_minimal_scope(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Minimal Upstream Test",
         aim="Test minimal scope",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
     project_id = str(project.id)
 

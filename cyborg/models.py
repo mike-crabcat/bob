@@ -82,6 +82,7 @@ class TaskStatus(StrEnum):
     SUBMITTED = "submitted"
     COMPLETED = "completed"
     FAILED = "failed"
+    DEPRECATED = "deprecated"
 
 
 class TaskPriority(StrEnum):
@@ -693,6 +694,8 @@ class ProjectCreate(CyborgModel):
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
     task_ids: list[UUID] = Field(default_factory=list)
     metadata: MetadataDict = Field(default_factory=dict)
+    source_project_ids: list[UUID] = Field(default_factory=list)
+    auto_discover_sources: bool = True
 
     @field_validator("title")
     @classmethod
@@ -713,6 +716,7 @@ class ProjectUpdate(CyborgModel):
     success_criteria: list[SuccessCriterion] | None = None
     task_ids: list[UUID] | None = None
     metadata: MetadataDict | None = None
+    source_project_ids: list[UUID] | None = None
 
     @field_validator("title")
     @classmethod
@@ -751,15 +755,17 @@ class ProjectResponse(CyborgModel, EntityRef, SoftDeleteFields):
     last_notification_at: datetime | None = None
     needs_input_since: datetime | None = None
     notifications_muted: bool = False
+    source_projects: list[SourceProjectResponse] = Field(default_factory=list)
+    derived_outputs: list[SourceOutputItem] = Field(default_factory=list)
 
 
 class ProjectSpecFields(CyborgModel):
     aim: str = Field(min_length=1)
-    method: str = Field(min_length=1)
+    method: str | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[SuccessCriterion] = Field(min_length=1)
 
-    @field_validator("aim", "method")
+    @field_validator("aim")
     @classmethod
     def project_spec_text_must_not_be_blank(cls, value: str) -> str:
         stripped = value.strip()
@@ -817,6 +823,35 @@ class ProjectSpecListResponse(CyborgModel):
 
 class ProjectCloseRequest(CyborgModel):
     conclusion: str | None = None
+
+
+class SourceOutputType(StrEnum):
+    VENV = "venv"
+    SCRIPT = "script"
+    REPORT = "report"
+    RESULT = "result"
+    ARTIFACT = "artifact"
+    SUMMARY = "summary"
+    OTHER = "other"
+
+
+class SourceOutputItem(CyborgModel):
+    output_type: SourceOutputType
+    path: str
+    description: str | None = None
+    size_bytes: int | None = None
+    source_project_id: UUID
+    source_task_id: UUID | None = None
+
+
+class SourceProjectResponse(CyborgModel):
+    source_project_id: UUID
+    source_project_title: str
+    source_project_state: ProjectState
+    auto_discovered: bool = False
+    relevance_score: float | None = None
+    relevance_reason: str | None = None
+    created_at: datetime
 
 
 class ProjectJournalEntryFields(CyborgModel):
@@ -1190,9 +1225,9 @@ class SessionRouteResponse(SessionRouteFields, EntityRef, SoftDeleteFields):
 
 
 class ResolvedSessionRoute(CyborgModel):
-    channel: Literal["whatsapp"]
-    kind: SessionRouteKind
-    to: str
+    channel: Literal["whatsapp"] | None = None
+    kind: SessionRouteKind | None = None
+    to: str | None = None
     session_key: str | None = None
     chat_id: str | None = None
     contact_id: UUID | None = None

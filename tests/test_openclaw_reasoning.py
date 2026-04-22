@@ -204,7 +204,7 @@ async def test_generate_follow_up_tasks(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Follow-up Test",
         aim="Test follow-up generation",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -278,7 +278,7 @@ async def test_refine_project_strategy_with_changes(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Needs Refinement",
         aim="Test refinement with changes",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -328,7 +328,7 @@ async def test_extract_learnings(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Completed for Learning",
         aim="Extract lessons",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     # Close the project
@@ -390,6 +390,7 @@ async def test_generate_task_plan(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Test Project",
         aim="Test project for task plan generation",
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
     project_id = str(project.id)
 
@@ -437,7 +438,7 @@ async def test_analyze_project_health(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="At Risk Project",
         aim="Health check test",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -547,7 +548,7 @@ async def test_openclaw_unavailable_handling(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Test Failure",
         aim="Test error handling",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -575,7 +576,7 @@ async def test_malformed_json_response(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="JSON Test",
         aim="Test JSON parsing",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -608,7 +609,7 @@ async def test_idempotency_key_included(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Idempotency Test",
         aim="Test idempotency",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -641,7 +642,7 @@ async def test_response_format_json_hint(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Format Test",
         aim="Test response format",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
 
     project_id = str(project.id)
@@ -865,7 +866,7 @@ async def test_upstream_context_in_refinement_prompt(db: Database):
     project = await project_service.create_project(ProjectCreate(
         title="Refinement Upstream Test",
         aim="Test upstream in refinement",
-        success_criteria=[],
+        success_criteria=[SuccessCriterion(check="done", description="Done")],
     ))
     project_id = str(project.id)
 

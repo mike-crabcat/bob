@@ -26,7 +26,7 @@ class OpenClawHookService(BaseService):
     GATEWAY_CLIENT_ID = "gateway-client"
     GATEWAY_CLIENT_MODE = "backend"
     GATEWAY_SCOPES = ["operator.write"]
-    BOOTSTRAP_TIMEOUT_SECONDS = 180.0
+    BOOTSTRAP_TIMEOUT_SECONDS = 10800.0
     DISPATCH_ACCEPT_TIMEOUT = 30.0  # Max wait for gateway to accept a notification
 
     def __init__(
@@ -67,6 +67,12 @@ class OpenClawHookService(BaseService):
             raise ValueError("No delivery route could be resolved for the notification")
 
         route_data = route.model_dump(mode="json")
+        is_channel_less = route_data.get("channel") is None
+
+        # User-facing notifications require a channel; agent dispatches do not
+        if is_channel_less and not self._is_agent_dispatch_type(notification):
+            raise ValueError("No channel route could be resolved for user-facing notification")
+
         delivery_session_key = await self._resolve_delivery_session_key(notification, route_data)
 
         # Task assignments and plan approvals use the agent method with detailed prompt
@@ -168,29 +174,34 @@ class OpenClawHookService(BaseService):
             )
             return
 
-        # Submission review notifications ask the agent to verify its own work
+        # Submission review notifications use a fresh session for unbiased review
         if notification.get("notification_type") == NotificationType.SUBMISSION_REVIEW.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            # Derive a fresh review session key (not the task's execution session)
+            task_id = notification.get("metadata", {}).get("task_id") or notification.get("entity_id", "")
+            from cyborg.services.project_service import short_task_id
+            review_session_key = f"cyborg:review:{short_task_id(task_id)}"
             if not is_retry:
                 metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="submission_review",
-                    prompt_text=self._render_submission_review_prompt(notification, route_data, session_key),
+                    prompt_text=self._render_submission_review_prompt(notification, route_data, review_session_key),
                     project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
                     task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=session_key,
+                    session_key=review_session_key,
                 )
             await self._send_gateway_request(
                 "agent",
-                self._build_submission_review_agent_params(notification, route_data, session_key),
+                self._build_submission_review_agent_params(notification, route_data, review_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
 
-        # Next-action prompts are dispatched to the project's source session
+        # Next-action prompts use a fresh reasoning session (not the source channel)
         if notification.get("notification_type") == NotificationType.NEXT_ACTION.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            from cyborg.services.project_service import short_task_id
+            project_id = notification.get("metadata", {}).get("project_id", "")
+            next_action_session_key = f"cyborg:next-action:{short_task_id(project_id)}"
             if not is_retry:
                 metadata = notification.get("metadata", {})
                 await log_prompt(
@@ -199,11 +210,11 @@ class OpenClawHookService(BaseService):
                     prompt_text=notification["message"],
                     project_id=metadata.get("project_id"),
                     task_id=metadata.get("completed_task_id"),
-                    session_key=session_key,
+                    session_key=next_action_session_key,
                 )
             await self._send_gateway_request(
                 "agent",
-                self._build_next_action_agent_params(notification, route_data, session_key),
+                self._build_next_action_agent_params(notification, route_data, next_action_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
             return
@@ -297,6 +308,8 @@ class OpenClawHookService(BaseService):
     ) -> str | None:
         if self._is_target_task_assignment(notification):
             session_key = await self.routing_service.resolve_target_session_key(notification.get("metadata", {}))
+            if session_key is None:
+                session_key = route.get("session_key")
             if session_key is None:
                 raise ValueError("Task assignment delivery requires a resolvable target OpenClaw session key")
             return session_key
@@ -560,16 +573,19 @@ class OpenClawHookService(BaseService):
         session_key: str,
     ) -> dict[str, Any]:
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        is_channel_less = route.get("channel") is None
         params: dict[str, Any] = {
             "message": await self._render_task_assignment_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": not is_channel_less,
             "sessionKey": session_key,
-            "thinking": "low" if notification.get("metadata", {}).get("auto_created_by_project") else "off",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -588,7 +604,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -942,14 +958,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_retry_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1037,14 +1055,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_input_response_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1120,14 +1140,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_task_tap_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1145,8 +1167,9 @@ class OpenClawHookService(BaseService):
         result_summary = metadata.get("result_summary", "")
 
         lines = [
-            "A task has been submitted for your review. You must verify whether the work was actually completed.",
-            "Be strict but fair. The agent should have done real work, not just restated the plan.",
+            "## Review Only — Do Not Do Any Work",
+            "A task has been submitted for review. Your job is strictly to read what was done and judge if it meets the criteria.",
+            "Do NOT write code, create files, run commands, or attempt to fix or complete anything. Only review and approve/reject.",
             "",
             f"Task ID: {task_id}",
             f"Task: {notification['title']}",
@@ -1210,14 +1233,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_submission_review_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1235,7 +1260,7 @@ class OpenClawHookService(BaseService):
             "channel": route["channel"],
             "to": route["to"],
             "sessionKey": session_key,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1248,6 +1273,17 @@ class OpenClawHookService(BaseService):
         return (
             notification.get("notification_type") == NotificationType.TASK_ASSIGNMENT.value
             and metadata.get("delivery_route") == "target"
+        )
+
+    def _is_agent_dispatch_type(self, notification: dict[str, Any]) -> bool:
+        """Check if this notification type dispatches to an agent (not a user)."""
+        return notification.get("notification_type") in (
+            NotificationType.TASK_ASSIGNMENT.value,
+            NotificationType.TASK_RETRY.value,
+            NotificationType.TASK_INPUT_RESPONSE.value,
+            NotificationType.TASK_TAP.value,
+            NotificationType.SUBMISSION_REVIEW.value,
+            NotificationType.NEXT_ACTION.value,
         )
 
     def _is_auto_project_source_task_assignment(self, notification: dict[str, Any]) -> bool:
