@@ -316,7 +316,10 @@ class SessionRouteService(BaseService):
                         session_key=session_key.strip(),
                         route_source="target_session.session_key",
                     )
-                return None
+                return ResolvedSessionRoute(
+                    session_key=session_key.strip(),
+                    route_source="target_session.session_key_only",
+                )
 
         if channel != "whatsapp":
             return None

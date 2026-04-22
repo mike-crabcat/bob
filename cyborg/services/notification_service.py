@@ -140,11 +140,12 @@ class NotificationService(BaseService):
             )
             return
 
-        # Fire-once: skip if a pending NEEDS_INPUT already exists for this project
+        # Fire-once: skip if any NEEDS_INPUT notification exists (pending or acknowledged)
         existing = await self.db.fetch_one(
             """
             SELECT id FROM notifications
-            WHERE entity_type = ? AND entity_id = ? AND notification_type = ? AND status = ?
+            WHERE entity_type = ? AND entity_id = ? AND notification_type = ?
+              AND status IN (?, ?)
             LIMIT 1
             """,
             (
@@ -152,6 +153,7 @@ class NotificationService(BaseService):
                 project_id,
                 NotificationType.NEEDS_INPUT.value,
                 NotificationStatus.PENDING.value,
+                NotificationStatus.ACKNOWLEDGED.value,
             ),
         )
         if existing is not None:
@@ -608,9 +610,6 @@ class NotificationService(BaseService):
             return
 
         project_metadata = json_loads(project.get("metadata"), {})
-        has_source_route = any(project_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        if not has_source_route:
-            return
 
         metadata = {
             **project_metadata,

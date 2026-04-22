@@ -90,10 +90,16 @@
 
 <!-- Specs & Planning -->
 {% if project.state == 'planning' or specs %}
-<div class="glass-card neon-border rounded-xl p-6 mb-8" x-data="{ showRejectForm: false }">
+<div class="glass-card neon-border rounded-xl p-6 mb-8" x-data="{ showRejectForm: false, showOlderSpecs: false, showReviseForm: false }">
     <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
         <span class="text-accent-orange">◈</span>
         Specs & Planning
+        {% if project.state in ('paused', 'closed') %}
+        <button type="button" @click="showReviseForm = !showReviseForm"
+                class="ml-auto px-3 py-1 text-xs bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors cursor-pointer">
+            Revise Spec
+        </button>
+        {% endif %}
     </h2>
 
     <!-- Planning state banner -->
@@ -102,6 +108,7 @@
         {% if not specs %}bg-accent-orange/10 border border-accent-orange/30
         {% elif specs[0].status == 'rejected' %}bg-accent-red/10 border border-accent-red/30
         {% elif specs[0].status == 'pending_approval' %}bg-accent-cyan/10 border border-accent-cyan/30
+        {% elif specs[0].status == 'approved' %}bg-accent-orange/10 border border-accent-orange/30
         {% else %}bg-bg-card{% endif %}">
         <div class="flex items-center gap-2">
             {% if not specs %}
@@ -113,6 +120,9 @@
             {% elif specs[0].status == 'pending_approval' %}
             <span class="text-accent-cyan">●</span>
             <span class="text-sm text-accent-cyan">Spec pending approval — review and approve to start execution</span>
+            {% elif specs[0].status == 'approved' %}
+            <span class="text-accent-orange pulse">●</span>
+            <span class="text-sm text-accent-orange">Generating revised spec&hellip;</span>
             {% else %}
             <span class="text-text-muted">●</span>
             <span class="text-sm text-text-muted">Planning in progress</span>
@@ -125,6 +135,9 @@
     {% if specs %}
     <div class="space-y-4">
         {% for spec in specs %}
+        {% if not loop.first %}
+        <template x-if="showOlderSpecs">
+        {% endif %}
         <div class="p-4 bg-bg-card rounded-lg
             {% if spec.status == 'rejected' %}border border-accent-red/20
             {% elif spec.status == 'approved' %}border border-accent-green/20
@@ -158,17 +171,22 @@
 
             <!-- Plan steps -->
             {% if spec.plan %}
-            <div class="text-sm mb-2">
-                <span class="text-text-secondary">Plan ({{ spec.plan|length }} steps):</span>
-                <ol class="mt-1 ml-4 space-y-1">
-                    {% for step in spec.plan %}
-                    <li class="text-text-primary">
-                        <span class="text-accent-cyan">{{ step.order + 1 }}.</span>
-                        {{ step.title }}
-                        <span class="text-text-muted">— {{ step.description }}</span>
-                    </li>
-                    {% endfor %}
-                </ol>
+            <div class="text-sm mb-2" x-data="{ showPlan: false }">
+                <button type="button" @click="showPlan = !showPlan"
+                        class="text-text-secondary cursor-pointer hover:text-text-primary transition-colors">
+                    <span x-text="showPlan ? '▾ Hide plan' : '▸ Show plan ({{ spec.plan|length }} steps)'"></span>
+                </button>
+                <div x-show="showPlan" x-cloak>
+                    <ol class="mt-1 ml-4 space-y-1">
+                        {% for step in spec.plan %}
+                        <li class="text-text-primary">
+                            <span class="text-accent-cyan">{{ step.order + 1 }}.</span>
+                            {{ step.title }}
+                            <span class="text-text-muted">— {{ step.description }}</span>
+                        </li>
+                        {% endfor %}
+                    </ol>
+                </div>
             </div>
             {% endif %}
 
@@ -243,62 +261,59 @@
             </div>
             {% endif %}
         </div>
+        {% if not loop.first %}
+        </template>
+        {% endif %}
         {% endfor %}
+
+        <!-- Show older specs toggle -->
+        {% if specs|length > 1 %}
+        <button type="button" @click="showOlderSpecs = !showOlderSpecs"
+                class="text-sm text-text-muted hover:text-text-secondary transition-colors cursor-pointer flex items-center gap-1">
+            <span x-text="showOlderSpecs ? '▾ Hide older specs' : '▸ Show older specs ({{ specs|length - 1 }})'"></span>
+        </button>
+        {% endif %}
     </div>
     {% else %}
     <div class="text-text-muted text-sm">No specs submitted yet</div>
     {% endif %}
+
+    <!-- Revise Spec Form (paused/closed only) -->
+    {% if project.state in ('paused', 'closed') %}
+    <div x-show="showReviseForm" x-cloak class="mt-4 pt-4 border-t border-bg-elevated">
+        <h3 class="text-sm font-semibold mb-3">Revise Spec</h3>
+        <form method="POST" action="/dashboard/projects/{{ project.id }}/revise-spec">
+            <div class="mb-3">
+                <label class="block text-sm text-text-secondary mb-1">What do you want to change?</label>
+                <textarea name="feedback" rows="3" required
+                          class="w-full bg-bg-deep border border-bg-elevated rounded-lg p-3 text-sm text-text-primary focus:border-accent-cyan/50 focus:outline-none"
+                          placeholder="Describe what you'd like to be different — e.g. 'Add a criterion for verifying the API handles edge cases' or 'Update the aim to include mobile support'..."></textarea>
+            </div>
+            <div class="flex items-center gap-4 mb-4">
+                <label class="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
+                    <input type="checkbox" name="allow_aim_changes" class="accent-accent-cyan">
+                    Allow aim changes
+                </label>
+                <label class="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
+                    <input type="checkbox" name="allow_criteria_changes" checked class="accent-accent-cyan">
+                    Allow success criteria changes
+                </label>
+            </div>
+            <div class="flex gap-2">
+                <button type="submit"
+                        class="px-4 py-2 bg-accent-cyan text-bg-deep rounded-lg hover:bg-accent-cyan/80 transition-colors text-sm font-medium cursor-pointer">
+                    Generate Revision
+                </button>
+                <button type="button" @click="showReviseForm = false"
+                        class="px-4 py-2 bg-bg-elevated text-text-secondary rounded-lg hover:bg-bg-card transition-colors text-sm cursor-pointer">
+                    Cancel
+                </button>
+            </div>
+        </form>
+    </div>
+    {% endif %}
 </div>
 {% endif %}
-
-<!-- Project Details -->
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-    <!-- Aim & Method -->
-    <div class="glass-card neon-border rounded-xl p-6">
-        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <span class="text-accent-cyan">◈</span>
-            Project Definition
-        </h2>
-        <div class="space-y-4">
-            <div>
-                <div class="text-text-secondary text-sm mb-1">AIM</div>
-                <div class="text-text-primary">{{ project.aim or 'Not specified' }}</div>
-            </div>
-            {% if project.method %}
-            <div>
-                <div class="text-text-secondary text-sm mb-1">METHOD</div>
-                <div class="text-text-primary">{{ project.method }}</div>
-            </div>
-            {% endif %}
-            {% if project.conclusion %}
-            <div>
-                <div class="text-text-secondary text-sm mb-1">CONCLUSION</div>
-                <div class="text-text-primary">{{ project.conclusion }}</div>
-            </div>
-            {% endif %}
-        </div>
-    </div>
-
-    <!-- Success Criteria -->
-    <div class="glass-card neon-border rounded-xl p-6">
-        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <span class="text-accent-green">✓</span>
-            Success Criteria
-        </h2>
-        {% if project.success_criteria %}
-        <div class="space-y-2">
-            {% for criterion in project.success_criteria %}
-            <div class="flex items-center gap-2 p-2 bg-bg-card rounded">
-                <span class="text-accent-green">○</span>
-                <span class="text-sm flex-1">{{ criterion.check }}</span>
-            </div>
-            {% endfor %}
-        </div>
-        {% else %}
-        <div class="text-text-muted text-sm">No success criteria defined</div>
-        {% endif %}
-    </div>
-</div>
 
 <!-- Tasks -->
 <div class="glass-card neon-border rounded-xl p-6 mb-8">
@@ -354,8 +369,22 @@
             {% endif %}
             {% endfor %}
             {% if ns.grouped %}
+            {% set fi = namespace(tid='', total=0) %}
             {% for f in ns.grouped %}
-            {% if loop.first or f.task_short_id != ns.grouped[loop.index0 - 1].task_short_id %}
+            {% set is_new = fi.tid != f.task_short_id %}
+            {% if is_new %}
+            {% if fi.tid %}
+            {% if fi.total > 3 %}
+            <button type="button" onclick="loadTaskFiles(this, '{{ project.id }}', '{{ fi.tid }}')"
+                    class="text-xs text-text-muted pl-1 mt-1 cursor-pointer hover:text-accent-cyan">
+                ... show all {{ fi.total }} files
+            </button>
+            {% endif %}
+            </div>
+            {% endif %}
+            {% set fi.tid = f.task_short_id %}
+            {% set fi.total = f.task_file_count %}
+            <div>
             <div class="text-xs text-accent-cyan mt-3 mb-1 pl-1">{{ f.task_title }}</div>
             {% endif %}
             <a href="/dashboard/projects/{{ project.id }}/files/{{ f.relative_path }}"
@@ -366,6 +395,15 @@
                 <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
             </a>
             {% endfor %}
+            {% if fi.tid %}
+            {% if fi.total > 3 %}
+            <button type="button" onclick="loadTaskFiles(this, '{{ project.id }}', '{{ fi.tid }}')"
+                    class="text-xs text-text-muted pl-1 mt-1 cursor-pointer hover:text-accent-cyan">
+                ... show all {{ fi.total }} files
+            </button>
+            {% endif %}
+            </div>
+            {% endif %}
             {% endif %}
             {% else %}
             <div class="space-y-1">
@@ -377,6 +415,12 @@
                     <span class="text-sm flex-1 truncate text-text-primary">{{ f.name }}</span>
                     <span class="text-xs text-text-muted font-mono-data">{{ f.size_bytes|file_size }}</span>
                 </a>
+                {% if loop.last and f.category_file_count and f.category_file_count > 10 %}
+                <button type="button" onclick="loadCategoryFiles(this, '{{ project.id }}', '{{ category }}')"
+                        class="text-xs text-text-muted pl-1 mt-1 cursor-pointer hover:text-accent-cyan">
+                    ... show all {{ f.category_file_count }} files
+                </button>
+                {% endif %}
                 {% endfor %}
             </div>
             {% endif %}
@@ -513,4 +557,63 @@
         <form id="delete-form" method="POST" action="/dashboard/projects/{{ project.id }}/delete" class="hidden"></form>
     </div>
 </div>
+
+<script>
+function formatFileSize(bytes) {
+    if (!bytes) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    let size = bytes;
+    while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+    return size.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function loadTaskFiles(btn, projectId, taskShortId) {
+    if (btn.dataset.loaded) { btn.remove(); return; }
+    btn.textContent = 'loading...';
+    try {
+        const resp = await fetch(`/dashboard/projects/${projectId}/task-files/${taskShortId}`);
+        const data = await resp.json();
+        const container = btn.parentElement;
+        data.files.slice(3).forEach(f => {
+            const a = document.createElement('a');
+            a.href = `/dashboard/projects/${projectId}/files/${f.relative_path}`;
+            a.target = '_blank';
+            a.className = 'block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors';
+            a.innerHTML = `<span class="text-sm">${f.name}</span>`
+                + `<span class="text-sm flex-1 truncate text-text-primary"></span>`
+                + `<span class="text-xs text-text-muted font-mono-data">${formatFileSize(f.size_bytes)}</span>`;
+            container.insertBefore(a, btn);
+        });
+        btn.textContent = 'show less';
+        btn.dataset.loaded = '1';
+    } catch (e) {
+        btn.textContent = 'failed to load';
+    }
+}
+
+async function loadCategoryFiles(btn, projectId, category) {
+    if (btn.dataset.loaded) { btn.remove(); return; }
+    btn.textContent = 'loading...';
+    try {
+        const resp = await fetch(`/dashboard/projects/${projectId}/category-files/${category}`);
+        const data = await resp.json();
+        const container = btn.parentElement;
+        data.files.slice(10).forEach(f => {
+            const a = document.createElement('a');
+            a.href = `/dashboard/projects/${projectId}/files/${f.relative_path}`;
+            a.target = '_blank';
+            a.className = 'block p-2 bg-bg-card rounded-lg flex items-center gap-3 hover:bg-bg-elevated transition-colors';
+            a.innerHTML = `<span class="text-sm">${f.name}</span>`
+                + `<span class="text-sm flex-1 truncate text-text-primary"></span>`
+                + `<span class="text-xs text-text-muted font-mono-data">${formatFileSize(f.size_bytes)}</span>`;
+            container.insertBefore(a, btn);
+        });
+        btn.textContent = 'show less';
+        btn.dataset.loaded = '1';
+    } catch (e) {
+        btn.textContent = 'failed to load';
+    }
+}
+</script>
 {% endblock %}
