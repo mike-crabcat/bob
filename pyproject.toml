@@ -1,28 +1,12 @@
-[build-system]
-requires = ["hatchling>=1.27.0"]
-build-backend = "hatchling.build"
-
 [project]
-name = "cyborg"
-version = "0.1.0"
-description = "SQLite-backed HTTP data service for Bob"
-readme = "README.md"
+name = "cyborg-workspace"
+version = "0.0.0"
+description = "Development workspace for Cyborg packages"
 requires-python = ">=3.12"
-license = { text = "MIT" }
-authors = [
-  { name = "OpenClaw" },
-]
 dependencies = [
-  "aiosqlite>=0.20.0",
-  "fastapi>=0.115.0",
-  "httpx>=0.28.0",
-  "jinja2>=3.1.0",
-  "pydantic>=2.10.0",
-  "python-multipart>=0.0.18",
-  "python-jose>=3.3.0",
-  "typer>=0.16.0",
-  "uvicorn>=0.35.0",
-  "websockets>=15.0.0",
+  "cyborg-core",
+  "cyborg-server",
+  "cyborg-cli",
 ]
 
 [project.optional-dependencies]
@@ -30,24 +14,23 @@ dev = [
   "pytest>=8.3.0",
 ]
 
-[project.scripts]
-cyborg = "cyborg.cli:app"
-
-[tool.hatch.build]
-include = [
-  "cyborg/**/*.py",
-  "cyborg/**/*.sql",
-  "README.md",
-  "docs/**/*.md",
-  "tests/**/*.py",
-]
+[tool.uv.sources]
+cyborg-core = { path = "packages/cyborg-core" }
+cyborg-server = { path = "packages/cyborg-server" }
+cyborg-cli = { path = "packages/cyborg-cli" }
 
 [tool.hatch.build.targets.wheel]
-packages = ["cyborg"]
+packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
   "openclaw_live: exercises a real OpenClaw gateway/model and is skipped by default",
   "asyncio: marks coroutine-style tests that require explicit async support",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.3.0",
+    "pytest-timeout>=2.4.0",
 ]

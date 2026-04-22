@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cyborg-core"
+version = "0.1.0"
+description = "Shared config, models, and utilities for Cyborg"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+  { name = "OpenClaw" },
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["cyborg_core"]
+
+[tool.hatch.build]
+include = [
+  "cyborg_core/**/*.py",
+  "cyborg_core/**/*.sql",
+]

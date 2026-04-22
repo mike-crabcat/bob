@@ -9,11 +9,11 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 
-from cyborg.database import Database
-from cyborg.models import SuccessCriterion, TaskStatus
-from cyborg.services.base import utcnow
-from cyborg.services.project_execution_service import ProjectExecutionService
-from cyborg.services.project_autonomy_service import ProjectAutonomyService
+from cyborg_server.database import Database
+from cyborg_core.models import SuccessCriterion, TaskStatus
+from cyborg_server.services.base import utcnow
+from cyborg_server.services.project_execution_service import ProjectExecutionService
+from cyborg_server.services.project_autonomy_service import ProjectAutonomyService
 from tests.mocks.mock_llm_service import MockLLMReasoningService
 
 

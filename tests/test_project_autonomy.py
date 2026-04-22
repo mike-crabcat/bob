@@ -3,17 +3,17 @@
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, patch
-from cyborg.services.project_autonomy_service import ProjectAutonomyService
-from cyborg.services.project_execution_service import ProjectExecutionService
-from cyborg.services.project_service import ProjectService
-from cyborg.database import Database
+from cyborg_server.services.project_autonomy_service import ProjectAutonomyService
+from cyborg_server.services.project_execution_service import ProjectExecutionService
+from cyborg_server.services.project_service import ProjectService
+from cyborg_server.database import Database
 
 
 @pytest_asyncio.fixture
 async def autonomous_project(db: Database):
     """Create a test project with auto-execute enabled."""
-    from cyborg.services.project_service import ProjectService
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.project_service import ProjectService
+    from cyborg_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -42,7 +42,7 @@ async def autonomous_project(db: Database):
     project_id = str(project.id)
 
     # Approve the spec (auto-triggers execution)
-    from cyborg.models import ProjectSpecApproveRequest
+    from cyborg_core.models import ProjectSpecApproveRequest
     spec_service = project_service.project_spec_service
     specs = await spec_service.list_specs(project_id)
     await spec_service.approve_spec(
@@ -60,7 +60,7 @@ async def autonomous_project(db: Database):
 @pytest.mark.skip(reason="Removed PlanService — test needs rewrite for new task lifecycle")
 async def test_dependency_release_and_autonomy(db: Database):
     """Test that dependent tasks are released and then trigger autonomy."""
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -113,8 +113,8 @@ async def test_dependency_release_and_autonomy(db: Database):
 @pytest.mark.asyncio
 async def test_max_autonomy_cycles_limit(db: Database):
     """Test that autonomy has circuit breakers to prevent infinite loops."""
-    from cyborg.services.project_service import ProjectService
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.project_service import ProjectService
+    from cyborg_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -146,8 +146,8 @@ async def test_max_autonomy_cycles_limit(db: Database):
 @pytest.mark.asyncio
 async def test_journal_records_all_decisions(db: Database, autonomous_project):
     """Test that all autonomy decisions are recorded in journal."""
-    from cyborg.services.task_service import TaskService
-    import cyborg.services.openclaw_reasoning_service as reasoning_module
+    from cyborg_server.services.task_service import TaskService
+    import cyborg_server.services.openclaw_reasoning_service as reasoning_module
 
     project_id = autonomous_project["project_id"]
     task_service = TaskService(db)
@@ -182,7 +182,7 @@ async def test_journal_records_all_decisions(db: Database, autonomous_project):
 @pytest.mark.asyncio
 async def test_task_completion_triggers_reasoning(db: Database):
     """Test that task completion dispatches next-action prompt, then decide-next closes the project."""
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -198,7 +198,7 @@ async def test_task_completion_triggers_reasoning(db: Database):
     project_id = str(project.id)
 
     # Approve spec to activate the project
-    from cyborg.models import ProjectSpecApproveRequest
+    from cyborg_core.models import ProjectSpecApproveRequest
     spec_service = project_service.project_spec_service
     specs = await spec_service.list_specs(project_id)
     await spec_service.approve_spec(
@@ -226,7 +226,7 @@ async def test_task_completion_triggers_reasoning(db: Database):
     assert project_data["reasoning_otp"] is not None
 
     # Simulate the agent's decide-next response
-    from cyborg.services.project_execution_service import ProjectExecutionService
+    from cyborg_server.services.project_execution_service import ProjectExecutionService
     execution_service = ProjectExecutionService(db)
     await execution_service.verify_decide_next(project_id, {
         "otp": project_data["reasoning_otp"],

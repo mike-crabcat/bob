@@ -4,8 +4,8 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from cyborg.database import Database
-from cyborg.services.prompt_history import (
+from cyborg_server.database import Database
+from cyborg_server.services.prompt_history import (
     PROMPT_CATEGORIES,
     estimate_token_count,
     log_prompt,
@@ -102,10 +102,10 @@ class TestLogPrompt:
 class TestReasoningServiceLogging:
     @pytest.mark.asyncio
     async def test_evaluate_logs_prompt(self, db: Database):
-        from cyborg.services.project_service import ProjectService
-        from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
-        from cyborg.services.openclaw_hook_service import OpenClawHookService
-        from cyborg.models import ProjectCreate, SuccessCriterion
+        from cyborg_server.services.project_service import ProjectService
+        from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
+        from cyborg_server.services.openclaw_hook_service import OpenClawHookService
+        from cyborg_core.models import ProjectCreate, SuccessCriterion
 
         project_service = ProjectService(db)
         project = await project_service.create_project(ProjectCreate(
@@ -140,8 +140,8 @@ class TestReasoningServiceLogging:
 
     @pytest.mark.asyncio
     async def test_generate_project_plan_logs_prompt(self, db: Database):
-        from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
-        from cyborg.services.openclaw_hook_service import OpenClawHookService
+        from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
+        from cyborg_server.services.openclaw_hook_service import OpenClawHookService
 
         reasoning_service = OpenClawReasoningService(db)
 
@@ -174,9 +174,9 @@ class TestReasoningServiceLogging:
 class TestHookServiceLogging:
     @pytest.mark.asyncio
     async def test_task_assignment_logs_prompt(self, db: Database):
-        from cyborg.services.openclaw_hook_service import OpenClawHookService
-        from cyborg.services.session_route_service import SessionRouteService
-        from cyborg.models import NotificationType
+        from cyborg_server.services.openclaw_hook_service import OpenClawHookService
+        from cyborg_server.services.session_route_service import SessionRouteService
+        from cyborg_core.models import NotificationType
 
         routing = SessionRouteService(db)
         hook = OpenClawHookService(db, routing_service=routing)
@@ -226,8 +226,8 @@ class TestHookServiceLogging:
 
     @pytest.mark.asyncio
     async def test_needs_input_logs_prompt(self, db: Database):
-        from cyborg.services.openclaw_hook_service import OpenClawHookService
-        from cyborg.services.session_route_service import SessionRouteService
+        from cyborg_server.services.openclaw_hook_service import OpenClawHookService
+        from cyborg_server.services.session_route_service import SessionRouteService
 
         routing = SessionRouteService(db)
         hook = OpenClawHookService(db, routing_service=routing)
@@ -270,8 +270,8 @@ class TestHookServiceLogging:
 
     @pytest.mark.asyncio
     async def test_generic_notification_logs_prompt(self, db: Database):
-        from cyborg.services.openclaw_hook_service import OpenClawHookService
-        from cyborg.services.session_route_service import SessionRouteService
+        from cyborg_server.services.openclaw_hook_service import OpenClawHookService
+        from cyborg_server.services.session_route_service import SessionRouteService
 
         routing = SessionRouteService(db)
         hook = OpenClawHookService(db, routing_service=routing)

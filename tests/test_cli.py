@@ -6,7 +6,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-import cyborg.cli as cli
+import cyborg_cli.cli as cli
 
 
 runner = CliRunner()

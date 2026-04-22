@@ -1,0 +1,325 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Approvals - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">
+        <span class="neon-text-pink">Pending</span> Approvals
+    </h1>
+    <p class="text-text-secondary">Review queued approval items and approve or reject them directly.</p>
+</div>
+
+<!-- Stats Row -->
+<div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-8">
+    <div class="glass-card neon-border-pink rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-pink">{{ pending_count }}</div>
+        <div class="text-text-muted text-sm mt-1">Pending</div>
+    </div>
+    <div class="glass-card rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-green">{{ approved_today }}</div>
+        <div class="text-text-muted text-sm mt-1">Approved Today</div>
+    </div>
+    <div class="glass-card rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-red">{{ rejected_today }}</div>
+        <div class="text-text-muted text-sm mt-1">Rejected Today</div>
+    </div>
+    <div class="glass-card rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-purple">{{ avg_response_time }}</div>
+        <div class="text-text-muted text-sm mt-1">Avg Response Time</div>
+    </div>
+</div>
+
+<!-- Filters -->
+<div class="glass-card neon-border-pink rounded-xl p-4 mb-6">
+    <div class="flex flex-wrap items-center gap-4">
+        <span class="text-text-secondary text-sm">Filter by:</span>
+        <div class="flex gap-2">
+            <a href="/dashboard/approvals" class="filter-btn px-3 py-1.5 text-sm rounded {% if not filter_type %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                All
+            </a>
+            <a href="/dashboard/approvals?type=project_plan" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'project_plan' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Project Plans
+            </a>
+            <a href="/dashboard/approvals?type=strategy_refinement" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'strategy_refinement' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Strategy Refinements
+            </a>
+            <a href="/dashboard/approvals?type=task_creation" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'task_creation' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Task Creation
+            </a>
+            <a href="/dashboard/approvals?type=follow_up_tasks" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'follow_up_tasks' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Follow-up Tasks
+            </a>
+            <a href="/dashboard/approvals?type=task_input" class="filter-btn px-3 py-1.5 text-sm rounded {% if filter_type == 'task_input' %}bg-accent-pink/20 text-accent-pink border border-accent-pink/30{% else %}bg-bg-card text-text-secondary border border-accent-pink/10 hover:border-accent-pink/30{% endif %} transition-colors">
+                Task Input
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card rounded-xl p-4 mb-6 border border-accent-cyan/20">
+    <p class="text-sm text-text-secondary">
+        Approving or rejecting project plans here directly applies the decision to the project spec. Other approval types are tracked in this queue only.
+    </p>
+</div>
+
+<!-- Approval Items -->
+<div class="space-y-4">
+    {% for approval in approvals %}
+    <div id="approval-{{ approval.id }}" class="glass-card neon-border-pink rounded-xl p-6 card-hover">
+        <div class="flex flex-col lg:flex-row lg:items-start gap-6">
+            <!-- Type & Priority -->
+            <div class="flex items-center gap-3 lg:w-48">
+                <div class="w-12 h-12 rounded-lg bg-bg-elevated flex items-center justify-center text-accent-pink text-xl">
+                    {% if approval.approval_type == 'project_plan' %}◈
+                    {% elif approval.approval_type == 'strategy_refinement' %}◇
+                    {% elif approval.approval_type == 'task_creation' %}●
+                    {% else %}◆{% endif %}
+                </div>
+                <div>
+                    <div class="status-info text-xs px-2 py-0.5 rounded mb-1">{{ approval.type_label }}</div>
+                    {% if approval.priority == 'urgent' %}
+                    <div class="text-xs text-accent-red font-medium">URGENT</div>
+                    {% elif approval.priority == 'high' %}
+                    <div class="text-xs text-accent-orange font-medium">HIGH</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div class="flex-1">
+                <h3 class="text-lg font-semibold mb-2">{{ approval.title }}</h3>
+                <p class="text-text-secondary text-sm mb-4">{{ approval.description }}</p>
+
+                <!-- Proposal Data Preview -->
+                {% if approval.approval_type == 'task_input' %}
+                <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10 space-y-3">
+                    {% if approval.proposal and approval.proposal.reason %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">REASON</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.reason }}</div>
+                    </div>
+                    {% endif %}
+                    {% if approval.input_schema %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">QUESTION</div>
+                        <div class="text-sm text-text-primary">{{ approval.input_schema.prompt }}</div>
+                    </div>
+                    <!-- Input Form -->
+                    <form hx-post="/dashboard/approve/{{ approval.id }}/input"
+                          hx-target="#approval-{{ approval.id }}"
+                          hx-swap="outerHTML"
+                          class="space-y-3 mt-3">
+                        {% if approval.input_schema.type == 'text' %}
+                        <textarea name="response"
+                                  rows="3"
+                                  class="w-full bg-bg-card border border-accent-cyan/20 rounded-lg p-3 text-sm text-text-primary placeholder-text-muted focus:border-accent-cyan focus:outline-none"
+                                  {% if approval.input_schema.placeholder %}placeholder="{{ approval.input_schema.placeholder }}"{% endif %}
+                                  required></textarea>
+                        {% elif approval.input_schema.type == 'multi_choice' %}
+                        <div class="space-y-2">
+                            {% for option in approval.input_schema.options %}
+                            <label class="flex items-start gap-3 p-3 rounded-lg hover:bg-bg-card cursor-pointer border border-transparent hover:border-accent-cyan/10 transition-colors">
+                                <div class="pt-0.5">
+                                    {% if approval.input_schema.allow_multiple %}
+                                    <input type="checkbox" name="response" value="{{ option.value }}" class="accent-accent-cyan">
+                                    {% else %}
+                                    <input type="radio" name="response" value="{{ option.value }}" required class="accent-accent-cyan">
+                                    {% endif %}
+                                </div>
+                                <div class="flex-1 space-y-2">
+                                    <span class="text-sm text-text-primary">{{ option.label }}</span>
+                                    {% if option.image_url %}
+                                    <div class="mt-1">
+                                        <img src="{{ option.image_url }}"
+                                             alt="{{ option.label }}"
+                                             class="max-w-xs max-h-48 rounded-lg border border-accent-cyan/20 object-contain"
+                                             loading="lazy"
+                                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                        <span class="text-xs text-accent-red hidden">Image failed to load</span>
+                                    </div>
+                                    {% endif %}
+                                    {% if option.audio_url %}
+                                    <div class="mt-1">
+                                        <audio controls
+                                               class="h-8 w-full max-w-xs"
+                                               preload="metadata"
+                                               style="filter: hue-rotate(160deg) saturate(2);">
+                                            <source src="{{ option.audio_url }}" type="audio/mpeg">
+                                            <span class="text-xs text-text-muted">Audio playback not supported</span>
+                                        </audio>
+                                    </div>
+                                    {% endif %}
+                                </div>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                        <div class="flex gap-2">
+                            <button type="submit"
+                                    class="px-4 py-2 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium text-sm">
+                                Submit Response
+                            </button>
+                            <button type="button"
+                                    onclick="this.closest('form').previousElementSibling || this.closest('.glass-card').querySelector('form[action*=reject] > button').click()"
+                                    class="px-4 py-2 bg-bg-card text-text-secondary border border-accent-pink/10 rounded-lg hover:border-accent-pink/30 transition-colors text-sm">
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                    {% endif %}
+                </div>
+                {% elif approval.approval_type == 'project_plan' and approval.proposal %}
+                <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10 space-y-3">
+                    {% if approval.proposal.aim %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">AIM</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.aim }}</div>
+                    </div>
+                    {% endif %}
+                    {% if approval.proposal.method %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">METHOD</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.method }}</div>
+                    </div>
+                    {% endif %}
+                    {% if approval.proposal.plan %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">PLAN</div>
+                        <ol class="text-sm text-text-primary space-y-2 list-decimal list-inside">
+                            {% for step in approval.proposal.plan %}
+                            <li>
+                                <span class="font-medium">{{ step.title }}</span>
+                                {% if step.description %}
+                                <div class="text-text-secondary whitespace-pre-line ml-4">{{ step.description }}</div>
+                                {% endif %}
+                                {% if step.criteria %}
+                                <div class="text-text-muted text-xs ml-4">Done when: {{ step.criteria }}</div>
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ol>
+                    </div>
+                    {% endif %}
+                    {% if approval.proposal.success_criteria %}
+                    <div>
+                        <div class="text-xs text-accent-cyan font-semibold mb-1">SUCCESS CRITERIA</div>
+                        <ul class="text-sm text-text-primary space-y-1">
+                            {% for criterion in approval.proposal.success_criteria %}
+                            <li class="flex items-start gap-2">
+                                <span class="text-accent-cyan mt-0.5">&#x25B8;</span>
+                                <span>{{ criterion.description or criterion.check }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
+                {% elif approval.proposal %}
+                <div class="bg-bg-deep rounded-lg p-4 mb-4 border border-accent-cyan/10">
+                    <div class="text-xs text-text-muted mb-2 font-mono">PROPOSAL DATA:</div>
+                    <pre class="text-sm text-text-primary overflow-x-auto whitespace-pre-wrap">{{ approval.proposal_preview }}</pre>
+                </div>
+                {% endif %}
+
+                <!-- Metadata -->
+                <div class="flex flex-wrap items-center gap-4 text-xs text-text-muted">
+                    <span class="font-mono-data">ID: {{ approval.id[:8] }}</span>
+                    <span>Requested: {{ approval.requested_at|relative_time }}</span>
+                    {% if approval.requested_by %}
+                    <span>By: {{ approval.requested_by }}</span>
+                    {% endif %}
+                    {% if approval.entity_id %}
+                    <span>Entity: {{ approval.entity_id[:8] }}</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex flex-row lg:flex-col gap-3 lg:w-48">
+                {% if approval.approval_type == 'task_input' %}
+                {% if approval.input_schema %}
+                <!-- Has input schema: Decline only (submit is in the form above) -->
+                <button hx-post="/dashboard/reject/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                    Decline
+                </button>
+                {% else %}
+                <!-- No input schema: simple unblock/dismiss -->
+                <button hx-post="/dashboard/approve/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
+                    Unblock
+                </button>
+                <button hx-post="/dashboard/reject/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                    Dismiss
+                </button>
+                {% endif %}
+                {% else %}
+                {% if approval.review_href %}
+                <a href="{{ approval.review_href }}"
+                   class="flex-1 px-4 py-2.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors font-medium text-center">
+                    Review Context
+                </a>
+                {% endif %}
+                {% if approval.approval_type == 'project_plan' and approval.proposal and not approval.proposal.plan %}
+                <div class="flex-1 px-4 py-2.5 bg-bg-card text-text-muted border border-accent-green/10 rounded-lg text-center text-sm cursor-not-allowed">
+                    Plan pending generation...
+                </div>
+                {% else %}
+                <button hx-post="/dashboard/approve/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors font-medium">
+                    Approve
+                </button>
+                {% endif %}
+                <button hx-post="/dashboard/reject/{{ approval.id }}"
+                        hx-target="#approval-{{ approval.id }}"
+                        hx-swap="outerHTML"
+                        class="flex-1 px-4 py-2.5 bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors font-medium">
+                    Reject
+                </button>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% if not approvals %}
+<!-- Empty State -->
+<div class="glass-card neon-border-green rounded-xl p-12 text-center">
+    <div class="text-4xl mb-4 text-accent-green">✓</div>
+    <h3 class="text-xl font-semibold mb-2 text-accent-green">All caught up!</h3>
+    <p class="text-text-muted">No pending approvals at this time</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Optional: Add keyboard shortcuts
+document.addEventListener('keydown', function(e) {
+    // Only when not typing in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    // Number keys to select approval
+    const num = parseInt(e.key);
+    if (num >= 1 && num <= {{ approvals|length }}) {
+        const approvalCards = document.querySelectorAll('[id^="approval-"]');
+        if (approvalCards[num - 1]) {
+            approvalCards[num - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            approvalCards[num - 1].classList.add('ring-2', 'ring-accent-cyan');
+        }
+    }
+});
+</script>
+{% endblock %}
