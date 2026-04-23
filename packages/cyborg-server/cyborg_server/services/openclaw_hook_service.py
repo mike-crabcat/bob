@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from dataclasses import dataclass
 from datetime import timedelta
+import hashlib
 import json
-import shutil
+import logging
+from pathlib import Path
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +21,160 @@ from cyborg_server.models import NotificationDeliveryStatus, NotificationType
 from cyborg_server.services.base import BaseService, utcnow
 from cyborg_server.services.prompt_history import log_prompt
 from cyborg_server.services.session_route_service import SessionRouteService
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Device identity helpers (Ed25519 key pair for gateway authentication)
+# ---------------------------------------------------------------------------
+
+
+def _b64url(data: bytes) -> str:
+    """Base64url encode without padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+@dataclass(slots=True)
+class DeviceIdentity:
+    """Ed25519 device identity for OpenClaw gateway authentication."""
+
+    device_id: str  # SHA-256 hex of raw public key
+    public_key_pem: str
+    private_key_pem: str
+
+
+def _derive_device_id(raw_public_key_bytes: bytes) -> str:
+    """Derive device ID as SHA-256 hex of the raw 32-byte Ed25519 public key."""
+    return hashlib.sha256(raw_public_key_bytes).hexdigest()
+
+
+def _extract_raw_public_key(pem: str) -> bytes:
+    """Extract the raw 32-byte Ed25519 public key from a SPKI PEM block."""
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+    pub = load_pem_public_key(pem.encode())
+    return pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def _extract_raw_private_key(pem: str) -> bytes:
+    """Extract the raw 32-byte Ed25519 private key from a PKCS8 PEM block."""
+    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat
+
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    priv = load_pem_private_key(pem.encode(), password=None)
+    return priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, None)
+
+
+def load_or_create_identity(identity_path: Path) -> DeviceIdentity:
+    """Load an existing device identity, or create and persist a new one."""
+    if identity_path.exists():
+        data = json.loads(identity_path.read_text(encoding="utf-8"))
+        if data.get("version") == 1 and data.get("deviceId") and data.get("publicKeyPem") and data.get("privateKeyPem"):
+            return DeviceIdentity(
+                device_id=data["deviceId"],
+                public_key_pem=data["publicKeyPem"],
+                private_key_pem=data["privateKeyPem"],
+            )
+
+    # Generate a new Ed25519 key pair
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+        PublicFormat,
+    )
+
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+
+    raw_pub = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    device_id = _derive_device_id(raw_pub)
+
+    public_key_pem = public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    private_key_pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+
+    identity = DeviceIdentity(
+        device_id=device_id,
+        public_key_pem=public_key_pem,
+        private_key_pem=private_key_pem,
+    )
+
+    # Persist
+    identity_path.parent.mkdir(parents=True, exist_ok=True)
+    identity_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "deviceId": device_id,
+                "publicKeyPem": public_key_pem,
+                "privateKeyPem": private_key_pem,
+                "createdAtMs": int(time.time() * 1000),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    identity_path.chmod(0o600)
+    logger.info("Created new OpenClaw gateway device identity: %s", identity_path)
+    return identity
+
+
+def _resolve_identity_path(db: Database) -> Path:
+    """Resolve the device identity file path from settings."""
+    settings = getattr(db, "settings", None)
+    if isinstance(settings, Settings):
+        return settings.data_dir / "openclaw-device-identity.json"
+    return Path("~/.local/share/cyborg/openclaw-device-identity.json").expanduser()
+
+
+def build_device_auth(
+    identity: DeviceIdentity,
+    *,
+    client_id: str,
+    client_mode: str,
+    role: str,
+    scopes: list[str],
+    token: str,
+    nonce: str,
+    platform: str,
+) -> dict[str, Any]:
+    """Build the device auth fields for a gateway connect request.
+
+    Constructs the v3 signature payload and signs it with the device's Ed25519 private key.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    signed_at_ms = int(time.time() * 1000)
+    scopes_csv = ",".join(scopes)
+    device_family = ""
+
+    # v3 payload format
+    payload = (
+        f"v3|{identity.device_id}|{client_id}|{client_mode}|{role}"
+        f"|{scopes_csv}|{signed_at_ms}|{token}|{nonce}|{platform.lower()}|{device_family}"
+    )
+
+    # Sign
+    priv = load_pem_private_key(identity.private_key_pem.encode(), password=None)
+    if not isinstance(priv, Ed25519PrivateKey):
+        raise TypeError("Expected Ed25519 private key")
+    signature = priv.sign(payload.encode("utf-8"))
+
+    # Raw public key bytes, base64url encoded
+    raw_pub = _extract_raw_public_key(identity.public_key_pem)
+
+    return {
+        "id": identity.device_id,
+        "publicKey": _b64url(raw_pub),
+        "signature": _b64url(signature),
+        "signedAt": signed_at_ms,
+        "nonce": nonce,
+    }
 
 
 class OpenClawHookService(BaseService):
@@ -335,76 +494,12 @@ class OpenClawHookService(BaseService):
         expect_final: bool = False,
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
-        openclaw_bin = shutil.which("openclaw")
-        if openclaw_bin:
-            return await self._send_gateway_request_via_cli(
-                openclaw_bin,
-                method,
-                params,
-                expect_final=expect_final,
-                timeout_seconds=timeout_seconds,
-            )
         return await self._send_gateway_request_via_websocket(
             method,
             params,
             expect_final=expect_final,
             timeout_seconds=timeout_seconds,
         )
-
-    async def _send_gateway_request_via_cli(
-        self,
-        openclaw_bin: str,
-        method: str,
-        params: dict[str, Any],
-        *,
-        expect_final: bool,
-        timeout_seconds: float | None,
-    ) -> dict[str, Any]:
-        timeout = timeout_seconds or self.settings.timeout_seconds
-        command = [
-            openclaw_bin,
-            "gateway",
-            "call",
-            method,
-            "--json",
-            "--params",
-            json.dumps(params),
-            "--timeout",
-            str(int(timeout * 1000)),
-        ]
-        if expect_final:
-            command.append("--expect-final")
-        gateway_url = self.settings.resolved_gateway_url
-        gateway_token = self.settings.resolved_gateway_token
-        if gateway_url:
-            command.extend(["--url", gateway_url])
-        if gateway_token:
-            command.extend(["--token", gateway_token])
-
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout + 5,
-            )
-        except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise RuntimeError(f"OpenClaw gateway CLI timed out calling {method}") from exc
-
-        if process.returncode != 0:
-            error_text = stderr.decode().strip() or stdout.decode().strip() or f"exit {process.returncode}"
-            raise RuntimeError(f"OpenClaw gateway CLI failed calling {method}: {error_text}")
-
-        output = stdout.decode().strip()
-        if not output:
-            return {}
-        payload = json.loads(output)
-        return payload if isinstance(payload, dict) else {"payload": payload}
 
     async def _send_gateway_request_via_websocket(
         self,
@@ -429,9 +524,9 @@ class OpenClawHookService(BaseService):
             close_timeout=timeout,
             max_size=1_048_576,
         ) as websocket:
-            await self._await_gateway_challenge(websocket, timeout_seconds=timeout)
+            nonce = await self._await_gateway_challenge(websocket, timeout_seconds=timeout)
 
-            connect_params = self._build_gateway_connect_params()
+            connect_params = self._build_gateway_connect_params_with_device(nonce)
             await websocket.send(
                 json.dumps(
                     {
@@ -485,7 +580,32 @@ class OpenClawHookService(BaseService):
             connect_params["auth"] = {"token": gateway_token}
         return connect_params
 
-    async def _await_gateway_challenge(self, websocket: Any, *, timeout_seconds: float) -> None:
+    def _build_gateway_connect_params_with_device(self, nonce: str) -> dict[str, Any]:
+        """Build connect params including Ed25519 device identity and signature."""
+        connect_params = self._build_gateway_connect_params()
+        gateway_token = self.settings.resolved_gateway_token
+
+        try:
+            identity_path = _resolve_identity_path(self.db)
+            identity = load_or_create_identity(identity_path)
+            device_auth = build_device_auth(
+                identity,
+                client_id=self.GATEWAY_CLIENT_ID,
+                client_mode=self.GATEWAY_CLIENT_MODE,
+                role="operator",
+                scopes=self.GATEWAY_SCOPES,
+                token=gateway_token,
+                nonce=nonce,
+                platform="python",
+            )
+            connect_params["device"] = device_auth
+        except Exception:
+            logger.warning("Failed to build device auth, connecting without device identity", exc_info=True)
+
+        return connect_params
+
+    async def _await_gateway_challenge(self, websocket: Any, *, timeout_seconds: float) -> str:
+        """Wait for the gateway connect challenge and return the nonce."""
         timeout = timeout_seconds
         while True:
             raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
@@ -511,7 +631,7 @@ class OpenClawHookService(BaseService):
             nonce = payload.get("nonce") if isinstance(payload, dict) else None
             if not isinstance(nonce, str) or not nonce.strip():
                 raise RuntimeError("OpenClaw gateway connect challenge missing nonce")
-            return None
+            return nonce
 
     async def _await_gateway_response(
         self,
