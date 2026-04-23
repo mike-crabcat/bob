@@ -366,6 +366,7 @@ uv run cyborg serve
 | `CYBORG_LOG_PATH` | *(none)* | Log file path |
 | `CYBORG_DB_POOL_SIZE` | `4` | Connection pool size |
 | `CYBORG_PUBLIC_URL` | *(none)* | Public URL for webhook callbacks |
+| `CYBORG_PROJECTS_BASE_DIR` | `~/.openclaw/workspace/projects` | Base directory for project workspaces |
 | `CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS` | `60` | Notification dispatch interval |
 
 **OpenClaw integration:**
@@ -377,8 +378,6 @@ uv run cyborg serve
 | `CYBORG_OPENCLAW_GATEWAY_URL` | OpenClaw gateway websocket URL (defaults from base URL) |
 | `CYBORG_OPENCLAW_GATEWAY_TOKEN` | Gateway auth token (defaults to `CYBORG_OPENCLAW_TOKEN`) |
 | `CYBORG_OPENCLAW_AGENT_ID` | Agent ID for target task-assignment turns |
-| `CYBORG_OPENCLAW_SENDER_NAME` | Sender name for outbound messages |
-| `CYBORG_OPENCLAW_WAKE_MODE` | Wake mode for gateway sessions |
 | `CYBORG_OPENCLAW_TIMEOUT_SECONDS` | Request timeout |
 
 **Webhook templates:**

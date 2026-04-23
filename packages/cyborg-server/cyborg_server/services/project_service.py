@@ -12,10 +12,9 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
-from cyborg_core.config import Settings
 from cyborg_server.database import Database
-from cyborg_core.exceptions import ConflictError, NotFoundError
-from cyborg_core.models import (
+from cyborg_server.exceptions import ConflictError, NotFoundError
+from cyborg_server.models import (
     NotificationEntityType,
     NotificationStatus,
     ProjectSpecSubmitRequest,
@@ -92,6 +91,10 @@ class ProjectService(BaseService):
         payload = ProjectCreate.model_validate(payload)
         if payload.state == ProjectState.ACTIVE:
             raise ConflictError("Projects cannot be created directly in 'active' state. Create the project, submit a spec, approve it, then start or execute it.")
+        if not payload.aim or not payload.aim.strip():
+            raise ConflictError("Project creation requires --aim (what success looks like).")
+        if not payload.success_criteria:
+            raise ConflictError("Project creation requires --success-criteria-json (how to verify completion).")
 
         project_id = str(uuid4())
         now = utcnow().isoformat()
@@ -108,11 +111,6 @@ class ProjectService(BaseService):
                 payload.metadata,
                 payload.task_ids,
             )
-            if self._require_source_route_metadata() and not has_source_route_metadata(project_metadata):
-                raise ConflictError(
-                    "Projects require source routing metadata. "
-                    "Provide metadata.channel plus session_key/chat_id, or link an existing routed task."
-                )
             await connection.execute(
                 """
                 INSERT INTO projects (
@@ -136,6 +134,7 @@ class ProjectService(BaseService):
                 ),
             )
             await self._replace_task_links(connection, project_id, payload.task_ids)
+
         # Spec submission is fast (DB-only), keep synchronous so the response
         # includes the latest spec status.  Defer plan generation to the
         # background task so OpenClaw reasoning doesn't block the HTTP response.
@@ -144,24 +143,48 @@ class ProjectService(BaseService):
                 project_id, spec_payload, defer_plan_generation=defer_effects
             )
         if defer_effects:
+            # Link source projects in background — auto-discovery makes a
+            # slow LLM call (~60s) that must not block the HTTP response.
             project = await self.get_project(project_id)
             return project
         await self._post_create_background_effects(
             project_id,
             has_spec=spec_payload is not None,
             initial_state=payload.state,
+            payload=payload,
         )
         project = await self.get_project(project_id)
         return project
 
-    async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState) -> None:
-        """Run notification sync, plan generation, and summary update in the background."""
+    async def _post_create_background_effects(self, project_id: str, *, has_spec: bool, initial_state: ProjectState, payload: ProjectCreate | None = None) -> None:
+        """Run notification sync, plan generation, source linking, and summary update in the background."""
+        if payload:
+            try:
+                await self._link_source_projects(project_id, payload)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Source linking failed for project %s: %s", project_id, exc)
         if has_spec:
             await self.project_spec_service.generate_plan_if_needed(project_id)
         else:
             await self._sync_notifications(project_id)
         project = await self.get_project(project_id)
         await self._update_summary_md(project)
+
+    async def _link_source_projects(self, project_id: str, payload: ProjectCreate) -> None:
+        """Link source projects to a newly created derived project."""
+        from cyborg_server.services.source_discovery_service import SourceDiscoveryService
+        discovery = SourceDiscoveryService(self.db)
+
+        source_ids = [str(sid) for sid in payload.source_project_ids]
+        if source_ids:
+            await discovery.link_sources(project_id, source_ids)
+            await discovery.scan_source_outputs(project_id)
+        elif payload.auto_discover_sources:
+            await discovery.auto_discover_sources(
+                project_id, payload.aim, payload.method,
+            )
+            await discovery.scan_source_outputs(project_id)
 
     async def update_project(self, project_id: str, payload: ProjectUpdate, *, defer_plan_generation: bool = False) -> ProjectResponse:
         existing = await self._get_project_row(project_id)
@@ -290,9 +313,16 @@ class ProjectService(BaseService):
             # 5. Unlink all tasks from this project in the join table
             await conn.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
 
+            # 5b. Delete task files referencing this project (shared tasks keep their project files)
+            await conn.execute("DELETE FROM task_files WHERE project_id = ?", (project_id,))
+
             # 6. Delete specs and journal entries
             await conn.execute("DELETE FROM project_specs WHERE project_id = ?", (project_id,))
             await conn.execute("DELETE FROM project_journal_entries WHERE project_id = ?", (project_id,))
+
+            # 6b. Delete source links (both directions)
+            await conn.execute("DELETE FROM project_sources WHERE derived_project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM project_sources WHERE source_project_id = ?", (project_id,))
 
             # 7. Delete the project itself
             await conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
@@ -314,12 +344,12 @@ class ProjectService(BaseService):
     async def resume_project(self, project_id: str) -> ProjectResponse:
         return await self._transition_project(project_id, ProjectState.ACTIVE)
 
-    async def resume_project_reasoning(self, project_id: str) -> None:
+    async def resume_project_reasoning(self, project_id: str, *, resumed_from_block: bool = False) -> None:
         """Trigger reasoning to continue work after resume. Safe to call as a background task."""
         try:
             from cyborg_server.services.project_execution_service import ProjectExecutionService
             execution_service = ProjectExecutionService(self.db)
-            await execution_service.on_project_resumed(project_id)
+            await execution_service.on_project_resumed(project_id, resumed_from_block=resumed_from_block)
         except Exception:
             pass
 
@@ -435,12 +465,6 @@ class ProjectService(BaseService):
                 return merged_metadata
         return merged_metadata
 
-    def _require_source_route_metadata(self) -> bool:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current.openclaw.enabled
-        return False
-
     async def list_project_tasks(self, project_id: str) -> list[TaskResponse]:
         await self._get_project_row(project_id)
         rows = await self.db.fetch_all(
@@ -498,6 +522,11 @@ class ProjectService(BaseService):
         decoded["success_criteria"] = json_loads(decoded.get("success_criteria"), [])
         decoded["metadata"] = json_loads(decoded.get("metadata"), {})
         decoded = await self.project_spec_service.populate_project_spec_fields(decoded)
+        # Source project data
+        from cyborg_server.services.source_discovery_service import SourceDiscoveryService
+        discovery = SourceDiscoveryService(self.db)
+        decoded["source_projects"] = await discovery.get_sources(decoded["id"])
+        decoded["derived_outputs"] = await discovery._get_cached_outputs(decoded["id"])
         return decoded
 
     def _build_spec_payload(
@@ -510,12 +539,12 @@ class ProjectService(BaseService):
     ) -> ProjectSpecSubmitRequest | None:
         if aim is None and method is None and plan is None and success_criteria is None:
             return None
-        if not aim or not method or not success_criteria:
+        if not aim or not success_criteria:
             return None
         return ProjectSpecSubmitRequest.model_validate(
             {
                 "aim": aim,
-                "method": method,
+                "method": method or "",
                 "plan": plan or [],
                 "success_criteria": success_criteria,
             }
@@ -582,14 +611,22 @@ class ProjectService(BaseService):
     async def get_project_path(self, project_id: str) -> Path:
         """Return the workspace directory path for a project.
 
-        The path is derived from the project title slug:
-        ``/home/mike/.openclaw/workspace/projects/<slug>/``
+        The path is derived from the configured projects base directory
+        and the project title slug: ``<projects_base_dir>/<slug>/``
 
         The directory is created on disk if it does not already exist.
         """
+        from cyborg_server.config import Settings
+
+        settings = getattr(self.db, "settings", None)
+        if isinstance(settings, Settings):
+            base_dir = settings.projects_base_dir
+        else:
+            base_dir = Path("~/.openclaw/workspace/projects").expanduser()
+
         row = await self._get_project_row(project_id)
         slug = _slugify(row["title"])
-        path = Path(f"/home/mike/.openclaw/workspace/projects/{slug}")
+        path = base_dir / slug
         path.mkdir(parents=True, exist_ok=True)
         return path
 
