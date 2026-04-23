@@ -256,7 +256,6 @@ class ProjectService(BaseService):
         but not deleted.
         """
         row = await self._get_project_row(project_id)
-        slug = _slugify(row["title"])
         task_ids = await self._get_task_ids(project_id)
 
         notification_service = NotificationService(self.db)
@@ -328,8 +327,8 @@ class ProjectService(BaseService):
             await conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
         # 8. Delete workspace directory (outside transaction)
-        workspace_path = Path(f"/home/mike/.openclaw/workspace/projects/{slug}")
-        if workspace_path.exists():
+        workspace_path = await self.get_project_path(project_id)
+        if workspace_path and workspace_path.exists():
             shutil.rmtree(workspace_path)
             logger.info("Deleted workspace directory: %s", workspace_path)
 
@@ -749,8 +748,8 @@ class ProjectService(BaseService):
 
         # Write the file
         content = "\n".join(lines)
-        slug = _slugify(project.title)
-        summary_path = Path(f"/home/mike/.openclaw/workspace/projects/{slug}/SUMMARY.md")
+        project_path = await self.get_project_path(str(project.id))
+        summary_path = project_path / "SUMMARY.md"
 
         # Ensure directory exists
         summary_path.parent.mkdir(parents=True, exist_ok=True)
