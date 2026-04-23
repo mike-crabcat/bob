@@ -1,7 +1,7 @@
 {
   "id": "cyborg-context",
   "name": "Cyborg Context",
-  "description": "Inject Bob's Cyborg context (projects, tasks, events) into conversations as a native context engine",
+  "description": "Inject Cyborg context (projects, tasks, events) into conversations as a native context engine",
   "version": "0.1.0",
   "main": "index.ts",
   "license": "MIT",
@@ -52,7 +52,7 @@
   "uiHints": {
     "enabled": {
       "label": "Enable Cyborg Context Injection",
-      "help": "When enabled, Bob's active projects, tasks, and events are automatically injected into conversation context"
+      "help": "When enabled, active projects, tasks, and events are automatically injected into conversation context"
     },
     "cyborgUrl": {
       "label": "Cyborg Service URL",

@@ -721,6 +721,9 @@ def serve(
         webhooks=env_settings.webhooks,
         openclaw=env_settings.openclaw,
         heartbeat_interval_seconds=env_settings.heartbeat_interval_seconds,
+        projects_base_dir=env_settings.projects_base_dir,
+        public_url=env_settings.public_url,
+        dashboard_secret=env_settings.dashboard_secret,
     )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
 

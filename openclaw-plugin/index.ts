@@ -1,7 +1,7 @@
 /**
  * @cyborg/openclaw-plugin — Cyborg Context Plugin for OpenClaw
  *
- * Injects Bob's active projects, tasks, and events from Cyborg service
+ * Injects active projects, tasks, and events from Cyborg service
  * directly into the conversation context via OpenClaw's ContextEngine API.
  */
 
@@ -118,7 +118,7 @@ function estimateTokens(text: string): number {
  */
 function formatCyborgContext(data: CyborgContextResponse): string {
   const lines: string[] = [
-    `# Bob's Active Context`,
+    `# Cyborg Active Context`,
     `Generated: ${data.generated_at}`,
     "",
   ];
@@ -345,7 +345,7 @@ function createCyborgContextEngine(config: CyborgContextConfig): ContextEngine {
 const cyborgPlugin = {
   id: "cyborg-context",
   name: "Cyborg Context",
-  description: "Inject Bob's Cyborg context (projects, tasks, events) into conversations",
+  description: "Inject Cyborg context (projects, tasks, events) into conversations",
 
   configSchema: {
     parse(value: unknown) {

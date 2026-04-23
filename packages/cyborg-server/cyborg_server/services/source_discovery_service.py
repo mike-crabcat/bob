@@ -22,14 +22,14 @@ from cyborg_server.services.base import BaseService, json_dumps, json_loads, utc
 logger = logging.getLogger(__name__)
 
 
-def _get_projects_base_dir() -> Path:
-    """Return the configured projects base directory."""
+def _get_projects_base_dir_from_db(db: Database) -> Path:
+    """Return the configured projects base directory from runtime settings."""
     from cyborg_server.config import Settings
 
-    settings = getattr(_get_projects_base_dir, "_settings", None)
-    if settings is None:
-        return Path("~/.openclaw/workspace/projects").expanduser()
-    return settings.projects_base_dir
+    settings = getattr(db, "settings", None)
+    if isinstance(settings, Settings):
+        return settings.projects_base_dir
+    return Path("~/.openclaw/workspace/projects").expanduser()
 
 _SCRIPT_EXTENSIONS = {".py", ".sh", ".js", ".ts", ".r", ".R"}
 _VENV_DIRS = {".venv", "venv"}
@@ -216,7 +216,7 @@ class SourceDiscoveryService(BaseService):
 
         # 2. Filesystem scan of the source project workspace
         slug = _slugify(source_title)
-        workspace = _get_projects_base_dir() / slug
+        workspace = _get_projects_base_dir_from_db(self.db) / slug
         if workspace.exists():
             # Venv
             for venv_name in _VENV_DIRS:

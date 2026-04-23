@@ -707,7 +707,7 @@ Recommended OpenClaw config:
 For automatic context injection into every OpenClaw session, use the OpenClaw Context Plugin:
 
 ```bash
-cp -r ~/.openclaw/workspace/projects/cyborg/openclaw-plugin ~/.openclaw/extensions/cyborg-context
+cp -r openclaw-plugin ~/.openclaw/extensions/cyborg-context
 systemctl --user restart openclaw-gateway.service
 ```
 
