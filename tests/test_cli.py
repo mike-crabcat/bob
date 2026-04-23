@@ -6,7 +6,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-import cyborg.cli as cli
+import cyborg_server.cli as cli
 
 
 runner = CliRunner()
@@ -575,7 +575,6 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
     for key in (
         "CYBORG_OPENCLAW_BASE_URL",
         "CYBORG_OPENCLAW_TOKEN",
-        "CYBORG_OPENCLAW_HOOK_PATH",
         "CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS",
         "CYBORG_HEARTBEAT_INTERVAL_SECONDS",
         "CYBORG_ENV_FILE",
@@ -587,7 +586,6 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
             [
                 "CYBORG_OPENCLAW_BASE_URL=https://openclaw.example",
                 "CYBORG_OPENCLAW_TOKEN=secret-token",
-                "CYBORG_OPENCLAW_HOOK_PATH=/hooks/agent",
                 "CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15",
             ]
         ),
@@ -619,7 +617,6 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
     settings = captured["settings"]
     assert settings.openclaw.base_url == "https://openclaw.example"
     assert settings.openclaw.token == "secret-token"
-    assert settings.openclaw.hook_path == "/hooks/agent"
     assert settings.heartbeat_interval_seconds == 15.0
     assert captured["app"] == "fake-app"
     assert captured["host"] == "127.0.0.1"

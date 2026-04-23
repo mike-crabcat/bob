@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cyborg.database import Database
-from cyborg.models import ProjectState, TaskStatus
-from cyborg.services.base import utcnow
+from cyborg_server.database import Database
+from cyborg_server.models import ProjectState, TaskStatus
+from cyborg_server.services.base import utcnow
 
 
 class MockLLMReasoningService:
@@ -61,7 +61,7 @@ class MockLLMReasoningService:
 
         # Parse success criteria
         import json
-        from cyborg.services.base import json_loads
+        from cyborg_server.services.base import json_loads
 
         criteria = json_loads(project.get("success_criteria") or "[]", [])
         completed_count = int(task_stats["completed"]) if task_stats and task_stats["completed"] else 0

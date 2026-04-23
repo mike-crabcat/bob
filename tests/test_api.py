@@ -11,18 +11,18 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
 
-import cyborg.services.calendar_service as calendar_service_module
-import cyborg.services.notification_service as notification_service_module
-import cyborg.services.openclaw_hook_service as openclaw_hook_service_module
-import cyborg.services.task_service as task_service_module
-from cyborg.config import OpenClawHookSettings, Settings
-from cyborg.database import Database
-from cyborg.exceptions import ConflictError, NotFoundError
-from cyborg.main import create_app
-from cyborg.models import ProjectSpecApproveRequest
-from cyborg.services.project_spec_service import ProjectSpecService
-from cyborg.services.session_route_service import SessionRouteService
-from cyborg.services.task_service import TaskService
+import cyborg_server.services.calendar_service as calendar_service_module
+import cyborg_server.services.notification_service as notification_service_module
+import cyborg_server.services.openclaw_hook_service as openclaw_hook_service_module
+import cyborg_server.services.task_service as task_service_module
+from cyborg_server.config import OpenClawHookSettings, Settings
+from cyborg_server.database import Database
+from cyborg_server.exceptions import ConflictError, NotFoundError
+from cyborg_server.main import create_app
+from cyborg_server.models import ProjectSpecApproveRequest
+from cyborg_server.services.project_spec_service import ProjectSpecService
+from cyborg_server.services.session_route_service import SessionRouteService
+from cyborg_server.services.task_service import TaskService
 
 
 def make_client(tmp_path: Path, settings: Settings | None = None) -> TestClient:
@@ -400,7 +400,7 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
 
 
 def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: Path, monkeypatch) -> None:
-    import cyborg.services.openclaw_reasoning_service as reasoning_module
+    import cyborg_server.services.openclaw_reasoning_service as reasoning_module
 
     call_count = 0
 

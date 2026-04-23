@@ -1,0 +1,8 @@
+[project]
+name = "cyborg-cli-skill"
+version = "0.2.0"
+description = "Cyborg CLI skill for OpenClaw"
+requires-python = ">=3.12"
+dependencies = [
+    "cyborg-server",
+]

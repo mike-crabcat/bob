@@ -1,7 +1,7 @@
 {
   "name": "@cyborg/openclaw-plugin",
   "version": "0.1.0",
-  "description": "Cyborg Context Plugin for OpenClaw - Inject Bob's active projects, tasks, and events into conversations",
+  "description": "Cyborg Context Plugin for OpenClaw - Inject active projects, tasks, and events into conversations",
   "type": "module",
   "main": "index.ts",
   "license": "MIT",

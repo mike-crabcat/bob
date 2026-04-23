@@ -16,10 +16,10 @@ import httpx
 import pytest
 import uvicorn
 
-from cyborg.config import OpenClawHookSettings, Settings
-from cyborg.database import Database
-from cyborg.main import create_app
-from cyborg.models import (
+from cyborg_server.config import OpenClawHookSettings, Settings
+from cyborg_server.database import Database
+from cyborg_server.main import create_app
+from cyborg_server.models import (
     JournalEntryType,
     ProjectCloseRequest,
     ProjectCreate,
@@ -29,13 +29,13 @@ from cyborg.models import (
     TaskCreate,
     TaskFailureRequest,
 )
-from cyborg.services.notification_service import NotificationService
-from cyborg.services.openclaw_hook_service import OpenClawHookService
-from cyborg.services.openclaw_reasoning_service import OpenClawReasoningService
-from cyborg.services.project_service import ProjectService
-from cyborg.services.project_spec_service import ProjectSpecService
-from cyborg.services.session_route_service import SessionRouteService
-from cyborg.services.task_service import TaskService
+from cyborg_server.services.notification_service import NotificationService
+from cyborg_server.services.openclaw_hook_service import OpenClawHookService
+from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
+from cyborg_server.services.project_service import ProjectService
+from cyborg_server.services.project_spec_service import ProjectSpecService
+from cyborg_server.services.session_route_service import SessionRouteService
+from cyborg_server.services.task_service import TaskService
 
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "cyborg" / "schemas"

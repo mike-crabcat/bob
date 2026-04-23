@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from cyborg.models import JournalEntryType
+from cyborg_server.models import JournalEntryType
 
 
 pytestmark = pytest.mark.openclaw_live

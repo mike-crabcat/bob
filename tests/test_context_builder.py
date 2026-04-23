@@ -2,16 +2,16 @@
 
 import pytest
 import pytest_asyncio
-from cyborg.models import PlanStep, ProjectCreate, SuccessCriterion, TaskCreate
-from cyborg.services.context_builder import ContextBuilder, ContextScope
-from cyborg.database import Database
+from cyborg_server.models import PlanStep, ProjectCreate, SuccessCriterion, TaskCreate
+from cyborg_server.services.context_builder import ContextBuilder, ContextScope
+from cyborg_server.database import Database
 
 
 @pytest_asyncio.fixture
 async def sample_project(db: Database):
     """Create a sample project with tasks and journal entries."""
-    from cyborg.services.project_service import ProjectService
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.project_service import ProjectService
+    from cyborg_server.services.task_service import TaskService
     import json
     from uuid import uuid4
 
@@ -208,7 +208,7 @@ async def test_context_filters_by_focus_refinement(db: Database, sample_project)
     project_id = sample_project["project_id"]
 
     # Create a parent-child relationship to test refinement focus
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.task_service import TaskService
     task_service = TaskService(db)
 
     child_task = await task_service.create_task({
@@ -323,7 +323,7 @@ async def test_nonexistent_project(db: Database):
 @pytest.mark.asyncio
 async def test_plan_summarization(db: Database):
     """Test that long plans are summarized."""
-    from cyborg.services.project_service import ProjectService
+    from cyborg_server.services.project_service import ProjectService
     import json
 
     project_service = ProjectService(db)
@@ -356,8 +356,8 @@ async def test_plan_summarization(db: Database):
 @pytest.mark.asyncio
 async def test_duration_calculation(db: Database):
     """Test project duration calculation."""
-    from cyborg.models import ProjectSpecApproveRequest
-    from cyborg.services.project_service import ProjectService
+    from cyborg_server.models import ProjectSpecApproveRequest
+    from cyborg_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
 
@@ -396,8 +396,8 @@ async def test_duration_calculation(db: Database):
 @pytest.mark.asyncio
 async def test_upstream_context_with_completed_parent(db: Database):
     """Upstream context should include parent task results and files."""
-    from cyborg.services.project_service import ProjectService
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.project_service import ProjectService
+    from cyborg_server.services.task_service import TaskService
     from uuid import uuid4
 
     project_service = ProjectService(db)
@@ -462,8 +462,8 @@ async def test_upstream_context_with_completed_parent(db: Database):
 @pytest.mark.asyncio
 async def test_upstream_context_empty_for_minimal_scope(db: Database):
     """Upstream context should not be computed at MINIMAL scope."""
-    from cyborg.services.project_service import ProjectService
-    from cyborg.services.task_service import TaskService
+    from cyborg_server.services.project_service import ProjectService
+    from cyborg_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cyborg-server"
+version = "0.2.0"
+description = "Cyborg data service — server, CLI, and shared libraries"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+  { name = "OpenClaw" },
+]
+dependencies = [
+  "aiosqlite>=0.20.0",
+  "cryptography>=44.0.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.28.0",
+  "jinja2>=3.1.0",
+  "pydantic>=2.10.0",
+  "python-multipart>=0.0.18",
+  "python-jose>=3.3.0",
+  "typer>=0.16.0",
+  "uvicorn>=0.35.0",
+  "websockets>=15.0.0",
+]
+
+[project.scripts]
+cyborg = "cyborg_server.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cyborg_server"]
+
+[tool.hatch.build]
+include = [
+  "cyborg_server/**/*.py",
+  "cyborg_server/**/*.sql",
+  "cyborg_server/**/*.html",
+]
