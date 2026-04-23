@@ -168,7 +168,7 @@ class Settings:
     log_path: Path | None = None
     log_level: str = "info"
     debug: bool = False
-    version: str = "0.1.0"  # Application version
+    version: str = "0.2.0"  # Application version
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
