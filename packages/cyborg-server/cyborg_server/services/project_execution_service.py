@@ -16,8 +16,8 @@ from uuid import uuid4
 from aiosqlite import Connection
 
 from cyborg_server.database import Database
-from cyborg_core.exceptions import ConflictError, NotFoundError
-from cyborg_core.models import (
+from cyborg_server.exceptions import ConflictError, NotFoundError
+from cyborg_server.models import (
     JournalEntryType,
     PlanStep,
     ProjectResponse,
@@ -43,7 +43,7 @@ def _get_structured_logger():
     """Lazy import structured logging helpers."""
     global _structured_logger
     if _structured_logger is None:
-        from cyborg_core.structured_logging import get_logger as _get_logger
+        from cyborg_server.structured_logging import get_logger as _get_logger
         _structured_logger = _get_logger(__name__)
     return _structured_logger
 
@@ -91,13 +91,16 @@ class ProjectExecutionService(BaseService):
     async def _sync_notifications(self, project_id: str) -> None:
         await NotificationService(self.db).sync_project_state(project_id)
 
-    async def on_project_resumed(self, project_id: str) -> None:
+    async def on_project_resumed(self, project_id: str, *, resumed_from_block: bool = False) -> None:
         """Resume reasoning after a project is unpaused.
 
         Looks at the current task state and triggers the appropriate next step:
         - If all tasks are completed, runs decide_next_action to create more or close
         - If there are no tasks, starts execution from the plan
         - Active/submitted/pending tasks should already have their notifications
+
+        When resumed_from_block is True (project was just unblocked after user approval),
+        tries auto-completion first before asking reasoning, to prevent re-blocking loops.
         """
         project = await self._get_project_row(project_id)
         if not project or project["state"] != ProjectState.ACTIVE.value:
@@ -114,7 +117,18 @@ class ProjectExecutionService(BaseService):
         )
 
         if latest_task and latest_task["status"] == TaskStatus.COMPLETED.value:
-            await self.decide_next_action(project_id, latest_task["id"], latest_task["title"])
+            # When resuming from a block with all tasks done, try auto-completion first
+            if resumed_from_block:
+                try:
+                    result = await self.evaluate_and_complete(project_id)
+                    if result is not None:
+                        return  # Auto-completed, no reasoning needed
+                except Exception:
+                    pass  # Fall through to decide_next_action
+            await self.decide_next_action(
+                project_id, latest_task["id"], latest_task["title"],
+                resumed_from_block=resumed_from_block,
+            )
         elif not latest_task:
             await self.start_project_execution(project_id)
 
@@ -197,7 +211,7 @@ class ProjectExecutionService(BaseService):
         The automatic flow uses decide_next_action instead.
         Returns the completed project if auto-completed, None otherwise.
         """
-        from cyborg_core.structured_logging import log_autonomy_decision
+        from cyborg_server.structured_logging import log_autonomy_decision
 
         project = await self._get_project_row(project_id)
         if not project or project["state"] != ProjectState.ACTIVE.value:
@@ -306,9 +320,10 @@ class ProjectExecutionService(BaseService):
         return []
 
     async def cleanup_old_plan_tasks(self, project_id: str) -> int:
-        """Remove all auto-created tasks from a previous plan before re-planning.
+        """Remove deprecated auto-created tasks from a previous plan before re-planning.
 
-        Soft-deletes them, preserving history via journal entries.
+        Only soft-deletes tasks that were explicitly deprecated by reasoning (e.g. during
+        spec revision). Tasks whose output is still relevant are preserved.
         Returns count of tasks cleaned up.
         """
         rows = await self.db.fetch_all(
@@ -319,6 +334,7 @@ class ProjectExecutionService(BaseService):
             WHERE pt.project_id = ?
               AND t.deleted_at IS NULL
               AND t.metadata LIKE '%auto_created_by_project%'
+              AND t.status = 'deprecated'
             """,
             (project_id,),
         )
@@ -336,7 +352,7 @@ class ProjectExecutionService(BaseService):
         await self._add_journal_entry(
             project_id,
             JournalEntryType.DECISION,
-            f"Cleaned up {len(task_ids)} auto-created tasks from previous plan before re-planning.",
+            f"Cleaned up {len(task_ids)} deprecated tasks from previous plan.",
             {"replan_reason": "new plan approved"},
         )
         return len(task_ids)
@@ -366,6 +382,8 @@ class ProjectExecutionService(BaseService):
         completed_task_id: str,
         completed_task_title: str,
         result_summary: str | None = None,
+        *,
+        resumed_from_block: bool = False,
     ) -> None:
         """Dispatch a next-action prompt to OpenClaw (fire-and-forget).
 
@@ -375,7 +393,7 @@ class ProjectExecutionService(BaseService):
         asynchronously via `cyborg project decide-next`.
         """
         import secrets
-        from cyborg_core.structured_logging import log_autonomy_decision
+        from cyborg_server.structured_logging import log_autonomy_decision
         from cyborg_server.services.context_builder import ContextBuilder, ContextScope
 
         project = await self._get_project_row(project_id)
@@ -411,7 +429,7 @@ class ProjectExecutionService(BaseService):
             focus_reasoning="next_action",
         )
 
-        prompt = self._build_next_action_prompt(context, completed_task_id, project_id, otp)
+        prompt = self._build_next_action_prompt(context, completed_task_id, project_id, otp, resumed_from_block=resumed_from_block)
 
         # Dispatch via notification service (fire-and-forget)
         try:
@@ -452,6 +470,8 @@ class ProjectExecutionService(BaseService):
         completed_task_id: str,
         project_id: str,
         otp: str,
+        *,
+        resumed_from_block: bool = False,
     ) -> str:
         """Build the next-action prompt with context and OTP-secured CLI instructions."""
         core = context["core"]
@@ -473,14 +493,28 @@ class ProjectExecutionService(BaseService):
         if not completed_task_info:
             completed_task_info = f"Task ID: {completed_task_id} (details not available)"
 
-        parts = [
-            "You are managing an autonomous project. A task has just completed.",
-            "Decide what should happen next based on the project's aim, plan, and success criteria.",
-            "",
-            "## Project",
-            f"Title: {project['title']}",
-            f"Aim: {project.get('aim', 'N/A')}",
-        ]
+        if resumed_from_block:
+            parts = [
+                "You are managing an autonomous project that was previously blocked waiting for user input.",
+                "The user has now approved/resumed the project. Decide what should happen next.",
+                "",
+                "**IMPORTANT:** The user chose to approve the block (not reject it), meaning they want",
+                "the project to continue. Do NOT block the project again unless there is a genuinely",
+                "new reason that did not exist before. Prefer create_task or close_project.",
+                "",
+                "## Project",
+                f"Title: {project['title']}",
+                f"Aim: {project.get('aim', 'N/A')}",
+            ]
+        else:
+            parts = [
+                "You are managing an autonomous project. A task has just completed.",
+                "Decide what should happen next based on the project's aim, plan, and success criteria.",
+                "",
+                "## Project",
+                f"Title: {project['title']}",
+                f"Aim: {project.get('aim', 'N/A')}",
+            ]
 
         if project.get("method"):
             parts.append(f"Method: {project['method']}")
@@ -637,7 +671,7 @@ class ProjectExecutionService(BaseService):
         if output_directory and output_directory.endswith("/pending"):
             try:
                 from cyborg_server.services.project_service import short_task_id
-                from cyborg_core.models import TaskUpdate
+                from cyborg_server.models import TaskUpdate
 
                 real_dir = output_directory.replace("/pending", f"/{short_task_id(str(task.id))}")
                 updated_plan = plan.replace(output_directory, real_dir)
@@ -705,7 +739,7 @@ class ProjectExecutionService(BaseService):
         if output_directory and output_directory.endswith("/pending"):
             try:
                 from cyborg_server.services.project_service import short_task_id
-                from cyborg_core.models import TaskUpdate
+                from cyborg_server.models import TaskUpdate
 
                 real_dir = output_directory.replace("/pending", f"/{short_task_id(str(task.id))}")
                 updated_plan = plan.replace(output_directory, real_dir)
@@ -765,14 +799,46 @@ class ProjectExecutionService(BaseService):
         reasoning: str,
     ) -> None:
         """Block a project based on reasoning decision."""
+        project = await self._get_project_row(project_id)
+        project_title = project["title"] if project else "Unknown"
+
         now = utcnow().isoformat()
         await self.db.execute(
             """
             UPDATE projects
-            SET state = ?, blocked_reason = ?, updated_at = ?
+            SET state = ?, blocked_reason = ?, blocked_resume_instructions = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             """,
-            (ProjectState.PAUSED.value, block_reason, now, project_id),
+            (ProjectState.PAUSED.value, block_reason, resume_instructions, now, project_id),
+        )
+
+        # Create a task_input approval with text input so the user can respond
+        input_schema = json_dumps({"type": "text", "prompt": "How should the project proceed?"})
+        proposal_data = json_dumps({
+            "project_id": project_id,
+            "project_title": project_title,
+            "reason": block_reason,
+            "resume_instructions": resume_instructions,
+        })
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, input_schema, status, priority, requested_at, requested_by,
+                metadata, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                f"Project blocked: {project_title}",
+                block_reason,
+                proposal_data,
+                input_schema,
+                now,
+                json_dumps({"entity_kind": "project", "resume_instructions": resume_instructions}),
+                now,
+            ),
         )
 
         await self._add_journal_entry(
@@ -786,6 +852,9 @@ class ProjectExecutionService(BaseService):
 
     async def _block_project_cycle_limit(self, project_id: str, cycle_count: int) -> None:
         """Block a project that exceeded the reasoning cycle limit."""
+        project = await self._get_project_row(project_id)
+        project_title = project["title"] if project else "Unknown"
+
         now = utcnow().isoformat()
         block_reason = f"Project exceeded maximum reasoning cycles ({cycle_count}). Manual review required."
         await self.db.execute(
@@ -795,6 +864,35 @@ class ProjectExecutionService(BaseService):
             WHERE id = ? AND deleted_at IS NULL
             """,
             (ProjectState.PAUSED.value, block_reason, now, project_id),
+        )
+
+        # Create a task_input approval with text input so the user can respond
+        input_schema = json_dumps({"type": "text", "prompt": "The project hit the reasoning cycle limit. How should it proceed?"})
+        proposal_data = json_dumps({
+            "project_id": project_id,
+            "project_title": project_title,
+            "reason": block_reason,
+            "cycle_count": cycle_count,
+        })
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, input_schema, status, priority, requested_at, requested_by,
+                metadata, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                f"Cycle limit reached: {project_title}",
+                block_reason,
+                proposal_data,
+                input_schema,
+                now,
+                json_dumps({"entity_kind": "project"}),
+                now,
+            ),
         )
 
         await self._add_journal_entry(
@@ -883,6 +981,37 @@ class ProjectExecutionService(BaseService):
             JournalEntryType.BLOCKER,
             f"Project blocked: {reason}",
             {"resume_instructions": resume_instructions} if resume_instructions else {},
+        )
+
+        # Create an approval record so the block shows in the dashboard
+        from uuid import uuid4
+
+        proposal_data = {
+            "project_id": project_id,
+            "project_title": project["title"],
+            "reason": reason,
+            "resume_instructions": resume_instructions,
+        }
+        input_schema = json_dumps({"type": "text", "prompt": "How should the project proceed?"})
+        await self.db.execute(
+            """
+            INSERT INTO approvals (
+                id, approval_type, entity_id, title, description,
+                proposal_data, input_schema, status, priority, requested_at, requested_by,
+                metadata, created_at
+            ) VALUES (?, 'task_input', ?, ?, ?, ?, ?, 'pending', 'high', ?, 'system', ?, ?)
+            """,
+            (
+                str(uuid4()),
+                project_id,
+                f"Project blocked: {project['title']}",
+                reason,
+                json_dumps(proposal_data),
+                input_schema,
+                now,
+                json_dumps({"entity_kind": "project", "resume_instructions": resume_instructions}),
+                now,
+            ),
         )
         
         # Trigger webhook notification
@@ -1022,10 +1151,72 @@ class ProjectExecutionService(BaseService):
                 "problem": "blocked_task_without_approval",
             })
 
+        # Obsolete approvals: pending approvals whose entity can't accept them
+        obsolete_rows = await self.db.fetch_all(
+            """
+            SELECT a.id as approval_id, a.approval_type, a.title, a.entity_id,
+                   a.metadata, a.requested_at,
+                   p.id as project_id, p.title as project_title, p.state as project_state,
+                   p.blocked_reason as project_blocked_reason
+            FROM approvals a
+            LEFT JOIN projects p ON p.id = a.entity_id AND p.deleted_at IS NULL
+            LEFT JOIN tasks t ON t.id = a.entity_id AND t.deleted_at IS NULL
+            WHERE a.status = 'pending'
+              AND (
+                (a.approval_type = 'project_plan' AND (p.state = 'closed' OR p.id IS NULL))
+                OR (a.approval_type = 'task_input'
+                    AND json_extract(a.metadata, '$.entity_kind') = 'project'
+                    AND (p.state = 'closed' OR p.id IS NULL OR p.blocked_reason IS NULL))
+                OR (a.approval_type = 'task_input'
+                    AND (json_extract(a.metadata, '$.entity_kind') IS NULL
+                         OR json_extract(a.metadata, '$.entity_kind') != 'project')
+                    AND (t.id IS NULL OR t.status != 'blocked'))
+              )
+            """,
+        )
+        for row in obsolete_rows:
+            problems.append({
+                "approval_id": row["approval_id"],
+                "approval_type": row["approval_type"],
+                "title": row["title"],
+                "entity_id": row["entity_id"],
+                "project_id": row["project_id"],
+                "project_title": row["project_title"],
+                "project_state": row["project_state"],
+                "problem": "obsolete_approval",
+            })
+
+        # Duplicate pending approvals: more than one pending approval of the
+        # same type for the same entity.
+        duplicate_rows = await self.db.fetch_all(
+            """
+            SELECT a.approval_type, a.entity_id, COUNT(*) AS cnt,
+                   MIN(a.id) AS keep_id,
+                   GROUP_CONCAT(a.id) AS approval_ids,
+                   GROUP_CONCAT(a.title, ' | ') AS titles
+            FROM approvals a
+            WHERE a.status = 'pending'
+            GROUP BY a.approval_type, a.entity_id
+            HAVING cnt > 1
+            """,
+        )
+        for row in duplicate_rows:
+            approval_ids = row["approval_ids"].split(",")
+            keep_id = row["keep_id"]
+            cancel_ids = [aid for aid in approval_ids if aid != keep_id]
+            problems.append({
+                "approval_type": row["approval_type"],
+                "entity_id": row["entity_id"],
+                "title": row["titles"],
+                "problem": "duplicate_pending_approvals",
+                "keep_approval_id": keep_id,
+                "cancel_approval_ids": cancel_ids,
+            })
+
         return problems
 
     async def bootstrap_stuck_project(self, project_id: str) -> dict[str, Any]:
-        """Bootstrap a stuck project by invoking reasoning to create the first task.
+        """Bootstrap a stuck project by creating the first task from plan step 0.
 
         Only works for active projects with zero tasks.
         """
@@ -1041,13 +1232,17 @@ class ProjectExecutionService(BaseService):
         if task_count and task_count["cnt"] > 0:
             return {"project_id": project_id, "action": "skipped", "reason": "has tasks"}
 
-        # Invoke reasoning via decide_next_action with a sentinel completed task ID
-        await self.decide_next_action(project_id, "__bootstrap__", "Project bootstrap", None)
+        # Create the first task deterministically from plan step 0
+        plan = self._parse_plan(project.get("plan"))
+        if not plan:
+            return {"project_id": project_id, "action": "skipped", "reason": "no plan"}
+
+        await self._create_initial_task(project_id, plan[0])
 
         await self._add_journal_entry(
             project_id,
             JournalEntryType.DECISION,
-            "Doctor bootstrapped stuck project — reasoning invoked to create first task",
+            "Doctor bootstrapped stuck project — created first task from plan step 0",
             {"source": "doctor", "problem": "active_with_no_tasks"},
         )
 
@@ -1059,8 +1254,8 @@ class ProjectExecutionService(BaseService):
         Validates the OTP, clears it (one-time use), then executes the
         chosen action (create_task, close_project, or block_project).
         """
-        from cyborg_core.exceptions import ConflictError
-        from cyborg_core.models import ProjectDecideNextRequest
+        from cyborg_server.exceptions import ConflictError
+        from cyborg_server.models import ProjectDecideNextRequest
 
         req = ProjectDecideNextRequest.model_validate(payload)
         project = await self._get_project_row(project_id)
@@ -1171,3 +1366,18 @@ class ProjectExecutionService(BaseService):
         )
 
         return {"task_id": task_id, "action": "approval_created", "approval_id": approval_id}
+
+    async def cancel_obsolete_approval(self, approval_id: str) -> dict[str, Any]:
+        """Cancel a pending approval whose target entity can no longer accept it."""
+        approval = await self.db.fetch_one(
+            "SELECT id, approval_type, entity_id FROM approvals WHERE id = ? AND status = 'pending'",
+            (approval_id,),
+        )
+        if not approval:
+            return {"approval_id": approval_id, "action": "skipped", "reason": "not pending"}
+
+        await self.db.execute(
+            "UPDATE approvals SET status = 'cancelled', reviewed_at = ?, reviewed_by = 'doctor' WHERE id = ?",
+            (utcnow().isoformat(), approval_id),
+        )
+        return {"approval_id": approval_id, "action": "cancelled"}

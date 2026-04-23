@@ -8,7 +8,7 @@ from typing import Any
 from aiosqlite import Connection
 
 from cyborg_server.database import Database
-from cyborg_core.models import JournalEntryType, ProjectState, TaskStatus
+from cyborg_server.models import JournalEntryType, ProjectState, TaskStatus
 from cyborg_server.services.base import BaseService, utcnow, json_dumps, json_loads
 
 
@@ -22,7 +22,7 @@ def _get_structured_logger():
     """Lazy import structured logging helpers."""
     global _structured_logger
     if _structured_logger is None:
-        from cyborg_core.structured_logging import get_logger as _get_logger
+        from cyborg_server.structured_logging import get_logger as _get_logger
         _structured_logger = _get_logger(__name__)
     return _structured_logger
 

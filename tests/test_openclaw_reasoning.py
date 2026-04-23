@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from cyborg_core.models import (
+from cyborg_server.models import (
     JournalEntryType,
     PlanStep,
     ProjectCloseRequest,
@@ -381,7 +381,7 @@ async def test_generate_task_plan(db: Database):
     """Test task-level plan generation."""
     from cyborg_server.services.task_service import TaskService
     from cyborg_server.services.project_service import ProjectService
-    from cyborg_core.models import ProjectCreate
+    from cyborg_server.models import ProjectCreate
 
     task_service = TaskService(db)
     project_service = ProjectService(db)

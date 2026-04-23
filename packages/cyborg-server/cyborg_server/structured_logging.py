@@ -4,7 +4,7 @@ This module provides structured logging utilities that output JSON-formatted log
 with consistent fields including correlation IDs for request tracking.
 
 Usage:
-    from cyborg.structured_logging import get_logger, log_reasoning_request
+    from cyborg_server.structured_logging import get_logger, log_reasoning_request
 
     logger = get_logger(__name__)
     logger.info("Task completed", extra={"task_id": "abc-123", "project_id": "def-456"})
@@ -22,7 +22,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from cyborg.config import Settings
+from cyborg_server.config import Settings
 
 
 # Correlation ID context variable (thread-safe for asyncio)

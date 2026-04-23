@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from pathlib import Path
 
-from cyborg_core.config import Settings
+from cyborg_server.config import Settings
 from cyborg_server.main import create_app
 from cyborg_server.services.webhook_service import (
     WebhookConfig,

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 
 from cyborg_server.dependencies import get_database
 from cyborg_server.database import Database
-from cyborg_core.models import (
+from cyborg_server.models import (
     ContextCalendarResponse,
     ContextProjectsResponse,
     ContextSummaryResponse,

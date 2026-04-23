@@ -7,10 +7,10 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from cyborg_core.config import Settings
+from cyborg_server.config import Settings
 from cyborg_server.database import Database
-from cyborg_core.exceptions import ConflictError, NotFoundError
-from cyborg_core.models import (
+from cyborg_server.exceptions import ConflictError, NotFoundError
+from cyborg_server.models import (
     ResolvedSessionRoute,
     SessionRouteCreate,
     SessionRouteKind,
@@ -316,7 +316,10 @@ class SessionRouteService(BaseService):
                         session_key=session_key.strip(),
                         route_source="target_session.session_key",
                     )
-                return None
+                return ResolvedSessionRoute(
+                    session_key=session_key.strip(),
+                    route_source="target_session.session_key_only",
+                )
 
         if channel != "whatsapp":
             return None

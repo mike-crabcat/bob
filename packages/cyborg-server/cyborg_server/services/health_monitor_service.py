@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from cyborg_server.database import Database
-from cyborg_core.models import ProjectState, TaskStatus
+from cyborg_server.models import ProjectState, TaskStatus
 from cyborg_server.services.base import BaseService, utcnow
 from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
 
@@ -24,7 +24,7 @@ def _get_structured_logger():
     """Lazy import structured logging helpers."""
     global _structured_logger
     if _structured_logger is None:
-        from cyborg_core.structured_logging import get_logger as _get_logger
+        from cyborg_server.structured_logging import get_logger as _get_logger
         _structured_logger = _get_logger(__name__)
     return _structured_logger
 
@@ -228,7 +228,7 @@ class HealthMonitorService(BaseService):
         check_type: str = "triggered",
     ) -> dict[str, Any]:
         """Save a health check record to the database."""
-        from cyborg_core.structured_logging import log_health_check
+        from cyborg_server.structured_logging import log_health_check
 
         check_id = str(uuid4())
 

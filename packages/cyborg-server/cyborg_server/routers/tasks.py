@@ -9,7 +9,7 @@ from pydantic import BaseModel, model_validator
 
 from cyborg_server.dependencies import get_task_service
 
-from cyborg_core.models import (
+from cyborg_server.models import (
     TaskBlockRequest,
     TaskFailureRequest,
     TaskFileCreate,

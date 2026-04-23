@@ -7,9 +7,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from cyborg_core.config import Settings
+from cyborg_server.config import Settings
 from cyborg_server.main import create_app
-from cyborg_core.models import ProjectSpecApproveRequest
+from cyborg_server.models import ProjectSpecApproveRequest
 from cyborg_server.services.project_spec_service import ProjectSpecService
 from cyborg_server.services.task_service import TaskService
 

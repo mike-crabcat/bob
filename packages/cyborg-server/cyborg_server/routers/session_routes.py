@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Response, status
 
 from cyborg_server.dependencies import get_session_route_service
-from cyborg_core.models import SessionRouteCreate, SessionRouteResponse, SessionRouteUpdate
+from cyborg_server.models import SessionRouteCreate, SessionRouteResponse, SessionRouteUpdate
 from cyborg_server.services.session_route_service import SessionRouteService
 
 

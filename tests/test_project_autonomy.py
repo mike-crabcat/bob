@@ -42,7 +42,7 @@ async def autonomous_project(db: Database):
     project_id = str(project.id)
 
     # Approve the spec (auto-triggers execution)
-    from cyborg_core.models import ProjectSpecApproveRequest
+    from cyborg_server.models import ProjectSpecApproveRequest
     spec_service = project_service.project_spec_service
     specs = await spec_service.list_specs(project_id)
     await spec_service.approve_spec(
@@ -198,7 +198,7 @@ async def test_task_completion_triggers_reasoning(db: Database):
     project_id = str(project.id)
 
     # Approve spec to activate the project
-    from cyborg_core.models import ProjectSpecApproveRequest
+    from cyborg_server.models import ProjectSpecApproveRequest
     spec_service = project_service.project_spec_service
     specs = await spec_service.list_specs(project_id)
     await spec_service.approve_spec(

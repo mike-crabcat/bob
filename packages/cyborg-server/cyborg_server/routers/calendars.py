@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Response, status
 
 from cyborg_server.dependencies import get_calendar_service
-from cyborg_core.models import (
+from cyborg_server.models import (
     CalendarCreate,
     CalendarResponse,
     CalendarUpdate,

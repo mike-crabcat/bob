@@ -73,42 +73,18 @@ wheels = [
 ]
 
 [[package]]
-name = "cyborg-cli"
-version = "0.1.0"
-source = { directory = "packages/cyborg-cli" }
-dependencies = [
-    { name = "cyborg-core" },
-    { name = "typer" },
-    { name = "uvicorn" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cyborg-core", specifier = "==0.1.0" },
-    { name = "cyborg-server", marker = "extra == 'server'", specifier = "==0.1.0" },
-    { name = "typer", specifier = ">=0.16.0" },
-    { name = "uvicorn", specifier = ">=0.35.0" },
-]
-provides-extras = ["server"]
-
-[[package]]
-name = "cyborg-core"
-version = "0.1.0"
-source = { directory = "packages/cyborg-core" }
-
-[[package]]
 name = "cyborg-server"
 version = "0.1.0"
 source = { directory = "packages/cyborg-server" }
 dependencies = [
     { name = "aiosqlite" },
-    { name = "cyborg-core" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jinja2" },
     { name = "pydantic" },
     { name = "python-jose" },
     { name = "python-multipart" },
+    { name = "typer" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
@@ -116,13 +92,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
-    { name = "cyborg-core", specifier = "==0.1.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "python-jose", specifier = ">=3.3.0" },
     { name = "python-multipart", specifier = ">=0.0.18" },
+    { name = "typer", specifier = ">=0.16.0" },
     { name = "uvicorn", specifier = ">=0.35.0" },
     { name = "websockets", specifier = ">=15.0.0" },
 ]
@@ -132,8 +108,6 @@ name = "cyborg-workspace"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "cyborg-cli" },
-    { name = "cyborg-core" },
     { name = "cyborg-server" },
 ]
 
@@ -150,8 +124,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cyborg-cli", directory = "packages/cyborg-cli" },
-    { name = "cyborg-core", directory = "packages/cyborg-core" },
     { name = "cyborg-server", directory = "packages/cyborg-server" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
 ]

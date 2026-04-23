@@ -14,8 +14,8 @@ from uuid import UUID, uuid4
 from aiosqlite import Connection
 
 from cyborg_server.database import Database
-from cyborg_core.exceptions import NotFoundError
-from cyborg_core.models import (
+from cyborg_server.exceptions import NotFoundError
+from cyborg_server.models import (
     NotificationAcknowledgeRequest,
     NotificationDeliveryStatus,
     NotificationEntityType,
@@ -44,7 +44,7 @@ class NotificationService(BaseService):
 
     def _get_openclaw_service(self) -> OpenClawHookService:
         if self._openclaw_service is None:
-            from cyborg_core.config import Settings
+            from cyborg_server.config import Settings
             settings = getattr(self.db, "settings", None)
             public_url = ""
             if isinstance(settings, Settings):
@@ -140,11 +140,12 @@ class NotificationService(BaseService):
             )
             return
 
-        # Fire-once: skip if a pending NEEDS_INPUT already exists for this project
+        # Fire-once: skip if any NEEDS_INPUT notification exists (pending or acknowledged)
         existing = await self.db.fetch_one(
             """
             SELECT id FROM notifications
-            WHERE entity_type = ? AND entity_id = ? AND notification_type = ? AND status = ?
+            WHERE entity_type = ? AND entity_id = ? AND notification_type = ?
+              AND status IN (?, ?)
             LIMIT 1
             """,
             (
@@ -152,6 +153,7 @@ class NotificationService(BaseService):
                 project_id,
                 NotificationType.NEEDS_INPUT.value,
                 NotificationStatus.PENDING.value,
+                NotificationStatus.ACKNOWLEDGED.value,
             ),
         )
         if existing is not None:
@@ -608,9 +610,6 @@ class NotificationService(BaseService):
             return
 
         project_metadata = json_loads(project.get("metadata"), {})
-        has_source_route = any(project_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        if not has_source_route:
-            return
 
         metadata = {
             **project_metadata,

@@ -16,10 +16,10 @@ import httpx
 import pytest
 import uvicorn
 
-from cyborg_core.config import OpenClawHookSettings, Settings
+from cyborg_server.config import OpenClawHookSettings, Settings
 from cyborg_server.database import Database
 from cyborg_server.main import create_app
-from cyborg_core.models import (
+from cyborg_server.models import (
     JournalEntryType,
     ProjectCloseRequest,
     ProjectCreate,

@@ -64,7 +64,13 @@ class ContextBuilder(BaseService):
             scope
         )
 
-        # 6. Build the prompt-ready structure
+        # 6. Source project context (for derived projects)
+        source_context = await self._get_source_context(
+            project_id,
+            scope
+        )
+
+        # 7. Build the prompt-ready structure
         return self._assemble_context(
             core=core_context,
             tasks=task_context,
@@ -72,6 +78,7 @@ class ContextBuilder(BaseService):
             temporal=temporal_context,
             related=related_context,
             scope=scope,
+            sources=source_context,
         )
 
     async def _get_core_context(self, project_id: str) -> dict[str, Any]:
@@ -132,7 +139,7 @@ class ContextBuilder(BaseService):
                 t.metadata, t.parent_id, t.created_at, t.updated_at
             FROM tasks t
             INNER JOIN project_tasks pt ON pt.task_id = t.id
-            WHERE pt.project_id = ? AND t.deleted_at IS NULL
+            WHERE pt.project_id = ? AND t.deleted_at IS NULL AND t.status != 'deprecated'
             ORDER BY t.created_at
             """,
             (project_id,)
@@ -476,6 +483,47 @@ class ContextBuilder(BaseService):
             "notes": "Related context not yet implemented"
         }
 
+    async def _get_source_context(
+        self,
+        project_id: str,
+        scope: ContextScope
+    ) -> dict[str, Any]:
+        """Source project outputs for derived projects."""
+        try:
+            from cyborg_server.services.source_discovery_service import SourceDiscoveryService
+            discovery = SourceDiscoveryService(self.db)
+            sources = await discovery.get_sources(project_id)
+            if not sources:
+                return {}
+        except Exception:
+            return {}
+
+        if scope == ContextScope.MINIMAL:
+            return {
+                "source_projects": [
+                    {
+                        "id": str(s.source_project_id),
+                        "title": s.source_project_title,
+                        "relevance": s.relevance_reason,
+                    }
+                    for s in sources
+                ]
+            }
+
+        # STANDARD and above: include full output inventory
+        try:
+            return await discovery.get_derived_outputs_for_context(project_id)
+        except Exception:
+            return {
+                "source_projects": [
+                    {
+                        "id": str(s.source_project_id),
+                        "title": s.source_project_title,
+                    }
+                    for s in sources
+                ]
+            }
+
     def _assemble_context(
         self,
         core: dict[str, Any],
@@ -484,6 +532,7 @@ class ContextBuilder(BaseService):
         temporal: dict[str, Any],
         related: dict[str, Any],
         scope: ContextScope,
+        sources: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Assemble final context structure."""
 
@@ -495,6 +544,7 @@ class ContextBuilder(BaseService):
             "journal": journal,
             "temporal": temporal,
             "related": related,
+            "sources": sources or {},
             "metadata": {
                 "total_estimated_tokens": self._estimate_tokens(core, tasks, journal),
             },

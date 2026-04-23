@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from cyborg_core.config import Settings
+from cyborg_server.config import Settings
 
 
 def _clear_cyborg_env(monkeypatch, tmp_path: Path) -> None:

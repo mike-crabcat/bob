@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 
 from cyborg_server.database import Database
-from cyborg_core.models import SuccessCriterion, TaskStatus
+from cyborg_server.models import SuccessCriterion, TaskStatus
 from cyborg_server.services.base import utcnow
 from cyborg_server.services.project_execution_service import ProjectExecutionService
 from cyborg_server.services.project_autonomy_service import ProjectAutonomyService

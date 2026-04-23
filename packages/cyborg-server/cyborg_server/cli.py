@@ -17,8 +17,8 @@ from urllib.request import Request, urlopen
 import typer
 import uvicorn
 
-from cyborg.config import DEFAULT_HOST, DEFAULT_PORT, Settings
-from cyborg.main import create_app
+from cyborg_server.config import DEFAULT_HOST, DEFAULT_PORT, Settings
+from cyborg_server.main import create_app
 
 
 SERVICE_NAME = "cyborg.service"

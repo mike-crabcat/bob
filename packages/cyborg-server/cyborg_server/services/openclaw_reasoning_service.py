@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from cyborg_server.database import Database
-from cyborg_core.models import PlanStep, SuccessCriterion
+from cyborg_server.models import PlanStep, SuccessCriterion
 from cyborg_server.services.base import BaseService, json_loads
 from cyborg_server.services.context_builder import ContextBuilder, ContextScope
 from cyborg_server.services.prompt_history import log_prompt
@@ -26,7 +26,7 @@ def _get_structured_logger():
     """Lazy import structured logging helpers."""
     global _structured_logger
     if _structured_logger is None:
-        from cyborg_core.structured_logging import get_logger as _get_logger
+        from cyborg_server.structured_logging import get_logger as _get_logger
         _structured_logger = _get_logger(__name__)
     return _structured_logger
 
@@ -38,14 +38,7 @@ class OpenClawReasoningService(BaseService):
     Cyborg builds context → OpenClaw does reasoning → Cyborg parses result
     """
 
-    # Default timeouts for different reasoning types (seconds)
-    TIMEOUT_PLAN = 180
-    TIMEOUT_EVALUATION = 120
-    TIMEOUT_REFINEMENT = 180
-    TIMEOUT_LEARNING = 120
-    TIMEOUT_NEXT_ACTION = 180
-    TIMEOUT_REVIEW = 120
-    TIMEOUT_DEFAULT = 120
+    TIMEOUT_DEFAULT = 10800
 
     def __init__(self, db: Database):
         super().__init__(db)
@@ -73,24 +66,131 @@ class OpenClawReasoningService(BaseService):
         method: str | None = None,
         success_criteria: list[str] | None = None,
         reference_project_id: str | None = None,
+        source_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Ask OpenClaw to generate a project plan.
         """
 
         # Build minimal prompt
-        prompt = self._build_plan_prompt(aim, method, success_criteria)
+        prompt = self._build_plan_prompt(aim, method, success_criteria, source_context=source_context)
 
         # Call OpenClaw
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_PLAN,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="plan_generation",
             project_id=reference_project_id,
         )
 
         return self._parse_plan_response(response)
+
+    async def discover_sources(
+        self,
+        aim: str,
+        method: str | None,
+        closed_projects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Ask OpenClaw which closed projects are relevant sources for a new project.
+
+        Returns a list of dicts with keys: project_id, confidence, reason.
+        Fails gracefully — returns an empty list on error.
+        """
+        prompt = self._build_source_discovery_prompt(aim, method, closed_projects)
+
+        try:
+            response = await self._call_openclaw(
+                prompt=prompt,
+                response_format="json",
+                timeout=self.TIMEOUT_DEFAULT,
+                reasoning_type="source_discovery",
+            )
+            return self._parse_source_discovery_response(response)
+        except Exception as e:
+            logger.warning("Source discovery LLM call failed: %s", e)
+            return []
+
+    def _build_source_discovery_prompt(
+        self,
+        aim: str,
+        method: str | None,
+        closed_projects: list[dict[str, Any]],
+    ) -> str:
+        """Build prompt for source project discovery."""
+        parts = [
+            "You are a project planning assistant. A new project is being created.",
+            "Determine which completed projects could serve as useful sources.",
+            "",
+            f"New Project Aim: {aim}",
+        ]
+        if method:
+            parts.append(f"New Project Method: {method}")
+
+        parts.extend([
+            "",
+            "Completed Projects:",
+        ])
+
+        for p in closed_projects:
+            parts.append(f"  - ID: {p['id']}")
+            parts.append(f"    Title: {p['title']}")
+            if p.get("aim"):
+                parts.append(f"    Aim: {p['aim'][:200]}")
+            if p.get("method"):
+                parts.append(f"    Method: {p['method'][:100]}")
+            if p.get("conclusion"):
+                parts.append(f"    Conclusion: {p['conclusion'][:200]}")
+            parts.append(f"    Output files: {p.get('file_count', 0)}")
+            parts.append("")
+
+        parts.extend([
+            "Identify projects whose outputs (code, venv, scripts, reports, data) would be",
+            "useful as inputs for the new project. Consider:",
+            "- Does the new project need the same programming environment or tools?",
+            "- Can the new project build on top of code, scripts, or data from a completed one?",
+            "- Do the topics or domains overlap significantly?",
+            "",
+            "Only include high-confidence matches (confidence >= 0.7).",
+            "",
+            "Respond with valid JSON only:",
+            "{",
+            '  "matches": [',
+            '    {"project_id": "...", "confidence": 0.85, "reason": "brief explanation"},',
+            '    ...',
+            '  ]',
+            "}",
+        ])
+
+        return "\n".join(parts)
+
+    def _parse_source_discovery_response(self, response: str) -> list[dict[str, Any]]:
+        """Parse source discovery response."""
+        try:
+            data = self._load_json_payload(response)
+            if isinstance(data, dict) and "matches" in data:
+                matches = data["matches"]
+            elif isinstance(data, list):
+                matches = data
+            else:
+                return []
+
+            results = []
+            for m in matches:
+                if not isinstance(m, dict):
+                    continue
+                pid = str(m.get("project_id", ""))
+                confidence = float(m.get("confidence", 0))
+                if pid and confidence >= 0.7:
+                    results.append({
+                        "project_id": pid,
+                        "confidence": confidence,
+                        "reason": str(m.get("reason", "")),
+                    })
+            return results
+        except Exception as e:
+            logger.warning("Failed to parse source discovery response: %s", e)
+            return []
 
     async def evaluate_success_criteria(
         self,
@@ -114,7 +214,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_EVALUATION,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="criteria_evaluation",
             project_id=project_id,
         )
@@ -145,7 +245,7 @@ class OpenClawReasoningService(BaseService):
             response = await self._call_openclaw(
                 prompt=prompt,
                 response_format="json",
-                timeout=self.TIMEOUT_NEXT_ACTION,
+                timeout=self.TIMEOUT_DEFAULT,
                 reasoning_type="next_action",
                 project_id=project_id,
                 task_id=completed_task_id,
@@ -183,7 +283,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_REFINEMENT,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="strategy_refinement",
             project_id=project_id,
             task_id=trigger_task_id,
@@ -210,7 +310,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_LEARNING,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="learning_extraction",
             project_id=project_id,
         )
@@ -300,7 +400,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_EVALUATION,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="health_analysis",
             project_id=project_id,
         )
@@ -327,7 +427,7 @@ class OpenClawReasoningService(BaseService):
         response = await self._call_openclaw(
             prompt=prompt,
             response_format="json",
-            timeout=self.TIMEOUT_PLAN,
+            timeout=self.TIMEOUT_DEFAULT,
             reasoning_type="follow_up_generation",
             project_id=project_id,
         )
@@ -345,11 +445,13 @@ class OpenClawReasoningService(BaseService):
         allow_aim_changes: bool = False,
         allow_criteria_changes: bool = False,
         reference_project_id: str | None = None,
+        current_tasks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        """Ask OpenClaw to revise a rejected spec based on user feedback.
+        """Ask OpenClaw to revise a spec based on feedback.
 
-        Returns a dict with revised aim, method, success_criteria, and plan,
-        or None if revision fails.
+        Returns a dict with revised aim, method, success_criteria, plan,
+        and optionally deprecated_task_ids for tasks made obsolete by the revision.
+        Returns None if revision fails.
         """
         constraints = []
         if not allow_aim_changes:
@@ -369,8 +471,8 @@ class OpenClawReasoningService(BaseService):
             f"  {i}. {s.get('title', '?')}: {s.get('description', '')}" for i, s in enumerate(plan_steps)
         )
 
-        prompt = "\n".join([
-            "You are a project planning assistant. A spec was rejected. Revise it based on the feedback.",
+        parts = [
+            "You are a project planning assistant. Revise the spec based on the feedback below.",
             "",
             f"Current Aim: {aim}",
             f"Current Method: {method or 'Not specified'}",
@@ -380,26 +482,46 @@ class OpenClawReasoningService(BaseService):
             "",
             "Current Plan:",
             plan_lines or "  (none)",
+        ]
+
+        # Include current project tasks so reasoning can identify obsolete ones
+        if current_tasks:
+            parts.extend(["", "Current Project Tasks:"])
+            for t in current_tasks:
+                status = t.get("status", "?")
+                title = t.get("title", "Untitled")
+                result = f": {t['result'][:100]}" if t.get("result") else ""
+                parts.append(f'  - [{t["id"]}] [{status}] {title}{result}')
+
+        parts.extend([
             "",
-            f"Rejection Feedback: {feedback}",
+            f"Feedback: {feedback}",
             "",
             "Constraints:",
         ] + [f"  - {c}" for c in constraints] + [
+            "",
+            "Important: If the revised spec makes any existing tasks obsolete (e.g. the aim changed",
+            "direction, criteria were replaced, or the feedback requests a different approach), list",
+            "their IDs in deprecated_task_ids. Deprecated tasks will be excluded from future reasoning.",
+            "Do NOT deprecate tasks whose output is still relevant or could be built upon.",
             "",
             "Respond with valid JSON only:",
             "{",
             '  "aim": "revised aim (or original if unchanged)",',
             '  "method": "revised method",',
             '  "success_criteria": [{"check": "...", "description": "..."}],',
-            '  "plan": [{"order": 0, "title": "...", "description": "...", "criteria": "..."}]',
+            '  "plan": [{"order": 0, "title": "...", "description": "...", "criteria": "..."}],',
+            '  "deprecated_task_ids": ["task-id-1", "task-id-2"]',
             "}",
         ])
+
+        prompt = "\n".join(parts)
 
         try:
             response = await self._call_openclaw(
                 prompt=prompt,
                 response_format="json",
-                timeout=self.TIMEOUT_PLAN,
+                timeout=self.TIMEOUT_DEFAULT,
                 reasoning_type="spec_revision",
                 project_id=reference_project_id,
             )
@@ -423,7 +545,7 @@ class OpenClawReasoningService(BaseService):
 
         Uses a separate internal session for reasoning (not user-facing).
         """
-        from cyborg_core.structured_logging import log_reasoning_request
+        from cyborg_server.structured_logging import log_reasoning_request
 
         # Use a fresh session for each reasoning call
         if session_key:
@@ -449,7 +571,7 @@ class OpenClawReasoningService(BaseService):
             "message": prompt,
             "deliver": False,  # Not delivering to a user
             "sessionKey": reasoning_session,
-            "thinking": "low",
+            "thinking": "high",
             "timeout": timeout * 1000,
             "idempotencyKey": str(uuid4()),
         }
@@ -577,6 +699,7 @@ class OpenClawReasoningService(BaseService):
         aim: str,
         method: str | None,
         success_criteria: list[str] | None,
+        source_context: dict[str, Any] | None = None,
     ) -> str:
         """Build prompt for plan generation."""
 
@@ -594,6 +717,34 @@ class OpenClawReasoningService(BaseService):
             parts.append("Success Criteria:")
             for i, criterion in enumerate(success_criteria, 1):
                 parts.append(f"  {i}. {criterion}")
+
+        # Inject source project outputs if available
+        if source_context and source_context.get("source_projects"):
+            parts.append("")
+            parts.append("## Source Project Outputs Available")
+            parts.append("")
+            parts.append(
+                "This project is derived from completed projects whose outputs are available for reuse."
+            )
+            for sp in source_context["source_projects"]:
+                parts.append("")
+                parts.append(f"### Source: {sp.get('title', 'Unknown')}")
+                if sp.get("aim"):
+                    parts.append(f"Aim: {sp['aim']}")
+                if sp.get("conclusion"):
+                    parts.append(f"Conclusion: {sp['conclusion']}")
+                if sp.get("relevance_reason"):
+                    parts.append(f"Relevance: {sp['relevance_reason']}")
+                outputs = sp.get("outputs", [])
+                if outputs:
+                    parts.append("")
+                    parts.append("Available Outputs:")
+                    for out in outputs:
+                        parts.append(f"  - {out['type']}: {out['path']}" + (f" ({out['description']})" if out.get("description") else ""))
+                parts.append("")
+            parts.append("Consider how to best leverage these existing resources in the execution plan.")
+            parts.append("Reference outputs by their absolute path in the plan steps where relevant.")
+            parts.append("")
 
         parts.extend([
             "",

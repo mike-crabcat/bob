@@ -3,11 +3,10 @@
 from pathlib import Path
 from uuid import uuid4
 
-import cyborg_core
 import pytest_asyncio
 from cyborg_server.database import Database
 
-SCHEMA_DIR = Path(cyborg_core.__file__).parent / "schemas"
+SCHEMA_DIR = Path(__file__).parent.parent / "packages" / "cyborg-server" / "cyborg_server" / "schemas"
 
 
 @pytest_asyncio.fixture

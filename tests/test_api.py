@@ -15,11 +15,11 @@ import cyborg_server.services.calendar_service as calendar_service_module
 import cyborg_server.services.notification_service as notification_service_module
 import cyborg_server.services.openclaw_hook_service as openclaw_hook_service_module
 import cyborg_server.services.task_service as task_service_module
-from cyborg_core.config import OpenClawHookSettings, Settings
+from cyborg_server.config import OpenClawHookSettings, Settings
 from cyborg_server.database import Database
-from cyborg_core.exceptions import ConflictError, NotFoundError
+from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.main import create_app
-from cyborg_core.models import ProjectSpecApproveRequest
+from cyborg_server.models import ProjectSpecApproveRequest
 from cyborg_server.services.project_spec_service import ProjectSpecService
 from cyborg_server.services.session_route_service import SessionRouteService
 from cyborg_server.services.task_service import TaskService

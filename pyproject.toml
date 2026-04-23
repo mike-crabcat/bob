@@ -4,9 +4,7 @@ version = "0.0.0"
 description = "Development workspace for Cyborg packages"
 requires-python = ">=3.12"
 dependencies = [
-  "cyborg-core",
   "cyborg-server",
-  "cyborg-cli",
 ]
 
 [project.optional-dependencies]
@@ -15,9 +13,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-cyborg-core = { path = "packages/cyborg-core" }
 cyborg-server = { path = "packages/cyborg-server" }
-cyborg-cli = { path = "packages/cyborg-cli" }
 
 [tool.hatch.build.targets.wheel]
 packages = []

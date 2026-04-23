@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from cyborg_server.database import Database
 from cyborg_server.dependencies import get_database
-from cyborg_core.models import JournalEntryType
+from cyborg_server.models import JournalEntryType
 from cyborg_server.services.base import utcnow
 from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
 from cyborg_server.services.project_service import ProjectService

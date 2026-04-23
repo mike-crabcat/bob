@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from fastapi import Depends, Request
 
-from cyborg_core.config import Settings
+from cyborg_server.config import Settings
 from cyborg_server.database import Database
-from cyborg_core.exceptions import ForbiddenError
+from cyborg_server.exceptions import ForbiddenError
 from cyborg_server.services.calendar_service import CalendarService
 from cyborg_server.services.notification_service import NotificationService
 from cyborg_server.services.project_execution_service import ProjectExecutionService
+from cyborg_server.services.source_discovery_service import SourceDiscoveryService
 from cyborg_server.services.project_spec_service import ProjectSpecService
 from cyborg_server.services.project_service import ProjectService
 from cyborg_server.services.session_route_service import SessionRouteService
@@ -76,3 +77,8 @@ def get_project_execution_service(database: Database = Depends(get_database)) ->
     """Build a project execution service for the current request."""
 
     return ProjectExecutionService(database)
+
+def get_source_discovery_service(database: Database = Depends(get_database)) -> SourceDiscoveryService:
+    """Build a source discovery service for the current request."""
+
+    return SourceDiscoveryService(database)

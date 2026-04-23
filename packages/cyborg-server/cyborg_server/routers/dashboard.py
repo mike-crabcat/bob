@@ -12,16 +12,17 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from jinja2 import FileSystemLoader
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 
-from cyborg_core.config import Settings
+from cyborg_server.config import Settings
 from cyborg_server.database import Database
 from cyborg_server.dependencies import get_database
-from cyborg_core.models import ProjectState, TaskStatus
+from cyborg_server.models import ProjectState, TaskStatus
 
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -47,14 +48,16 @@ async def _get_project_id_for_task(db: Database, task_id: str) -> str | None:
     return row["project_id"] if row else None
 
 
-def _approval_review_href(approval_type: str | None, entity_id: str | None) -> str | None:
+def _approval_review_href(approval_type: str | None, entity_id: str | None, metadata: dict | None = None) -> str | None:
     """Return the best dashboard review link for an approval item."""
     if not entity_id:
         return None
     if approval_type in {"project_plan", "strategy_refinement", "follow_up_tasks"}:
         return f"/dashboard/projects/{entity_id}"
     if approval_type == "task_input":
-        # Link to the parent project for context
+        # For project-level blocks, entity_id IS the project_id
+        if metadata and metadata.get("entity_kind") == "project":
+            return f"/dashboard/projects/{entity_id}"
         return None  # Task input is handled inline in the approvals queue
     return None
 
@@ -552,7 +555,7 @@ async def project_detail(
         short = t["id"].replace("-", "")[:8]
         task_id_map[short] = t["title"]
 
-    scanned_files = _scan_project_files(project_path, task_id_map=task_id_map)
+    scanned_files = _scan_project_files(project_path, task_id_map=task_id_map, task_file_limit=3, category_file_limit=10)
     file_categories = _group_files_by_category(scanned_files)
 
     # Get specs for this project
@@ -624,6 +627,52 @@ async def delete_project(
     )
 
 
+@router.get("/projects/{project_id}/task-files/{task_short_id}")
+async def dashboard_task_files_api(
+    project_id: str,
+    task_short_id: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Return files for a specific task within a project as JSON."""
+    from fastapi.responses import JSONResponse
+    from cyborg_server.services.project_service import ProjectService
+
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+    if not project_path:
+        return JSONResponse(content={"files": []}, status_code=404)
+
+    scanned = _scan_project_files(project_path)
+    task_files = [
+        f for f in scanned
+        if f.get("task_short_id") == task_short_id
+    ]
+    return JSONResponse(content={"files": task_files})
+
+
+@router.get("/projects/{project_id}/category-files/{category}")
+async def dashboard_category_files_api(
+    project_id: str,
+    category: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Return files for a specific category within a project as JSON."""
+    from fastapi.responses import JSONResponse
+    from cyborg_server.services.project_service import ProjectService
+
+    project_service = ProjectService(db)
+    project_path = await project_service.get_project_path(project_id)
+    if not project_path:
+        return JSONResponse(content={"files": []}, status_code=404)
+
+    scanned = _scan_project_files(project_path)
+    cat_files = [
+        f for f in scanned
+        if f.get("category") == category and "task_short_id" not in f
+    ]
+    return JSONResponse(content={"files": cat_files})
+
+
 @router.post("/projects/{project_id}/pause")
 async def dashboard_pause_project(
     project_id: str,
@@ -650,6 +699,61 @@ async def dashboard_resume_project(
     project_service = ProjectService(db)
     await project_service.resume_project(project_id)
     background_tasks.add_task(project_service.resume_project_reasoning, project_id)
+    return Response(
+        status_code=303,
+        headers={"Location": f"/dashboard/projects/{project_id}"},
+    )
+
+
+@router.post("/projects/{project_id}/revise-spec")
+async def dashboard_revise_spec(
+    project_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Submit revision guidance for a paused/closed project spec and trigger reasoning."""
+    from cyborg_server.services.project_spec_service import ProjectSpecService
+
+    form = await request.form()
+    feedback = str(form.get("feedback", "")).strip()
+    allow_aim = form.get("allow_aim_changes") is not None
+    allow_criteria = form.get("allow_criteria_changes") is not None
+
+    if not feedback:
+        return Response(content="Feedback is required", status_code=400)
+
+    spec_service = ProjectSpecService(db)
+
+    # Transition to PLANNING synchronously so the user sees immediate feedback
+    project = await db.fetch_one(
+        "SELECT state FROM projects WHERE id = ? AND deleted_at IS NULL",
+        (project_id,),
+    )
+    if project and project["state"] in ("closed", "paused"):
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "UPDATE projects SET state = 'planning', closed_at = NULL, conclusion = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (now, project_id),
+        )
+        await db.execute(
+            "INSERT INTO project_journal_entries (id, project_id, entry_type, content, created_at, metadata) VALUES (?, ?, 'note', ?, ?, ?)",
+            (str(uuid4()), project_id, f"Spec revision requested: {feedback[:200]}", now, "{}"),
+        )
+
+    async def _run_revision():
+        try:
+            await spec_service.revise_spec_after_rejection(
+                project_id,
+                feedback,
+                allow_aim_changes=allow_aim,
+                allow_criteria_changes=allow_criteria,
+            )
+        except Exception:
+            pass  # Revision failure is okay — user can retry
+
+    background_tasks.add_task(_run_revision)
+
     return Response(
         status_code=303,
         headers={"Location": f"/dashboard/projects/{project_id}"},
@@ -924,8 +1028,19 @@ async def approvals(
 
         # Resolve project_id for task_input approvals to build media URLs
         project_id = None
+        approval_metadata = None
+        if a.get("metadata"):
+            try:
+                approval_metadata = json.loads(a["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         if a["approval_type"] == "task_input" and a.get("entity_id"):
-            project_id = await _get_project_id_for_task(db, a["entity_id"])
+            # For project-level blocks, entity_id IS the project_id
+            if approval_metadata and approval_metadata.get("entity_kind") == "project":
+                project_id = a["entity_id"]
+            else:
+                project_id = await _get_project_id_for_task(db, a["entity_id"])
 
         # Prefix media paths with full dashboard URLs
         if input_schema and project_id and input_schema.get("type") == "multi_choice":
@@ -949,7 +1064,7 @@ async def approvals(
             "proposal_preview": proposal_preview,
             "input_schema": input_schema,
             "project_id": project_id,
-            "review_href": _approval_review_href(a["approval_type"], a.get("entity_id")),
+            "review_href": _approval_review_href(a["approval_type"], a.get("entity_id"), approval_metadata),
         })
 
     return _render_template(
@@ -987,7 +1102,7 @@ async def approve_approval(
     # If this is a project_plan approval, invoke the spec approval service
     if approval_type == "project_plan" and entity_id:
         from cyborg_server.services.project_spec_service import ProjectSpecService
-        from cyborg_core.models import ProjectSpecApproveRequest
+        from cyborg_server.models import ProjectSpecApproveRequest
 
         spec_service = ProjectSpecService(db)
         pending_spec = await db.fetch_one(
@@ -1003,7 +1118,7 @@ async def approve_approval(
             await spec_service.approve_spec(str(pending_spec["id"]), approve_payload)
         else:
             # Spec already approved (e.g. re-approving after a reset) — just trigger execution
-            from cyborg_core.models import ProjectState
+            from cyborg_server.models import ProjectState
             project = await db.fetch_one(
                 "SELECT state FROM projects WHERE id = ? AND deleted_at IS NULL",
                 (entity_id,),
@@ -1015,23 +1130,51 @@ async def approve_approval(
             ):
                 from cyborg_server.services.project_execution_service import ProjectExecutionService
                 execution_service = ProjectExecutionService(db)
-                if project["state"] in (ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
+                if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
                     await execution_service.cleanup_old_plan_tasks(entity_id)
                 await execution_service.start_project_execution(entity_id)
 
-    # If this is a task_input approval, unblock the task
+    # If this is a task_input approval, unblock the entity
     if approval_type == "task_input" and entity_id:
-        from cyborg_server.services.task_service import TaskService
-        from cyborg_core.models import TaskUnblockRequest
+        approval_metadata = json.loads(approval.get("metadata") or "{}")
+        is_project_block = approval_metadata.get("entity_kind") == "project"
 
-        task_service = TaskService(db)
-        try:
-            await task_service.unblock_task(
+        if is_project_block:
+            # Resume the blocked project
+            from cyborg_server.services.project_service import ProjectService
+            from cyborg_server.services.project_execution_service import ProjectExecutionService
+            from cyborg_server.models import JournalEntryType
+
+            # Add journal entry so reasoning knows the project was unblocked by user
+            execution_service = ProjectExecutionService(db)
+            await execution_service._add_journal_entry(
                 entity_id,
-                TaskUnblockRequest(notes="Unblocked via dashboard"),
+                JournalEntryType.DECISION,
+                f"User approved project block (resuming). Block reason: {approval.get('description', '')}",
+                {"action": "block_approved", "approval_id": approval_id},
             )
-        except Exception:
-            pass
+
+            project_service = ProjectService(db)
+            try:
+                await project_service.resume_project(entity_id)
+                try:
+                    await project_service.resume_project_reasoning(entity_id, resumed_from_block=True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            from cyborg_server.services.task_service import TaskService
+            from cyborg_server.models import TaskUnblockRequest
+
+            task_service = TaskService(db)
+            try:
+                await task_service.unblock_task(
+                    entity_id,
+                    TaskUnblockRequest(notes="Unblocked via dashboard"),
+                )
+            except Exception:
+                pass
 
     await db.execute(
         """
@@ -1072,7 +1215,7 @@ async def reject_approval(
     # If this is a project_plan approval, invoke the spec reject service
     if approval_type == "project_plan" and entity_id:
         from cyborg_server.services.project_spec_service import ProjectSpecService
-        from cyborg_core.models import ProjectSpecRejectRequest
+        from cyborg_server.models import ProjectSpecRejectRequest
 
         spec_service = ProjectSpecService(db)
         pending_spec = await db.fetch_one(
@@ -1087,19 +1230,34 @@ async def reject_approval(
             reject_payload = ProjectSpecRejectRequest(feedback="Rejected via dashboard")
             await spec_service.reject_spec(str(pending_spec["id"]), reject_payload)
 
-    # If this is a task_input approval, unblock the task with a declined note
+    # If this is a task_input approval, handle based on entity kind
     if approval_type == "task_input" and entity_id:
-        from cyborg_server.services.task_service import TaskService
-        from cyborg_core.models import TaskUnblockRequest
+        approval_metadata = json.loads(approval.get("metadata") or "{}")
+        is_project_block = approval_metadata.get("entity_kind") == "project"
 
-        task_service = TaskService(db)
-        try:
-            await task_service.unblock_task(
-                entity_id,
-                TaskUnblockRequest(notes="User declined to provide input via dashboard"),
-            )
-        except Exception:
-            pass
+        if is_project_block:
+            from cyborg_server.services.project_service import ProjectService
+
+            project_service = ProjectService(db)
+            try:
+                await project_service.close_project(
+                    entity_id,
+                    conclusion="User declined to provide input via dashboard",
+                )
+            except Exception:
+                pass
+        else:
+            from cyborg_server.services.task_service import TaskService
+            from cyborg_server.models import TaskUnblockRequest
+
+            task_service = TaskService(db)
+            try:
+                await task_service.unblock_task(
+                    entity_id,
+                    TaskUnblockRequest(notes="User declined to provide input via dashboard"),
+                )
+            except Exception:
+                pass
 
     await db.execute(
         """
@@ -1124,7 +1282,7 @@ async def reject_and_revise_spec(
     db: Database = Depends(get_database),
 ) -> Response:
     """Reject a spec with feedback and trigger revision reasoning in the background."""
-    from cyborg_core.models import ProjectSpecRejectRequest
+    from cyborg_server.models import ProjectSpecRejectRequest
     from cyborg_server.services.project_spec_service import ProjectSpecService
 
     form = await request.form()
@@ -1230,29 +1388,59 @@ async def resolve_task_input(
         (response_json, now_iso, approval_id),
     )
 
-    # Unblock the task with the user's input
-    from cyborg_server.services.task_service import TaskService
-    from cyborg_core.models import TaskUnblockRequest
+    # Unblock the entity with the user's input
+    approval_metadata = json.loads(approval.get("metadata") or "{}")
+    is_project_block = approval_metadata.get("entity_kind") == "project"
 
-    task_service = TaskService(db)
     response_summary = response_value if isinstance(response_value, str) else ", ".join(response_value)
-    await task_service.unblock_task(
-        entity_id,
-        TaskUnblockRequest(notes=f"User input received: {response_summary}"),
-    )
 
-    # Dispatch input response notification to the task session
-    try:
-        from cyborg_server.services.notification_service import NotificationService
-        notification_service = NotificationService(db)
-        await notification_service.create_task_input_response_notification(
+    if is_project_block:
+        # Unblock the project and feed user response into reasoning
+        from cyborg_server.services.project_service import ProjectService
+        from cyborg_server.services.project_execution_service import ProjectExecutionService
+        from cyborg_server.models import JournalEntryType
+
+        # Add journal entry with user's response so reasoning can use it
+        execution_service = ProjectExecutionService(db)
+        await execution_service._add_journal_entry(
             entity_id,
-            response_value if isinstance(response_value, list) else response_value.strip(),
-            input_prompt,
-            approval_id,
+            JournalEntryType.DECISION,
+            f"User response to block: {response_summary}",
+            {"user_response": response_summary, "approval_id": approval_id},
         )
-    except Exception:
-        logger.exception("Failed to dispatch task_input_response notification for approval %s", approval_id)
+
+        project_service = ProjectService(db)
+        try:
+            await project_service.resume_project(entity_id)
+        except Exception:
+            pass
+        try:
+            await project_service.resume_project_reasoning(entity_id, resumed_from_block=True)
+        except Exception:
+            pass
+    else:
+        # Unblock the task with the user's input
+        from cyborg_server.services.task_service import TaskService
+        from cyborg_server.models import TaskUnblockRequest
+
+        task_service = TaskService(db)
+        await task_service.unblock_task(
+            entity_id,
+            TaskUnblockRequest(notes=f"User input received: {response_summary}"),
+        )
+
+        # Dispatch input response notification to the task session
+        try:
+            from cyborg_server.services.notification_service import NotificationService
+            notification_service = NotificationService(db)
+            await notification_service.create_task_input_response_notification(
+                entity_id,
+                response_value if isinstance(response_value, list) else response_value.strip(),
+                input_prompt,
+                approval_id,
+            )
+        except Exception:
+            logger.exception("Failed to dispatch task_input_response notification for approval %s", approval_id)
 
     # Return empty fragment to remove the row
     return Response(content="", status_code=200)
@@ -1748,15 +1936,23 @@ def _file_icon(filename: str) -> str:
     return icons.get(ext, "\U0001f4ce")
 
 
-_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache"}
+_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".mypy_cache"}
 
 
 def _scan_project_files(
     project_path: Path,
     *,
     task_id_map: dict[str, str] | None = None,
+    task_file_limit: int = 0,
+    category_file_limit: int = 0,
 ) -> list[dict[str, Any]]:
-    """Scan the project workspace for files, returning entries for the template."""
+    """Scan the project workspace for files, returning entries for the template.
+
+    Args:
+        task_file_limit: If > 0, cap task files to this many per task.
+        category_file_limit: If > 0, cap non-task files to this many per category.
+            Both limits attach a ``_file_count`` field with the true total.
+    """
     from pathlib import Path as _Path
 
     workspace_root = project_path.resolve()
@@ -1764,6 +1960,8 @@ def _scan_project_files(
         return []
 
     files: list[dict[str, Any]] = []
+    task_file_counts: dict[str, int] = {}
+    cat_file_counts: dict[str, int] = {}
     for child in sorted(workspace_root.rglob("*")):
         if not child.is_file():
             continue
@@ -1784,13 +1982,38 @@ def _scan_project_files(
         }
 
         # Annotate task files with their task title
+        is_task_file = False
         if category == "tasks" and len(rel_parts) >= 3 and task_id_map:
             short_id = rel_parts[1]
             if short_id in task_id_map:
                 entry["task_short_id"] = short_id
                 entry["task_title"] = task_id_map[short_id]
+                is_task_file = True
+
+                if task_file_limit > 0:
+                    task_file_counts[short_id] = task_file_counts.get(short_id, 0) + 1
+                    if task_file_counts[short_id] > task_file_limit:
+                        continue
+
+        # Cap non-task files per category
+        if not is_task_file and category_file_limit > 0:
+            cat_file_counts[category] = cat_file_counts.get(category, 0) + 1
+            if cat_file_counts[category] > category_file_limit:
+                continue
 
         files.append(entry)
+
+    # Attach true counts so templates know whether to show "show all"
+    if task_file_limit > 0:
+        for f in files:
+            tid = f.get("task_short_id")
+            if tid and tid in task_file_counts:
+                f["task_file_count"] = task_file_counts[tid]
+    if category_file_limit > 0:
+        for f in files:
+            cat = f.get("category")
+            if cat and cat in cat_file_counts and "task_short_id" not in f:
+                f["category_file_count"] = cat_file_counts[cat]
 
     return files
 

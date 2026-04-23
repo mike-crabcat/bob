@@ -12,15 +12,13 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-import cyborg_core
-
-from cyborg_core import __version__
-from cyborg_core.config import Settings
+from cyborg_server import __version__
+from cyborg_server.config import Settings
 from cyborg_server.database import Database
-from cyborg_core.exceptions import ServiceError
-from cyborg_core.models import HealthResponse
+from cyborg_server.exceptions import ServiceError
+from cyborg_server.models import HealthResponse
 from cyborg_server.routers import calendars, contacts, context, dashboard, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks
-from cyborg_core.structured_logging import configure_logging, CorrelationIdMiddleware
+from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resolved_settings.ensure_directories()
         database = Database(
             db_path=resolved_settings.db_path,
-            schema_dir=Path(cyborg_core.__file__).parent / "schemas",
+            schema_dir=Path(__file__).parent / "schemas",
             pool_size=resolved_settings.pool_size,
         )
         await database.connect()
@@ -47,7 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.db = database
 
         # Attach database log handler for structured logging
-        from cyborg_core.structured_logging import attach_database_handler
+        from cyborg_server.structured_logging import attach_database_handler
         attach_database_handler(database)
 
         stop_event = asyncio.Event()
@@ -147,7 +145,7 @@ async def _heartbeat_loop(database: Database, *, interval_seconds: float, stop_e
 
 async def _check_blocked_projects(database: Database, notification_service: NotificationService) -> None:
     """Find blocked projects missing notifications and raise one."""
-    from cyborg_core.models import ProjectState
+    from cyborg_server.models import ProjectState
 
     blocked = await database.fetch_all(
         """SELECT id FROM projects

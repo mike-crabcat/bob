@@ -113,7 +113,7 @@ class WebhookService(BaseService):
         if self._cyborg_service_url is not None:
             return self._cyborg_service_url
         # Try to get from database settings
-        from cyborg_core.config import Settings
+        from cyborg_server.config import Settings
         settings = getattr(self.db, "settings", None)
         if isinstance(settings, Settings):
             return settings.resolved_public_url

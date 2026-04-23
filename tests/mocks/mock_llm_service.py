@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from cyborg_server.database import Database
-from cyborg_core.models import ProjectState, TaskStatus
+from cyborg_server.models import ProjectState, TaskStatus
 from cyborg_server.services.base import utcnow
 
 

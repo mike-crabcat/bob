@@ -105,7 +105,7 @@ class TestReasoningServiceLogging:
         from cyborg_server.services.project_service import ProjectService
         from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
         from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-        from cyborg_core.models import ProjectCreate, SuccessCriterion
+        from cyborg_server.models import ProjectCreate, SuccessCriterion
 
         project_service = ProjectService(db)
         project = await project_service.create_project(ProjectCreate(
@@ -176,7 +176,7 @@ class TestHookServiceLogging:
     async def test_task_assignment_logs_prompt(self, db: Database):
         from cyborg_server.services.openclaw_hook_service import OpenClawHookService
         from cyborg_server.services.session_route_service import SessionRouteService
-        from cyborg_core.models import NotificationType
+        from cyborg_server.models import NotificationType
 
         routing = SessionRouteService(db)
         hook = OpenClawHookService(db, routing_service=routing)

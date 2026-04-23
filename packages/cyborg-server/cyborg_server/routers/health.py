@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from cyborg_server.database import Database
 from cyborg_server.dependencies import get_database
-from cyborg_core.models import ProjectState
+from cyborg_server.models import ProjectState
 from cyborg_server.services.health_monitor_service import HealthMonitorService
 
 

@@ -8,8 +8,8 @@ from uuid import uuid4
 from aiosqlite import Connection
 
 from cyborg_server.database import Database
-from cyborg_core.exceptions import NotFoundError
-from cyborg_core.models import (
+from cyborg_server.exceptions import NotFoundError
+from cyborg_server.models import (
     CalendarCreate,
     CalendarResponse,
     CalendarUpdate,

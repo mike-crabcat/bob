@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from cyborg_server.database import Database
 from cyborg_server.dependencies import get_database
-from cyborg_core.models import ContactCreate, ContactResponse, ContactUpdate
+from cyborg_server.models import ContactCreate, ContactResponse, ContactUpdate
 
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])

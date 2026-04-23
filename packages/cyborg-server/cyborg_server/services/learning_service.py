@@ -7,7 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from cyborg_server.database import Database
-from cyborg_core.models import ProjectState
+from cyborg_server.models import ProjectState
 from cyborg_server.services.base import BaseService, utcnow
 from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
 

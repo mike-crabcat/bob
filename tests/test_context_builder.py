@@ -2,7 +2,7 @@
 
 import pytest
 import pytest_asyncio
-from cyborg_core.models import PlanStep, ProjectCreate, SuccessCriterion, TaskCreate
+from cyborg_server.models import PlanStep, ProjectCreate, SuccessCriterion, TaskCreate
 from cyborg_server.services.context_builder import ContextBuilder, ContextScope
 from cyborg_server.database import Database
 
@@ -356,7 +356,7 @@ async def test_plan_summarization(db: Database):
 @pytest.mark.asyncio
 async def test_duration_calculation(db: Database):
     """Test project duration calculation."""
-    from cyborg_core.models import ProjectSpecApproveRequest
+    from cyborg_server.models import ProjectSpecApproveRequest
     from cyborg_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
