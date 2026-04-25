@@ -1187,16 +1187,15 @@ class TaskService(BaseService):
         # Compute the relative path under the project workspace
         relative_path = f"tasks/{task_id.replace('-', '')[:8]}/{payload.filename}"
 
-        # Determine size if possible
-        size_bytes: int | None = None
-        try:
-            output_directory = await self._compute_output_directory(task_id)
-            if output_directory:
-                full_path = Path(output_directory) / payload.filename
-                if full_path.exists():
-                    size_bytes = full_path.stat().st_size
-        except Exception:
-            pass
+        # Validate file exists on disk and determine size
+        output_directory = await self._compute_output_directory(task_id)
+        if output_directory:
+            full_path = Path(output_directory) / payload.filename
+            if not full_path.exists():
+                raise ConflictError(f"File '{payload.filename}' does not exist on disk at {full_path}")
+            size_bytes = full_path.stat().st_size
+        else:
+            size_bytes = None
 
         file_id = str(uuid4())
         await self.db.execute(

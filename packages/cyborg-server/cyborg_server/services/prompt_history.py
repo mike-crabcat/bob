@@ -25,6 +25,7 @@ PROMPT_CATEGORIES = frozenset({
     "task_retry",
     "task_tap",
     "task_input_response",
+    "source_discovery",
 })
 
 

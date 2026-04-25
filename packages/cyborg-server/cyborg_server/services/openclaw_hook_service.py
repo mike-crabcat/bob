@@ -221,8 +221,12 @@ class OpenClawHookService(BaseService):
 
     async def dispatch_notification(self, notification: dict[str, Any]) -> None:
         is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
-        route = await self.routing_service.resolve_notification_route(notification.get("metadata", {}))
+        metadata = notification.get("metadata", {})
+        route = await self.routing_service.resolve_notification_route(metadata)
         if route is None:
+            if metadata.get("auto_created_by_project"):
+                self.logger.info("Skipping notification for auto-created task — no delivery route available")
+                return
             raise ValueError("No delivery route could be resolved for the notification")
 
         route_data = route.model_dump(mode="json")
@@ -237,7 +241,6 @@ class OpenClawHookService(BaseService):
         # Task assignments and plan approvals use the agent method with detailed prompt
         if self._should_use_task_assignment_agent(notification, delivery_session_key):
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="task_assignment",
@@ -257,7 +260,6 @@ class OpenClawHookService(BaseService):
         if notification.get("notification_type") == "needs_input":
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="needs_input",
@@ -277,7 +279,6 @@ class OpenClawHookService(BaseService):
         if notification.get("notification_type") == NotificationType.TASK_RETRY.value:
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="task_retry",
@@ -297,7 +298,6 @@ class OpenClawHookService(BaseService):
         if notification.get("notification_type") == NotificationType.TASK_INPUT_RESPONSE.value:
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="task_input_response",
@@ -317,7 +317,6 @@ class OpenClawHookService(BaseService):
         if notification.get("notification_type") == NotificationType.TASK_TAP.value:
             session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="task_tap",
@@ -336,11 +335,10 @@ class OpenClawHookService(BaseService):
         # Submission review notifications use a fresh session for unbiased review
         if notification.get("notification_type") == NotificationType.SUBMISSION_REVIEW.value:
             # Derive a fresh review session key (not the task's execution session)
-            task_id = notification.get("metadata", {}).get("task_id") or notification.get("entity_id", "")
+            task_id = metadata.get("task_id") or notification.get("entity_id", "")
             from cyborg_server.services.project_service import short_task_id
             review_session_key = f"cyborg:review:{short_task_id(task_id)}"
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="submission_review",
@@ -359,10 +357,9 @@ class OpenClawHookService(BaseService):
         # Next-action prompts use a fresh reasoning session (not the source channel)
         if notification.get("notification_type") == NotificationType.NEXT_ACTION.value:
             from cyborg_server.services.project_service import short_task_id
-            project_id = notification.get("metadata", {}).get("project_id", "")
+            project_id = metadata.get("project_id", "")
             next_action_session_key = f"cyborg:next-action:{short_task_id(project_id)}"
             if not is_retry:
-                metadata = notification.get("metadata", {})
                 await log_prompt(
                     self.db,
                     category="next_action",
@@ -381,7 +378,6 @@ class OpenClawHookService(BaseService):
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
         if not is_retry:
-            metadata = notification.get("metadata", {})
             await log_prompt(
                 self.db,
                 category="notification",
