@@ -493,6 +493,19 @@ class ProjectExecutionService(BaseService):
         if not completed_task_info:
             completed_task_info = f"Task ID: {completed_task_id} (details not available)"
 
+        # Extract user response from journal when resuming from a block
+        user_response_text = None
+        if resumed_from_block:
+            for entry in reversed(journal):
+                entry_meta = json_loads(entry.get("metadata"), {})
+                if entry_meta.get("user_response"):
+                    user_response_text = entry_meta["user_response"]
+                    break
+                if "User response to block:" in entry.get("content", ""):
+                    content = entry["content"]
+                    user_response_text = content.split("User response to block:", 1)[-1].strip()
+                    break
+
         if resumed_from_block:
             parts = [
                 "You are managing an autonomous project that was previously blocked waiting for user input.",
@@ -501,11 +514,19 @@ class ProjectExecutionService(BaseService):
                 "**IMPORTANT:** The user chose to approve the block (not reject it), meaning they want",
                 "the project to continue. Do NOT block the project again unless there is a genuinely",
                 "new reason that did not exist before. Prefer create_task or close_project.",
+            ]
+            if user_response_text:
+                parts.extend([
+                    "",
+                    "## User's Response",
+                    user_response_text,
+                ])
+            parts.extend([
                 "",
                 "## Project",
                 f"Title: {project['title']}",
                 f"Aim: {project.get('aim', 'N/A')}",
-            ]
+            ])
         else:
             parts = [
                 "You are managing an autonomous project. A task has just completed.",
