@@ -1292,9 +1292,11 @@ class EmailSendRequest(CyborgModel):
     text: str = Field(min_length=1)
     html: str | None = None
     cc: list[str] | None = None
+    agenda: str | None = None
 
 
 class EmailReplyRequest(CyborgModel):
+    message_id: str = Field(min_length=1)
     text: str = Field(min_length=1)
     html: str | None = None
     reply_all: bool = False

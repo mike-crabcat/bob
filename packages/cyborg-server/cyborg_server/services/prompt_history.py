@@ -26,6 +26,8 @@ PROMPT_CATEGORIES = frozenset({
     "task_tap",
     "task_input_response",
     "source_discovery",
+    "email_agenda",
+    "email_context",
 })
 
 

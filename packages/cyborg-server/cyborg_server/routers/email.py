@@ -182,6 +182,12 @@ async def send_email(
     """Send a new email from a registered inbox."""
     from cyborg_server.config import Settings
     from cyborg_server.services.agentmail_client import AgentMailClient
+    from cyborg_server.services.email_polling_service import (
+        CUSTOM_AGENDA_TEMPLATE,
+        DEFAULT_AGENDA,
+        resolve_or_create_email_thread,
+    )
+    from cyborg_server.services.openclaw_hook_service import OpenClawHookService
 
     inbox = await database.fetch_one(
         "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
@@ -194,6 +200,7 @@ async def send_email(
     if not isinstance(settings, Settings):
         settings = Settings.from_env()
 
+    # Send via AgentMail
     async with AgentMailClient(
         base_url=settings.agentmail.base_url,
         api_key=settings.agentmail.api_key,
@@ -206,13 +213,138 @@ async def send_email(
             html=payload.html,
             cc=payload.cc,
         )
+
+    agentmail_message_id = result.get("message_id", "")
+    agentmail_thread_id = result.get("thread_id", "")
+
+    if not agentmail_thread_id:
+        return result
+
+    # Look up contact from recipient
+    contact_id = None
+    recipient_email = payload.to if isinstance(payload.to, str) else (payload.to[0] if payload.to else "")
+    if recipient_email:
+        contact = await database.fetch_one(
+            "SELECT id FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
+            (recipient_email,),
+        )
+        if contact:
+            contact_id = contact["id"]
+
+    # Create thread + session route (or find existing)
+    thread, is_new_thread = await resolve_or_create_email_thread(
+        database,
+        inbox=inbox,
+        agentmail_thread_id=agentmail_thread_id,
+        subject=payload.subject,
+        contact_id=contact_id,
+        agenda=payload.agenda,
+    )
+
+    # Store outgoing message record
+    now = utcnow()
+    message_id = str(uuid4())
+    await database.execute(
+        """
+        INSERT INTO email_messages (
+            id, inbox_id, agentmail_message_id, thread_id,
+            subject, sender_email, sender_name,
+            to_addresses, cc_addresses,
+            text_body, html_body, preview, labels,
+            has_attachments, in_reply_to,
+            message_timestamp, processed_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            message_id,
+            inbox["id"],
+            agentmail_message_id,
+            agentmail_thread_id,
+            payload.subject,
+            inbox["email_address"],
+            inbox["display_name"],
+            json_dumps([payload.to] if isinstance(payload.to, str) else payload.to),
+            json_dumps(payload.cc or []),
+            payload.text,
+            payload.html,
+            payload.text[:200] if payload.text else None,
+            json_dumps(["sent"]),
+            0,
+            None,
+            now.isoformat(),
+            now.isoformat(),
+            now.isoformat(),
+        ),
+    )
+
+    # Update thread message count
+    await database.execute(
+        """
+        UPDATE email_threads
+        SET message_count = message_count + 1, last_message_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (now.isoformat(), now.isoformat(), thread["id"]),
+    )
+
+    # Dispatch to OpenClaw
+    if settings.openclaw.enabled:
+        hook_service = OpenClawHookService(
+            database,
+            cyborg_service_url=settings.resolved_public_url,
+        )
+
+        # Seed agenda for new threads
+        if is_new_thread:
+            if payload.agenda:
+                agenda_prompt = CUSTOM_AGENDA_TEMPLATE.format(
+                    agenda=payload.agenda, inbox_id=inbox["id"],
+                )
+            else:
+                agenda_prompt = DEFAULT_AGENDA.format(inbox_id=inbox["id"])
+
+            await hook_service._send_gateway_request(
+                "agent",
+                {
+                    "message": agenda_prompt,
+                    "deliver": False,
+                    "sessionKey": thread["session_key"],
+                    "thinking": "high",
+                    "timeout": int(settings.openclaw.timeout_seconds),
+                    "idempotencyKey": f"email:send:agenda:{agentmail_thread_id}",
+                },
+            )
+
+        # Send email body as context with NO_REPLY
+        context_prompt = "\n".join([
+            "This is a copy of an email you just sent. It is provided for context only.",
+            "DO NOT reply to this message. The next action will be when the recipient responds.",
+            "",
+            f"Subject: {payload.subject}",
+            f"To: {payload.to}",
+            "",
+            "## Body",
+            payload.text,
+        ])
+
+        await hook_service._send_gateway_request(
+            "agent",
+            {
+                "message": context_prompt,
+                "deliver": False,
+                "sessionKey": thread["session_key"],
+                "thinking": "high",
+                "timeout": int(settings.openclaw.timeout_seconds),
+                "idempotencyKey": f"email:send:context:{agentmail_message_id}",
+            },
+        )
+
     return result
 
 
-@router.post("/inboxes/{inbox_id}/messages/{message_id}/reply", status_code=status.HTTP_201_CREATED)
+@router.post("/inboxes/{inbox_id}/reply", status_code=status.HTTP_201_CREATED)
 async def reply_to_email(
     inbox_id: UUID,
-    message_id: str,
     payload: EmailReplyRequest,
     database: Database = Depends(get_database),
 ) -> dict[str, Any]:
@@ -237,7 +369,7 @@ async def reply_to_email(
     ) as client:
         result = await client.reply_message(
             inbox["agentmail_inbox_id"],
-            message_id,
+            payload.message_id,
             text=payload.text,
             html=payload.html,
             reply_all=payload.reply_all,

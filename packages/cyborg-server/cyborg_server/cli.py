@@ -718,8 +718,11 @@ def serve(
         config_dir=config_dir,
         db_path=db_path,
         log_level=log_level,
+        pool_size=env_settings.pool_size,
         webhooks=env_settings.webhooks,
         openclaw=env_settings.openclaw,
+        agentmail=env_settings.agentmail,
+        email_polling_enabled=env_settings.email_polling_enabled,
         heartbeat_interval_seconds=env_settings.heartbeat_interval_seconds,
         projects_base_dir=env_settings.projects_base_dir,
         public_url=env_settings.public_url,
@@ -3015,11 +3018,14 @@ def email_send(
     subject: Annotated[str, typer.Option("--subject", help="Email subject")],
     text: Annotated[str, typer.Option("--text", help="Email body text")],
     cc: Annotated[Optional[list[str]], typer.Option("--cc", help="CC recipients")] = None,
+    agenda: Annotated[Optional[str], typer.Option("--agenda", help="Agenda for the OpenClaw session")] = None,
 ) -> None:
     """Send a new email from a registered inbox."""
     payload: dict[str, Any] = {"to": to, "subject": subject, "text": text}
     if cc:
         payload["cc"] = cc
+    if agenda:
+        payload["agenda"] = agenda
     result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/send", payload)
     _echo_json(result.get("data", result))
 
@@ -3032,8 +3038,8 @@ def email_reply(
     reply_all: Annotated[bool, typer.Option("--reply-all", help="Reply to all recipients")] = False,
 ) -> None:
     """Reply to an email message."""
-    payload: dict[str, Any] = {"text": text, "reply_all": reply_all}
-    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/messages/{message_id}/reply", payload)
+    payload: dict[str, Any] = {"message_id": message_id, "text": text, "reply_all": reply_all}
+    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/reply", payload)
     _echo_json(result.get("data", result))
 
 

@@ -71,7 +71,7 @@ class AgentMailClient:
             body["bcc"] = bcc
         if thread_id:
             body["thread_id"] = thread_id
-        response = await self._client.post(f"/v0/inboxes/{inbox_id}/messages", json=body)
+        response = await self._client.post(f"/v0/inboxes/{inbox_id}/messages/send", json=body)
         response.raise_for_status()
         return response.json()
 
