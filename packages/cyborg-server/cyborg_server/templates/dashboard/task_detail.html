@@ -75,31 +75,31 @@
         {% if task.description %}
         <div>
             <div class="text-text-secondary text-sm mb-1">DESCRIPTION</div>
-            <div class="text-text-primary whitespace-pre-line">{{ task.description }}</div>
+            <div class="text-text-primary whitespace-pre-line">{{ task.description|unescape_newlines }}</div>
         </div>
         {% endif %}
         {% if task.plan %}
         <div>
             <div class="text-text-secondary text-sm mb-1">PLAN</div>
-            <div class="text-text-primary whitespace-pre-line">{{ task.plan }}</div>
+            <div class="text-text-primary whitespace-pre-line">{{ task.plan|unescape_newlines }}</div>
         </div>
         {% endif %}
         {% if task.result %}
         <div>
             <div class="text-text-secondary text-sm mb-1">RESULT</div>
-            <div class="text-text-primary whitespace-pre-line">{{ task.result }}</div>
+            <div class="text-text-primary whitespace-pre-line">{{ task.result|unescape_newlines }}</div>
         </div>
         {% endif %}
         {% if task.blocked_reason %}
         <div>
             <div class="text-text-secondary text-sm mb-1">BLOCKED REASON</div>
-            <div class="text-accent-orange whitespace-pre-line">{{ task.blocked_reason }}</div>
+            <div class="text-accent-orange whitespace-pre-line">{{ task.blocked_reason|unescape_newlines }}</div>
         </div>
         {% endif %}
         {% if task.blocked_resume_instructions %}
         <div>
             <div class="text-text-secondary text-sm mb-1">RESUME INSTRUCTIONS</div>
-            <div class="text-text-secondary whitespace-pre-line">{{ task.blocked_resume_instructions }}</div>
+            <div class="text-text-secondary whitespace-pre-line">{{ task.blocked_resume_instructions|unescape_newlines }}</div>
         </div>
         {% endif %}
         <!-- Timestamps -->
@@ -251,7 +251,7 @@
             {% if step.result %}
             <div class="mt-2 text-sm text-text-secondary">
                 <span x-show="!expanded">{{ step.result[:200] }}{% if step.result|length > 200 %}...{% endif %}</span>
-                <span x-show="expanded" x-cloak class="whitespace-pre-line">{{ step.result }}</span>
+                <span x-show="expanded" x-cloak class="whitespace-pre-line">{{ step.result|unescape_newlines }}</span>
                 {% if step.result|length > 200 %}
                 <button @click="expanded = !expanded" class="text-xs text-accent-cyan hover:underline ml-1">
                     <span x-show="!expanded">Show more</span>

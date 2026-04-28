@@ -98,7 +98,7 @@
                     {% if approval.proposal and approval.proposal.reason %}
                     <div>
                         <div class="text-xs text-accent-cyan font-semibold mb-1">REASON</div>
-                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.reason }}</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.reason|unescape_newlines }}</div>
                     </div>
                     {% endif %}
                     {% if approval.input_schema %}
@@ -175,13 +175,13 @@
                     {% if approval.proposal.aim %}
                     <div>
                         <div class="text-xs text-accent-cyan font-semibold mb-1">AIM</div>
-                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.aim }}</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.aim|unescape_newlines }}</div>
                     </div>
                     {% endif %}
                     {% if approval.proposal.method %}
                     <div>
                         <div class="text-xs text-accent-cyan font-semibold mb-1">METHOD</div>
-                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.method }}</div>
+                        <div class="text-sm text-text-primary whitespace-pre-line">{{ approval.proposal.method|unescape_newlines }}</div>
                     </div>
                     {% endif %}
                     {% if approval.proposal.plan %}
@@ -192,7 +192,7 @@
                             <li>
                                 <span class="font-medium">{{ step.title }}</span>
                                 {% if step.description %}
-                                <div class="text-text-secondary whitespace-pre-line ml-4">{{ step.description }}</div>
+                                <div class="text-text-secondary whitespace-pre-line ml-4">{{ step.description|unescape_newlines }}</div>
                                 {% endif %}
                                 {% if step.criteria %}
                                 <div class="text-text-muted text-xs ml-4">Done when: {{ step.criteria }}</div>

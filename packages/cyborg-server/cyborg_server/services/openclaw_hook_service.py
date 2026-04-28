@@ -188,6 +188,11 @@ class OpenClawHookService(BaseService):
     BOOTSTRAP_TIMEOUT_SECONDS = 10800.0
     DISPATCH_ACCEPT_TIMEOUT = 30.0  # Max wait for gateway to accept a notification
 
+    _WHATSAPP_DELIVERABLE_TYPES: frozenset[str] = frozenset({
+        NotificationType.NEEDS_INPUT.value,
+        NotificationType.PROJECT_RESULT.value,
+    })
+
     def __init__(
         self,
         db: Database,
@@ -235,6 +240,17 @@ class OpenClawHookService(BaseService):
         # User-facing notifications require a channel; agent dispatches do not
         if is_channel_less and not self._is_agent_dispatch_type(notification):
             raise ValueError("No channel route could be resolved for user-facing notification")
+
+        # WhatsApp delivery filter — only specific types reach the user's channel.
+        # All agent dispatch types still execute, but suppressed ones get deliver=False.
+        if not self._is_whatsapp_deliverable(notification):
+            route_data = {k: v for k, v in route_data.items() if k not in ("channel", "to")}
+            if not self._is_agent_dispatch_type(notification):
+                self.logger.info(
+                    "Skipping WhatsApp delivery for %s notification (id=%s)",
+                    notification.get("notification_type"), notification.get("id"),
+                )
+                return
 
         delivery_session_key = await self._resolve_delivery_session_key(notification, route_data)
 
@@ -716,14 +732,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": self._render_needs_input_prompt(notification, route, session_key),
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1372,14 +1390,16 @@ class OpenClawHookService(BaseService):
         timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
             "message": notification["message"],
-            "deliver": True,
-            "channel": route["channel"],
-            "to": route["to"],
+            "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
             "thinking": "high",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
+        if route.get("channel"):
+            params["channel"] = route["channel"]
+        if route.get("to"):
+            params["to"] = route["to"]
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
         return params
@@ -1401,6 +1421,10 @@ class OpenClawHookService(BaseService):
             NotificationType.SUBMISSION_REVIEW.value,
             NotificationType.NEXT_ACTION.value,
         )
+
+    def _is_whatsapp_deliverable(self, notification: dict[str, Any]) -> bool:
+        """Check if this notification type should be delivered to the user's WhatsApp channel."""
+        return notification.get("notification_type") in self._WHATSAPP_DELIVERABLE_TYPES
 
     def _is_auto_project_source_task_assignment(self, notification: dict[str, Any]) -> bool:
         metadata = notification.get("metadata", {})

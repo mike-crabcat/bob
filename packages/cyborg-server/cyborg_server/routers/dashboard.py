@@ -1835,6 +1835,7 @@ def _render_template(template_name: str, request: Request, context: dict[str, An
     env.filters['relative_time'] = _format_relative_time
     env.filters['file_size'] = _format_file_size
     env.filters['file_icon'] = _file_icon
+    env.filters['unescape_newlines'] = lambda v: v.replace('\\n', '\n') if isinstance(v, str) else v
 
     # Add request to context
     context["request"] = request

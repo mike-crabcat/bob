@@ -131,7 +131,7 @@
                     </div>
                     <div class="text-sm font-medium mb-1">{{ approval.title }}</div>
                     {% if approval.type == 'project_plan' and approval.proposal and approval.proposal.aim %}
-                    <div class="text-xs text-text-secondary mb-2 whitespace-pre-line">{{ approval.proposal.aim[:120] }}</div>
+                    <div class="text-xs text-text-secondary mb-2 whitespace-pre-line">{{ approval.proposal.aim[:120]|unescape_newlines }}</div>
                     {% else %}
                     <div class="text-xs text-text-muted mb-2">{{ approval.description|truncate(80) }}</div>
                     {% endif %}
