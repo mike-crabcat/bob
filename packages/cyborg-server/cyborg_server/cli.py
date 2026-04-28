@@ -2953,6 +2953,119 @@ def learning_suggest_criteria(
         typer.echo()
 
 
+# ---------------------------------------------------------------------------
+# Email relay
+# ---------------------------------------------------------------------------
+
+email_app = typer.Typer(help="Email relay operations")
+email_inbox_app = typer.Typer(help="Email inbox management")
+email_app.add_typer(email_inbox_app, name="inbox")
+
+app.add_typer(email_app, name="email")
+
+
+@email_inbox_app.command("register")
+def email_inbox_register(
+    agentmail_inbox_id: Annotated[str, typer.Option("--agentmail-inbox-id", help="AgentMail inbox ID")],
+    display_name: Annotated[str, typer.Option("--display-name", help="Display name for this inbox")],
+    email_address: Annotated[str, typer.Option("--email-address", help="Email address for this inbox")],
+    metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Optional metadata JSON")] = None,
+) -> None:
+    """Register an AgentMail inbox for email relay."""
+    payload: dict[str, Any] = {
+        "agentmail_inbox_id": agentmail_inbox_id,
+        "display_name": display_name,
+        "email_address": email_address,
+    }
+    if metadata_json:
+        payload["metadata"] = _parse_json_option(metadata_json, "metadata-json", dict)
+    result = _api_call("POST", "/api/v1/email/inboxes", payload)
+    _echo_json(result["data"])
+
+
+@email_inbox_app.command("list")
+def email_inbox_list() -> None:
+    """List registered email inboxes."""
+    result = _api_call("GET", "/api/v1/email/inboxes")
+    _echo_json(result["data"])
+
+
+@email_inbox_app.command("get")
+def email_inbox_get(
+    id: Annotated[str, typer.Argument(help="Inbox ID")],
+) -> None:
+    """Get a registered email inbox."""
+    result = _api_call("GET", f"/api/v1/email/inboxes/{id}")
+    _echo_json(result["data"])
+
+
+@email_inbox_app.command("remove")
+def email_inbox_remove(
+    id: Annotated[str, typer.Argument(help="Inbox ID")],
+) -> None:
+    """Remove a registered email inbox."""
+    _api_call("DELETE", f"/api/v1/email/inboxes/{id}")
+    typer.echo("Inbox removed.")
+
+
+@email_app.command("send")
+def email_send(
+    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID to send from")],
+    to: Annotated[str, typer.Option("--to", help="Recipient email address")],
+    subject: Annotated[str, typer.Option("--subject", help="Email subject")],
+    text: Annotated[str, typer.Option("--text", help="Email body text")],
+    cc: Annotated[Optional[list[str]], typer.Option("--cc", help="CC recipients")] = None,
+) -> None:
+    """Send a new email from a registered inbox."""
+    payload: dict[str, Any] = {"to": to, "subject": subject, "text": text}
+    if cc:
+        payload["cc"] = cc
+    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/send", payload)
+    _echo_json(result.get("data", result))
+
+
+@email_app.command("reply")
+def email_reply(
+    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
+    message_id: Annotated[str, typer.Option("--message-id", help="Message ID to reply to")],
+    text: Annotated[str, typer.Option("--text", help="Reply body text")],
+    reply_all: Annotated[bool, typer.Option("--reply-all", help="Reply to all recipients")] = False,
+) -> None:
+    """Reply to an email message."""
+    payload: dict[str, Any] = {"text": text, "reply_all": reply_all}
+    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/messages/{message_id}/reply", payload)
+    _echo_json(result.get("data", result))
+
+
+@email_app.command("messages")
+def email_messages(
+    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
+    limit: Annotated[int, typer.Option("--limit", help="Max messages")] = 25,
+) -> None:
+    """List messages in an inbox."""
+    result = _api_call("GET", f"/api/v1/email/inboxes/{inbox_id}/messages?limit={limit}")
+    _echo_json(result.get("data", result))
+
+
+@email_app.command("threads")
+def email_threads(
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Filter by inbox ID")] = None,
+) -> None:
+    """List tracked email threads."""
+    qs = _query_string(inbox_id=inbox_id)
+    result = _api_call("GET", f"/api/v1/email/threads{qs}")
+    _echo_json(result["data"])
+
+
+@email_app.command("thread")
+def email_thread_get(
+    thread_id: Annotated[str, typer.Argument(help="Thread ID")],
+) -> None:
+    """Get a tracked email thread."""
+    result = _api_call("GET", f"/api/v1/email/threads/{thread_id}")
+    _echo_json(result["data"])
+
+
 def main() -> int:
     """CLI entry point for `python -m cyborg.cli`."""
 

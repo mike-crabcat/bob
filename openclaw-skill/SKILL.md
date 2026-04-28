@@ -1,11 +1,14 @@
 ---
 name: cyborg-cli
-description: "Interface with Cyborg for autonomous project execution and task management. Use the CLI for all operations."
+description: "Interface with Cyborg for autonomous project execution and sending emails via agentmail."
 ---
 
 # Cyborg CLI
 
 **Always use the `cyborg` CLI. Never call the HTTP API directly.**
+
+## Setup
+Use `uv sync` to setup a venv, and then `uv tool install cyborg-server`
 
 ## Rules
 
@@ -18,6 +21,8 @@ description: "Interface with Cyborg for autonomous project execution and task ma
 
 ## Quick Reference
 
+Use `uv run` to run all commands.  Use a `uv sync` in the skill directory to setup a venv for it.
+
 | Need | Command |
 |------|---------|
 | Create project | `project create` (with aim, success-criteria-json) |
@@ -28,6 +33,9 @@ description: "Interface with Cyborg for autonomous project execution and task ma
 | Structured input | `task block --reason --resume-instructions --input-schema-json '{...}'` |
 | Record file | `task file --project-id --filename --purpose` |
 | Check status | `context summary` |
+| Send email | `email send --inbox <id> --to <addr> --subject <subj> --text <body>` |
+| Reply to email | `email reply --inbox <id> --message-id <id> --text <reply>` |
+| List email threads | `email threads [--inbox <id>]` |
 | Get context for injection | `openclaw context` |
 | Add to calendar | `event create` → `event recipient-add` |
 
@@ -217,4 +225,43 @@ cyborg context summary       # All active tasks + projects
 cyborg context tasks         # Task-focused context
 cyborg context projects      # Project-focused context
 cyborg openclaw context      # Plain text context for injection
+```
+
+## Email
+
+Email relay via AgentMail. Each email thread maps to a session so replies share context.
+
+### Sending a New Email
+
+```bash
+cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Subject" --text "Body"
+cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Hello" --text "Hi" --cc "b@example.com"
+```
+
+### Replying to an Email Thread
+
+When you receive an email task assignment, reply using the thread's message ID:
+
+```bash
+cyborg email reply --inbox <inbox-id> --message-id <msg-id> --text "Reply text"
+cyborg email reply --inbox <inbox-id> --message-id <msg-id> --text "Reply" --reply-all
+```
+
+Use `--reply-all` to include all CC'd recipients.
+
+### Inbox Management
+
+```bash
+cyborg email inbox register --agentmail-inbox-id <id> --display-name "Name" --email-address "addr"
+cyborg email inbox list
+cyborg email inbox get <id>
+cyborg email inbox remove <id>
+```
+
+### Listing Messages and Threads
+
+```bash
+cyborg email messages --inbox <inbox-id>
+cyborg email threads [--inbox <id>]
+cyborg email thread get <thread-id>
 ```

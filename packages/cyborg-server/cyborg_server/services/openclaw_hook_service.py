@@ -193,6 +193,12 @@ class OpenClawHookService(BaseService):
         NotificationType.PROJECT_RESULT.value,
     })
 
+    _EMAIL_DELIVERABLE_TYPES: frozenset[str] = frozenset({
+        NotificationType.NEEDS_INPUT.value,
+        NotificationType.PROJECT_RESULT.value,
+        NotificationType.TASK_ASSIGNMENT.value,
+    })
+
     def __init__(
         self,
         db: Database,
@@ -240,6 +246,11 @@ class OpenClawHookService(BaseService):
         # User-facing notifications require a channel; agent dispatches do not
         if is_channel_less and not self._is_agent_dispatch_type(notification):
             raise ValueError("No channel route could be resolved for user-facing notification")
+
+        # Email channel: deliver directly via AgentMail and dispatch to OpenClaw gateway
+        if route_data.get("channel") == "email":
+            await self._dispatch_email_notification(notification, route_data)
+            return
 
         # WhatsApp delivery filter — only specific types reach the user's channel.
         # All agent dispatch types still execute, but suppressed ones get deliver=False.
@@ -491,6 +502,58 @@ class OpenClawHookService(BaseService):
             return session_key
 
         return None
+
+    async def _dispatch_email_notification(
+        self,
+        notification: dict[str, Any],
+        route: dict[str, Any],
+    ) -> None:
+        """Deliver a notification via email (AgentMail) and dispatch to OpenClaw gateway."""
+        from cyborg_server.services.email_delivery_service import EmailDeliveryService
+
+        metadata = notification.get("metadata", {})
+        route_metadata = route.get("metadata", {})
+        inbox_id = route_metadata.get("inbox_id")
+        session_key = route.get("session_key")
+
+        # Send email via AgentMail if this is a deliverable type
+        if notification.get("notification_type") in self._EMAIL_DELIVERABLE_TYPES and inbox_id:
+            delivery_service = EmailDeliveryService(self.db)
+            message = self._render_message(notification)
+            thread_id = route.get("chat_id")
+            try:
+                if thread_id:
+                    await delivery_service.send_reply(
+                        inbox_id=inbox_id,
+                        thread_id=thread_id,
+                        text=message,
+                    )
+                self.logger.info(
+                    "Delivered %s notification via email (thread=%s)",
+                    notification.get("notification_type"), thread_id,
+                )
+            except Exception:
+                self.logger.warning(
+                    "Failed to deliver email for notification %s",
+                    notification.get("id"),
+                    exc_info=True,
+                )
+
+        # Also dispatch to OpenClaw gateway so the agent processes the notification
+        if session_key and self._is_agent_dispatch_type(notification):
+            await self._send_gateway_request(
+                "agent",
+                {
+                    "message": await self._render_task_assignment_prompt(notification, route, session_key)
+                        if self._should_use_task_assignment_agent(notification, session_key)
+                        else self._render_message(notification),
+                    "deliver": False,
+                    "sessionKey": session_key,
+                    "thinking": "high",
+                    "timeout": int(self.BOOTSTRAP_TIMEOUT_SECONDS),
+                    "idempotencyKey": notification["id"],
+                },
+            )
 
     def _resolve_visible_session_key(self, route: dict[str, Any]) -> str | None:
         session_key = route.get("session_key")

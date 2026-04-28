@@ -120,6 +120,20 @@ class WebhookConfig:
 
 
 @dataclass(slots=True)
+class AgentMailSettings:
+    """Configuration for AgentMail email provider."""
+
+    base_url: str = "https://api.agentmail.to"
+    api_key: str = ""
+    default_inbox_id: str = ""
+    poll_interval_seconds: float = 30.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(slots=True)
 class OpenClawHookSettings:
     """Configuration for direct OpenClaw notification delivery."""
 
@@ -172,6 +186,8 @@ class Settings:
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
+    agentmail: AgentMailSettings = field(default_factory=AgentMailSettings)
+    email_polling_enabled: bool = True
     heartbeat_interval_seconds: float = 60.0
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
@@ -265,6 +281,14 @@ class Settings:
         dashboard_secret = os.getenv("CYBORG_DASHBOARD_SECRET", "")
         projects_base_dir = _env_path("CYBORG_PROJECTS_BASE_DIR", Path("~/.openclaw/workspace/projects"))
 
+        agentmail = AgentMailSettings(
+            base_url=os.getenv("CYBORG_AGENTMAIL_BASE_URL", "https://api.agentmail.to").rstrip("/"),
+            api_key=os.getenv("CYBORG_AGENTMAIL_API_KEY", ""),
+            default_inbox_id=os.getenv("CYBORG_AGENTMAIL_DEFAULT_INBOX_ID", ""),
+            poll_interval_seconds=float(os.getenv("CYBORG_AGENTMAIL_POLL_INTERVAL_SECONDS", "30")),
+        )
+        email_polling_enabled = os.getenv("CYBORG_EMAIL_POLLING_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+
         return cls(
             host=host,
             port=port,
@@ -277,6 +301,8 @@ class Settings:
             pool_size=pool_size,
             webhooks=webhooks,
             openclaw=openclaw,
+            agentmail=agentmail,
+            email_polling_enabled=email_polling_enabled,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             projects_base_dir=projects_base_dir,
             public_url=public_url,

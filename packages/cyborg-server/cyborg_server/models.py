@@ -95,11 +95,13 @@ class TaskPriority(StrEnum):
 class TaskTargetSessionKind(StrEnum):
     GROUP = "group"
     DM = "dm"
+    THREAD = "thread"
 
 
 class SessionRouteKind(StrEnum):
     GROUP = "group"
     DM = "dm"
+    THREAD = "thread"
 
 
 class TaskStepStatus(StrEnum):
@@ -339,7 +341,7 @@ class TaskInputResolveRequest(CyborgModel):
 
 
 class TaskTargetSession(CyborgModel):
-    channel: Literal["whatsapp"] | None = None
+    channel: Literal["whatsapp", "email"] | None = None
     kind: TaskTargetSessionKind | None = None
     session_key: str | None = None
     chat_id: str | None = None
@@ -375,6 +377,11 @@ class TaskTargetSession(CyborgModel):
                 raise ValueError("dm target_session cannot include session_key")
             if self.chat_id is not None:
                 raise ValueError("dm target_session cannot include chat_id")
+        if self.kind == TaskTargetSessionKind.THREAD:
+            if self.session_key is None and self.chat_id is None:
+                raise ValueError("thread target_session requires session_key or chat_id")
+            if self.contact_id is not None:
+                raise ValueError("thread target_session cannot include contact_id")
         return self
 
 
@@ -1165,7 +1172,7 @@ class ContactResponse(ContactFields, EntityRef, SoftDeleteFields):
 
 
 class SessionRouteFields(CyborgModel):
-    channel: Literal["whatsapp"]
+    channel: Literal["whatsapp", "email"]
     session_key: str = Field(min_length=1, max_length=255)
     kind: SessionRouteKind
     chat_id: str | None = None
@@ -1194,6 +1201,11 @@ class SessionRouteFields(CyborgModel):
                 raise ValueError("dm session routes require contact_id")
             if self.chat_id is not None:
                 raise ValueError("dm session routes cannot include chat_id")
+        if self.kind == SessionRouteKind.THREAD:
+            if self.chat_id is None:
+                raise ValueError("thread session routes require chat_id")
+            if self.contact_id is not None:
+                raise ValueError("thread session routes cannot include contact_id")
         return self
 
 
@@ -1225,7 +1237,7 @@ class SessionRouteResponse(SessionRouteFields, EntityRef, SoftDeleteFields):
 
 
 class ResolvedSessionRoute(CyborgModel):
-    channel: Literal["whatsapp"] | None = None
+    channel: Literal["whatsapp", "email"] | None = None
     kind: SessionRouteKind | None = None
     to: str | None = None
     session_key: str | None = None
@@ -1235,6 +1247,71 @@ class ResolvedSessionRoute(CyborgModel):
     phone_number: str | None = None
     route_source: str | None = None
     metadata: MetadataDict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Email relay models
+# ---------------------------------------------------------------------------
+
+
+class EmailInboxCreate(CyborgModel):
+    agentmail_inbox_id: str = Field(min_length=1)
+    display_name: str = Field(min_length=1, max_length=200)
+    email_address: str = Field(min_length=1)
+    metadata: MetadataDict = Field(default_factory=dict)
+
+    @field_validator("email_address")
+    @classmethod
+    def email_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("email_address must not be blank")
+        return stripped
+
+
+class EmailInboxUpdate(CyborgModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    is_active: bool | None = None
+    metadata: MetadataDict | None = None
+
+
+class EmailInboxResponse(CyborgModel, EntityRef):
+    agentmail_inbox_id: str
+    display_name: str
+    email_address: str
+    is_active: bool = True
+    last_polled_at: datetime | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailSendRequest(CyborgModel):
+    to: str = Field(min_length=1)
+    subject: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    html: str | None = None
+    cc: list[str] | None = None
+
+
+class EmailReplyRequest(CyborgModel):
+    text: str = Field(min_length=1)
+    html: str | None = None
+    reply_all: bool = False
+
+
+class EmailThreadResponse(CyborgModel, EntityRef):
+    inbox_id: UUID
+    agentmail_thread_id: str
+    subject: str | None = None
+    contact_id: UUID | None = None
+    project_id: UUID | None = None
+    session_key: str
+    message_count: int = 0
+    last_message_at: datetime | None = None
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
 
 
 class NotificationResponse(CyborgModel, EntityRef):
