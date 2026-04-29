@@ -57,6 +57,7 @@ class AgentMailClient:
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         thread_id: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "to": to if isinstance(to, list) else [to],
@@ -71,6 +72,8 @@ class AgentMailClient:
             body["bcc"] = bcc
         if thread_id:
             body["thread_id"] = thread_id
+        if attachments:
+            body["attachments"] = attachments
         response = await self._client.post(f"/v0/inboxes/{inbox_id}/messages/send", json=body)
         response.raise_for_status()
         return response.json()
@@ -83,12 +86,15 @@ class AgentMailClient:
         text: str,
         html: str | None = None,
         reply_all: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"text": text}
         if html:
             body["html"] = html
         if reply_all:
             body["reply_all"] = True
+        if attachments:
+            body["attachments"] = attachments
         response = await self._client.post(
             f"/v0/inboxes/{inbox_id}/messages/{message_id}/reply",
             json=body,
@@ -117,6 +123,19 @@ class AgentMailClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def get_attachment(
+        self,
+        inbox_id: str,
+        message_id: str,
+        attachment_id: str,
+    ) -> bytes:
+        """Download an attachment's raw content."""
+        response = await self._client.get(
+            f"/v0/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
+        )
+        response.raise_for_status()
+        return response.content
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from cyborg_server.database import Database
@@ -22,6 +24,7 @@ from cyborg_server.services.base import json_dumps, json_loads, utcnow
 
 
 router = APIRouter(prefix="/api/v1/email", tags=["email"])
+logger = logging.getLogger(__name__)
 
 
 def _row_to_inbox(row: dict[str, Any]) -> EmailInboxResponse:
@@ -212,6 +215,7 @@ async def send_email(
             text=payload.text,
             html=payload.html,
             cc=payload.cc,
+            attachments=[a.model_dump(exclude_none=True) for a in payload.attachments] if payload.attachments else None,
         )
 
     agentmail_message_id = result.get("message_id", "")
@@ -269,7 +273,7 @@ async def send_email(
             payload.html,
             payload.text[:200] if payload.text else None,
             json_dumps(["sent"]),
-            0,
+            1 if payload.attachments else 0,
             None,
             now.isoformat(),
             now.isoformat(),
@@ -294,50 +298,50 @@ async def send_email(
             cyborg_service_url=settings.resolved_public_url,
         )
 
-        # Seed agenda for new threads
+        # Combined dispatch: agenda + outgoing email context
+        send_parts: list[str] = []
+
         if is_new_thread:
             if payload.agenda:
-                agenda_prompt = CUSTOM_AGENDA_TEMPLATE.format(
+                send_parts.append(CUSTOM_AGENDA_TEMPLATE.format(
                     agenda=payload.agenda, inbox_id=inbox["id"],
-                )
+                ))
             else:
-                agenda_prompt = DEFAULT_AGENDA.format(inbox_id=inbox["id"])
+                send_parts.append(DEFAULT_AGENDA.format(inbox_id=inbox["id"]))
+            send_parts.append("")
 
-            await hook_service._send_gateway_request(
-                "agent",
-                {
-                    "message": agenda_prompt,
-                    "deliver": False,
-                    "sessionKey": thread["session_key"],
-                    "thinking": "high",
-                    "timeout": int(settings.openclaw.timeout_seconds),
-                    "idempotencyKey": f"email:send:agenda:{agentmail_thread_id}",
-                },
-            )
-
-        # Send email body as context with NO_REPLY
-        context_prompt = "\n".join([
-            "This is a copy of an email you just sent. It is provided for context only.",
-            "DO NOT reply to this message. The next action will be when the recipient responds.",
+        send_parts += [
+            "## Email You Just Sent",
+            "This is provided for your context. Do NOT reply — wait for the recipient to respond.",
             "",
             f"Subject: {payload.subject}",
             f"To: {payload.to}",
             "",
-            "## Body",
             payload.text,
-        ])
+        ]
 
+        send_prompt = "\n".join(send_parts)
+        send_key = f"email:send:{agentmail_message_id}"
+
+        logger.info(
+            "Dispatching send to OpenClaw session=%s idempotency=%s timeout=%ds new_thread=%s\n%s",
+            thread["session_key"], send_key,
+            int(settings.openclaw.timeout_seconds),
+            is_new_thread,
+            send_prompt,
+        )
         await hook_service._send_gateway_request(
             "agent",
             {
-                "message": context_prompt,
+                "message": send_prompt,
                 "deliver": False,
                 "sessionKey": thread["session_key"],
-                "thinking": "high",
+                "thinking": "on",
                 "timeout": int(settings.openclaw.timeout_seconds),
-                "idempotencyKey": f"email:send:context:{agentmail_message_id}",
+                "idempotencyKey": send_key,
             },
         )
+        logger.info("Send dispatch accepted for thread %s", thread["id"])
 
     return result
 
@@ -373,6 +377,7 @@ async def reply_to_email(
             text=payload.text,
             html=payload.html,
             reply_all=payload.reply_all,
+            attachments=[a.model_dump(exclude_none=True) for a in payload.attachments] if payload.attachments else None,
         )
     return result
 
@@ -413,6 +418,49 @@ async def list_messages(
             limit=limit,
             page_token=page_token,
         )
+
+
+# ---------------------------------------------------------------------------
+# Attachments
+# ---------------------------------------------------------------------------
+
+
+@router.get("/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}")
+async def download_attachment(
+    inbox_id: UUID,
+    message_id: str,
+    attachment_id: str,
+    database: Database = Depends(get_database),
+) -> Response:
+    """Download an email attachment from AgentMail."""
+    from cyborg_server.config import Settings
+    from cyborg_server.services.agentmail_client import AgentMailClient
+
+    inbox = await database.fetch_one(
+        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
+        (str(inbox_id),),
+    )
+    if inbox is None:
+        raise HTTPException(status_code=404, detail="Inbox not found")
+
+    settings = getattr(database, "settings", None)
+    if not isinstance(settings, Settings):
+        settings = Settings.from_env()
+
+    async with AgentMailClient(
+        base_url=settings.agentmail.base_url,
+        api_key=settings.agentmail.api_key,
+    ) as client:
+        content = await client.get_attachment(
+            inbox["agentmail_inbox_id"],
+            message_id,
+            attachment_id,
+        )
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{attachment_id}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ class EmailDeliveryService(BaseService):
         thread_id: str,
         text: str,
         html: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Send a reply in an existing email thread.
 
@@ -84,6 +85,7 @@ class EmailDeliveryService(BaseService):
                     text=text,
                     html=html,
                     reply_all=True,
+                    attachments=attachments,
                 )
             except Exception:
                 logger.warning(
@@ -111,6 +113,7 @@ class EmailDeliveryService(BaseService):
         text: str,
         html: str | None = None,
         cc: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Send a new email from a registered inbox."""
         inbox = await self.db.fetch_one(
@@ -127,4 +130,5 @@ class EmailDeliveryService(BaseService):
             text=text,
             html=html,
             cc=cc,
+            attachments=attachments,
         )

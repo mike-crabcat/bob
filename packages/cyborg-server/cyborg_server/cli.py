@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import shutil
 import shlex
@@ -2967,6 +2969,22 @@ email_app.add_typer(email_inbox_app, name="inbox")
 app.add_typer(email_app, name="email")
 
 
+def _read_file_as_attachment(file_path: str, *, inline: bool = False) -> dict[str, Any]:
+    path = Path(file_path)
+    if not path.is_file():
+        raise typer.BadParameter(f"File not found: {file_path}")
+    content = base64.b64encode(path.read_bytes()).decode("ascii")
+    result: dict[str, Any] = {
+        "content": content,
+        "filename": path.name,
+        "content_type": mimetypes.guess_type(str(path))[0] or "application/octet-stream",
+        "content_disposition": "inline" if inline else "attachment",
+    }
+    if inline:
+        result["content_id"] = path.name
+    return result
+
+
 @email_inbox_app.command("register")
 def email_inbox_register(
     agentmail_inbox_id: Annotated[str, typer.Option("--agentmail-inbox-id", help="AgentMail inbox ID")],
@@ -3019,6 +3037,9 @@ def email_send(
     text: Annotated[str, typer.Option("--text", help="Email body text")],
     cc: Annotated[Optional[list[str]], typer.Option("--cc", help="CC recipients")] = None,
     agenda: Annotated[Optional[str], typer.Option("--agenda", help="Agenda for the OpenClaw session")] = None,
+    html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
+    attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
+    inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
 ) -> None:
     """Send a new email from a registered inbox."""
     payload: dict[str, Any] = {"to": to, "subject": subject, "text": text}
@@ -3026,6 +3047,17 @@ def email_send(
         payload["cc"] = cc
     if agenda:
         payload["agenda"] = agenda
+    if html:
+        payload["html"] = html
+    attachments: list[dict[str, Any]] = []
+    if attach:
+        for fp in attach:
+            attachments.append(_read_file_as_attachment(fp))
+    if inline_image:
+        for fp in inline_image:
+            attachments.append(_read_file_as_attachment(fp, inline=True))
+    if attachments:
+        payload["attachments"] = attachments
     result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/send", payload)
     _echo_json(result.get("data", result))
 
@@ -3036,9 +3068,23 @@ def email_reply(
     message_id: Annotated[str, typer.Option("--message-id", help="Message ID to reply to")],
     text: Annotated[str, typer.Option("--text", help="Reply body text")],
     reply_all: Annotated[bool, typer.Option("--reply-all", help="Reply to all recipients")] = False,
+    html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
+    attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
+    inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
 ) -> None:
     """Reply to an email message."""
     payload: dict[str, Any] = {"message_id": message_id, "text": text, "reply_all": reply_all}
+    if html:
+        payload["html"] = html
+    attachments: list[dict[str, Any]] = []
+    if attach:
+        for fp in attach:
+            attachments.append(_read_file_as_attachment(fp))
+    if inline_image:
+        for fp in inline_image:
+            attachments.append(_read_file_as_attachment(fp, inline=True))
+    if attachments:
+        payload["attachments"] = attachments
     result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/reply", payload)
     _echo_json(result.get("data", result))
 
@@ -3051,6 +3097,35 @@ def email_messages(
     """List messages in an inbox."""
     result = _api_call("GET", f"/api/v1/email/inboxes/{inbox_id}/messages?limit={limit}")
     _echo_json(result.get("data", result))
+
+
+@email_app.command("download-attachment")
+def email_download_attachment(
+    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
+    message_id: Annotated[str, typer.Option("--message-id", help="AgentMail message ID")],
+    attachment_id: Annotated[str, typer.Option("--attachment-id", help="Attachment ID")],
+    output: Annotated[str, typer.Option("--output", "-o", help="Output file path")] = "",
+) -> None:
+    """Download an email attachment to disk."""
+    settings = Settings.from_env()
+    encoded_msg = quote(message_id, safe="")
+    url = f"http://{settings.host}:{settings.port}/api/v1/email/inboxes/{inbox_id}/messages/{encoded_msg}/attachments/{attachment_id}"
+    req = Request(url, method="GET")
+
+    try:
+        with urlopen(req, timeout=60) as response:
+            content = response.read()
+    except HTTPError as exc:
+        _handle_http_error(exc)
+    except URLError as exc:
+        _handle_connection_error(exc)
+
+    output_path = Path(output) if output else Path(attachment_id)
+    if output and output_path.is_dir():
+        output_path = output_path / attachment_id
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(content)
+    _echo_json({"path": str(output_path.resolve()), "size": len(content)})
 
 
 @email_app.command("threads")

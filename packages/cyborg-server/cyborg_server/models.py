@@ -1286,6 +1286,14 @@ class EmailInboxResponse(CyborgModel, EntityRef):
     updated_at: datetime
 
 
+class EmailAttachment(CyborgModel):
+    content: str = Field(min_length=1, description="Base64-encoded file content")
+    filename: str | None = Field(default=None, max_length=255)
+    content_type: str | None = Field(default=None)
+    content_id: str | None = Field(default=None, description="CID for inline images")
+    content_disposition: str | None = Field(default=None, pattern=r"^(inline|attachment)$")
+
+
 class EmailSendRequest(CyborgModel):
     to: str = Field(min_length=1)
     subject: str = Field(min_length=1)
@@ -1293,6 +1301,7 @@ class EmailSendRequest(CyborgModel):
     html: str | None = None
     cc: list[str] | None = None
     agenda: str | None = None
+    attachments: list[EmailAttachment] | None = None
 
 
 class EmailReplyRequest(CyborgModel):
@@ -1300,6 +1309,7 @@ class EmailReplyRequest(CyborgModel):
     text: str = Field(min_length=1)
     html: str | None = None
     reply_all: bool = False
+    attachments: list[EmailAttachment] | None = None
 
 
 class EmailThreadResponse(CyborgModel, EntityRef):

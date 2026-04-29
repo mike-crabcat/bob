@@ -37,7 +37,10 @@ Use `uv run` to run all commands.  Use a `uv sync` in the skill directory to set
 | Check status | `context summary` |
 | Send email | `email send --inbox <id> --to <addr> --subject <subj> --text <body>` |
 | Reply to email | `email reply --inbox <id> --message-id <id> --text <reply>` |
+| Send with attachment | `email send ... --attach /path/to/file` |
+| Send with inline image | `email send ... --html '<img src="cid:image.png" />' --inline-image /path/to/image.png` |
 | List email threads | `email threads [--inbox <id>]` |
+| Download attachment | `email download-attachment --inbox <id> --message-id <id> --attachment-id <id> --output <path>` |
 | Get context for injection | `openclaw context` |
 | Add to calendar | `event create` → `event recipient-add` |
 
@@ -229,6 +232,44 @@ uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subje
 uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Hello" --text "Hi" --cc "b@example.com"
 ```
 
+### Sending with Attachments
+
+Use `--attach` to add file attachments. Repeat the flag for multiple files.
+
+```bash
+uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Report" \
+  --text "Please find the attached report." \
+  --attach /path/to/report.pdf
+
+# Multiple attachments
+uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Files" \
+  --text "Here are the files." \
+  --attach /path/to/file1.pdf --attach /path/to/file2.xlsx
+```
+
+### Sending with Inline Images
+
+To embed images directly in the email body, use `--inline-image` together with `--html`.
+
+The `--html` body references each image using `cid:<filename>` where `<filename>` matches the basename of the file passed to `--inline-image`.
+
+```bash
+uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Chart" \
+  --text "See the chart below." \
+  --html '<p>Here is the chart:</p><img src="cid:chart.png" />' \
+  --inline-image /path/to/chart.png
+```
+
+You can mix `--attach` and `--inline-image` in the same command.
+
+### Best Practices for Attachments and Images
+
+- **Always include `--text`** as a plain-text fallback when using `--html`.
+- **Inline images need both `--html` and `--inline-image`** — the `cid:` reference in the HTML must match the filename.
+- **Don't send images in the first email to a new contact** — this hurts deliverability.
+- **Keep attachments under 10 MB** — large files may cause timeouts.
+- **Use `--html` for rich formatting** — styled text, tables, embedded images. Keep `--text` as a readable summary.
+
 ### Replying to an Email Thread
 
 When you receive an email task assignment, reply using the thread's message ID:
@@ -239,6 +280,19 @@ uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> --text "Reply
 ```
 
 Use `--reply-all` to include all CC'd recipients.
+
+Reply with attachments using `--attach`, or reply with inline images using `--html` + `--inline-image`:
+
+```bash
+uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> \
+  --text "Here is the signed document." \
+  --attach /path/to/signed.pdf
+
+uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> \
+  --text "See the screenshot." \
+  --html '<img src="cid:screenshot.png" />' \
+  --inline-image /path/to/screenshot.png
+```
 
 ### Inbox Management
 
@@ -256,3 +310,18 @@ uv run cyborg email messages --inbox <inbox-id>
 uv run cyborg email threads [--inbox <id>]
 uv run cyborg email thread get <thread-id>
 ```
+
+### Downloading Attachments
+
+When an email has attachments that were not auto-downloaded (e.g., from an untrusted sender), download individual attachments after reviewing their metadata:
+
+```bash
+uv run cyborg email download-attachment --inbox <inbox-id> --message-id <msg-id> --attachment-id <att-id> --output /path/to/save
+```
+
+- `--inbox`: The inbox ID (provided in the email prompt)
+- `--message-id`: The message ID from the email prompt (angle-bracketed string)
+- `--attachment-id`: The specific attachment ID (listed in the email prompt)
+- `--output` / `-o`: Where to save the file. Defaults to current directory with attachment ID as filename.
+
+Only download attachments after reviewing metadata and determining they are safe.

@@ -549,7 +549,7 @@ class OpenClawHookService(BaseService):
                         else self._render_message(notification),
                     "deliver": False,
                     "sessionKey": session_key,
-                    "thinking": "high",
+                    "thinking": "on",
                     "timeout": int(self.BOOTSTRAP_TIMEOUT_SECONDS),
                     "idempotencyKey": notification["id"],
                 },
@@ -773,7 +773,7 @@ class OpenClawHookService(BaseService):
             "message": await self._render_task_assignment_prompt(notification, route, session_key),
             "deliver": not is_channel_less,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -797,7 +797,7 @@ class OpenClawHookService(BaseService):
             "message": self._render_needs_input_prompt(notification, route, session_key),
             "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1157,7 +1157,7 @@ class OpenClawHookService(BaseService):
             "message": self._render_task_retry_prompt(notification, route, session_key),
             "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1254,7 +1254,7 @@ class OpenClawHookService(BaseService):
             "message": self._render_task_input_response_prompt(notification, route, session_key),
             "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1339,7 +1339,7 @@ class OpenClawHookService(BaseService):
             "message": self._render_task_tap_prompt(notification, route, session_key),
             "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1432,7 +1432,7 @@ class OpenClawHookService(BaseService):
             "message": self._render_submission_review_prompt(notification, route, session_key),
             "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
@@ -1455,7 +1455,7 @@ class OpenClawHookService(BaseService):
             "message": notification["message"],
             "deliver": route.get("channel") is not None,
             "sessionKey": session_key,
-            "thinking": "high",
+            "thinking": "on",
             "timeout": timeout_seconds,
             "idempotencyKey": notification["id"],
         }
