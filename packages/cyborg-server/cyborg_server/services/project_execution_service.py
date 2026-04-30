@@ -569,7 +569,13 @@ class ProjectExecutionService(BaseService):
         if journal:
             parts.extend(["", "## Recent Activity"])
             for entry in journal[-5:]:
-                content = entry.get("content", "")[:120]
+                content = entry.get("content", "")
+                entry_meta = json_loads(entry.get("metadata"), {})
+                # Preserve full content for user responses and decisions
+                if entry_meta.get("user_response") or entry.get("entry_type") == "decision":
+                    pass  # keep full content
+                elif len(content) > 200:
+                    content = content[:200] + "..."
                 parts.append(f"  - [{entry.get('entry_type', '?')}] {content}")
 
         parts.extend([
@@ -1234,6 +1240,29 @@ class ProjectExecutionService(BaseService):
                 "cancel_approval_ids": cancel_ids,
             })
 
+        # Failed next_action notifications blocking project progress
+        failed_next_action_rows = await self.db.fetch_all(
+            """
+            SELECT n.id AS notification_id, n.entity_id AS project_id, n.last_delivery_error,
+                   p.title, n.created_at
+            FROM notifications n
+            INNER JOIN projects p ON p.id = n.entity_id AND p.deleted_at IS NULL
+            WHERE n.notification_type = 'next_action'
+              AND n.status = 'pending'
+              AND n.delivery_status = 'failed'
+              AND p.state = 'active'
+            """,
+        )
+        for row in failed_next_action_rows:
+            problems.append({
+                "project_id": row["project_id"],
+                "notification_id": row["notification_id"],
+                "title": row["title"],
+                "last_delivery_error": row["last_delivery_error"],
+                "notification_created_at": row["created_at"],
+                "problem": "failed_next_action_notification",
+            })
+
         return problems
 
     async def bootstrap_stuck_project(self, project_id: str) -> dict[str, Any]:
@@ -1268,6 +1297,37 @@ class ProjectExecutionService(BaseService):
         )
 
         return {"project_id": project_id, "action": "bootstrapped"}
+
+    async def redrive_next_action(self, project_id: str) -> dict[str, Any]:
+        """Cancel a failed next_action notification and re-dispatch decide_next_action."""
+        from cyborg_server.services.notification_service import NotificationService
+
+        # Cancel the failed notification
+        await self.db.execute(
+            "UPDATE notifications SET status = 'resolved', resolved_at = ?, updated_at = ? WHERE entity_id = ? AND notification_type = 'next_action' AND status = 'pending' AND delivery_status = 'failed'",
+            (utcnow().isoformat(), utcnow().isoformat(), project_id),
+        )
+
+        # Find the completed task that triggered the original next_action
+        last_completed = await self.db.fetch_one(
+            """
+            SELECT t.id, t.title FROM tasks t
+            INNER JOIN project_tasks pt ON pt.task_id = t.id
+            WHERE pt.project_id = ? AND t.status = 'completed' AND t.deleted_at IS NULL
+            ORDER BY t.updated_at DESC LIMIT 1
+            """,
+            (project_id,),
+        )
+        completed_task_id = last_completed["id"] if last_completed else None
+        completed_task_title = last_completed["title"] if last_completed else None
+
+        await self.decide_next_action(
+            project_id,
+            completed_task_id=completed_task_id or "",
+            completed_task_title=completed_task_title or "",
+        )
+
+        return {"project_id": project_id, "action": "redriven_next_action"}
 
     async def verify_decide_next(self, project_id: str, payload: Any) -> ProjectResponse:
         """Process an async next-action response from reasoning.

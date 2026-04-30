@@ -69,6 +69,12 @@ async def doctor(
                     fixes.append({**problem, "action": "cancelled_duplicates", "cancelled_count": len(cancel_ids)})
                 except Exception as exc:
                     fixes.append({**problem, "action": "error", "error": str(exc)})
+            elif problem["problem"] == "failed_next_action_notification":
+                try:
+                    result = await execution_service.redrive_next_action(problem["project_id"])
+                    fixes.append({**problem, **result})
+                except Exception as exc:
+                    fixes.append({**problem, "action": "error", "error": str(exc)})
 
     return {"problems": problems, "fixes": fixes}
 

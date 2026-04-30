@@ -603,7 +603,7 @@ class NotificationService(BaseService):
         This is fire-and-forget — the agent responds via `cyborg project decide-next` CLI.
         """
         project = await self.db.fetch_one(
-            "SELECT id, title, metadata, updated_at FROM projects WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, title, metadata, updated_at, subagent_session_key FROM projects WHERE id = ? AND deleted_at IS NULL",
             (project_id,),
         )
         if project is None:
@@ -617,6 +617,7 @@ class NotificationService(BaseService):
             "completed_task_id": completed_task_id,
             "delivery_route": "source",
             "next_action_otp": otp,
+            "subagent_session_key": project.get("subagent_session_key"),
         }
 
         reference = now or utcnow()

@@ -184,7 +184,7 @@ wheels = [
 
 [[package]]
 name = "cyborg-server"
-version = "0.4.3"
+version = "0.4.4"
 source = { editable = "packages/cyborg-server" }
 dependencies = [
     { name = "aiosqlite" },
