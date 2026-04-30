@@ -233,6 +233,16 @@ class OpenClawHookService(BaseService):
     async def dispatch_notification(self, notification: dict[str, Any]) -> None:
         is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
         metadata = notification.get("metadata", {})
+
+        # Agent-internal dispatches (next_action, task_assignment, etc.) don't need
+        # a channel route — they dispatch directly to the gateway with deliver=False.
+        if self._is_agent_dispatch_type(notification):
+            session_key = metadata.get("subagent_session_key") or await self._resolve_project_session_key(notification)
+            if session_key:
+                await self._dispatch_agent_internal(notification, session_key)
+                return
+            # Fall through to route resolution for task assignments that use target sessions
+
         route = await self.routing_service.resolve_notification_route(metadata)
         if route is None:
             if metadata.get("auto_created_by_project"):
@@ -502,6 +512,58 @@ class OpenClawHookService(BaseService):
             return session_key
 
         return None
+
+    async def _resolve_project_session_key(self, notification: dict[str, Any]) -> str | None:
+        """Resolve a project's subagent_session_key from the notification's entity_id."""
+        entity_type = notification.get("entity_type")
+        if entity_type != "project":
+            return None
+        entity_id = str(notification.get("entity_id", ""))
+        if not entity_id:
+            return None
+        project = await self.db.fetch_one(
+            "SELECT subagent_session_key FROM projects WHERE id = ? AND deleted_at IS NULL",
+            (entity_id,),
+        )
+        return project.get("subagent_session_key") if project else None
+
+    async def _dispatch_agent_internal(
+        self,
+        notification: dict[str, Any],
+        session_key: str,
+    ) -> None:
+        """Dispatch an agent-internal notification directly to the gateway with deliver=False."""
+        is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
+        metadata = notification.get("metadata", {})
+        notification_type = notification.get("notification_type")
+
+        logger.info(
+            "Dispatching agent-internal %s notification (id=%s, session=%s)",
+            notification_type, notification.get("id"), session_key,
+        )
+
+        if not is_retry:
+            from cyborg_server.services.prompt_history import log_prompt
+            await log_prompt(
+                self.db,
+                category=notification_type or "notification",
+                prompt_text=notification.get("message", ""),
+                project_id=metadata.get("project_id"),
+                task_id=metadata.get("task_id") or str(notification.get("entity_id", "")),
+                session_key=session_key,
+            )
+
+        await self._send_gateway_request(
+            "agent",
+            {
+                "message": notification.get("message", ""),
+                "deliver": False,
+                "sessionKey": session_key,
+                "thinking": "on",
+                "timeout": int(self.BOOTSTRAP_TIMEOUT_SECONDS),
+                "idempotencyKey": notification["id"],
+            },
+        )
 
     async def _dispatch_email_notification(
         self,

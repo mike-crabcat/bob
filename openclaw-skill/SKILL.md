@@ -272,7 +272,11 @@ You can mix `--attach` and `--inline-image` in the same command.
 
 ### Replying to an Email Thread
 
-When you receive an email task assignment, reply using the thread's message ID:
+**You MUST always use `email reply` to respond to emails. Never use `email send` to reply to an existing thread.**
+
+The `email reply` command threads your response into the existing conversation. The `--message-id` is provided in every incoming email prompt — use the exact value from the prompt.
+
+If you cannot find the message ID in the prompt or conversation context, **ask the user for it** rather than guessing or falling back to `email send`.
 
 ```bash
 uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> --text "Reply text"

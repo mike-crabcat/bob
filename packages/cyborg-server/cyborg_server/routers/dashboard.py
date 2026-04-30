@@ -642,7 +642,13 @@ async def dashboard_task_files_api(
     if not project_path:
         return JSONResponse(content={"files": []}, status_code=404)
 
-    scanned = _scan_project_files(project_path)
+    tasks = await db.fetch_all(
+        "SELECT id, title FROM tasks t INNER JOIN project_tasks pt ON pt.task_id = t.id WHERE pt.project_id = ? AND t.deleted_at IS NULL",
+        (project_id,),
+    )
+    task_id_map = {t["id"].replace("-", "")[:8]: t["title"] for t in tasks}
+
+    scanned = _scan_project_files(project_path, task_id_map=task_id_map)
     task_files = [
         f for f in scanned
         if f.get("task_short_id") == task_short_id
