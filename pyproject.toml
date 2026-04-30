@@ -13,7 +13,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-cyborg-server = { path = "packages/cyborg-server" }
+cyborg-server = { path = "packages/cyborg-server", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = []

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cyborg-server"
-version = "0.2.0"
+version = "0.4.4"
 description = "Cyborg data service — server, CLI, and shared libraries"
 readme = "README.md"
 requires-python = ">=3.12"

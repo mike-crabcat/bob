@@ -1,13 +1,18 @@
 ---
 name: cyborg-cli
-description: "Interface with Cyborg for autonomous project execution and task management. Use the CLI for all operations."
+description: "Interface with Cyborg for autonomous project execution and sending emails via agentmail."
 ---
 
 # Cyborg CLI
 
 **Always use the `cyborg` CLI. Never call the HTTP API directly.**
 
+## Setup
+Use `uv sync` to setup a venv, and then `uv tool install cyborg-server`
+
 ## Rules
+
+** YOU ARE NOT THE DEVELOPER OF CYBORG ** If it has an error tell the user - don't try to fix it or hack it.
 
 1. **Only execute work when dispatched.** You will receive task assignment notifications from Cyborg. Follow the instructions in the assignment prompt. Do not start work you were not assigned.
 2. **Always include `--result-summary`** when completing tasks.
@@ -17,6 +22,8 @@ description: "Interface with Cyborg for autonomous project execution and task ma
 6. **Do not mention Cyborg internals** (task IDs, notification IDs, session keys) in user-facing messages unless the assignment prompt explicitly tells you to.
 
 ## Quick Reference
+
+Use `uv run` to run all commands.  Use a `uv sync` in the skill directory to setup a venv for it.
 
 | Need | Command |
 |------|---------|
@@ -28,6 +35,12 @@ description: "Interface with Cyborg for autonomous project execution and task ma
 | Structured input | `task block --reason --resume-instructions --input-schema-json '{...}'` |
 | Record file | `task file --project-id --filename --purpose` |
 | Check status | `context summary` |
+| Send email | `email send --inbox <id> --to <addr> --subject <subj> --text <body>` |
+| Reply to email | `email reply --inbox <id> --message-id <id> --text <reply>` |
+| Send with attachment | `email send ... --attach /path/to/file` |
+| Send with inline image | `email send ... --html '<img src="cid:image.png" />' --inline-image /path/to/image.png` |
+| List email threads | `email threads [--inbox <id>]` |
+| Download attachment | `email download-attachment --inbox <id> --message-id <id> --attachment-id <id> --output <path>` |
 | Get context for injection | `openclaw context` |
 | Add to calendar | `event create` → `event recipient-add` |
 
@@ -38,7 +51,7 @@ description: "Interface with Cyborg for autonomous project execution and task ma
 Project creation requires **aim** and **success criteria**. Method and plan are optional — Cyborg will generate a plan automatically after approval if you don't provide one.
 
 ```bash
-cyborg project create "Project Name" \
+uv run cyborg project create "Project Name" \
   --aim "What success looks like" \
   --success-criteria-json '[{"check":"output_exists","description":"Output file created"}]' \
   --description "What this project does" \
@@ -53,7 +66,7 @@ A spec (v1) is created automatically. The project waits for approval — do not 
 If the spec is rejected, submit a revised version:
 
 ```bash
-cyborg project spec submit <project-id> \
+uv run cyborg project spec submit <project-id> \
   --aim "Updated aim" \
   --method "Updated method" \
   --success-criteria-json '[{"check":"...","description":"..."}]'
@@ -62,11 +75,10 @@ cyborg project spec submit <project-id> \
 ### Other Project Commands
 
 ```bash
-cyborg project list --state active     # List projects by state
-cyborg project get <id>                # View project details
-cyborg project tasks <id>              # Tasks within a project
-cyborg project pause <id>              # Pause work
-cyborg project close <id> --conclusion "Done"  # Close with conclusion
+uv run cyborg project list --state active     # List projects by state
+uv run cyborg project get <id>                # View project details
+uv run cyborg project tasks <id>              # Tasks within a project
+uv run cyborg project pause <id>              # Pause work
 ```
 
 Project states: `planning` → `active` → `paused` → `closed`
@@ -89,16 +101,16 @@ planning → pending → active → completed / failed
 
 ```bash
 # Lifecycle
-cyborg task start <id>                                 # pending → active
-cyborg task complete <id> --result-summary "Done"      # active → completed
-cyborg task block <id> --reason "Need X" --resume-instructions "When unblocked: 1. Get X. 2. Continue."
-cyborg task unblock <id>                               # Resume a blocked task
-cyborg task fail <id>                                  # Mark as failed
+uv run cyborg task start <id>                                 # pending → active
+uv run cyborg task complete <id> --result-summary "Done"      # active → completed
+uv run cyborg task block <id> --reason "Need X" --resume-instructions "When unblocked: 1. Get X. 2. Continue."
+uv run cyborg task unblock <id>                               # Resume a blocked task
+uv run cyborg task fail <id>                                  # Mark as failed
 
 # List & query
-cyborg task list --status pending
-cyborg task list --status blocked
-cyborg task list --project-id <id>
+uv run cyborg task list --status pending
+uv run cyborg task list --status blocked
+uv run cyborg task list --project-id <id>
 ```
 
 ### Submitting Work for Review
@@ -106,17 +118,7 @@ cyborg task list --project-id <id>
 When you finish a task, submit it. Cyborg sends it for review and you will receive a one-time password (OTP).
 
 ```bash
-cyborg task submit <id> --result-summary "Summary of what was done"
-```
-
-When you receive the review prompt with the OTP, verify the work:
-
-```bash
-# Approve (work is satisfactory)
-cyborg task verify-submit <id> --otp <otp> --approve
-
-# Reject (issues found — task returns to active)
-cyborg task verify-submit <id> --otp <otp> --reject --reason "Explain what is wrong"
+uv run cyborg task submit <id> --result-summary "Summary of what was done"
 ```
 
 If rejected, you will receive a retry notification with feedback. Address the issues and re-submit.
@@ -132,7 +134,7 @@ When a task needs user input before it can continue, block it with an `input_sch
 #### Text input
 
 ```bash
-cyborg task block <id> \
+uv run cyborg task block <id> \
   --reason "Need a project name to proceed" \
   --resume-instructions "Use the provided name in the configuration file and continue setup." \
   --input-schema-json '{
@@ -145,7 +147,7 @@ cyborg task block <id> \
 #### Multi-choice input
 
 ```bash
-cyborg task block <id> \
+uv run cyborg task block <id> \
   --reason "Need to confirm deployment target" \
   --resume-instructions "Deploy to the selected environment." \
   --input-schema-json '{
@@ -165,7 +167,7 @@ Add `"allow_multiple": true` for multi-select. Options can also include `image_u
 **Every file created during task execution must be registered.**
 
 ```bash
-cyborg task file <task-id> \
+uv run cyborg task file <task-id> \
   --project-id <project-id> \
   --filename "output.md" \
   --purpose result \
@@ -177,33 +179,33 @@ File purposes: `reasoning`, `result`, `analysis`, `log`, `artifact`, `other`
 ## Contacts
 
 ```bash
-cyborg contact create "Name" --phone-number "+61456224867" --email "name@example.com"
-cyborg contact list
-cyborg contact get <id>
-cyborg contact update <id> --email "new@example.com"
-cyborg contact delete <id>
-cyborg contact by-phone "+61456224867"
-cyborg contact by-email "name@example.com"
+uv run cyborg contact create "Name" --phone-number "+61456224867" --email "name@example.com"
+uv run cyborg contact list
+uv run cyborg contact get <id>
+uv run cyborg contact update <id> --email "new@example.com"
+uv run cyborg contact delete <id>
+uv run cyborg contact by-phone "+61456224867"
+uv run cyborg contact by-email "name@example.com"
 ```
 
 ## Calendar & Events
 
 ```bash
 # Events
-cyborg event create "Meeting" --time "2026-04-05T10:00:00" --duration 30
-cyborg event create "Call" --time "now" --duration 15
-cyborg event create "Follow-up" --time "+2h" --venue "Office"
-cyborg event list
-cyborg event get <id>
-cyborg event update <id> --time "2026-04-05T14:00:00"
-cyborg event event delete <id>
+uv run cyborg event create "Meeting" --time "2026-04-05T10:00:00" --duration 30
+uv run cyborg event create "Call" --time "now" --duration 15
+uv run cyborg event create "Follow-up" --time "+2h" --venue "Office"
+uv run cyborg event list
+uv run cyborg event get <id>
+uv run cyborg event update <id> --time "2026-04-05T14:00:00"
+uv run cyborg event event delete <id>
 
 # Add recipients
-cyborg event recipient-add <id> --address "email@example.com" --name "Alice"
+uv run cyborg event recipient-add <id> --address "email@example.com" --name "Alice"
 
 # Confirm/cancel
-cyborg event confirm <id>
-cyborg event cancel <id>
+uv run cyborg event confirm <id>
+uv run cyborg event cancel <id>
 ```
 
 - `--time` accepts ISO datetime, `"now"`, or relative like `"+1h"`, `"+30m"`
@@ -213,8 +215,113 @@ cyborg event cancel <id>
 ## Context
 
 ```bash
-cyborg context summary       # All active tasks + projects
-cyborg context tasks         # Task-focused context
-cyborg context projects      # Project-focused context
-cyborg openclaw context      # Plain text context for injection
+uv run cyborg context summary       # All active tasks + projects
+uv run cyborg context tasks         # Task-focused context
+uv run cyborg context projects      # Project-focused context
+uv run cyborg openclaw context      # Plain text context for injection
 ```
+
+## Email
+
+Email relay via AgentMail. Each email thread maps to a session so replies share context.
+
+### Sending a New Email
+
+```bash
+uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Subject" --text "Body"
+uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Hello" --text "Hi" --cc "b@example.com"
+```
+
+### Sending with Attachments
+
+Use `--attach` to add file attachments. Repeat the flag for multiple files.
+
+```bash
+uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Report" \
+  --text "Please find the attached report." \
+  --attach /path/to/report.pdf
+
+# Multiple attachments
+uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Files" \
+  --text "Here are the files." \
+  --attach /path/to/file1.pdf --attach /path/to/file2.xlsx
+```
+
+### Sending with Inline Images
+
+To embed images directly in the email body, use `--inline-image` together with `--html`.
+
+The `--html` body references each image using `cid:<filename>` where `<filename>` matches the basename of the file passed to `--inline-image`.
+
+```bash
+uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Chart" \
+  --text "See the chart below." \
+  --html '<p>Here is the chart:</p><img src="cid:chart.png" />' \
+  --inline-image /path/to/chart.png
+```
+
+You can mix `--attach` and `--inline-image` in the same command.
+
+### Best Practices for Attachments and Images
+
+- **Always include `--text`** as a plain-text fallback when using `--html`.
+- **Inline images need both `--html` and `--inline-image`** — the `cid:` reference in the HTML must match the filename.
+- **Don't send images in the first email to a new contact** — this hurts deliverability.
+- **Keep attachments under 10 MB** — large files may cause timeouts.
+- **Use `--html` for rich formatting** — styled text, tables, embedded images. Keep `--text` as a readable summary.
+
+### Replying to an Email Thread
+
+When you receive an email task assignment, reply using the thread's message ID:
+
+```bash
+uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> --text "Reply text"
+uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> --text "Reply" --reply-all
+```
+
+Use `--reply-all` to include all CC'd recipients.
+
+Reply with attachments using `--attach`, or reply with inline images using `--html` + `--inline-image`:
+
+```bash
+uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> \
+  --text "Here is the signed document." \
+  --attach /path/to/signed.pdf
+
+uv run cyborg email reply --inbox <inbox-id> --message-id <msg-id> \
+  --text "See the screenshot." \
+  --html '<img src="cid:screenshot.png" />' \
+  --inline-image /path/to/screenshot.png
+```
+
+### Inbox Management
+
+```bash
+uv run cyborg email inbox register --agentmail-inbox-id <id> --display-name "Name" --email-address "addr"
+uv run cyborg email inbox list
+uv run cyborg email inbox get <id>
+uv run cyborg email inbox remove <id>
+```
+
+### Listing Messages and Threads
+
+```bash
+uv run cyborg email messages --inbox <inbox-id>
+uv run cyborg email threads [--inbox <id>]
+uv run cyborg email thread get <thread-id>
+```
+
+### Downloading Attachments
+
+When an email has attachments that were not auto-downloaded (e.g., from an untrusted sender), download individual attachments after reviewing their metadata:
+
+```bash
+uv run cyborg email download-attachment --inbox <inbox-id> --message-id <msg-id> --attachment-id <att-id> --output /path/to/save
+```
+
+- `--inbox`: The inbox ID (provided in the email prompt)
+- `--message-id`: The message ID from the email prompt (angle-bracketed string)
+- `--attachment-id`: The specific attachment ID (listed in the email prompt)
+- `--output` / `-o`: Where to save the file. Defaults to current directory with attachment ID as filename.
+
+Only download attachments after reviewing metadata and determining they are safe.

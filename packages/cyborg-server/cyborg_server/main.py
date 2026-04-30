@@ -17,7 +17,7 @@ from cyborg_server.config import Settings
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ServiceError
 from cyborg_server.models import HealthResponse
-from cyborg_server.routers import calendars, contacts, context, dashboard, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks
+from cyborg_server.routers import calendars, contacts, context, dashboard, email, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks
 from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(session_routes.router)
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
+    app.include_router(email.router)
     app.include_router(dashboard.router)  # Web dashboard
 
     return app
@@ -138,6 +139,10 @@ async def _heartbeat_loop(database: Database, *, interval_seconds: float, stop_e
         except Exception:
             logger.exception("Heartbeat blocked-project check failed")
         try:
+            await _poll_email_inboxes(database)
+        except Exception:
+            logger.exception("Heartbeat email polling failed")
+        try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
             continue
@@ -154,3 +159,27 @@ async def _check_blocked_projects(database: Database, notification_service: Noti
     )
     for project in blocked:
         await notification_service.sync_project_state(project["id"])
+
+
+async def _poll_email_inboxes(database: Database) -> None:
+    """Poll AgentMail inboxes for new email messages."""
+    from cyborg_server.config import Settings
+
+    settings = getattr(database, "settings", None)
+    if not isinstance(settings, Settings) or not settings.agentmail.enabled or not settings.email_polling_enabled:
+        return
+
+    from cyborg_server.services.agentmail_client import AgentMailClient
+    from cyborg_server.services.email_polling_service import EmailPollingService
+
+    client = AgentMailClient(
+        base_url=settings.agentmail.base_url,
+        api_key=settings.agentmail.api_key,
+    )
+    try:
+        service = EmailPollingService(database, agentmail_client=client)
+        count = await service.poll_all_inboxes()
+        if count > 0:
+            logger.info("Email polling processed %d new message(s)", count)
+    finally:
+        await client.close()

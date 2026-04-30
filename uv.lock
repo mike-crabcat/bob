@@ -184,8 +184,8 @@ wheels = [
 
 [[package]]
 name = "cyborg-server"
-version = "0.2.0"
-source = { directory = "packages/cyborg-server" }
+version = "0.4.3"
+source = { editable = "packages/cyborg-server" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "cryptography" },
@@ -236,7 +236,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cyborg-server", directory = "packages/cyborg-server" },
+    { name = "cyborg-server", editable = "packages/cyborg-server" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
 ]
 provides-extras = ["dev"]

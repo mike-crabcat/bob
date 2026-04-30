@@ -36,7 +36,12 @@ def extract_source_route_metadata(metadata: dict[str, Any] | None) -> dict[str, 
 
 def has_source_route_metadata(metadata: dict[str, Any] | None) -> bool:
     extracted = extract_source_route_metadata(metadata)
-    return extracted.get("channel") == "whatsapp" and bool(extracted.get("chat_id") or extracted.get("session_key"))
+    channel = extracted.get("channel")
+    if channel == "whatsapp":
+        return bool(extracted.get("chat_id") or extracted.get("session_key"))
+    if channel == "email":
+        return bool(extracted.get("chat_id") or extracted.get("session_key"))
+    return False
 
 
 def merge_source_route_metadata(
@@ -228,6 +233,8 @@ class SessionRouteService(BaseService):
 
     async def resolve_source_metadata(self, metadata: dict[str, Any]) -> ResolvedSessionRoute | None:
         channel = metadata.get("channel")
+        if channel == "email":
+            return await self._resolve_email_source_metadata(metadata)
         if channel != "whatsapp":
             return None
         chat_id = metadata.get("chat_id")
@@ -320,6 +327,9 @@ class SessionRouteService(BaseService):
                     session_key=session_key.strip(),
                     route_source="target_session.session_key_only",
                 )
+
+        if channel == "email":
+            return await self._resolve_email_target_metadata(target_session, metadata)
 
         if channel != "whatsapp":
             return None
@@ -479,7 +489,7 @@ class SessionRouteService(BaseService):
         metadata = json_loads(row.get("metadata"), {})
         if row["kind"] == SessionRouteKind.GROUP.value:
             return ResolvedSessionRoute(
-                channel="whatsapp",
+                channel=row["channel"],
                 kind=SessionRouteKind.GROUP,
                 to=row["chat_id"],
                 session_key=row["session_key"],
@@ -487,7 +497,59 @@ class SessionRouteService(BaseService):
                 route_source="session_routes",
                 metadata=metadata,
             )
+        if row["kind"] == SessionRouteKind.THREAD.value:
+            return ResolvedSessionRoute(
+                channel=row["channel"],
+                kind=SessionRouteKind.THREAD,
+                to=row["chat_id"],
+                session_key=row["session_key"],
+                chat_id=row["chat_id"],
+                route_source="session_routes",
+                metadata=metadata,
+            )
         return await self._resolve_contact_route(row["contact_id"], session_key=row["session_key"], metadata=metadata, route_source="session_routes")
+
+    async def _resolve_email_source_metadata(self, metadata: dict[str, Any]) -> ResolvedSessionRoute | None:
+        chat_id = metadata.get("chat_id")
+        session_key = metadata.get("session_key")
+        if isinstance(chat_id, str) and chat_id.strip():
+            thread_id = chat_id.strip()
+            registered = await self.resolve_registered_route("email", thread_id)
+            derived_session_key = session_key or (registered.session_key if registered else None) or self._build_email_thread_session_key(thread_id)
+            return ResolvedSessionRoute(
+                channel="email",
+                kind=SessionRouteKind.THREAD,
+                to=thread_id,
+                session_key=derived_session_key,
+                chat_id=thread_id,
+                route_source="metadata.chat_id",
+            )
+        if isinstance(session_key, str) and session_key.strip():
+            resolved = await self.resolve_registered_route("email", session_key.strip())
+            if resolved is not None:
+                return resolved
+        return None
+
+    async def _resolve_email_target_metadata(self, target_session: dict[str, Any], metadata: dict[str, Any]) -> ResolvedSessionRoute | None:
+        kind = target_session.get("kind")
+        if kind == SessionRouteKind.THREAD.value or kind is None:
+            session_key = target_session.get("session_key")
+            chat_id = target_session.get("chat_id")
+            if isinstance(chat_id, str) and chat_id.strip():
+                thread_id = chat_id.strip()
+                registered = await self.resolve_registered_route("email", thread_id)
+                derived_session_key = session_key or (registered.session_key if registered else None) or self._build_email_thread_session_key(thread_id)
+                return ResolvedSessionRoute(
+                    channel="email",
+                    kind=SessionRouteKind.THREAD,
+                    to=thread_id,
+                    session_key=derived_session_key,
+                    chat_id=thread_id,
+                    route_source="target_session.chat_id",
+                )
+            if isinstance(session_key, str) and session_key.strip():
+                return await self.resolve_registered_route("email", session_key.strip())
+        return None
 
     async def _resolve_contact_route(
         self,
@@ -534,15 +596,22 @@ class SessionRouteService(BaseService):
         chat_id: str | None,
         contact_id: str | Any | None,
     ) -> None:
-        if channel != "whatsapp":
-            raise ConflictError("Only WhatsApp session routes are supported")
-        if kind == SessionRouteKind.GROUP:
-            if not chat_id:
-                raise ConflictError("Group session routes require chat_id")
+        if channel == "whatsapp":
+            if kind == SessionRouteKind.GROUP:
+                if not chat_id:
+                    raise ConflictError("Group session routes require chat_id")
+                return
+            if contact_id is None:
+                raise ConflictError("DM session routes require contact_id")
+            await self._resolve_contact_route(str(contact_id), route_source="session_routes.validation")
             return
-        if contact_id is None:
-            raise ConflictError("DM session routes require contact_id")
-        await self._resolve_contact_route(str(contact_id), route_source="session_routes.validation")
+        if channel == "email":
+            if kind == SessionRouteKind.THREAD:
+                if not chat_id:
+                    raise ConflictError("Thread email session routes require chat_id (thread_id)")
+                return
+            raise ConflictError("Email session routes must use kind 'thread'")
+        raise ConflictError(f"Unsupported channel: {channel}")
 
     def _decode_route_row(self, row: dict[str, Any]) -> dict[str, Any]:
         decoded = dict(row)
@@ -554,16 +623,22 @@ class SessionRouteService(BaseService):
     def _build_whatsapp_dm_session_key(self, phone_number: str, *, source_session_key: str | None = None) -> str:
         return f"{self._resolve_whatsapp_agent_prefix(source_session_key)}whatsapp:direct:{phone_number}"
 
+    def _build_email_thread_session_key(self, thread_id: str) -> str:
+        return f"{self._resolve_agent_prefix()}email:thread:{thread_id}"
+
+    def _resolve_agent_prefix(self) -> str:
+        current = getattr(self.db, "settings", None)
+        if isinstance(current, Settings) and current.openclaw.agent_id:
+            return f"agent:{current.openclaw.agent_id}:"
+        return "agent:main:"
+
     def _resolve_whatsapp_agent_prefix(self, source_session_key: str | None) -> str:
         if isinstance(source_session_key, str):
             match = re.match(r"^(?P<prefix>agent:[^:]+:)whatsapp:(?:direct|group):", source_session_key.strip())
             if match is not None:
                 return match.group("prefix")
 
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings) and current.openclaw.agent_id:
-            return f"agent:{current.openclaw.agent_id}:"
-        return "agent:main:"
+        return self._resolve_agent_prefix()
 
     def _derive_whatsapp_group_chat_id_from_session_key(self, session_key: str) -> str | None:
         match = re.search(r"(?:^|:)whatsapp:group:(?P<chat_id>[^:]+@g\.us)$", session_key)
