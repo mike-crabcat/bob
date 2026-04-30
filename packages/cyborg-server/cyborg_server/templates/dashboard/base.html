@@ -341,6 +341,9 @@
                             <span class="ml-1 px-1.5 py-0.5 text-xs bg-accent-pink/20 text-accent-pink rounded-full">{{ pending_count }}</span>
                             {% endif %}
                         </a>
+                        <a href="/dashboard/emails" class="nav-link text-sm {% if '/emails' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
+                            Email
+                        </a>
                         <a href="/dashboard/logs" class="nav-link text-sm {% if '/logs' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
                             Logs
                         </a>
@@ -368,6 +371,9 @@
                         </a>
                         <a href="/dashboard/approvals" class="px-3 py-1.5 rounded-full text-sm border {% if '/approvals' in request.path %}bg-accent-pink/20 text-accent-pink border-accent-pink/30{% else %}bg-bg-card text-text-secondary border-accent-pink/10{% endif %}">
                             Approvals{% if pending_count > 0 %} ({{ pending_count }}){% endif %}
+                        </a>
+                        <a href="/dashboard/emails" class="px-3 py-1.5 rounded-full text-sm border {% if '/emails' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
+                            Email
                         </a>
                         <a href="/dashboard/logs" class="px-3 py-1.5 rounded-full text-sm border {% if '/logs' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
                             Logs

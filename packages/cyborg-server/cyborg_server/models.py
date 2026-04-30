@@ -1300,7 +1300,7 @@ class EmailSendRequest(CyborgModel):
     text: str = Field(min_length=1)
     html: str | None = None
     cc: list[str] | None = None
-    agenda: str | None = None
+    agenda: str = Field(min_length=1, description="Purpose and handling instructions for this email thread")
     attachments: list[EmailAttachment] | None = None
 
 
@@ -1319,6 +1319,7 @@ class EmailThreadResponse(CyborgModel, EntityRef):
     contact_id: UUID | None = None
     project_id: UUID | None = None
     session_key: str
+    agenda: str | None = None
     message_count: int = 0
     last_message_at: datetime | None = None
     is_active: bool = True

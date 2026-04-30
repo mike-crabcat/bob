@@ -50,6 +50,7 @@ def _row_to_thread(row: dict[str, Any]) -> EmailThreadResponse:
         contact_id=UUID(row["contact_id"]) if row.get("contact_id") else None,
         project_id=UUID(row["project_id"]) if row.get("project_id") else None,
         session_key=row["session_key"],
+        agenda=row.get("agenda"),
         message_count=int(row.get("message_count") or 0),
         last_message_at=datetime.fromisoformat(row["last_message_at"]) if row.get("last_message_at") else None,
         is_active=bool(row.get("is_active", 1)),
@@ -187,7 +188,6 @@ async def send_email(
     from cyborg_server.services.agentmail_client import AgentMailClient
     from cyborg_server.services.email_polling_service import (
         CUSTOM_AGENDA_TEMPLATE,
-        DEFAULT_AGENDA,
         resolve_or_create_email_thread,
     )
     from cyborg_server.services.openclaw_hook_service import OpenClawHookService
@@ -302,12 +302,9 @@ async def send_email(
         send_parts: list[str] = []
 
         if is_new_thread:
-            if payload.agenda:
-                send_parts.append(CUSTOM_AGENDA_TEMPLATE.format(
-                    agenda=payload.agenda, inbox_id=inbox["id"],
-                ))
-            else:
-                send_parts.append(DEFAULT_AGENDA.format(inbox_id=inbox["id"]))
+            send_parts.append(CUSTOM_AGENDA_TEMPLATE.format(
+                agenda=payload.agenda, inbox_id=inbox["id"],
+            ))
             send_parts.append("")
 
         send_parts += [
@@ -495,6 +492,30 @@ async def get_thread(
     """Get a tracked email thread."""
     row = await database.fetch_one(
         "SELECT * FROM email_threads WHERE id = ? AND deleted_at IS NULL",
+        (str(thread_id),),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return _row_to_thread(row)
+
+
+@router.patch("/threads/{thread_id}/agenda", response_model=EmailThreadResponse)
+async def update_thread_agenda(
+    thread_id: UUID,
+    payload: dict[str, str],
+    database: Database = Depends(get_database),
+) -> EmailThreadResponse:
+    """Update the agenda for an email thread."""
+    agenda = payload.get("agenda", "").strip()
+    if not agenda:
+        raise HTTPException(status_code=422, detail="agenda must not be empty")
+    now_iso = utcnow().isoformat()
+    await database.execute(
+        "UPDATE email_threads SET agenda = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+        (agenda, now_iso, str(thread_id)),
+    )
+    row = await database.fetch_one(
+        "SELECT * FROM email_threads WHERE id = ?",
         (str(thread_id),),
     )
     if row is None:

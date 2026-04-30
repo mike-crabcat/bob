@@ -1586,6 +1586,50 @@ async def logs(
     )
 
 
+@router.get("/emails", response_class=HTMLResponse)
+async def email_threads(
+    request: Request,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Email threads management view."""
+    pending_count = await _get_pending_approval_count(db)
+
+    threads = await db.fetch_all(
+        """
+        SELECT et.*, c.email as contact_email, ei.email_address as inbox_email
+        FROM email_threads et
+        LEFT JOIN contacts c ON c.id = et.contact_id AND c.deleted_at IS NULL
+        LEFT JOIN email_inboxes ei ON ei.id = et.inbox_id AND ei.deleted_at IS NULL
+        WHERE et.deleted_at IS NULL
+        ORDER BY et.last_message_at DESC
+        """,
+    )
+
+    inbox_count = await db.fetch_one(
+        "SELECT COUNT(*) as cnt FROM email_inboxes WHERE deleted_at IS NULL AND is_active = 1",
+    )
+    active_count = sum(1 for t in threads if t.get("is_active"))
+
+    thread_rows = []
+    for t in threads:
+        thread_rows.append({
+            "id": t["id"],
+            "subject": t.get("subject"),
+            "agenda": t.get("agenda"),
+            "contact_email": t.get("contact_email"),
+            "message_count": int(t.get("message_count") or 0),
+            "last_message_at": t.get("last_message_at"),
+            "is_active": bool(t.get("is_active")),
+        })
+
+    return _render_template("dashboard/emails.html", request, {
+        "pending_count": pending_count,
+        "threads": thread_rows,
+        "active_count": active_count,
+        "inbox_count": inbox_count["cnt"] if inbox_count else 0,
+    })
+
+
 @router.get("/health", response_class=HTMLResponse)
 async def health(
     request: Request,

@@ -130,11 +130,29 @@ class AgentMailClient:
         message_id: str,
         attachment_id: str,
     ) -> bytes:
-        """Download an attachment's raw content."""
+        """Download an attachment's raw content.
+
+        The AgentMail API may return either the raw binary content directly,
+        or a JSON body containing a ``download_url`` field. This method
+        handles both cases transparently.
+        """
         response = await self._client.get(
             f"/v0/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
         )
         response.raise_for_status()
+
+        content_type = response.headers.get("content-type", "")
+        if "application/json" in content_type:
+            data = response.json()
+            download_url = data.get("download_url") or data.get("url")
+            if download_url:
+                logger.debug("Following download_url for attachment %s", attachment_id)
+                dl_response = await self._client.get(download_url)
+                dl_response.raise_for_status()
+                return dl_response.content
+            # If no download_url, return raw content as-is
+            logger.warning("Attachment %s returned JSON without download_url: %s", attachment_id, data)
+
         return response.content
 
     async def close(self) -> None:

@@ -35,7 +35,7 @@ Use `uv run` to run all commands.  Use a `uv sync` in the skill directory to set
 | Structured input | `task block --reason --resume-instructions --input-schema-json '{...}'` |
 | Record file | `task file --project-id --filename --purpose` |
 | Check status | `context summary` |
-| Send email | `email send --inbox <id> --to <addr> --subject <subj> --text <body>` |
+| Send email | `email send --inbox <id> --to <addr> --subject <subj> --text <body> --agenda <purpose>` |
 | Reply to email | `email reply --inbox <id> --message-id <id> --text <reply>` |
 | Send with attachment | `email send ... --attach /path/to/file` |
 | Send with inline image | `email send ... --html '<img src="cid:image.png" />' --inline-image /path/to/image.png` |
@@ -225,11 +225,50 @@ uv run cyborg openclaw context      # Plain text context for injection
 
 Email relay via AgentMail. Each email thread maps to a session so replies share context.
 
+### Thread Agenda
+
+Every email thread has an **agenda** — a statement of the conversation's purpose and how responses should be handled. The agenda persists across all messages in the thread and guides how the agent processes replies.
+
+**You MUST provide `--agenda` when sending a new email.** It answers "why are you sending this email?" beyond what the body says, and provides rules for handling responses.
+
+**What to include:**
+- The purpose of the conversation (what outcome you expect)
+- How to handle replies (what to do if the recipient asks X, agrees, declines, etc.)
+- Any special rules (tone, escalation, what to collect)
+
+**Examples:**
+
+```bash
+# Scheduling a meeting
+uv run cyborg email send --inbox <id> --to "alice@example.com" --subject "Meeting request" \
+  --text "Hi Alice, can we meet next week?" \
+  --agenda "Schedule a 30-minute meeting with Alice for next week. Preferred times: Tuesday or Wednesday afternoon. If she suggests alternatives, negotiate and confirm. If she declines, ask for a reason and report back."
+
+# Sending a document for review
+uv run cyborg email send --inbox <id> --to "bob@example.com" --subject "Q3 report for review" \
+  --text "Hi Bob, please find the attached Q3 report." \
+  --agenda "Bob is reviewing the Q3 financial report. If he has questions, answer them or escalate to the user. If he requests changes, note them and inform the user. Confirm receipt of his feedback." \
+  --attach /path/to/report.pdf
+
+# Collecting information
+uv run cyborg email send --inbox <id> --to "vendor@example.com" --subject "Pricing request" \
+  --text "Hi, could you send me your current pricing for the Enterprise plan?" \
+  --agenda "Collect pricing details for the Enterprise plan. Record all numbers, terms, and conditions. If they offer a call instead, accept and report back the details. If they need more info about our requirements, ask the user."
+```
+
+For incoming emails that start new threads, a default agenda is used automatically. If the user asks to change the agenda for an existing thread:
+
+```bash
+uv run cyborg email update-agenda <thread-id> --agenda "New agenda text"
+```
+
 ### Sending a New Email
 
 ```bash
-uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Subject" --text "Body"
-uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Hello" --text "Hi" --cc "b@example.com"
+uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Subject" --text "Body" \
+  --agenda "Purpose and handling instructions for this thread"
+uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Hello" --text "Hi" \
+  --agenda "Greet and establish contact" --cc "b@example.com"
 ```
 
 ### Sending with Attachments
@@ -239,11 +278,13 @@ Use `--attach` to add file attachments. Repeat the flag for multiple files.
 ```bash
 uv run cyborg email send --inbox <inbox-id> --to "recipient@example.com" --subject "Report" \
   --text "Please find the attached report." \
+  --agenda "Deliver the attached report and confirm receipt." \
   --attach /path/to/report.pdf
 
 # Multiple attachments
 uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Files" \
   --text "Here are the files." \
+  --agenda "Deliver the requested files." \
   --attach /path/to/file1.pdf --attach /path/to/file2.xlsx
 ```
 
@@ -256,6 +297,7 @@ The `--html` body references each image using `cid:<filename>` where `<filename>
 ```bash
 uv run cyborg email send --inbox <inbox-id> --to "a@example.com" --subject "Chart" \
   --text "See the chart below." \
+  --agenda "Share the chart and gather feedback." \
   --html '<p>Here is the chart:</p><img src="cid:chart.png" />' \
   --inline-image /path/to/chart.png
 ```

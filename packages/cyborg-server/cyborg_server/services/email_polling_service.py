@@ -389,12 +389,20 @@ class EmailPollingService(BaseService):
             if contact:
                 contact_id = contact["id"]
 
+        is_known = contact_id is not None
+        default_agenda = (
+            DEFAULT_AGENDA.format(inbox_id=inbox["id"])
+            if is_known
+            else UNTRUSTED_EXTERNAL_AGENDA.format(inbox_id=inbox["id"])
+        )
+
         return await resolve_or_create_email_thread(
             self.db,
             inbox=inbox,
             agentmail_thread_id=thread_id,
             subject=message.get("subject"),
             contact_id=contact_id,
+            agenda=default_agenda,
         )
 
     async def _download_attachments(
@@ -466,14 +474,18 @@ class EmailPollingService(BaseService):
 
         prompt_parts: list[str] = []
 
-        # 1. Agenda framing (new threads only)
-        if is_new_thread:
+        # 1. Agenda framing (always, using stored agenda if available)
+        stored_agenda = thread.get("agenda")
+        if stored_agenda:
+            prompt_parts.append(stored_agenda)
+        else:
+            # Fallback for legacy threads without a stored agenda
             is_known = thread.get("contact_id") is not None
             if is_known:
                 prompt_parts.append(DEFAULT_AGENDA.format(inbox_id=inbox["id"]))
             else:
                 prompt_parts.append(UNTRUSTED_EXTERNAL_AGENDA.format(inbox_id=inbox["id"]))
-            prompt_parts.append("")
+        prompt_parts.append("")
 
         # 2. Prior outgoing email context (if this thread was started by a send)
         prior_outgoing = await self.db.fetch_one(

@@ -3035,18 +3035,16 @@ def email_send(
     to: Annotated[str, typer.Option("--to", help="Recipient email address")],
     subject: Annotated[str, typer.Option("--subject", help="Email subject")],
     text: Annotated[str, typer.Option("--text", help="Email body text")],
+    agenda: Annotated[str, typer.Option("--agenda", help="Purpose and handling instructions for this email thread (required)")],
     cc: Annotated[Optional[list[str]], typer.Option("--cc", help="CC recipients")] = None,
-    agenda: Annotated[Optional[str], typer.Option("--agenda", help="Agenda for the OpenClaw session")] = None,
     html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
     attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
     inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
 ) -> None:
     """Send a new email from a registered inbox."""
-    payload: dict[str, Any] = {"to": to, "subject": subject, "text": text}
+    payload: dict[str, Any] = {"to": to, "subject": subject, "text": text, "agenda": agenda}
     if cc:
         payload["cc"] = cc
-    if agenda:
-        payload["agenda"] = agenda
     if html:
         payload["html"] = html
     attachments: list[dict[str, Any]] = []
@@ -3145,6 +3143,16 @@ def email_thread_get(
     """Get a tracked email thread."""
     result = _api_call("GET", f"/api/v1/email/threads/{thread_id}")
     _echo_json(result["data"])
+
+
+@email_app.command("update-agenda")
+def email_thread_update_agenda(
+    thread_id: Annotated[str, typer.Argument(help="Thread ID")],
+    agenda: Annotated[str, typer.Option("--agenda", help="New agenda text for the thread")],
+) -> None:
+    """Update the agenda for an email thread."""
+    result = _api_call("PATCH", f"/api/v1/email/threads/{thread_id}/agenda", {"agenda": agenda})
+    _echo_json(result.get("data", result))
 
 
 def main() -> int:

@@ -1,0 +1,99 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Email Threads - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">
+        <span class="neon-text-cyan">Email</span> Threads
+    </h1>
+    <p class="text-text-secondary">View and manage email conversation threads and their agendas.</p>
+</div>
+
+<!-- Stats Row -->
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+    <div class="glass-card neon-border-cyan rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-cyan">{{ threads|length }}</div>
+        <div class="text-text-muted text-sm mt-1">Total Threads</div>
+    </div>
+    <div class="glass-card rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-green">{{ active_count }}</div>
+        <div class="text-text-muted text-sm mt-1">Active</div>
+    </div>
+    <div class="glass-card rounded-xl p-5">
+        <div class="text-3xl font-bold font-mono-data text-accent-purple">{{ inbox_count }}</div>
+        <div class="text-text-muted text-sm mt-1">Inboxes</div>
+    </div>
+</div>
+
+<!-- Thread List -->
+<div class="space-y-4">
+    {% for thread in threads %}
+    <div class="glass-card rounded-xl p-6 card-hover">
+        <div class="flex flex-col lg:flex-row lg:items-start gap-4">
+            <!-- Thread Info -->
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-3 mb-2">
+                    <h3 class="text-lg font-semibold truncate">{{ thread.subject or "(no subject)" }}</h3>
+                    {% if thread.is_active %}
+                    <span class="text-xs px-2 py-0.5 rounded bg-accent-green/20 text-accent-green border border-accent-green/30">Active</span>
+                    {% else %}
+                    <span class="text-xs px-2 py-0.5 rounded bg-bg-elevated text-text-muted border border-accent-cyan/10">Inactive</span>
+                    {% endif %}
+                </div>
+
+                <!-- Thread metadata -->
+                <div class="flex flex-wrap items-center gap-3 text-xs text-text-muted mb-3">
+                    <span class="font-mono-data">{{ thread.id[:8] }}</span>
+                    <span>{{ thread.message_count }} message{{ 's' if thread.message_count != 1 else '' }}</span>
+                    {% if thread.contact_email %}
+                    <span class="text-text-secondary">{{ thread.contact_email }}</span>
+                    {% endif %}
+                    {% if thread.last_message_at %}
+                    <span>Last: {{ thread.last_message_at|relative_time }}</span>
+                    {% endif %}
+                </div>
+
+                <!-- Agenda -->
+                <div class="bg-bg-deep rounded-lg p-4 border border-accent-cyan/10">
+                    <div class="flex items-center justify-between mb-2">
+                        <div class="text-xs text-accent-cyan font-semibold">AGENDA</div>
+                        <button type="button"
+                                onclick="this.parentElement.nextElementSibling.classList.toggle('hidden'); this.textContent = this.textContent === 'Edit' ? 'Cancel' : 'Edit'"
+                                class="text-xs text-text-muted hover:text-accent-cyan transition-colors">
+                            Edit
+                        </button>
+                    </div>
+                    <div class="text-sm text-text-primary whitespace-pre-line mb-3">{{ thread.agenda or "(no agenda set)" }}</div>
+                    <form hx-patch="/api/v1/email/threads/{{ thread.id }}/agenda"
+                          hx-target="closest .glass-card"
+                          hx-swap="none"
+                          hx-on::after-request="location.reload()"
+                          class="hidden space-y-2">
+                        <textarea name="agenda"
+                                  rows="4"
+                                  class="w-full bg-bg-card border border-accent-cyan/20 rounded-lg p-3 text-sm text-text-primary placeholder-text-muted focus:border-accent-cyan focus:outline-none">{{ thread.agenda or '' }}</textarea>
+                        <div class="flex gap-2">
+                            <button type="submit"
+                                    class="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors text-sm font-medium">
+                                Save
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% if not threads %}
+<!-- Empty State -->
+<div class="glass-card neon-border-cyan rounded-xl p-12 text-center">
+    <div class="text-4xl mb-4 text-accent-cyan">&#9993;</div>
+    <h3 class="text-xl font-semibold mb-2 text-accent-cyan">No email threads yet</h3>
+    <p class="text-text-muted">Email threads will appear here when emails are sent or received.</p>
+</div>
+{% endif %}
+{% endblock %}
