@@ -1,0 +1,70 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}{{ message.subject or "Email" }} - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<!-- Back link -->
+<a href="/dashboard/emails" class="inline-flex items-center gap-2 text-accent-cyan hover:text-accent-cyan/80 transition-colors mb-6">
+    &larr; Back to Emails
+</a>
+
+<!-- Message Header -->
+<div class="glass-card neon-border-cyan rounded-xl p-6 mb-6">
+    <h1 class="text-2xl font-bold mb-4">{{ message.subject or "(no subject)" }}</h1>
+
+    <div class="space-y-2 text-sm">
+        <div class="flex gap-3">
+            <span class="text-text-muted w-12 shrink-0">From</span>
+            <span class="text-text-primary">
+                {% if message.sender_name %}
+                    {{ message.sender_name }}
+                    <span class="text-text-muted">&lt;{{ message.sender_email }}&gt;</span>
+                {% else %}
+                    {{ message.sender_email }}
+                {% endif %}
+            </span>
+        </div>
+        <div class="flex gap-3">
+            <span class="text-text-muted w-12 shrink-0">To</span>
+            <span class="text-text-primary">{{ to_addresses | join(', ') }}</span>
+        </div>
+        {% if cc_addresses %}
+        <div class="flex gap-3">
+            <span class="text-text-muted w-12 shrink-0">Cc</span>
+            <span class="text-text-primary">{{ cc_addresses | join(', ') }}</span>
+        </div>
+        {% endif %}
+        <div class="flex gap-3">
+            <span class="text-text-muted w-12 shrink-0">Time</span>
+            <span class="text-text-primary font-mono-data">{{ message.message_timestamp }}</span>
+        </div>
+        {% if attachments %}
+        <div class="flex gap-3">
+            <span class="text-text-muted w-12 shrink-0">Files</span>
+            <div class="flex flex-wrap gap-2">
+                {% for att in attachments %}
+                <span class="text-xs px-2 py-1 rounded bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/20">
+                    {{ att.filename or att.name or "attachment" }}
+                </span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Message Body -->
+<div class="glass-card rounded-xl p-6">
+    {% if message.text_body %}
+    <pre class="whitespace-pre-wrap text-sm text-text-primary font-sans leading-relaxed">{{ message.text_body }}</pre>
+    {% elif message.html_body %}
+    <div class="text-sm text-text-primary prose prose-invert max-w-none">
+        {{ message.html_body | safe }}
+    </div>
+    {% elif message.preview %}
+    <p class="text-sm text-text-muted">{{ message.preview }}</p>
+    {% else %}
+    <p class="text-sm text-text-muted">(no body content)</p>
+    {% endif %}
+</div>
+{% endblock %}

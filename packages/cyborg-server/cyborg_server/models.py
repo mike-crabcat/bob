@@ -1169,6 +1169,7 @@ class ContactUpdate(CyborgModel):
 class ContactResponse(ContactFields, EntityRef, SoftDeleteFields):
     created_at: datetime
     updated_at: datetime
+    is_trusted: bool = False
 
 
 class SessionRouteFields(CyborgModel):

@@ -54,6 +54,7 @@ def _row_to_contact(row: dict[str, Any]) -> ContactResponse:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
+        is_trusted=bool(row.get("is_trusted", 0)),
     )
 
 

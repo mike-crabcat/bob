@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 from jinja2 import FileSystemLoader
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 
@@ -1622,12 +1622,136 @@ async def email_threads(
             "is_active": bool(t.get("is_active")),
         })
 
+    # Fetch all messages grouped by thread (thread_id is agentmail_thread_id)
+    all_messages = await db.fetch_all(
+        """
+        SELECT em.id, em.subject, em.sender_email, em.sender_name,
+               em.to_addresses, em.message_timestamp, em.has_attachments,
+               em.preview, em.thread_id, et.id as thread_row_id
+        FROM email_messages em
+        JOIN email_threads et ON et.agentmail_thread_id = em.thread_id
+        ORDER BY em.message_timestamp ASC
+        """,
+    )
+
+    messages_by_thread: dict[str, list] = {}
+    for m in all_messages:
+        tid = m["thread_row_id"]
+        row = dict(m)
+        row["to_addresses"] = json.loads(m.get("to_addresses") or "[]")
+        messages_by_thread.setdefault(tid, []).append(row)
+
     return _render_template("dashboard/emails.html", request, {
         "pending_count": pending_count,
         "threads": thread_rows,
         "active_count": active_count,
         "inbox_count": inbox_count["cnt"] if inbox_count else 0,
+        "messages_by_thread": messages_by_thread,
     })
+
+
+@router.get("/emails/{message_id}", response_class=HTMLResponse)
+async def email_message_detail(
+    message_id: str,
+    request: Request,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Individual email message detail view."""
+    pending_count = await _get_pending_approval_count(db)
+
+    msg = await db.fetch_one(
+        """
+        SELECT em.*, ei.email_address as inbox_email
+        FROM email_messages em
+        LEFT JOIN email_inboxes ei ON ei.id = em.inbox_id AND ei.deleted_at IS NULL
+        WHERE em.id = :id
+        """,
+        {"id": message_id},
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    to_addresses = json.loads(msg.get("to_addresses") or "[]")
+    cc_addresses = json.loads(msg.get("cc_addresses") or "[]")
+    attachments = json.loads(msg.get("attachments_json") or "[]")
+
+    return _render_template("dashboard/email_detail.html", request, {
+        "pending_count": pending_count,
+        "message": dict(msg),
+        "to_addresses": to_addresses,
+        "cc_addresses": cc_addresses,
+        "attachments": attachments,
+    })
+
+
+@router.get("/contacts", response_class=HTMLResponse)
+async def contacts(
+    request: Request,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Contacts management view with trust toggle."""
+    pending_count = await _get_pending_approval_count(db)
+
+    contacts_data = await db.fetch_all(
+        """
+        SELECT id, name, phone_number, email, is_default, is_trusted,
+               created_at, updated_at
+        FROM contacts
+        WHERE deleted_at IS NULL
+        ORDER BY is_trusted DESC, name ASC
+        """,
+    )
+
+    total = len(contacts_data)
+    trusted_count = sum(1 for c in contacts_data if c.get("is_trusted"))
+    untrusted_count = total - trusted_count
+
+    contact_rows = [
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "phone_number": c["phone_number"],
+            "email": c.get("email"),
+            "is_default": bool(c.get("is_default", 0)),
+            "is_trusted": bool(c.get("is_trusted", 0)),
+            "created_at": c["created_at"],
+        }
+        for c in contacts_data
+    ]
+
+    return _render_template("dashboard/contacts.html", request, {
+        "pending_count": pending_count,
+        "contacts": contact_rows,
+        "total": total,
+        "trusted_count": trusted_count,
+        "untrusted_count": untrusted_count,
+    })
+
+
+@router.post("/contacts/{contact_id}/toggle-trust")
+async def toggle_contact_trust(
+    contact_id: str,
+    db: Database = Depends(get_database),
+) -> Response:
+    """Toggle the trusted status of a contact (dashboard-only)."""
+    existing = await db.fetch_one(
+        "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
+        (contact_id,),
+    )
+    if not existing:
+        return Response(content="Contact not found", status_code=404)
+
+    new_trust = 0 if existing["is_trusted"] else 1
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        "UPDATE contacts SET is_trusted = ?, updated_at = ? WHERE id = ?",
+        (new_trust, now, contact_id),
+    )
+
+    return Response(
+        status_code=303,
+        headers={"Location": "/dashboard/contacts"},
+    )
 
 
 @router.get("/health", response_class=HTMLResponse)

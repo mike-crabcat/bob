@@ -30,9 +30,11 @@
 <!-- Thread List -->
 <div class="space-y-4">
     {% for thread in threads %}
-    <div class="glass-card rounded-xl p-6 card-hover">
-        <div class="flex flex-col lg:flex-row lg:items-start gap-4">
-            <!-- Thread Info -->
+    {% set thread_messages = messages_by_thread.get(thread.id, []) %}
+    <div class="glass-card rounded-xl overflow-hidden card-hover">
+        <!-- Thread Header (clickable) -->
+        <button onclick="toggleThread('thread-{{ loop.index }}')"
+                class="w-full text-left p-6 flex items-start gap-4 hover:bg-accent-cyan/5 transition-colors">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-3 mb-2">
                     <h3 class="text-lg font-semibold truncate">{{ thread.subject or "(no subject)" }}</h3>
@@ -41,12 +43,10 @@
                     {% else %}
                     <span class="text-xs px-2 py-0.5 rounded bg-bg-elevated text-text-muted border border-accent-cyan/10">Inactive</span>
                     {% endif %}
+                    <span class="text-xs text-text-muted">{{ thread_messages|length }} message{{ 's' if thread_messages|length != 1 else '' }}</span>
                 </div>
 
-                <!-- Thread metadata -->
-                <div class="flex flex-wrap items-center gap-3 text-xs text-text-muted mb-3">
-                    <span class="font-mono-data">{{ thread.id[:8] }}</span>
-                    <span>{{ thread.message_count }} message{{ 's' if thread.message_count != 1 else '' }}</span>
+                <div class="flex flex-wrap items-center gap-3 text-xs text-text-muted">
                     {% if thread.contact_email %}
                     <span class="text-text-secondary">{{ thread.contact_email }}</span>
                     {% endif %}
@@ -54,34 +54,87 @@
                     <span>Last: {{ thread.last_message_at|relative_time }}</span>
                     {% endif %}
                 </div>
+            </div>
 
-                <!-- Agenda -->
-                <div class="bg-bg-deep rounded-lg p-4 border border-accent-cyan/10">
-                    <div class="flex items-center justify-between mb-2">
-                        <div class="text-xs text-accent-cyan font-semibold">AGENDA</div>
-                        <button type="button"
-                                onclick="this.parentElement.nextElementSibling.classList.toggle('hidden'); this.textContent = this.textContent === 'Edit' ? 'Cancel' : 'Edit'"
-                                class="text-xs text-text-muted hover:text-accent-cyan transition-colors">
-                            Edit
+            <!-- Expand/collapse chevron -->
+            <svg id="chevron-thread-{{ loop.index }}" class="w-5 h-5 text-text-muted shrink-0 mt-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+            </svg>
+        </button>
+
+        <!-- Collapsible message list -->
+        <div id="thread-{{ loop.index }}" class="hidden">
+            <!-- Messages -->
+            {% if thread_messages %}
+            <div class="border-t border-accent-cyan/10">
+                {% for msg in thread_messages %}
+                <a href="/dashboard/emails/{{ msg.id }}"
+                   class="block px-6 py-3 hover:bg-accent-cyan/5 transition-colors border-b border-accent-cyan/5 last:border-b-0">
+                    <div class="flex items-center gap-4">
+                        <!-- From -->
+                        <div class="min-w-0 w-40 shrink-0">
+                            <div class="text-sm font-medium text-text-primary truncate">
+                                {{ msg.sender_name or msg.sender_email }}
+                            </div>
+                        </div>
+
+                        <!-- Subject / Preview -->
+                        <div class="min-w-0 flex-1">
+                            {% if msg.subject %}
+                            <div class="text-sm text-text-primary truncate">{{ msg.subject }}</div>
+                            {% endif %}
+                            {% if msg.preview %}
+                            <div class="text-xs text-text-muted truncate">{{ msg.preview }}</div>
+                            {% endif %}
+                        </div>
+
+                        <!-- To -->
+                        <div class="min-w-0 w-40 shrink-0 text-xs text-text-secondary truncate">
+                            {% if msg.to_addresses %}
+                                {{ msg.to_addresses | join(', ') }}
+                            {% endif %}
+                        </div>
+
+                        {% if msg.has_attachments %}
+                        <div class="text-text-muted text-sm shrink-0">&#128206;</div>
+                        {% endif %}
+
+                        <!-- Time -->
+                        <div class="text-xs text-text-muted whitespace-nowrap font-mono-data shrink-0">
+                            {{ msg.message_timestamp|relative_time }}
+                        </div>
+                    </div>
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <!-- Agenda (collapsible edit) -->
+            <div class="border-t border-accent-cyan/10 p-6 bg-bg-deep/50">
+                <div class="flex items-center justify-between mb-2">
+                    <div class="text-xs text-accent-cyan font-semibold">AGENDA</div>
+                    <button type="button"
+                            onclick="this.parentElement.nextElementSibling.classList.toggle('hidden'); this.textContent = this.textContent === 'Edit' ? 'Cancel' : 'Edit'"
+                            class="text-xs text-text-muted hover:text-accent-cyan transition-colors">
+                        Edit
+                    </button>
+                </div>
+                <div class="text-sm text-text-primary whitespace-pre-line mb-3">{{ thread.agenda or "(no agenda set)" }}</div>
+                <form hx-patch="/api/v1/email/threads/{{ thread.id }}/agenda"
+                      hx-target="closest .glass-card"
+                      hx-swap="none"
+                      hx-on::after-request="location.reload()"
+                      class="hidden space-y-2">
+                    <textarea name="agenda"
+                              rows="4"
+                              class="w-full bg-bg-card border border-accent-cyan/20 rounded-lg p-3 text-sm text-text-primary placeholder-text-muted focus:border-accent-cyan focus:outline-none">{{ thread.agenda or '' }}</textarea>
+                    <div class="flex gap-2">
+                        <button type="submit"
+                                class="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors text-sm font-medium">
+                            Save
                         </button>
                     </div>
-                    <div class="text-sm text-text-primary whitespace-pre-line mb-3">{{ thread.agenda or "(no agenda set)" }}</div>
-                    <form hx-patch="/api/v1/email/threads/{{ thread.id }}/agenda"
-                          hx-target="closest .glass-card"
-                          hx-swap="none"
-                          hx-on::after-request="location.reload()"
-                          class="hidden space-y-2">
-                        <textarea name="agenda"
-                                  rows="4"
-                                  class="w-full bg-bg-card border border-accent-cyan/20 rounded-lg p-3 text-sm text-text-primary placeholder-text-muted focus:border-accent-cyan focus:outline-none">{{ thread.agenda or '' }}</textarea>
-                        <div class="flex gap-2">
-                            <button type="submit"
-                                    class="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 rounded-lg hover:bg-accent-cyan/30 transition-colors text-sm font-medium">
-                                Save
-                            </button>
-                        </div>
-                    </form>
-                </div>
+                </form>
             </div>
         </div>
     </div>
@@ -96,4 +149,17 @@
     <p class="text-text-muted">Email threads will appear here when emails are sent or received.</p>
 </div>
 {% endif %}
+
+<script>
+function toggleThread(id) {
+    const el = document.getElementById(id);
+    const chevron = document.getElementById('chevron-' + id);
+    el.classList.toggle('hidden');
+    if (!el.classList.contains('hidden')) {
+        chevron.style.transform = 'rotate(180deg)';
+    } else {
+        chevron.style.transform = 'rotate(0deg)';
+    }
+}
+</script>
 {% endblock %}
