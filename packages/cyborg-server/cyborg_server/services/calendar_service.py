@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import NotFoundError
 from cyborg_server.models import (
@@ -27,8 +28,8 @@ from cyborg_server.services.base import BaseService, json_dumps, json_loads, utc
 class CalendarService(BaseService):
     """CRUD and lifecycle operations for calendars and events."""
 
-    def __init__(self, db: Database) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext) -> None:
+        super().__init__(ctx)
 
     async def list_calendars(self) -> list[CalendarResponse]:
         rows = await self.db.fetch_all(

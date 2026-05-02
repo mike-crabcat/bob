@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 from uuid import uuid4
 
-from aiosqlite import Connection
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.models import (
@@ -51,8 +50,8 @@ def _get_structured_logger():
 class ProjectExecutionService(BaseService):
     """Service for managing self-executing project workflows."""
 
-    def __init__(self, db: Database, task_service: Any | None = None, webhook_service: WebhookService | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, task_service: Any | None = None, webhook_service: WebhookService | None = None) -> None:
+        super().__init__(ctx)
         self._task_service = task_service
         self._webhook_service = webhook_service
         self._project_spec_service: ProjectSpecService | None = None
@@ -63,20 +62,20 @@ class ProjectExecutionService(BaseService):
         """Lazy-load task service to avoid circular dependencies."""
         if self._task_service is None:
             from cyborg_server.services.task_service import TaskService
-            self._task_service = TaskService(self.db)
+            self._task_service = TaskService(self.ctx)
         return self._task_service
 
     def _get_webhook_service(self) -> WebhookService | None:
         """Lazy-load webhook service."""
         if self._webhook_service is None:
-            self._webhook_service = WebhookService(self.db)
+            self._webhook_service = WebhookService(self.ctx)
         return self._webhook_service
 
     @property
     def project_spec_service(self) -> ProjectSpecService:
         """Lazy-load project spec service."""
         if self._project_spec_service is None:
-            self._project_spec_service = ProjectSpecService(self.db)
+            self._project_spec_service = ProjectSpecService(self.ctx)
         return self._project_spec_service
 
     @property
@@ -85,11 +84,11 @@ class ProjectExecutionService(BaseService):
         if self._reasoning_service is None:
             from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
 
-            self._reasoning_service = OpenClawReasoningService(self.db)
+            self._reasoning_service = OpenClawReasoningService(self.ctx)
         return self._reasoning_service
 
     async def _sync_notifications(self, project_id: str) -> None:
-        await NotificationService(self.db).sync_project_state(project_id)
+        await NotificationService(self.ctx).sync_project_state(project_id)
 
     async def on_project_resumed(self, project_id: str, *, resumed_from_block: bool = False) -> None:
         """Resume reasoning after a project is unpaused.
@@ -268,7 +267,7 @@ class ProjectExecutionService(BaseService):
         )
 
         await self._sync_notifications(project_id)
-        await NotificationService(self.db).create_project_result_notification(
+        await NotificationService(self.ctx).create_project_result_notification(
             project_id,
             conclusion=conclusion,
         )
@@ -422,7 +421,7 @@ class ProjectExecutionService(BaseService):
         )
 
         # Build context for the prompt
-        context_builder = ContextBuilder(self.db)
+        context_builder = ContextBuilder(self.ctx)
         context = await context_builder.build_project_context(
             project_id=project_id,
             scope=ContextScope.STANDARD,
@@ -434,7 +433,7 @@ class ProjectExecutionService(BaseService):
         # Dispatch via notification service (fire-and-forget)
         try:
             from cyborg_server.services.notification_service import NotificationService
-            notification_service = NotificationService(self.db)
+            notification_service = NotificationService(self.ctx)
             await notification_service.create_next_action_notification(
                 project_id,
                 prompt,
@@ -662,7 +661,7 @@ class ProjectExecutionService(BaseService):
         output_directory: str | None = None
         try:
             from cyborg_server.services.project_service import ProjectService
-            project_service = ProjectService(self.db)
+            project_service = ProjectService(self.ctx)
             project_path = await project_service.get_project_path(project_id)
             output_directory = str(project_path / "tasks" / "pending")
         except Exception:
@@ -724,7 +723,7 @@ class ProjectExecutionService(BaseService):
         output_directory: str | None = None
         try:
             from cyborg_server.services.project_service import ProjectService
-            project_service = ProjectService(self.db)
+            project_service = ProjectService(self.ctx)
             project_path = await project_service.get_project_path(project_id)
             output_directory = str(project_path / "tasks" / "pending")
         except Exception:
@@ -813,7 +812,7 @@ class ProjectExecutionService(BaseService):
         )
 
         await self._sync_notifications(project_id)
-        await NotificationService(self.db).create_project_result_notification(
+        await NotificationService(self.ctx).create_project_result_notification(
             project_id,
             conclusion=conclusion,
         )
@@ -1300,7 +1299,6 @@ class ProjectExecutionService(BaseService):
 
     async def redrive_next_action(self, project_id: str) -> dict[str, Any]:
         """Cancel a failed next_action notification and re-dispatch decide_next_action."""
-        from cyborg_server.services.notification_service import NotificationService
 
         # Cancel the failed notification
         await self.db.execute(

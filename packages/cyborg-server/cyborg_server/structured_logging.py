@@ -15,9 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import traceback
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -424,7 +423,6 @@ class DatabaseLogHandler(logging.Handler):
         for log_entry in logs_to_write:
             try:
                 # Import here to avoid circular dependency
-                import sqlite3
 
                 # Create a new event loop if none exists
                 try:

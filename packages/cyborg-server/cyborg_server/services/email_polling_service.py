@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from cyborg_server.config import Settings
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.models import SessionRouteCreate, SessionRouteKind
 from cyborg_server.services.agentmail_client import AgentMailClient
@@ -144,7 +145,10 @@ async def resolve_or_create_email_thread(
     now = utcnow()
     now_iso = now.isoformat()
 
-    route_service = SessionRouteService(db)
+    from cyborg_server.context import AppContext
+
+    ctx = AppContext(db=db, settings=db.get_settings())
+    route_service = SessionRouteService(ctx)
     await route_service.create_route(SessionRouteCreate(
         channel="email",
         session_key=session_key,
@@ -191,11 +195,11 @@ class EmailPollingService(BaseService):
 
     def __init__(
         self,
-        db: Database,
+        ctx: AppContext,
         *,
         agentmail_client: AgentMailClient | None = None,
     ) -> None:
-        super().__init__(db)
+        super().__init__(ctx)
         self._client = agentmail_client
 
     @property
@@ -207,12 +211,6 @@ class EmailPollingService(BaseService):
                 api_key=settings.agentmail.api_key,
             )
         return self._client
-
-    def _get_settings(self) -> Settings:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current
-        return Settings.from_env()
 
     async def poll_all_inboxes(self) -> int:
         """Poll all active email inboxes for new messages.
@@ -536,7 +534,7 @@ class EmailPollingService(BaseService):
         from cyborg_server.services.openclaw_hook_service import OpenClawHookService
 
         hook_service = OpenClawHookService(
-            self.db,
+            self.ctx,
             cyborg_service_url=settings.resolved_public_url,
         )
 
@@ -663,12 +661,12 @@ class EmailPollingService(BaseService):
             prompt_text=prompt,
             session_key=session_key,
         )
-        dispatch_id = await DispatchService(self.db).record_dispatch(
+        dispatch_id = await DispatchService(self.ctx).record_dispatch(
             notification_type="email_incoming",
             session_key=session_key,
         )
 
-        DispatchService(self.db).track(
+        DispatchService(self.ctx).track(
             dispatch_id,
             hook_service._send_gateway_request(
                 "agent",

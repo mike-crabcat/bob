@@ -7,8 +7,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from cyborg_server.database import Database
-from cyborg_server.dependencies import get_database
+from cyborg_server.context import AppContext
+from cyborg_server.dependencies import get_app_context
 from cyborg_server.services.learning_service import LearningService
 
 
@@ -74,9 +74,9 @@ class SuggestCriteriaResponse(BaseModel):
 # ============================================================================
 
 
-def _get_learning_service(db: Database) -> LearningService:
+def _get_learning_service(ctx: AppContext) -> LearningService:
     """Get or create the learning service instance."""
-    return LearningService(db)
+    return LearningService(ctx)
 
 
 # ============================================================================
@@ -88,14 +88,15 @@ def _get_learning_service(db: Database) -> LearningService:
 async def extract_project_insights(
     project_id: str,
     request: ExtractInsightsRequest | None = None,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> ExtractInsightsResponse:
     """
     Extract and store insights from a completed project.
 
     Uses OpenClaw reasoning to analyze the project and identify learnings.
     """
-    learning_service = _get_learning_service(db)
+    learning_service = _get_learning_service(ctx)
+    db = ctx.db
 
     # Verify project exists
     project = await db.fetch_one(
@@ -122,14 +123,14 @@ async def find_similar_projects(
     method: str | None = None,
     limit: int = 5,
     min_outcome: str | None = None,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> SimilarProjectsResponse:
     """
     Find projects similar to the given aim/method.
 
     Returns projects with their insights, ordered by relevance.
     """
-    learning_service = _get_learning_service(db)
+    learning_service = _get_learning_service(ctx)
 
     projects = await learning_service.query_similar_projects(
         aim=aim,
@@ -148,14 +149,14 @@ async def find_similar_projects(
 async def get_active_insights(
     category: str | None = None,
     limit: int = 50,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> ActiveInsightsResponse:
     """
     Get active (successful/partial) insights that can be applied to new projects.
 
     Insights are extracted from completed successful projects.
     """
-    learning_service = _get_learning_service(db)
+    learning_service = _get_learning_service(ctx)
 
     insights = await learning_service.get_active_insights(
         category=category,
@@ -172,14 +173,14 @@ async def get_active_insights(
 async def suggest_success_criteria(
     aim: str,
     method: str | None = None,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> SuggestCriteriaResponse:
     """
     Suggest success criteria based on similar successful projects.
 
     Returns criteria from similar past projects.
     """
-    learning_service = _get_learning_service(db)
+    learning_service = _get_learning_service(ctx)
 
     criteria = await learning_service.suggest_success_criteria(
         aim=aim,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.models import (
@@ -22,8 +23,8 @@ from cyborg_server.services.base import BaseService, json_dumps, json_loads, utc
 class ProjectSpecService(BaseService):
     """CRUD and approval workflow for project specifications."""
 
-    def __init__(self, db: Database) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext) -> None:
+        super().__init__(ctx)
 
     async def submit_spec(self, project_id: str, payload: ProjectSpecSubmitRequest, *, defer_plan_generation: bool = False) -> ProjectSpecResponse:
         project = await self._get_project_row(project_id)
@@ -187,7 +188,7 @@ class ProjectSpecService(BaseService):
 
         if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
             from cyborg_server.services.project_execution_service import ProjectExecutionService
-            execution_service = ProjectExecutionService(self.db)
+            execution_service = ProjectExecutionService(self.ctx)
             # Clean up old auto-created tasks before re-planning (also PLANNING — reopened closed projects)
             if project["state"] in (ProjectState.PLANNING.value, ProjectState.PAUSED.value, ProjectState.ACTIVE.value):
                 await execution_service.cleanup_old_plan_tasks(project_id)
@@ -257,7 +258,7 @@ class ProjectSpecService(BaseService):
         current_tasks = [dict(r) for r in task_rows] if task_rows else []
 
         from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
-        reasoning = OpenClawReasoningService(self.db)
+        reasoning = OpenClawReasoningService(self.ctx)
 
         revised = await reasoning.revise_spec(
             aim=latest["aim"],
@@ -456,7 +457,6 @@ class ProjectSpecService(BaseService):
         spec_row: dict[str, Any],
     ) -> None:
         """Ask OpenClaw to generate an execution plan and patch it into the existing spec."""
-        import json as _json
         import logging
 
         logger = logging.getLogger(__name__)
@@ -464,7 +464,7 @@ class ProjectSpecService(BaseService):
         try:
             from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
 
-            reasoning = OpenClawReasoningService(self.db)
+            reasoning = OpenClawReasoningService(self.ctx)
             criteria = json_loads(spec_row.get("success_criteria"), [])
             criteria_texts = [
                 c.get("description", c.get("check", ""))
@@ -476,7 +476,7 @@ class ProjectSpecService(BaseService):
             source_context = None
             try:
                 from cyborg_server.services.source_discovery_service import SourceDiscoveryService
-                discovery = SourceDiscoveryService(self.db)
+                discovery = SourceDiscoveryService(self.ctx)
                 source_context = await discovery.get_derived_outputs_for_context(project_id)
             except Exception:
                 pass

@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
-from cyborg_server.models import PlanStep, SuccessCriterion
 from cyborg_server.services.base import BaseService, json_loads
 from cyborg_server.services.context_builder import ContextBuilder, ContextScope
 from cyborg_server.services.prompt_history import log_prompt
@@ -40,9 +40,9 @@ class OpenClawReasoningService(BaseService):
 
     TIMEOUT_DEFAULT = 10800
 
-    def __init__(self, db: Database):
-        super().__init__(db)
-        self.context_builder = ContextBuilder(db)
+    def __init__(self, ctx: AppContext):
+        super().__init__(ctx)
+        self.context_builder = ContextBuilder(ctx)
 
         # Lazy load OpenClawHookService to avoid circular import
         self._openclaw_service = None
@@ -55,8 +55,8 @@ class OpenClawReasoningService(BaseService):
             from cyborg_server.services.session_route_service import SessionRouteService
 
             self._openclaw_service = OpenClawHookService(
-                self.db,
-                routing_service=SessionRouteService(self.db)
+                self.ctx,
+                routing_service=SessionRouteService(self.ctx)
             )
         return self._openclaw_service
 
@@ -358,7 +358,7 @@ class OpenClawReasoningService(BaseService):
             try:
                 from cyborg_server.services.task_service import TaskService
 
-                task_service = TaskService(self.db)
+                task_service = TaskService(self.ctx)
                 output_directory = await task_service._compute_output_directory(task_id)
             except Exception:
                 pass

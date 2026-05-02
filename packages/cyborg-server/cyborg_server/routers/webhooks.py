@@ -6,17 +6,17 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from cyborg_server.dependencies import get_database
-from cyborg_server.database import Database
+from cyborg_server.dependencies import get_app_context
+from cyborg_server.context import AppContext
 from cyborg_server.services.webhook_service import WebhookService
 
 
 router = APIRouter(tags=["webhooks"])
 
 
-def get_webhook_service(db: Database = Depends(get_database)) -> WebhookService:
+def get_webhook_service(ctx: AppContext = Depends(get_app_context)) -> WebhookService:
     """Dependency to get webhook service."""
-    return WebhookService(db)
+    return WebhookService(ctx)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

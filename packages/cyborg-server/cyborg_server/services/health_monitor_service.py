@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.models import ProjectState, TaskStatus
 from cyborg_server.services.base import BaseService, utcnow
@@ -39,15 +39,15 @@ class HealthMonitorService(BaseService):
     - Stores health checks in project_health_checks table
     """
 
-    def __init__(self, db: Database, reasoning_service: OpenClawReasoningService | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, reasoning_service: OpenClawReasoningService | None = None) -> None:
+        super().__init__(ctx)
         self._reasoning_service = reasoning_service
 
     @property
     def reasoning_service(self) -> OpenClawReasoningService:
         if self._reasoning_service is None:
             from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
-            self._reasoning_service = OpenClawReasoningService(self.db)
+            self._reasoning_service = OpenClawReasoningService(self.ctx)
         return self._reasoning_service
 
     async def analyze_project_health(

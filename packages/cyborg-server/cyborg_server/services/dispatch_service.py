@@ -8,7 +8,7 @@ from collections.abc import Coroutine
 from typing import Any
 from uuid import uuid4
 
-from cyborg_server.database import Database
+from cyborg_server.context import AppContext
 from cyborg_server.models import DispatchResponse, DispatchStatus
 from cyborg_server.services.base import BaseService, json_loads, utcnow
 
@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 class DispatchService(BaseService):
     """Record, query, and manage the lifecycle of agent dispatches to OpenClaw."""
+
+    _dispatch_semaphore: asyncio.Semaphore | None = None
+
+    @classmethod
+    def _get_semaphore(cls) -> asyncio.Semaphore:
+        if cls._dispatch_semaphore is None:
+            cls._dispatch_semaphore = asyncio.Semaphore(10)
+        return cls._dispatch_semaphore
 
     async def record_dispatch(
         self,
@@ -72,18 +80,20 @@ class DispatchService(BaseService):
         the gateway returns, failed on error, or timed_out on asyncio.TimeoutError.
         If the agent never finishes the dispatch stays active (stuck) and can be tapped.
         """
-        db = self.db
+        ctx = self.ctx
+        sem = self._get_semaphore()
 
         async def _run() -> None:
-            try:
-                await coro
-                await DispatchService(db)._complete(dispatch_id)
-            except asyncio.TimeoutError:
-                logger.warning("Dispatch %s timed out waiting for gateway final response", dispatch_id)
-                await DispatchService(db)._update_status(dispatch_id, DispatchStatus.TIMED_OUT)
-            except Exception:
-                logger.exception("Dispatch %s failed during gateway call", dispatch_id)
-                await DispatchService(db)._update_status(dispatch_id, DispatchStatus.FAILED)
+            async with sem:
+                try:
+                    await coro
+                    await DispatchService(ctx)._complete(dispatch_id)
+                except asyncio.TimeoutError:
+                    logger.warning("Dispatch %s timed out waiting for gateway final response", dispatch_id)
+                    await DispatchService(ctx)._update_status(dispatch_id, DispatchStatus.TIMED_OUT)
+                except Exception:
+                    logger.exception("Dispatch %s failed during gateway call", dispatch_id)
+                    await DispatchService(ctx)._update_status(dispatch_id, DispatchStatus.FAILED)
 
         asyncio.create_task(_run())
 
@@ -101,6 +111,60 @@ class DispatchService(BaseService):
             (DispatchStatus.COMPLETED.value, now_iso, now_iso, now_iso, dispatch_id, DispatchStatus.ACTIVE.value),
         )
         logger.info("Dispatch %s completed", dispatch_id)
+        await self._on_dispatch_completed(dispatch_id)
+
+    async def _on_dispatch_completed(self, dispatch_id: str) -> None:
+        """After a dispatch completes, check if stuck dispatches should be resolved.
+
+        When a tap dispatch (or any dispatch for a task) completes, the task may
+        already be in a terminal state (completed/submitted) because the agent
+        finished the work without the original dispatch ever being marked done.
+        In that case, clean up remaining active dispatches for the task and
+        resume the project execution flow (review, next action, etc.).
+        """
+        row = await self.db.fetch_one(
+            "SELECT notification_type, task_id, project_id FROM dispatches WHERE id = ?",
+            (dispatch_id,),
+        )
+        if row is None or not row["task_id"]:
+            return
+
+        task_id = str(row["task_id"])
+
+        task = await self.db.fetch_one(
+            "SELECT status, result FROM tasks WHERE id = ? AND deleted_at IS NULL",
+            (task_id,),
+        )
+        if task is None:
+            return
+
+        from cyborg_server.models import TaskStatus
+
+        terminal = {TaskStatus.COMPLETED.value, TaskStatus.SUBMITTED.value}
+        if task["status"] not in terminal:
+            return
+
+        # Task is already done — complete any remaining active dispatches.
+        completed = await self.complete_dispatches_for_task(task_id)
+        if completed:
+            logger.info(
+                "Task %s already %s; completed %d stuck dispatch(es)",
+                task_id, task["status"], completed,
+            )
+
+        # Resume project execution flow if the task is fully completed.
+        if task["status"] == TaskStatus.COMPLETED.value:
+            try:
+                from cyborg_server.services.task_service import TaskService
+
+                await TaskService(self.ctx)._trigger_project_execution(
+                    task_id, "", task.get("result"),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to trigger project execution after resolving stuck dispatch for task %s",
+                    task_id,
+                )
 
     async def _update_status(self, dispatch_id: str, status: DispatchStatus) -> None:
         now = utcnow()
@@ -124,7 +188,7 @@ class DispatchService(BaseService):
         """Mark all active dispatches for a task as completed or failed."""
         now = utcnow()
         now_iso = now.isoformat()
-        cursor = await self.db.execute(
+        count = await self.db.execute(
             """
             UPDATE dispatches
             SET status = ?, completed_at = ?, updated_at = ?,
@@ -133,7 +197,6 @@ class DispatchService(BaseService):
             """,
             (status.value, now_iso, now_iso, now_iso, task_id, DispatchStatus.ACTIVE.value),
         )
-        count = cursor.rowcount if hasattr(cursor, "rowcount") else 0
         if count:
             logger.info("Completed %d dispatch(es) for task %s as %s", count, task_id, status.value)
         return count
@@ -147,7 +210,7 @@ class DispatchService(BaseService):
         """Mark all active dispatches for a project as completed or failed."""
         now = utcnow()
         now_iso = now.isoformat()
-        cursor = await self.db.execute(
+        count = await self.db.execute(
             """
             UPDATE dispatches
             SET status = ?, completed_at = ?, updated_at = ?,
@@ -156,7 +219,6 @@ class DispatchService(BaseService):
             """,
             (status.value, now_iso, now_iso, now_iso, project_id, DispatchStatus.ACTIVE.value),
         )
-        count = cursor.rowcount if hasattr(cursor, "rowcount") else 0
         if count:
             logger.info("Completed %d dispatch(es) for project %s as %s", count, project_id, status.value)
         return count
@@ -236,7 +298,7 @@ class DispatchService(BaseService):
 
         # Create a task tap notification
         from cyborg_server.services.notification_service import NotificationService
-        notification_service = NotificationService(self.db)
+        notification_service = NotificationService(self.ctx)
         await notification_service.create_task_tap_notification(str(dispatch.task_id), now=now)
 
         logger.info("Tapped dispatch %s (tap_count now %d)", dispatch_id, dispatch.tap_count + 1)
@@ -257,11 +319,10 @@ class DispatchService(BaseService):
     async def cancel_active_dispatches(self) -> int:
         """Cancel all active dispatches. Used during shutdown timeout."""
         now = utcnow()
-        cursor = await self.db.execute(
+        count = await self.db.execute(
             "UPDATE dispatches SET status = ?, updated_at = ? WHERE status = ?",
             (DispatchStatus.CANCELLED.value, now.isoformat(), DispatchStatus.ACTIVE.value),
         )
-        count = cursor.rowcount if hasattr(cursor, "rowcount") else 0
         if count:
             logger.warning("Cancelled %d active dispatch(es) during shutdown", count)
         return count

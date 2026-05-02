@@ -11,11 +11,12 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Coroutine
 from uuid import uuid4
 
 from cyborg_server import __version__
 from cyborg_server.config import OpenClawHookSettings, Settings
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.models import NotificationDeliveryStatus, NotificationType
 from cyborg_server.services.base import BaseService, utcnow
@@ -125,10 +126,8 @@ def load_or_create_identity(identity_path: Path) -> DeviceIdentity:
 
 def _resolve_identity_path(db: Database) -> Path:
     """Resolve the device identity file path from settings."""
-    settings = getattr(db, "settings", None)
-    if isinstance(settings, Settings):
-        return settings.data_dir / "openclaw-device-identity.json"
-    return Path("~/.local/share/cyborg/openclaw-device-identity.json").expanduser()
+    settings = db.get_settings()
+    return settings.data_dir / "openclaw-device-identity.json"
 
 
 def build_device_auth(
@@ -196,31 +195,27 @@ class OpenClawHookService(BaseService):
     _EMAIL_DELIVERABLE_TYPES: frozenset[str] = frozenset({
         NotificationType.NEEDS_INPUT.value,
         NotificationType.PROJECT_RESULT.value,
-        NotificationType.TASK_ASSIGNMENT.value,
     })
 
     def __init__(
         self,
-        db: Database,
+        ctx: AppContext,
         routing_service: SessionRouteService | None = None,
         cyborg_service_url: str | None = None,
     ) -> None:
-        super().__init__(db)
+        super().__init__(ctx)
         self._routing_service = routing_service
         self._cyborg_service_url = cyborg_service_url
 
     @property
     def routing_service(self) -> SessionRouteService:
         if self._routing_service is None:
-            self._routing_service = SessionRouteService(self.db)
+            self._routing_service = SessionRouteService(self.ctx)
         return self._routing_service
 
     @property
     def settings(self) -> OpenClawHookSettings:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current.openclaw
-        return Settings.from_env().openclaw
+        return self._get_settings().openclaw
 
     @property
     def cyborg_service_url(self) -> str | None:
@@ -231,71 +226,49 @@ class OpenClawHookService(BaseService):
         return self.settings.enabled
 
     async def dispatch_notification(self, notification: dict[str, Any]) -> str | None:
+        """Dispatch a user-facing notification (needs_input, project_result, etc.).
+
+        Agent dispatch types (task_assignment, task_retry, etc.) now go through
+        the dispatch system directly and should not reach this method.
+        """
         is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
         metadata = notification.get("metadata", {})
 
-        # Agent-internal dispatches (next_action, task_assignment, etc.) don't need
-        # a channel route — they dispatch directly to the gateway with deliver=False.
-        if self._is_agent_dispatch_type(notification):
-            session_key = metadata.get("subagent_session_key") or await self._resolve_project_session_key(notification)
-            if session_key:
-                await self._dispatch_agent_internal(notification, session_key)
-                return session_key
-            # Fall through to route resolution for task assignments that use target sessions
-
         route = await self.routing_service.resolve_notification_route(metadata)
         if route is None:
-            if metadata.get("auto_created_by_project"):
-                self.logger.info("Skipping notification for auto-created task — no delivery route available")
-                return None
-            raise ValueError("No delivery route could be resolved for the notification")
+            self.logger.info(
+                "Skipping %s notification — no delivery route (entity=%s)",
+                notification.get("notification_type"), notification.get("entity_id"),
+            )
+            return None
 
         route_data = route.model_dump(mode="json")
         is_channel_less = route_data.get("channel") is None
 
-        # User-facing notifications require a channel; agent dispatches do not
-        if is_channel_less and not self._is_agent_dispatch_type(notification):
-            raise ValueError("No channel route could be resolved for user-facing notification")
+        # User-facing notifications require a channel; skip silently for routeless projects
+        if is_channel_less:
+            self.logger.info(
+                "Skipping %s notification — no channel route (entity=%s)",
+                notification.get("notification_type"), notification.get("entity_id"),
+            )
+            return None
 
         # Email channel: deliver directly via AgentMail and dispatch to OpenClaw gateway
         if route_data.get("channel") == "email":
             await self._dispatch_email_notification(notification, route_data)
             return self._resolve_visible_session_key(route_data)
 
-        # WhatsApp delivery filter — only specific types reach the user's channel.
-        # All agent dispatch types still execute, but suppressed ones get deliver=False.
+        # WhatsApp delivery filter — only specific types reach the user's channel
         if not self._is_whatsapp_deliverable(notification):
-            route_data = {k: v for k, v in route_data.items() if k not in ("channel", "to")}
-            if not self._is_agent_dispatch_type(notification):
-                self.logger.info(
-                    "Skipping WhatsApp delivery for %s notification (id=%s)",
-                    notification.get("notification_type"), notification.get("id"),
-                )
-                return None
-
-        delivery_session_key = await self._resolve_delivery_session_key(notification, route_data)
-
-        # Task assignments and plan approvals use the agent method with detailed prompt
-        if self._should_use_task_assignment_agent(notification, delivery_session_key):
-            if not is_retry:
-                await log_prompt(
-                    self.db,
-                    category="task_assignment",
-                    prompt_text=await self._render_task_assignment_prompt(notification, route_data, delivery_session_key),
-                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                    task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=delivery_session_key,
-                )
-            await self._send_gateway_request(
-                "agent",
-                await self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
-                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
+            self.logger.info(
+                "Skipping WhatsApp delivery for %s notification (id=%s)",
+                notification.get("notification_type"), notification.get("id"),
             )
-            return delivery_session_key
+            return None
 
-        # Needs input notifications (plan approvals, etc.) also use agent method for context
+        # Needs input notifications use agent method for context
         if notification.get("notification_type") == "needs_input":
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+            session_key = self._resolve_visible_session_key(route_data)
             if not is_retry:
                 await log_prompt(
                     self.db,
@@ -312,107 +285,8 @@ class OpenClawHookService(BaseService):
             )
             return session_key
 
-        # Task retry notifications use the agent method with retry-specific prompt
-        if notification.get("notification_type") == NotificationType.TASK_RETRY.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            if not is_retry:
-                await log_prompt(
-                    self.db,
-                    category="task_retry",
-                    prompt_text=self._render_task_retry_prompt(notification, route_data, session_key),
-                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                    task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=session_key,
-                )
-            await self._send_gateway_request(
-                "agent",
-                self._build_task_retry_agent_params(notification, route_data, session_key),
-                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
-            )
-            return session_key
-
-        # Task input response notifications use the agent method with input-specific prompt
-        if notification.get("notification_type") == NotificationType.TASK_INPUT_RESPONSE.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            if not is_retry:
-                await log_prompt(
-                    self.db,
-                    category="task_input_response",
-                    prompt_text=self._render_task_input_response_prompt(notification, route_data, session_key),
-                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                    task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=session_key,
-                )
-            await self._send_gateway_request(
-                "agent",
-                self._build_task_input_response_agent_params(notification, route_data, session_key),
-                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
-            )
-            return session_key
-
-        # Task tap notifications nudge the agent to continue or submit
-        if notification.get("notification_type") == NotificationType.TASK_TAP.value:
-            session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
-            if not is_retry:
-                await log_prompt(
-                    self.db,
-                    category="task_tap",
-                    prompt_text=self._render_task_tap_prompt(notification, route_data, session_key),
-                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                    task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=session_key,
-                )
-            await self._send_gateway_request(
-                "agent",
-                self._build_task_tap_agent_params(notification, route_data, session_key),
-                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
-            )
-            return session_key
-
-        # Submission review notifications use a fresh session for unbiased review
-        if notification.get("notification_type") == NotificationType.SUBMISSION_REVIEW.value:
-            # Derive a fresh review session key (not the task's execution session)
-            task_id = metadata.get("task_id") or notification.get("entity_id", "")
-            from cyborg_server.services.project_service import short_task_id
-            review_session_key = f"cyborg:review:{short_task_id(task_id)}"
-            if not is_retry:
-                await log_prompt(
-                    self.db,
-                    category="submission_review",
-                    prompt_text=self._render_submission_review_prompt(notification, route_data, review_session_key),
-                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
-                    task_id=metadata.get("task_id") or notification.get("entity_id"),
-                    session_key=review_session_key,
-                )
-            await self._send_gateway_request(
-                "agent",
-                self._build_submission_review_agent_params(notification, route_data, review_session_key),
-                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
-            )
-            return review_session_key
-
-        # Next-action prompts use a fresh reasoning session (not the source channel)
-        if notification.get("notification_type") == NotificationType.NEXT_ACTION.value:
-            from cyborg_server.services.project_service import short_task_id
-            project_id = metadata.get("project_id", "")
-            next_action_session_key = f"cyborg:next-action:{short_task_id(project_id)}"
-            if not is_retry:
-                await log_prompt(
-                    self.db,
-                    category="next_action",
-                    prompt_text=notification["message"],
-                    project_id=metadata.get("project_id"),
-                    task_id=metadata.get("completed_task_id"),
-                    session_key=next_action_session_key,
-                )
-            await self._send_gateway_request(
-                "agent",
-                self._build_next_action_agent_params(notification, route_data, next_action_session_key),
-                timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
-            )
-            return next_action_session_key
-
-        visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
+        # Generic send for remaining user-facing types (project_result, event_reminder)
+        visible_session_key = self._resolve_visible_session_key(route_data)
 
         if not is_retry:
             await log_prompt(
@@ -494,26 +368,6 @@ class OpenClawHookService(BaseService):
     async def close(self) -> None:
         return None
 
-    async def _resolve_delivery_session_key(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-    ) -> str | None:
-        if self._is_target_task_assignment(notification):
-            session_key = await self.routing_service.resolve_target_session_key(notification.get("metadata", {}))
-            if session_key is None:
-                session_key = route.get("session_key")
-            if session_key is None:
-                raise ValueError("Task assignment delivery requires a resolvable target OpenClaw session key")
-            return session_key
-        if self._is_auto_project_source_task_assignment(notification):
-            session_key = self._resolve_visible_session_key(route)
-            if session_key is None:
-                raise ValueError("Auto-created project task assignment requires a visible source OpenClaw session key")
-            return session_key
-
-        return None
-
     async def _resolve_project_session_key(self, notification: dict[str, Any]) -> str | None:
         """Resolve a project's subagent_session_key from the notification's entity_id."""
         entity_type = notification.get("entity_type")
@@ -522,49 +376,15 @@ class OpenClawHookService(BaseService):
         entity_id = str(notification.get("entity_id", ""))
         if not entity_id:
             return None
+        return await self.resolve_project_session_key(entity_id)
+
+    async def resolve_project_session_key(self, project_id: str) -> str | None:
+        """Resolve a project's subagent_session_key."""
         project = await self.db.fetch_one(
             "SELECT subagent_session_key FROM projects WHERE id = ? AND deleted_at IS NULL",
-            (entity_id,),
+            (project_id,),
         )
         return project.get("subagent_session_key") if project else None
-
-    async def _dispatch_agent_internal(
-        self,
-        notification: dict[str, Any],
-        session_key: str,
-    ) -> None:
-        """Dispatch an agent-internal notification directly to the gateway with deliver=False."""
-        is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
-        metadata = notification.get("metadata", {})
-        notification_type = notification.get("notification_type")
-
-        logger.info(
-            "Dispatching agent-internal %s notification (id=%s, session=%s)",
-            notification_type, notification.get("id"), session_key,
-        )
-
-        if not is_retry:
-            from cyborg_server.services.prompt_history import log_prompt
-            await log_prompt(
-                self.db,
-                category=notification_type or "notification",
-                prompt_text=notification.get("message", ""),
-                project_id=metadata.get("project_id"),
-                task_id=metadata.get("task_id") or str(notification.get("entity_id", "")),
-                session_key=session_key,
-            )
-
-        await self._send_gateway_request(
-            "agent",
-            {
-                "message": notification.get("message", ""),
-                "deliver": False,
-                "sessionKey": session_key,
-                "thinking": "on",
-                "timeout": int(self.BOOTSTRAP_TIMEOUT_SECONDS),
-                "idempotencyKey": notification["id"],
-            },
-        )
 
     async def _dispatch_email_notification(
         self,
@@ -581,7 +401,7 @@ class OpenClawHookService(BaseService):
 
         # Send email via AgentMail if this is a deliverable type
         if notification.get("notification_type") in self._EMAIL_DELIVERABLE_TYPES and inbox_id:
-            delivery_service = EmailDeliveryService(self.db)
+            delivery_service = EmailDeliveryService(self.ctx)
             message = self._render_message(notification)
             thread_id = route.get("chat_id")
             try:
@@ -602,27 +422,40 @@ class OpenClawHookService(BaseService):
                     exc_info=True,
                 )
 
-        # Also dispatch to OpenClaw gateway so the agent processes the notification
-        if session_key and self._is_agent_dispatch_type(notification):
-            await self._send_gateway_request(
-                "agent",
-                {
-                    "message": await self._render_task_assignment_prompt(notification, route, session_key)
-                        if self._should_use_task_assignment_agent(notification, session_key)
-                        else self._render_message(notification),
-                    "deliver": False,
-                    "sessionKey": session_key,
-                    "thinking": "on",
-                    "timeout": int(self.BOOTSTRAP_TIMEOUT_SECONDS),
-                    "idempotencyKey": notification["id"],
-                },
-            )
-
     def _resolve_visible_session_key(self, route: dict[str, Any]) -> str | None:
         session_key = route.get("session_key")
         if isinstance(session_key, str) and session_key.strip():
             return session_key.strip()
         return None
+
+    async def prepare_agent_dispatch(
+        self,
+        *,
+        message: str,
+        session_key: str,
+        idempotency_key: str,
+        timeout_seconds: float | None = None,
+        deliver: bool = False,
+    ) -> Coroutine:
+        """Return a gateway coroutine for dispatch_service.track() to await.
+
+        Callers build the prompt, resolve the session key, then pass the
+        coroutine to DispatchService.track() for lifecycle management.
+        """
+        timeout = timeout_seconds or int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": message,
+            "deliver": deliver,
+            "sessionKey": session_key,
+            "thinking": "on",
+            "timeout": timeout,
+            "idempotencyKey": idempotency_key,
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return self._send_gateway_request(
+            "agent", params, expect_final=True, timeout_seconds=timeout,
+        )
 
     async def _send_gateway_request(
         self,
@@ -824,30 +657,6 @@ class OpenClawHookService(BaseService):
             params["sessionKey"] = session_key
         return params
 
-    async def _build_task_assignment_agent_params(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> dict[str, Any]:
-        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
-        is_channel_less = route.get("channel") is None
-        params: dict[str, Any] = {
-            "message": await self._render_task_assignment_prompt(notification, route, session_key),
-            "deliver": not is_channel_less,
-            "sessionKey": session_key,
-            "thinking": "on",
-            "timeout": timeout_seconds,
-            "idempotencyKey": notification["id"],
-        }
-        if route.get("channel"):
-            params["channel"] = route["channel"]
-        if route.get("to"):
-            params["to"] = route["to"]
-        if self.settings.agent_id:
-            params["agentId"] = self.settings.agent_id
-        return params
-
     def _build_needs_input_agent_params(
         self,
         notification: dict[str, Any],
@@ -895,180 +704,6 @@ class OpenClawHookService(BaseService):
                 ]
             )
         return "\n".join(part for part in parts if part is not None)
-
-    async def _render_task_assignment_prompt(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> str:
-        metadata = notification.get("metadata", {})
-        target_session = metadata.get("target_session")
-        is_internal = bool(metadata.get("auto_created_by_project"))
-        task_id = metadata.get("task_id") or notification.get("entity_id")
-
-        if is_internal:
-            lines = [
-                "Cyborg internal task assignment for this session.",
-                "",
-                "This is an auto-created project task. Work autonomously to complete it.",
-                "Do NOT send messages to the user or wait for replies in this session.",
-                "If you need human input, block the task using the block API with an input_schema.",
-                "",
-            ]
-        else:
-            lines = [
-                "Cyborg task assignment for this session.",
-                "",
-                "You are responsible for handling this task in the current session.",
-                "Use the user's replies here as task input, ask focused follow-up questions if needed,",
-                "and complete or fail the Cyborg task once you have a clear answer.",
-                "This turn should send the first natural user-facing message to the recipient.",
-                "",
-            ]
-        lines.extend(
-            [
-                f"Task ID: {task_id}",
-                f"Notification ID: {notification['id']}",
-                f"Session Key: {session_key}",
-                f"Task: {notification['title']}",
-            ]
-        )
-
-        # Add description if present in notification message
-        if notification.get("message"):
-            lines.extend(["", notification["message"]])
-
-        if metadata.get("parent_project_title"):
-            lines.extend(
-                [
-                    "",
-                    f"Parent project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
-                ]
-            )
-        if metadata.get("requested_by"):
-            lines.extend(["", f"Requested by: {metadata['requested_by']}"])
-
-        # For internal project tasks, include prior completed tasks and their files
-        if is_internal and metadata.get("parent_project_id"):
-            prior_lines = await self._render_prior_work_section(metadata["parent_project_id"], task_id)
-            if prior_lines:
-                lines.extend([""] + prior_lines)
-
-        if is_internal:
-            lines.extend(
-                [
-                    "",
-                    "Instructions:",
-                    "- Work autonomously to complete the task. Do not send messages or wait for user replies.",
-                    "- If you can complete the task independently, do so and submit the result.",
-                    "- If you genuinely need human input, block the task with an input_schema:",
-                    f"  POST {self.cyborg_service_url or ''}/api/v1/tasks/{task_id}/block"
-                    '  {"reason":"<why blocked>","resume_instructions":"<how to resume>",'
-                    '"input_schema":{"type":"text","prompt":"<question>"}}',
-                    "  (input_schema can also be"
-                    ' {"type":"multi_choice","prompt":"...","options":[{"label":"A","value":"a"}],"allow_multiple":false})',
-                    "- The block creates an approval in the Cyborg dashboard where the user can respond.",
-                    "- When the user responds, you will receive a task_input_response notification to resume.",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "",
-                    "Instructions:",
-                    "- Send one concise natural message now that asks the first question needed to progress the task.",
-                    "- Do not mention Cyborg, hidden setup, task IDs, notification IDs, or internal routing.",
-                    "- Treat the next user reply in this session as work on this task.",
-                    "- If the answer is incomplete, ask one focused follow-up at a time.",
-                ]
-            )
-
-        # Include output directory instructions if available
-        output_directory = metadata.get("output_directory")
-        if output_directory:
-            lines.extend(
-                [
-                    "",
-                    "## Output Directory",
-                    f"All task artifacts must be written to: `{output_directory}`",
-                    "- Use descriptive filenames for each artifact.",
-                    "- Put the primary result in `RESULT.md`.",
-                ]
-            )
-            if self.cyborg_service_url:
-                lines.extend(
-                    [
-                        f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files",
-                    ]
-                )
-            else:
-                lines.extend(
-                    [
-                        "- Register all output files via the API: POST /api/v1/tasks/{task_id}/files",
-                    ]
-                )
-        # Include API completion instructions with service URL
-        if self.cyborg_service_url:
-            lines.extend(
-                [
-                    f'- Once the task is done, submit the task for review by calling: cyborg task submit <task-id> --result-summary "<answer>"',
-                    f'- Or use the HTTP API: POST {self.cyborg_service_url}/api/v1/tasks/<task-id>/submit with JSON {{"result_summary":"<answer>"}}',
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    '- Once the task is done, submit the task for review using: cyborg task submit <task-id> --result-summary "<answer>".',
-                    '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/submit with JSON {"result_summary":"<answer>"}.',
-                ]
-            )
-        if not is_internal:
-            lines.extend(
-                [
-                    "- Keep the tone natural for the channel and recipient.",
-                ]
-            )
-        return "\n".join(lines)
-
-    async def _render_prior_work_section(
-        self,
-        project_id: str,
-        exclude_task_id: str,
-    ) -> list[str]:
-        """Render a section listing prior completed tasks and their files in a project."""
-        completed_tasks = await self.db.fetch_all(
-            """
-            SELECT t.id, t.title, t.result
-            FROM tasks t
-            INNER JOIN project_tasks pt ON pt.task_id = t.id
-            WHERE pt.project_id = ?
-              AND t.status = 'completed'
-              AND t.deleted_at IS NULL
-              AND t.id != ?
-            ORDER BY t.completed_at ASC
-            """,
-            (project_id, exclude_task_id),
-        )
-        if not completed_tasks:
-            return []
-
-        lines = ["## Prior work in this project"]
-        for task in completed_tasks:
-            result_bit = f": {task['result'][:200]}" if task.get("result") else ""
-            lines.append(f"  - {task['title']}{result_bit}")
-
-            # Fetch files for this task
-            files = await self.db.fetch_all(
-                "SELECT filename, relative_path, purpose, description FROM task_files WHERE task_id = ? ORDER BY created_at ASC",
-                (task["id"],),
-            )
-            if files:
-                for f in files:
-                    desc = f" ({f['description']})" if f.get("description") else ""
-                    lines.append(f"    - {f['relative_path']} [{f['purpose']}]{desc}")
-
-        return lines
 
     def _render_needs_input_prompt(
         self,
@@ -1132,436 +767,6 @@ class OpenClawHookService(BaseService):
             ])
         return "\n".join(lines)
 
-    def _render_task_retry_prompt(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> str:
-        """Render prompt for task_retry notifications (submission rejected)."""
-        metadata = notification.get("metadata", {})
-        review_feedback = metadata.get("review_feedback", {})
-        issues = review_feedback.get("issues", [])
-        suggestions = review_feedback.get("suggestions", [])
-        reasoning = review_feedback.get("reasoning", "")
-
-        lines = [
-            "Cyborg task retry: the previous submission for this task was rejected by review.",
-            "",
-            "You must address the issues below and re-submit the task.",
-            "",
-            f"Task ID: {metadata.get('task_id') or notification.get('entity_id')}",
-            f"Notification ID: {notification['id']}",
-            f"Session Key: {session_key}",
-            f"Task: {notification['title']}",
-            "",
-            "## Review Feedback",
-            f"Reason: {reasoning}",
-        ]
-
-        if issues:
-            lines.extend(["", "Issues found:"])
-            for issue in issues:
-                lines.append(f"  - {issue}")
-
-        if suggestions:
-            lines.extend(["", "Specific suggestions:"])
-            for suggestion in suggestions:
-                lines.append(f"  - {suggestion}")
-
-        lines.extend([
-            "",
-            "## Instructions",
-            "- Address each issue raised by the review.",
-            "- Create any missing files that were expected.",
-            "- Do the actual work required by the task, don't just claim it's done.",
-        ])
-
-        # Include output directory instructions if available
-        output_directory = metadata.get("output_directory")
-        if output_directory:
-            task_id = metadata.get("task_id") or notification.get("entity_id")
-            lines.extend([
-                "",
-                "## Output Directory",
-                f"All task artifacts must be written to: `{output_directory}`",
-                "- Use descriptive filenames for each artifact.",
-                "- Put the primary result in `RESULT.md`.",
-            ])
-            if self.cyborg_service_url:
-                lines.append(
-                    f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files"
-                )
-
-        # Submit instructions
-        if self.cyborg_service_url:
-            lines.extend([
-                "",
-                f'- When finished, submit the task by calling: cyborg task submit {metadata.get("task_id", "<task-id>")} --result-summary "<answer>"',
-                f'- Or use the HTTP API: POST {self.cyborg_service_url}/api/v1/tasks/{metadata.get("task_id", "<task-id>")}/submit with JSON {{"result_summary":"<answer>"}}',
-            ])
-        else:
-            lines.extend([
-                "",
-                f'- When finished, submit the task using: cyborg task submit {metadata.get("task_id", "<task-id>")} --result-summary "<answer>".',
-                '- If you use the HTTP API instead of the CLI, POST to /api/v1/tasks/<task-id>/submit with JSON {"result_summary":"<answer>"}.',
-            ])
-
-        return "\n".join(lines)
-
-    def _build_task_retry_agent_params(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> dict[str, Any]:
-        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
-        params: dict[str, Any] = {
-            "message": self._render_task_retry_prompt(notification, route, session_key),
-            "deliver": route.get("channel") is not None,
-            "sessionKey": session_key,
-            "thinking": "on",
-            "timeout": timeout_seconds,
-            "idempotencyKey": notification["id"],
-        }
-        if route.get("channel"):
-            params["channel"] = route["channel"]
-        if route.get("to"):
-            params["to"] = route["to"]
-        if self.settings.agent_id:
-            params["agentId"] = self.settings.agent_id
-        return params
-
-    def _render_task_input_response_prompt(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> str:
-        """Render prompt for task_input_response notifications (user answered an input request)."""
-        metadata = notification.get("metadata", {})
-        input_response = metadata.get("input_response", "")
-        input_prompt = metadata.get("input_prompt", "")
-
-        if isinstance(input_response, list):
-            response_text = ", ".join(input_response)
-        else:
-            response_text = str(input_response)
-
-        lines = [
-            "Cyborg task input: the user has responded to your question.",
-            "",
-            "You asked the user a question and they have provided their answer.",
-            "Resume working on this task using their response.",
-            "",
-            f"Task ID: {metadata.get('task_id') or notification.get('entity_id')}",
-            f"Notification ID: {notification['id']}",
-            f"Session Key: {session_key}",
-            f"Task: {notification['title']}",
-            "",
-            "## Your Question",
-            input_prompt or "(question not available)",
-            "",
-            "## User's Response",
-            response_text,
-        ]
-
-        if metadata.get("parent_project_title"):
-            lines.extend([
-                "",
-                f"Parent project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
-            ])
-
-        # Include output directory instructions if available
-        output_directory = metadata.get("output_directory")
-        if output_directory:
-            task_id = metadata.get("task_id") or notification.get("entity_id")
-            lines.extend([
-                "",
-                "## Output Directory",
-                f"All task artifacts must be written to: `{output_directory}`",
-                "- Use descriptive filenames for each artifact.",
-                "- Put the primary result in `RESULT.md`.",
-            ])
-            if self.cyborg_service_url:
-                lines.append(
-                    f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files"
-                )
-
-        # Submit instructions
-        if self.cyborg_service_url:
-            lines.extend([
-                "",
-                "## Instructions",
-                "- Use the user's response to continue working on the task.",
-                f"- When done, submit: POST {self.cyborg_service_url}/api/v1/tasks/{metadata.get('task_id', '<task-id>')}/submit with JSON {{\"result_summary\":\"<answer>\"}}",
-            ])
-        else:
-            lines.extend([
-                "",
-                "## Instructions",
-                "- Use the user's response to continue working on the task.",
-                f"- When done, submit using: cyborg task submit {metadata.get('task_id', '<task-id>')} --result-summary \"<answer>\".",
-            ])
-
-        return "\n".join(lines)
-
-    def _build_task_input_response_agent_params(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> dict[str, Any]:
-        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
-        params: dict[str, Any] = {
-            "message": self._render_task_input_response_prompt(notification, route, session_key),
-            "deliver": route.get("channel") is not None,
-            "sessionKey": session_key,
-            "thinking": "on",
-            "timeout": timeout_seconds,
-            "idempotencyKey": notification["id"],
-        }
-        if route.get("channel"):
-            params["channel"] = route["channel"]
-        if route.get("to"):
-            params["to"] = route["to"]
-        if self.settings.agent_id:
-            params["agentId"] = self.settings.agent_id
-        return params
-
-    def _render_task_tap_prompt(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> str:
-        """Render prompt for task_tap notifications (operator nudge)."""
-        metadata = notification.get("metadata", {})
-        task_id = metadata.get("task_id") or notification.get("entity_id")
-
-        lines = [
-            "Cyborg task status check: the operator is nudging you on an active task.",
-            "",
-            "Please check your progress. If you have finished, register any output files and submit the task.",
-            "If you are still working, continue — no extra action needed beyond eventual completion.",
-            "If you are stuck or need clarification, block the task with an input_schema.",
-            "",
-            f"Task ID: {task_id}",
-            f"Notification ID: {notification['id']}",
-            f"Session Key: {session_key}",
-            f"Task: {notification['title']}",
-        ]
-
-        if metadata.get("parent_project_title"):
-            lines.extend([
-                "",
-                f"Parent project: {metadata['parent_project_title']} ({metadata.get('parent_project_id')})",
-            ])
-
-        output_directory = metadata.get("output_directory")
-        if output_directory:
-            lines.extend([
-                "",
-                "## Output Directory",
-                f"All task artifacts must be written to: `{output_directory}`",
-                "- Use descriptive filenames for each artifact.",
-                "- Put the primary result in `RESULT.md`.",
-            ])
-            if self.cyborg_service_url:
-                lines.append(
-                    f"- Register all output files via the API: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/files"
-                )
-
-        if self.cyborg_service_url:
-            lines.extend([
-                "",
-                "## Instructions",
-                f"- If finished, submit now: POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/submit with JSON {{\"result_summary\":\"<answer>\"}}",
-                "- If still working, continue and submit when done.",
-                "- If stuck, block the task with an input_schema so the operator can help.",
-            ])
-        else:
-            lines.extend([
-                "",
-                "## Instructions",
-                f"- If finished, submit using: cyborg task submit {task_id} --result-summary \"<answer>\".",
-                "- If still working, continue and submit when done.",
-                "- If stuck, block the task with an input_schema so the operator can help.",
-            ])
-
-        return "\n".join(lines)
-
-    def _build_task_tap_agent_params(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> dict[str, Any]:
-        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
-        params: dict[str, Any] = {
-            "message": self._render_task_tap_prompt(notification, route, session_key),
-            "deliver": route.get("channel") is not None,
-            "sessionKey": session_key,
-            "thinking": "on",
-            "timeout": timeout_seconds,
-            "idempotencyKey": notification["id"],
-        }
-        if route.get("channel"):
-            params["channel"] = route["channel"]
-        if route.get("to"):
-            params["to"] = route["to"]
-        if self.settings.agent_id:
-            params["agentId"] = self.settings.agent_id
-        return params
-
-    def _render_submission_review_prompt(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> str:
-        """Render prompt for submission_review notifications."""
-        metadata = notification.get("metadata", {})
-        task_id = metadata.get("task_id") or notification.get("entity_id")
-        otp = metadata.get("submission_review_otp", "")
-        result_summary = metadata.get("result_summary", "")
-
-        lines = [
-            "## Review Only — Do Not Do Any Work",
-            "A task has been submitted for review. Your job is strictly to read what was done and judge if it meets the criteria.",
-            "Do NOT write code, create files, run commands, or attempt to fix or complete anything. Only review and approve/reject.",
-            "",
-            f"Task ID: {task_id}",
-            f"Task: {notification['title']}",
-        ]
-
-        if metadata.get("parent_project_title"):
-            lines.append(f"Parent project: {metadata['parent_project_title']}")
-
-        if result_summary:
-            lines.extend(["", f"## What the Agent Claims", result_summary])
-
-        output_directory = metadata.get("output_directory")
-        if output_directory:
-            lines.extend([
-                "",
-                "## Output Directory",
-                f"Check the files in: `{output_directory}`",
-            ])
-
-        lines.extend([
-            "",
-            "## Review Checklist",
-            "1. Does the result actually address the task?",
-            "2. Were expected output files created with real content?",
-            "3. Is the result substantive, not just a restatement of the plan?",
-            "",
-            "## Your Action",
-            "After reviewing the task output, call the verification command with the one-time password below.",
-            "",
-            f"**One-time password:** `{otp}`",
-            "",
-        ])
-
-        if self.cyborg_service_url:
-            lines.extend([
-                "Approve (if the work is satisfactory):",
-                f"  POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/verify-submit",
-                f'  {{\"otp\": \"{otp}\", \"approved\": true}}',
-                "",
-                "Reject (if issues found):",
-                f"  POST {self.cyborg_service_url}/api/v1/tasks/{task_id}/verify-submit",
-                f'  {{\"otp\": \"{otp}\", \"approved\": false, \"reason\": \"<explain issues>\", \"issues\": [\"<issue1>\"]}}',
-            ])
-        else:
-            lines.extend([
-                "Approve (if the work is satisfactory):",
-                f"  cyborg task verify-submit {task_id} --otp {otp} --approve",
-                "",
-                "Reject (if issues found):",
-                f"  cyborg task verify-submit {task_id} --otp {otp} --reject --reason \"<explain issues>\"",
-            ])
-
-        return "\n".join(lines)
-
-    def _build_submission_review_agent_params(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> dict[str, Any]:
-        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
-        params: dict[str, Any] = {
-            "message": self._render_submission_review_prompt(notification, route, session_key),
-            "deliver": route.get("channel") is not None,
-            "sessionKey": session_key,
-            "thinking": "on",
-            "timeout": timeout_seconds,
-            "idempotencyKey": notification["id"],
-        }
-        if route.get("channel"):
-            params["channel"] = route["channel"]
-        if route.get("to"):
-            params["to"] = route["to"]
-        if self.settings.agent_id:
-            params["agentId"] = self.settings.agent_id
-        return params
-
-    def _build_next_action_agent_params(
-        self,
-        notification: dict[str, Any],
-        route: dict[str, Any],
-        session_key: str,
-    ) -> dict[str, Any]:
-        timeout_seconds = int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
-        params: dict[str, Any] = {
-            "message": notification["message"],
-            "deliver": route.get("channel") is not None,
-            "sessionKey": session_key,
-            "thinking": "on",
-            "timeout": timeout_seconds,
-            "idempotencyKey": notification["id"],
-        }
-        if route.get("channel"):
-            params["channel"] = route["channel"]
-        if route.get("to"):
-            params["to"] = route["to"]
-        if self.settings.agent_id:
-            params["agentId"] = self.settings.agent_id
-        return params
-
-    def _is_target_task_assignment(self, notification: dict[str, Any]) -> bool:
-        metadata = notification.get("metadata", {})
-        return (
-            notification.get("notification_type") == NotificationType.TASK_ASSIGNMENT.value
-            and metadata.get("delivery_route") == "target"
-        )
-
-    def _is_agent_dispatch_type(self, notification: dict[str, Any]) -> bool:
-        """Check if this notification type dispatches to an agent (not a user)."""
-        return notification.get("notification_type") in (
-            NotificationType.TASK_ASSIGNMENT.value,
-            NotificationType.TASK_RETRY.value,
-            NotificationType.TASK_INPUT_RESPONSE.value,
-            NotificationType.TASK_TAP.value,
-            NotificationType.SUBMISSION_REVIEW.value,
-            NotificationType.NEXT_ACTION.value,
-        )
-
     def _is_whatsapp_deliverable(self, notification: dict[str, Any]) -> bool:
         """Check if this notification type should be delivered to the user's WhatsApp channel."""
         return notification.get("notification_type") in self._WHATSAPP_DELIVERABLE_TYPES
-
-    def _is_auto_project_source_task_assignment(self, notification: dict[str, Any]) -> bool:
-        metadata = notification.get("metadata", {})
-        return (
-            notification.get("notification_type") == NotificationType.TASK_ASSIGNMENT.value
-            and metadata.get("delivery_route") == "source"
-            and bool(metadata.get("auto_created_by_project"))
-        )
-
-    def _should_use_task_assignment_agent(self, notification: dict[str, Any], session_key: str | None) -> bool:
-        return (
-            self._is_target_task_assignment(notification)
-            or self._is_auto_project_source_task_assignment(notification)
-        ) and bool(session_key)

@@ -7,7 +7,6 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from cyborg_server.database import Database
 from cyborg_server.exceptions import NotFoundError
@@ -24,12 +23,7 @@ logger = logging.getLogger(__name__)
 
 def _get_projects_base_dir_from_db(db: Database) -> Path:
     """Return the configured projects base directory from runtime settings."""
-    from cyborg_server.config import Settings
-
-    settings = getattr(db, "settings", None)
-    if isinstance(settings, Settings):
-        return settings.projects_base_dir
-    return Path("~/.openclaw/workspace/projects").expanduser()
+    return db.get_settings().projects_base_dir
 
 _SCRIPT_EXTENSIONS = {".py", ".sh", ".js", ".ts", ".r", ".R"}
 _VENV_DIRS = {".venv", "venv"}
@@ -334,7 +328,7 @@ class SourceDiscoveryService(BaseService):
 
         try:
             from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
-            reasoning = OpenClawReasoningService(self.db)
+            reasoning = OpenClawReasoningService(self.ctx)
             matches = await reasoning.discover_sources(
                 aim=aim,
                 method=method,

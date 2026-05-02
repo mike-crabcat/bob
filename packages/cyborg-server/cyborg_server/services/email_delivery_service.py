@@ -6,7 +6,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from cyborg_server.config import Settings
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.services.agentmail_client import AgentMailClient
 from cyborg_server.services.base import BaseService, json_dumps, utcnow
@@ -20,11 +20,11 @@ class EmailDeliveryService(BaseService):
 
     def __init__(
         self,
-        db: Database,
+        ctx: AppContext,
         *,
         agentmail_client: AgentMailClient | None = None,
     ) -> None:
-        super().__init__(db)
+        super().__init__(ctx)
         self._client = agentmail_client
 
     @property
@@ -36,12 +36,6 @@ class EmailDeliveryService(BaseService):
                 api_key=settings.agentmail.api_key,
             )
         return self._client
-
-    def _get_settings(self) -> Settings:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current
-        return Settings.from_env()
 
     async def send_reply(
         self,

@@ -7,8 +7,9 @@ from typing import Any
 
 from aiosqlite import Connection
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
-from cyborg_server.models import JournalEntryType, ProjectState, TaskStatus
+from cyborg_server.models import JournalEntryType, TaskStatus
 from cyborg_server.services.base import BaseService, utcnow, json_dumps, json_loads
 
 
@@ -33,8 +34,8 @@ DEPENDENCY_BLOCKED_PREFIX = "Waiting for dependency task"
 class ProjectAutonomyService(BaseService):
     """Release dependency-blocked tasks and checkpoint projects after task completion."""
 
-    def __init__(self, db: Database, execution_service: Any | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, execution_service: Any | None = None) -> None:
+        super().__init__(ctx)
         self._execution_service = execution_service
 
     @property
@@ -42,7 +43,7 @@ class ProjectAutonomyService(BaseService):
         if self._execution_service is None:
             from cyborg_server.services.project_execution_service import ProjectExecutionService
 
-            self._execution_service = ProjectExecutionService(self.db)
+            self._execution_service = ProjectExecutionService(self.ctx)
         return self._execution_service
 
     async def on_task_completed(

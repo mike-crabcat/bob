@@ -14,8 +14,17 @@ from fastapi.responses import JSONResponse
 
 from cyborg_server import __version__
 from cyborg_server.config import Settings
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ServiceError
+from cyborg_server.heartbeat import (
+    BlockedProjectCheckTask,
+    EmailPollingTask,
+    EmailSyncTask,
+    HeartbeatRunner,
+    NotificationDispatchTask,
+    StuckDispatchCheckTask,
+)
 from cyborg_server.models import HealthResponse
 from cyborg_server.routers import calendars, contacts, context, dashboard, dispatches, email, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks
 from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
@@ -44,18 +53,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = resolved_settings
         app.state.db = database
 
+        app_ctx = AppContext(db=database, settings=resolved_settings)
+
         # Attach database log handler for structured logging
         from cyborg_server.structured_logging import attach_database_handler
         attach_database_handler(database)
 
         stop_event = asyncio.Event()
-        heartbeat_worker = asyncio.create_task(
-            _heartbeat_loop(
-                database,
-                interval_seconds=resolved_settings.heartbeat_interval_seconds,
-                stop_event=stop_event,
-            )
-        )
+        runner = HeartbeatRunner(app_ctx, interval_seconds=resolved_settings.heartbeat_interval_seconds)
+        runner.register(NotificationDispatchTask())
+        runner.register(BlockedProjectCheckTask())
+        runner.register(EmailPollingTask())
+        runner.register(StuckDispatchCheckTask())
+        runner.register(EmailSyncTask())
+        heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:
             yield
         finally:
@@ -64,11 +75,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Wait for active dispatches to complete before shutting down
             try:
                 from cyborg_server.services.dispatch_service import DispatchService
-                dispatch_service = DispatchService(database)
-                await dispatch_service.wait_for_active_dispatches(
-                    timeout_seconds=resolved_settings.dispatch_shutdown_timeout_seconds,
-                    poll_interval=2.0,
-                )
+                dispatch_service = DispatchService(app_ctx)
+                active = await dispatch_service.count_active_dispatches()
+                if active:
+                    print(f"Waiting for {active} active dispatch(es) to complete...")
+                    await dispatch_service.wait_for_active_dispatches(
+                        timeout_seconds=resolved_settings.dispatch_shutdown_timeout_seconds,
+                        poll_interval=2.0,
+                    )
+                    remaining = await dispatch_service.count_active_dispatches()
+                    if remaining:
+                        print(f"Shutdown timed out — cancelled {remaining} dispatch(es).")
+                    else:
+                        print("All dispatches completed. Shutting down.")
             except Exception:
                 logger.warning("Error during dispatch drain", exc_info=True)
 
@@ -100,8 +119,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(Exception)
-    async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
-        return JSONResponse(status_code=500, content={"detail": str(exc)})
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     async def health_check(request: Request) -> HealthResponse:
@@ -131,123 +151,3 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 app = create_app()
-
-async def _heartbeat_loop(database: Database, *, interval_seconds: float, stop_event: asyncio.Event) -> None:
-    """Periodically dispatch pending notifications and scan for blocked projects."""
-
-    if interval_seconds <= 0:
-        await stop_event.wait()
-        return
-
-    from cyborg_server.services.notification_service import NotificationService
-
-    notification_service = NotificationService(database)
-    cycle = 0
-    while not stop_event.is_set():
-        cycle += 1
-        try:
-            await notification_service.dispatch_pending()
-        except Exception:
-            logger.exception("Heartbeat notification dispatch failed")
-        try:
-            await _check_blocked_projects(database, notification_service)
-        except Exception:
-            logger.exception("Heartbeat blocked-project check failed")
-        try:
-            await _poll_email_inboxes(database)
-        except Exception:
-            logger.exception("Heartbeat email polling failed")
-        try:
-            await _check_stuck_dispatches(database)
-        except Exception:
-            logger.exception("Heartbeat stuck-dispatch check failed")
-        # Periodic email sync every 10 cycles
-        if cycle % 10 == 0:
-            try:
-                await _sync_email_inboxes(database)
-            except Exception:
-                logger.exception("Heartbeat email sync failed")
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-        except TimeoutError:
-            continue
-
-
-async def _check_blocked_projects(database: Database, notification_service: NotificationService) -> None:
-    """Find blocked projects missing notifications and raise one."""
-    from cyborg_server.models import ProjectState
-
-    blocked = await database.fetch_all(
-        """SELECT id FROM projects
-           WHERE deleted_at IS NULL AND state = ? AND blocked_reason IS NOT NULL""",
-        (ProjectState.PAUSED.value,),
-    )
-    for project in blocked:
-        await notification_service.sync_project_state(project["id"])
-
-
-async def _poll_email_inboxes(database: Database) -> None:
-    """Poll AgentMail inboxes for new email messages."""
-    from cyborg_server.config import Settings
-
-    settings = getattr(database, "settings", None)
-    if not isinstance(settings, Settings) or not settings.agentmail.enabled or not settings.email_polling_enabled:
-        return
-
-    from cyborg_server.services.agentmail_client import AgentMailClient
-    from cyborg_server.services.email_polling_service import EmailPollingService
-
-    client = AgentMailClient(
-        base_url=settings.agentmail.base_url,
-        api_key=settings.agentmail.api_key,
-    )
-    try:
-        service = EmailPollingService(database, agentmail_client=client)
-        count = await service.poll_all_inboxes()
-        if count > 0:
-            logger.info("Email polling processed %d new message(s)", count)
-    finally:
-        await client.close()
-
-
-async def _check_stuck_dispatches(database: Database) -> None:
-    """Log stuck dispatches that have been active beyond the timeout threshold."""
-    from cyborg_server.config import Settings
-    from cyborg_server.services.dispatch_service import DispatchService
-
-    settings = getattr(database, "settings", None)
-    timeout_minutes = 60.0
-    if isinstance(settings, Settings):
-        timeout_minutes = settings.dispatch_stuck_timeout_minutes
-
-    dispatch_service = DispatchService(database)
-    stuck = await dispatch_service.get_stuck_dispatches(timeout_minutes=timeout_minutes)
-    if stuck:
-        logger.warning(
-            "Found %d stuck dispatch(es) older than %.0f minutes",
-            len(stuck), timeout_minutes,
-        )
-
-
-async def _sync_email_inboxes(database: Database) -> None:
-    """Periodic full email sync — reconcile AgentMail with local database."""
-    from cyborg_server.config import Settings
-    from cyborg_server.services.email_polling_service import EmailPollingService
-
-    settings = getattr(database, "settings", None)
-    if not isinstance(settings, Settings) or not settings.agentmail.enabled:
-        return
-
-    from cyborg_server.services.agentmail_client import AgentMailClient
-
-    client = AgentMailClient(
-        base_url=settings.agentmail.base_url,
-        api_key=settings.agentmail.api_key,
-    )
-    try:
-        service = EmailPollingService(database, agentmail_client=client)
-        count = await service.sync_all_inboxes()
-        if count > 0:
-            logger.info("Periodic email sync persisted %d missing message(s)", count)
-    finally:
-        await client.close()

@@ -6,14 +6,13 @@ exponential backoff retry logic, and delivery tracking.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.services.base import BaseService, json_dumps, json_loads, utcnow
 
@@ -102,8 +101,8 @@ class WebhookPayload:
 class WebhookService(BaseService):
     """Service for managing and delivering webhooks."""
     
-    def __init__(self, db: Database, cyborg_service_url: str | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, cyborg_service_url: str | None = None) -> None:
+        super().__init__(ctx)
         self._cyborg_service_url = cyborg_service_url
         self._http_client: Any | None = None
 
@@ -112,12 +111,7 @@ class WebhookService(BaseService):
         """Get the Cyborg service URL, falling back to settings if not provided."""
         if self._cyborg_service_url is not None:
             return self._cyborg_service_url
-        # Try to get from database settings
-        from cyborg_server.config import Settings
-        settings = getattr(self.db, "settings", None)
-        if isinstance(settings, Settings):
-            return settings.resolved_public_url
-        return None
+        return self._get_settings().resolved_public_url
     
     async def _get_http_client(self) -> Any:
         """Lazy-load HTTP client."""

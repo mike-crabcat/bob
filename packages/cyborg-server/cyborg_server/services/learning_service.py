@@ -6,6 +6,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.models import ProjectState
 from cyborg_server.services.base import BaseService, utcnow
@@ -22,15 +23,15 @@ class LearningService(BaseService):
     - Provides recommendations based on past outcomes
     """
 
-    def __init__(self, db: Database, reasoning_service: OpenClawReasoningService | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, reasoning_service: OpenClawReasoningService | None = None) -> None:
+        super().__init__(ctx)
         self._reasoning_service = reasoning_service
 
     @property
     def reasoning_service(self) -> OpenClawReasoningService:
         if self._reasoning_service is None:
             from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
-            self._reasoning_service = OpenClawReasoningService(self.db)
+            self._reasoning_service = OpenClawReasoningService(self.ctx)
         return self._reasoning_service
 
     async def extract_insights(

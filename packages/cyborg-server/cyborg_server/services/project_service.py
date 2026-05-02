@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shutil
 from pathlib import Path
@@ -12,6 +11,7 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.models import (
@@ -57,18 +57,18 @@ def short_task_id(task_id: str) -> str:
 class ProjectService(BaseService):
     """CRUD and lifecycle operations for projects."""
 
-    def __init__(self, db: Database) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext) -> None:
+        super().__init__(ctx)
         self._project_spec_service: ProjectSpecService | None = None
 
     @property
     def project_spec_service(self) -> ProjectSpecService:
         if self._project_spec_service is None:
-            self._project_spec_service = ProjectSpecService(self.db)
+            self._project_spec_service = ProjectSpecService(self.ctx)
         return self._project_spec_service
 
     async def _sync_notifications(self, project_id: str) -> None:
-        await NotificationService(self.db).sync_project_state(project_id)
+        await NotificationService(self.ctx).sync_project_state(project_id)
 
     async def list_projects(self, *, state: ProjectState | None = None) -> list[ProjectResponse]:
         query = "SELECT * FROM projects WHERE deleted_at IS NULL"
@@ -174,7 +174,7 @@ class ProjectService(BaseService):
     async def _link_source_projects(self, project_id: str, payload: ProjectCreate) -> None:
         """Link source projects to a newly created derived project."""
         from cyborg_server.services.source_discovery_service import SourceDiscoveryService
-        discovery = SourceDiscoveryService(self.db)
+        discovery = SourceDiscoveryService(self.ctx)
 
         source_ids = [str(sid) for sid in payload.source_project_ids]
         if source_ids:
@@ -258,7 +258,7 @@ class ProjectService(BaseService):
         row = await self._get_project_row(project_id)
         task_ids = await self._get_task_ids(project_id)
 
-        notification_service = NotificationService(self.db)
+        notification_service = NotificationService(self.ctx)
         now = utcnow()
 
         async with self.db.connection(write=True) as conn:
@@ -347,10 +347,10 @@ class ProjectService(BaseService):
         """Trigger reasoning to continue work after resume. Safe to call as a background task."""
         try:
             from cyborg_server.services.project_execution_service import ProjectExecutionService
-            execution_service = ProjectExecutionService(self.db)
+            execution_service = ProjectExecutionService(self.ctx)
             await execution_service.on_project_resumed(project_id, resumed_from_block=resumed_from_block)
         except Exception:
-            pass
+            logger.exception("Failed to trigger on_project_resumed for project %s", project_id)
 
     async def mute_project(self, project_id: str) -> ProjectResponse:
         await self._get_project_row(project_id)
@@ -523,7 +523,7 @@ class ProjectService(BaseService):
         decoded = await self.project_spec_service.populate_project_spec_fields(decoded)
         # Source project data
         from cyborg_server.services.source_discovery_service import SourceDiscoveryService
-        discovery = SourceDiscoveryService(self.db)
+        discovery = SourceDiscoveryService(self.ctx)
         decoded["source_projects"] = await discovery.get_sources(decoded["id"])
         decoded["derived_outputs"] = await discovery._get_cached_outputs(decoded["id"])
         return decoded
@@ -615,13 +615,8 @@ class ProjectService(BaseService):
 
         The directory is created on disk if it does not already exist.
         """
-        from cyborg_server.config import Settings
-
-        settings = getattr(self.db, "settings", None)
-        if isinstance(settings, Settings):
-            base_dir = settings.projects_base_dir
-        else:
-            base_dir = Path("~/.openclaw/workspace/projects").expanduser()
+        settings = self._get_settings()
+        base_dir = settings.projects_base_dir
 
         row = await self._get_project_row(project_id)
         slug = _slugify(row["title"])

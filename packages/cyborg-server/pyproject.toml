@@ -26,8 +26,19 @@ dependencies = [
   "websockets>=15.0.0",
 ]
 
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.25",
+  "pytest-cov>=6.0",
+]
+
 [project.scripts]
 cyborg = "cyborg_server.cli:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["cyborg_server"]

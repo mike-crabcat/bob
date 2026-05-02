@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from uuid import UUID
 
 from cyborg_server.models import DispatchResponse
 from cyborg_server.services.dispatch_service import DispatchService

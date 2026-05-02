@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from cyborg_server.database import Database
-from cyborg_server.dependencies import get_database
+from cyborg_server.context import AppContext
+from cyborg_server.dependencies import get_app_context
 from cyborg_server.models import ProjectState
+from cyborg_server.services.base import utcnow
 from cyborg_server.services.health_monitor_service import HealthMonitorService
 
 
@@ -60,9 +60,9 @@ class ProjectsNeedingAttentionResponse(BaseModel):
 # ============================================================================
 
 
-def _get_health_service(db: Database) -> HealthMonitorService:
+def _get_health_service(ctx: AppContext) -> HealthMonitorService:
     """Get or create the health monitor service instance."""
-    return HealthMonitorService(db)
+    return HealthMonitorService(ctx)
 
 
 # ============================================================================
@@ -73,14 +73,15 @@ def _get_health_service(db: Database) -> HealthMonitorService:
 @router.get("/scan", response_model=HealthScanResponse)
 async def scan_project_health(
     include_healthy: bool = False,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> HealthScanResponse:
     """
     Scan all active projects for health issues.
 
     Returns projects with health assessments, sorted by risk level.
     """
-    health_service = _get_health_service(db)
+    health_service = _get_health_service(ctx)
+    db = ctx.db
 
     # Get total active project count
     total_projects = await db.fetch_one(
@@ -99,21 +100,21 @@ async def scan_project_health(
             ProjectHealthResponse(**r)
             for r in results
         ],
-        timestamp=db.settings.utcnow().isoformat(),
+        timestamp=utcnow().isoformat(),
     )
 
 
 @router.get("/projects-needing-attention", response_model=list[ProjectsNeedingAttentionResponse])
 async def get_projects_needing_attention(
     limit: int = 20,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> list[ProjectsNeedingAttentionResponse]:
     """
     Get projects that need attention (high/critical risk or alerts).
 
     Returns projects sorted by urgency.
     """
-    health_service = _get_health_service(db)
+    health_service = _get_health_service(ctx)
 
     results = await health_service.get_projects_needing_attention(limit=limit)
 
@@ -124,14 +125,15 @@ async def get_projects_needing_attention(
 async def get_project_health(
     project_id: str,
     save_check: bool = False,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> ProjectHealthResponse:
     """
     Get health analysis for a specific project.
 
     If save_check is True, saves the health check to the database.
     """
-    health_service = _get_health_service(db)
+    health_service = _get_health_service(ctx)
+    db = ctx.db
 
     # Verify project exists
     project = await db.fetch_one(
@@ -169,14 +171,14 @@ async def get_project_health(
 @router.get("/projects/{project_id}/health/latest")
 async def get_latest_health_check(
     project_id: str,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any] | None:
     """
     Get the most recent health check for a project.
 
     Returns the latest saved health check or null if none exist.
     """
-    health_service = _get_health_service(db)
+    health_service = _get_health_service(ctx)
 
     result = await health_service.get_latest_health_check(project_id)
 

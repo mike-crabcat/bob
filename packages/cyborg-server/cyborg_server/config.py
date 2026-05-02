@@ -194,6 +194,7 @@ class Settings:
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
     dispatch_shutdown_timeout_seconds: float = 30.0
     dispatch_stuck_timeout_minutes: float = 60.0
+    dispatch_concurrency_limit: int = 10
 
     @property
     def dashboard_secret_configured(self) -> bool:
@@ -297,6 +298,9 @@ class Settings:
         dispatch_stuck_timeout_minutes = float(
             os.getenv("CYBORG_DISPATCH_STUCK_TIMEOUT_MINUTES", "60")
         )
+        dispatch_concurrency_limit = int(
+            os.getenv("CYBORG_DISPATCH_CONCURRENCY_LIMIT", "10")
+        )
 
         return cls(
             host=host,
@@ -318,6 +322,7 @@ class Settings:
             dashboard_secret=dashboard_secret,
             dispatch_shutdown_timeout_seconds=dispatch_shutdown_timeout_seconds,
             dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
+            dispatch_concurrency_limit=dispatch_concurrency_limit,
         )
 
     def ensure_directories(self) -> None:

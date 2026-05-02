@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.models import (
@@ -31,7 +32,8 @@ from cyborg_server.models import (
     TaskUnblockRequest,
     TaskUpdate,
 )
-from cyborg_server.services.base import BaseService, json_dumps, json_loads, next_cron_occurrence, utcnow
+from cyborg_server.cron import next_cron_occurrence
+from cyborg_server.services.base import BaseService, json_dumps, json_loads, utcnow
 from cyborg_server.services.notification_service import NotificationService
 from cyborg_server.services.project_autonomy_service import DEPENDENCY_BLOCKED_PREFIX
 
@@ -48,14 +50,14 @@ from cyborg_server.services.webhook_service import WebhookEvent, WebhookService
 class TaskService(BaseService):
     """CRUD and lifecycle operations for tasks."""
 
-    def __init__(self, db: Database, webhook_service: WebhookService | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, webhook_service: WebhookService | None = None) -> None:
+        super().__init__(ctx)
         self._webhook_service = webhook_service
 
     def _get_webhook_service(self) -> WebhookService | None:
         """Lazy-load webhook service."""
         if self._webhook_service is None:
-            self._webhook_service = WebhookService(self.db)
+            self._webhook_service = WebhookService(self.ctx)
         return self._webhook_service
 
     async def list_tasks(
@@ -161,9 +163,9 @@ class TaskService(BaseService):
             )
         # Dispatch task assignment as a reasoning prompt (fire-once)
         try:
-            await NotificationService(self.db).create_task_assignment_notification(task_id)
+            await NotificationService(self.ctx).create_task_assignment_notification(task_id)
         except Exception:
-            pass
+            logger.exception("Failed to dispatch task assignment notification for task %s", task_id)
         return await self.get_task(task_id)
 
     async def update_task(self, task_id: str, payload: TaskUpdate) -> TaskResponse:
@@ -277,15 +279,15 @@ class TaskService(BaseService):
             try:
                 await self._auto_register_untracked_files(task_id, output_directory)
             except Exception:
-                pass
+                logger.exception("Failed to auto-register untracked output files for task %s", task_id)
 
         # 3. Dispatch submission review notification to the agent session
         try:
-            await NotificationService(self.db).create_submission_review_notification(
+            await NotificationService(self.ctx).create_submission_review_notification(
                 task_id, otp, now=now,
             )
         except Exception:
-            pass
+            logger.exception("Failed to dispatch submission review notification for task %s", task_id)
 
         return await self.get_task(task_id)
 
@@ -295,7 +297,6 @@ class TaskService(BaseService):
         Called by the agent after reviewing the task work. The OTP must match
         the one generated during submit_task.
         """
-        from cyborg_server.models import TaskVerifySubmitRequest as _  # noqa: F811 — already imported
 
         row = await self._get_task_row(task_id)
         if row["status"] != TaskStatus.SUBMITTED.value:
@@ -352,11 +353,11 @@ class TaskService(BaseService):
 
         # Dispatch retry notification
         try:
-            await NotificationService(self.db).create_task_retry_notification(
+            await NotificationService(self.ctx).create_task_retry_notification(
                 task_id, review, now=now
             )
         except Exception:
-            pass
+            logger.exception("Failed to dispatch retry notification for task %s", task_id)
 
         return await self.get_task(task_id)
 
@@ -414,19 +415,19 @@ class TaskService(BaseService):
         # Resolve any pending/failed-delivery notifications for this task so
         # the retry loop won't re-dispatch stale prompts to a completed task.
         try:
-            notification_service = NotificationService(self.db)
+            notification_service = NotificationService(self.ctx)
             await notification_service._resolve_pending_notifications(
                 NotificationEntityType.TASK, task_id, now=now,
             )
         except Exception:
-            pass
+            logger.exception("Failed to resolve pending notifications for task %s", task_id)
 
         # Mark active dispatches as completed
         try:
             from cyborg_server.services.dispatch_service import DispatchService
-            await DispatchService(self.db).complete_dispatches_for_task(task_id)
+            await DispatchService(self.ctx).complete_dispatches_for_task(task_id)
         except Exception:
-            pass
+            logger.exception("Failed to mark active dispatches as completed for task %s", task_id)
 
         # Trigger post-completion autonomy flow for linked tasks and projects.
         await self._trigger_project_execution(task_id, row["title"], result_summary)
@@ -451,11 +452,11 @@ class TaskService(BaseService):
         try:
             from cyborg_server.services.project_autonomy_service import ProjectAutonomyService
 
-            autonomy_service = ProjectAutonomyService(self.db)
+            autonomy_service = ProjectAutonomyService(self.ctx)
             await autonomy_service.on_task_completed(task_id, task_title, result_summary)
         except Exception:
             # Don't let project execution failures affect task completion
-            pass
+            logger.exception("Project autonomy on_task_completed failed for task %s", task_id)
 
     async def fail_task(self, task_id: str, payload: TaskFailureRequest) -> TaskResponse:
         task = await self.get_task(task_id)
@@ -536,11 +537,11 @@ class TaskService(BaseService):
             # Mark active dispatches as failed
             try:
                 from cyborg_server.services.dispatch_service import DispatchService
-                await DispatchService(self.db).complete_dispatches_for_task(
+                await DispatchService(self.ctx).complete_dispatches_for_task(
                     task_id, status=DispatchStatus.FAILED,
                 )
             except Exception:
-                pass
+                logger.exception("Failed to mark dispatches as failed for task %s", task_id)
 
             await self._trigger_webhook(
                 event=WebhookEvent.TASK_FAILED,
@@ -941,7 +942,7 @@ class TaskService(BaseService):
         return [row["project_id"] for row in rows]
 
     async def _resolve_target_session_from_metadata(self, metadata: dict[str, Any]) -> dict[str, Any] | None:
-        resolved = await SessionRouteService(self.db).resolve_target_metadata(metadata)
+        resolved = await SessionRouteService(self.ctx).resolve_target_metadata(metadata)
         if resolved is None:
             return None
         return resolved.model_dump(mode="json")
@@ -1185,7 +1186,7 @@ class TaskService(BaseService):
             )
         except Exception:
             # Don't let webhook failures affect task operations
-            pass
+            logger.exception("Webhook trigger failed for task %s", task_id)
 
     # ------------------------------------------------------------------
     # File management
@@ -1272,7 +1273,7 @@ class TaskService(BaseService):
         try:
             from cyborg_server.services.project_service import ProjectService
 
-            project_service = ProjectService(self.db)
+            project_service = ProjectService(self.ctx)
             project_path = await project_service.get_project_path(project_id)
             short_id = task_id.replace("-", "")[:8]
             return str(project_path / "tasks" / short_id)
@@ -1325,7 +1326,7 @@ class TaskService(BaseService):
             try:
                 await self.register_task_file(task_id, project_id, payload)
             except Exception:
-                pass
+                logger.exception("Failed to register task file %s for task %s", child.name, task_id)
 
     @staticmethod
     def _guess_purpose(filename: str) -> TaskFilePurpose:

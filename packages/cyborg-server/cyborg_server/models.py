@@ -10,62 +10,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cyborg_server.cron import validate_cron_expression
+
 
 MetadataDict = dict[str, Any]
 COLOR_PATTERN = re.compile(r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
-
-
-def validate_cron_expression(expression: str) -> str:
-    """Validate a simple five-field cron expression."""
-
-    fields = expression.split()
-    if len(fields) != 5:
-        raise ValueError("Cron expressions must contain exactly five fields")
-
-    ranges = (
-        (0, 59),
-        (0, 23),
-        (1, 31),
-        (1, 12),
-        (0, 7),
-    )
-    for part, (lower, upper) in zip(fields, ranges, strict=True):
-        for token in part.split(","):
-            _validate_cron_token(token, lower, upper)
-    return expression
-
-
-def _validate_cron_token(token: str, lower: int, upper: int) -> None:
-    if token == "*":
-        return
-    if "/" in token:
-        base, step = token.split("/", 1)
-        if not step.isdigit() or int(step) <= 0:
-            raise ValueError("Cron step values must be positive integers")
-        _validate_cron_token(base, lower, upper)
-        return
-    if token.startswith("*/"):
-        step = token[2:]
-        if not step.isdigit() or int(step) <= 0:
-            raise ValueError("Cron step values must be positive integers")
-        return
-    if "-" in token:
-        start, end = token.split("-", 1)
-        if not (start.isdigit() and end.isdigit()):
-            raise ValueError("Cron ranges must use integers")
-        start_value = int(start)
-        end_value = int(end)
-        if not (lower <= start_value <= upper and lower <= end_value <= upper):
-            raise ValueError("Cron values are out of range")
-        if start_value > end_value:
-            raise ValueError("Cron range start must be <= range end")
-        return
-    if token.isdigit():
-        value = int(token)
-        if not lower <= value <= upper:
-            raise ValueError("Cron values are out of range")
-        return
-    raise ValueError(f"Unsupported cron token: {token}")
 
 
 class CyborgModel(BaseModel):
@@ -1373,8 +1322,8 @@ class NotificationAcknowledgeRequest(CyborgModel):
 
 
 class DispatchResponse(CyborgModel, EntityRef):
-    notification_id: UUID
-    notification_type: NotificationType
+    notification_id: UUID | None = None
+    notification_type: str
     session_key: str
     task_id: UUID | None = None
     project_id: UUID | None = None
