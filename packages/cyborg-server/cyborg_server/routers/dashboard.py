@@ -328,6 +328,33 @@ async def overview(
         for row in recent_outcome_rows
     ]
 
+    active_dispatch_rows = await db.fetch_all(
+        """
+        SELECT d.*,
+               t.title AS task_title,
+               p.title AS project_title
+        FROM dispatches d
+        LEFT JOIN tasks t ON t.id = d.task_id AND t.deleted_at IS NULL
+        LEFT JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
+        WHERE d.status = 'active'
+        ORDER BY d.dispatched_at ASC
+        LIMIT 20
+        """,
+    )
+    active_dispatches = [
+        {
+            "id": row["id"],
+            "notification_type": row["notification_type"],
+            "session_key": row["session_key"],
+            "task_id": row["task_id"],
+            "task_title": row["task_title"],
+            "project_title": row["project_title"],
+            "dispatched_at": row["dispatched_at"],
+            "tap_count": row["tap_count"],
+        }
+        for row in active_dispatch_rows
+    ]
+
     return _render_template(
         "dashboard/overview.html",
         request,
@@ -352,6 +379,7 @@ async def overview(
             ),
             "open_notifications": open_notifications,
             "recent_outcomes": recent_outcomes,
+            "active_dispatches": active_dispatches,
         },
     )
 
@@ -1675,12 +1703,68 @@ async def email_message_detail(
     cc_addresses = json.loads(msg.get("cc_addresses") or "[]")
     attachments = json.loads(msg.get("attachments_json") or "[]")
 
+    # Look up dispatches and prompt history for this message's thread
+    thread_row = await db.fetch_one(
+        "SELECT session_key FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
+        (msg["thread_id"],),
+    )
+    dispatches = []
+    prompt_history = []
+    if thread_row and thread_row["session_key"]:
+        session_key = thread_row["session_key"]
+
+        dispatch_rows = await db.fetch_all(
+            """
+            SELECT d.*, t.title AS task_title, p.title AS project_title
+            FROM dispatches d
+            LEFT JOIN tasks t ON t.id = d.task_id AND t.deleted_at IS NULL
+            LEFT JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
+            WHERE d.session_key = ?
+            ORDER BY d.dispatched_at DESC
+            """,
+            (session_key,),
+        )
+        for d in dispatch_rows:
+            dispatches.append({
+                "id": d["id"],
+                "notification_type": d["notification_type"],
+                "status": d["status"],
+                "task_id": d["task_id"],
+                "task_title": d["task_title"],
+                "project_title": d["project_title"],
+                "dispatched_at": d["dispatched_at"],
+                "completed_at": d["completed_at"],
+                "duration_seconds": d["duration_seconds"],
+                "tap_count": d["tap_count"],
+            })
+
+        prompt_rows = await db.fetch_all(
+            """
+            SELECT id, category, prompt_text, session_key, timestamp, token_count_estimate
+            FROM prompt_history
+            WHERE session_key = ?
+            ORDER BY timestamp DESC
+            LIMIT 20
+            """,
+            (session_key,),
+        )
+        for p in prompt_rows:
+            prompt_history.append({
+                "id": p["id"],
+                "category": p["category"],
+                "prompt_text": p["prompt_text"],
+                "timestamp": p["timestamp"],
+                "token_count_estimate": p["token_count_estimate"],
+            })
+
     return _render_template("dashboard/email_detail.html", request, {
         "pending_count": pending_count,
         "message": dict(msg),
         "to_addresses": to_addresses,
         "cc_addresses": cc_addresses,
         "attachments": attachments,
+        "dispatches": dispatches,
+        "prompt_history": prompt_history,
     })
 
 

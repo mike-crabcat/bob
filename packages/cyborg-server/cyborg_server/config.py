@@ -192,6 +192,8 @@ class Settings:
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
+    dispatch_shutdown_timeout_seconds: float = 30.0
+    dispatch_stuck_timeout_minutes: float = 60.0
 
     @property
     def dashboard_secret_configured(self) -> bool:
@@ -289,6 +291,13 @@ class Settings:
         )
         email_polling_enabled = os.getenv("CYBORG_EMAIL_POLLING_ENABLED", "true").lower() in ("true", "1", "yes", "on")
 
+        dispatch_shutdown_timeout_seconds = float(
+            os.getenv("CYBORG_DISPATCH_SHUTDOWN_TIMEOUT_SECONDS", "30")
+        )
+        dispatch_stuck_timeout_minutes = float(
+            os.getenv("CYBORG_DISPATCH_STUCK_TIMEOUT_MINUTES", "60")
+        )
+
         return cls(
             host=host,
             port=port,
@@ -307,6 +316,8 @@ class Settings:
             projects_base_dir=projects_base_dir,
             public_url=public_url,
             dashboard_secret=dashboard_secret,
+            dispatch_shutdown_timeout_seconds=dispatch_shutdown_timeout_seconds,
+            dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
         )
 
     def ensure_directories(self) -> None:

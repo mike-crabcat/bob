@@ -10,6 +10,7 @@ from aiosqlite import Connection
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.models import (
+    DispatchStatus,
     NotificationEntityType,
     RetryAction,
     RetryConfig,
@@ -420,6 +421,13 @@ class TaskService(BaseService):
         except Exception:
             pass
 
+        # Mark active dispatches as completed
+        try:
+            from cyborg_server.services.dispatch_service import DispatchService
+            await DispatchService(self.db).complete_dispatches_for_task(task_id)
+        except Exception:
+            pass
+
         # Trigger post-completion autonomy flow for linked tasks and projects.
         await self._trigger_project_execution(task_id, row["title"], result_summary)
 
@@ -525,6 +533,15 @@ class TaskService(BaseService):
 
         # Trigger webhook notification (only if actually failed, not retrying)
         if not should_reload:
+            # Mark active dispatches as failed
+            try:
+                from cyborg_server.services.dispatch_service import DispatchService
+                await DispatchService(self.db).complete_dispatches_for_task(
+                    task_id, status=DispatchStatus.FAILED,
+                )
+            except Exception:
+                pass
+
             await self._trigger_webhook(
                 event=WebhookEvent.TASK_FAILED,
                 task_id=task_id,

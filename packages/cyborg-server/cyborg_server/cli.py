@@ -194,6 +194,25 @@ def _query_string(**params: Any) -> str:
     return f"?{urlencode(filtered, doseq=True)}"
 
 
+def _resolve_inbox_id(inbox_id: Optional[str]) -> str:
+    """Resolve inbox_id: explicit value → config default → sole active inbox."""
+    if inbox_id:
+        return inbox_id
+    settings = Settings.from_env()
+    if settings.agentmail.default_inbox_id:
+        return settings.agentmail.default_inbox_id
+    result = _api_call("GET", "/api/v1/email/inboxes?active_only=true")
+    inboxes = result.get("data", [])
+    if len(inboxes) == 1:
+        return str(inboxes[0]["id"])
+    if not inboxes:
+        raise typer.BadParameter("No active email inboxes found. Register one with `cyborg email-inbox register`.")
+    raise typer.BadParameter(
+        "Multiple inboxes found. Specify --inbox with one of:\n"
+        + "\n".join(f"  {ib['id']}  ({ib.get('email_address', ib.get('display_name', ''))})" for ib in inboxes)
+    )
+
+
 def _parse_json_option(value: str, label: str, expected_type: type[Any]) -> Any:
     try:
         parsed = json.loads(value)
@@ -3031,7 +3050,6 @@ def email_inbox_remove(
 
 @email_app.command("send")
 def email_send(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID to send from")],
     to: Annotated[str, typer.Option("--to", help="Recipient email address")],
     subject: Annotated[str, typer.Option("--subject", help="Email subject")],
     text: Annotated[str, typer.Option("--text", help="Email body text")],
@@ -3040,8 +3058,10 @@ def email_send(
     html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
     attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
     inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """Send a new email from a registered inbox."""
+    resolved_inbox = _resolve_inbox_id(inbox_id)
     payload: dict[str, Any] = {"to": to, "subject": subject, "text": text, "agenda": agenda}
     if cc:
         payload["cc"] = cc
@@ -3056,21 +3076,22 @@ def email_send(
             attachments.append(_read_file_as_attachment(fp, inline=True))
     if attachments:
         payload["attachments"] = attachments
-    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/send", payload)
+    result = _api_call("POST", f"/api/v1/email/inboxes/{resolved_inbox}/send", payload)
     _echo_json(result.get("data", result))
 
 
 @email_app.command("reply")
 def email_reply(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
     message_id: Annotated[str, typer.Option("--message-id", help="Message ID to reply to")],
     text: Annotated[str, typer.Option("--text", help="Reply body text")],
     reply_all: Annotated[bool, typer.Option("--reply-all", help="Reply to all recipients")] = False,
     html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
     attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
     inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """Reply to an email message."""
+    resolved_inbox = _resolve_inbox_id(inbox_id)
     payload: dict[str, Any] = {"message_id": message_id, "text": text, "reply_all": reply_all}
     if html:
         payload["html"] = html
@@ -3083,31 +3104,33 @@ def email_reply(
             attachments.append(_read_file_as_attachment(fp, inline=True))
     if attachments:
         payload["attachments"] = attachments
-    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/reply", payload)
+    result = _api_call("POST", f"/api/v1/email/inboxes/{resolved_inbox}/reply", payload)
     _echo_json(result.get("data", result))
 
 
 @email_app.command("messages")
 def email_messages(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
     limit: Annotated[int, typer.Option("--limit", help="Max messages")] = 25,
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """List messages in an inbox."""
-    result = _api_call("GET", f"/api/v1/email/inboxes/{inbox_id}/messages?limit={limit}")
+    resolved_inbox = _resolve_inbox_id(inbox_id)
+    result = _api_call("GET", f"/api/v1/email/inboxes/{resolved_inbox}/messages?limit={limit}")
     _echo_json(result.get("data", result))
 
 
 @email_app.command("download-attachment")
 def email_download_attachment(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
     message_id: Annotated[str, typer.Option("--message-id", help="AgentMail message ID")],
     attachment_id: Annotated[str, typer.Option("--attachment-id", help="Attachment ID")],
     output: Annotated[str, typer.Option("--output", "-o", help="Output file path")] = "",
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """Download an email attachment to disk."""
+    resolved_inbox = _resolve_inbox_id(inbox_id)
     settings = Settings.from_env()
     encoded_msg = quote(message_id, safe="")
-    url = f"http://{settings.host}:{settings.port}/api/v1/email/inboxes/{inbox_id}/messages/{encoded_msg}/attachments/{attachment_id}"
+    url = f"http://{settings.host}:{settings.port}/api/v1/email/inboxes/{resolved_inbox}/messages/{encoded_msg}/attachments/{attachment_id}"
     req = Request(url, method="GET")
 
     try:
@@ -3153,6 +3176,15 @@ def email_thread_update_agenda(
     """Update the agenda for an email thread."""
     result = _api_call("PATCH", f"/api/v1/email/threads/{thread_id}/agenda", {"agenda": agenda})
     _echo_json(result.get("data", result))
+
+
+@email_app.command("sync")
+def email_sync() -> None:
+    """Sync all inboxes — fetch missing messages from AgentMail and persist locally."""
+    result = _api_call("POST", "/api/v1/email/sync")
+    data = result.get("data", result)
+    count = data.get("synced", 0)
+    typer.echo(f"Synced {count} message(s) from AgentMail")
 
 
 def main() -> int:

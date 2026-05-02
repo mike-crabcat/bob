@@ -847,8 +847,9 @@ class NotificationService(BaseService):
             return False
 
         decoded = self._decode_notification_row(row)
+        session_key: str | None = None
         try:
-            await openclaw_service.dispatch_notification(decoded)
+            session_key = await openclaw_service.dispatch_notification(decoded)
         except Exception as exc:
             await openclaw_service.mark_delivery_failure(
                 notification_id,
@@ -860,6 +861,22 @@ class NotificationService(BaseService):
             return False
 
         await openclaw_service.mark_delivery_success(notification_id, timestamp=now.isoformat())
+
+        # Record dispatch for active tracking
+        if session_key and self._is_agent_dispatch_for_tracking(decoded):
+            try:
+                from cyborg_server.services.dispatch_service import DispatchService
+                metadata = decoded.get("metadata", {})
+                await DispatchService(self.db).record_dispatch(
+                    notification_id=notification_id,
+                    notification_type=decoded.get("notification_type", ""),
+                    session_key=session_key,
+                    task_id=metadata.get("task_id") or str(decoded.get("entity_id", "")),
+                    project_id=metadata.get("parent_project_id") or metadata.get("project_id"),
+                )
+            except Exception:
+                pass
+
         return True
 
     async def _lease_notification_for_delivery(self, notification_id: str, *, now: datetime) -> dict[str, Any] | None:
@@ -917,3 +934,15 @@ class NotificationService(BaseService):
         decoded["metadata"] = json_loads(decoded.get("metadata"), {})
         decoded["entity_id"] = UUID(decoded["entity_id"])
         return decoded
+
+    @staticmethod
+    def _is_agent_dispatch_for_tracking(notification: dict[str, Any]) -> bool:
+        """Check if this notification type should be tracked as an active dispatch."""
+        return notification.get("notification_type") in (
+            NotificationType.TASK_ASSIGNMENT.value,
+            NotificationType.TASK_RETRY.value,
+            NotificationType.TASK_INPUT_RESPONSE.value,
+            NotificationType.TASK_TAP.value,
+            NotificationType.SUBMISSION_REVIEW.value,
+            NotificationType.NEXT_ACTION.value,
+        )

@@ -230,7 +230,7 @@ class OpenClawHookService(BaseService):
     def is_configured(self) -> bool:
         return self.settings.enabled
 
-    async def dispatch_notification(self, notification: dict[str, Any]) -> None:
+    async def dispatch_notification(self, notification: dict[str, Any]) -> str | None:
         is_retry = int(notification.get("delivery_attempt_count") or 1) > 1
         metadata = notification.get("metadata", {})
 
@@ -240,14 +240,14 @@ class OpenClawHookService(BaseService):
             session_key = metadata.get("subagent_session_key") or await self._resolve_project_session_key(notification)
             if session_key:
                 await self._dispatch_agent_internal(notification, session_key)
-                return
+                return session_key
             # Fall through to route resolution for task assignments that use target sessions
 
         route = await self.routing_service.resolve_notification_route(metadata)
         if route is None:
             if metadata.get("auto_created_by_project"):
                 self.logger.info("Skipping notification for auto-created task — no delivery route available")
-                return
+                return None
             raise ValueError("No delivery route could be resolved for the notification")
 
         route_data = route.model_dump(mode="json")
@@ -260,7 +260,7 @@ class OpenClawHookService(BaseService):
         # Email channel: deliver directly via AgentMail and dispatch to OpenClaw gateway
         if route_data.get("channel") == "email":
             await self._dispatch_email_notification(notification, route_data)
-            return
+            return self._resolve_visible_session_key(route_data)
 
         # WhatsApp delivery filter — only specific types reach the user's channel.
         # All agent dispatch types still execute, but suppressed ones get deliver=False.
@@ -271,7 +271,7 @@ class OpenClawHookService(BaseService):
                     "Skipping WhatsApp delivery for %s notification (id=%s)",
                     notification.get("notification_type"), notification.get("id"),
                 )
-                return
+                return None
 
         delivery_session_key = await self._resolve_delivery_session_key(notification, route_data)
 
@@ -291,7 +291,7 @@ class OpenClawHookService(BaseService):
                 await self._build_task_assignment_agent_params(notification, route_data, delivery_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return delivery_session_key
 
         # Needs input notifications (plan approvals, etc.) also use agent method for context
         if notification.get("notification_type") == "needs_input":
@@ -310,7 +310,7 @@ class OpenClawHookService(BaseService):
                 self._build_needs_input_agent_params(notification, route_data, session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return session_key
 
         # Task retry notifications use the agent method with retry-specific prompt
         if notification.get("notification_type") == NotificationType.TASK_RETRY.value:
@@ -329,7 +329,7 @@ class OpenClawHookService(BaseService):
                 self._build_task_retry_agent_params(notification, route_data, session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return session_key
 
         # Task input response notifications use the agent method with input-specific prompt
         if notification.get("notification_type") == NotificationType.TASK_INPUT_RESPONSE.value:
@@ -348,7 +348,7 @@ class OpenClawHookService(BaseService):
                 self._build_task_input_response_agent_params(notification, route_data, session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return session_key
 
         # Task tap notifications nudge the agent to continue or submit
         if notification.get("notification_type") == NotificationType.TASK_TAP.value:
@@ -367,7 +367,7 @@ class OpenClawHookService(BaseService):
                 self._build_task_tap_agent_params(notification, route_data, session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return session_key
 
         # Submission review notifications use a fresh session for unbiased review
         if notification.get("notification_type") == NotificationType.SUBMISSION_REVIEW.value:
@@ -389,7 +389,7 @@ class OpenClawHookService(BaseService):
                 self._build_submission_review_agent_params(notification, route_data, review_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return review_session_key
 
         # Next-action prompts use a fresh reasoning session (not the source channel)
         if notification.get("notification_type") == NotificationType.NEXT_ACTION.value:
@@ -410,7 +410,7 @@ class OpenClawHookService(BaseService):
                 self._build_next_action_agent_params(notification, route_data, next_action_session_key),
                 timeout_seconds=self.DISPATCH_ACCEPT_TIMEOUT,
             )
-            return
+            return next_action_session_key
 
         visible_session_key = delivery_session_key or self._resolve_visible_session_key(route_data)
 
@@ -431,6 +431,7 @@ class OpenClawHookService(BaseService):
                 session_key=visible_session_key,
             ),
         )
+        return None
 
     async def mark_delivery_success(self, notification_id: str, *, timestamp: str | None = None) -> None:
         now = timestamp or utcnow().isoformat()

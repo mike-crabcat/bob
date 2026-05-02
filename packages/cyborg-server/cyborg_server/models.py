@@ -216,6 +216,14 @@ class NotificationDeliveryStatus(StrEnum):
     FAILED = "failed"
 
 
+class DispatchStatus(StrEnum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+
+
 class RecipientType(StrEnum):
     EMAIL = "email"
     PHONE = "phone"
@@ -1362,6 +1370,26 @@ class NotificationAcknowledgeRequest(CyborgModel):
         if not stripped:
             raise ValueError("acknowledged_by must not be blank")
         return stripped
+
+
+class DispatchResponse(CyborgModel, EntityRef):
+    notification_id: UUID
+    notification_type: NotificationType
+    session_key: str
+    task_id: UUID | None = None
+    project_id: UUID | None = None
+    status: DispatchStatus
+    dispatched_at: datetime
+    completed_at: datetime | None = None
+    last_tapped_at: datetime | None = None
+    tap_count: int = 0
+    max_auto_taps: int = 0
+    duration_seconds: float | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+    task_title: str | None = None
+    project_title: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class HealthResponse(CyborgModel):

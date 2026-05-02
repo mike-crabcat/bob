@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import uuid4
 
 from cyborg_server.config import Settings
 from cyborg_server.database import Database
 from cyborg_server.services.agentmail_client import AgentMailClient
-from cyborg_server.services.base import BaseService
+from cyborg_server.services.base import BaseService, json_dumps, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class EmailDeliveryService(BaseService):
         )
 
         inbox = await self.db.fetch_one(
-            "SELECT agentmail_inbox_id FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
+            "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
             (inbox_id,),
         )
         if inbox is None:
@@ -77,9 +78,10 @@ class EmailDeliveryService(BaseService):
 
         agentmail_inbox_id = inbox["agentmail_inbox_id"]
 
+        result: dict[str, Any] = {}
         if latest is not None and latest["agentmail_message_id"]:
             try:
-                return await self.client.reply_message(
+                result = await self.client.reply_message(
                     agentmail_inbox_id,
                     latest["agentmail_message_id"],
                     text=text,
@@ -93,22 +95,33 @@ class EmailDeliveryService(BaseService):
                     latest["agentmail_message_id"],
                     exc_info=True,
                 )
+                result = {}
 
-        # Fallback: send as new message with thread_id
-        return await self.client.send_message(
-            agentmail_inbox_id,
-            to="",  # thread_id handles routing
-            subject="",
+        if not result:
+            result = await self.client.send_message(
+                agentmail_inbox_id,
+                to="",  # thread_id handles routing
+                subject="",
+                text=text,
+                html=html,
+                thread_id=thread_id,
+            )
+
+        await self._persist_sent_message(
+            inbox=inbox,
+            agentmail_response=result,
+            agentmail_thread_id=thread_id,
             text=text,
             html=html,
-            thread_id=thread_id,
+            has_attachments=bool(attachments),
         )
+        return result
 
     async def send_new_email(
         self,
         *,
         inbox_id: str,
-        to: str,
+        to: str | list[str],
         subject: str,
         text: str,
         html: str | None = None,
@@ -117,13 +130,13 @@ class EmailDeliveryService(BaseService):
     ) -> dict[str, Any]:
         """Send a new email from a registered inbox."""
         inbox = await self.db.fetch_one(
-            "SELECT agentmail_inbox_id FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
+            "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
             (inbox_id,),
         )
         if inbox is None:
             raise ValueError(f"Inbox {inbox_id} not found")
 
-        return await self.client.send_message(
+        result = await self.client.send_message(
             inbox["agentmail_inbox_id"],
             to=to,
             subject=subject,
@@ -132,3 +145,89 @@ class EmailDeliveryService(BaseService):
             cc=cc,
             attachments=attachments,
         )
+
+        agentmail_thread_id = result.get("thread_id", "")
+        if agentmail_thread_id:
+            await self._persist_sent_message(
+                inbox=inbox,
+                agentmail_response=result,
+                agentmail_thread_id=agentmail_thread_id,
+                text=text,
+                html=html,
+                subject=subject,
+                to_addresses=[to] if isinstance(to, str) else to,
+                cc_addresses=cc,
+                has_attachments=bool(attachments),
+            )
+        return result
+
+    async def _persist_sent_message(
+        self,
+        *,
+        inbox: dict[str, Any],
+        agentmail_response: dict[str, Any],
+        agentmail_thread_id: str,
+        text: str,
+        html: str | None = None,
+        subject: str | None = None,
+        to_addresses: list[str] | None = None,
+        cc_addresses: list[str] | None = None,
+        has_attachments: bool = False,
+    ) -> str:
+        """Persist a sent message to email_messages and update thread stats."""
+        agentmail_message_id = agentmail_response.get("message_id", "")
+        if not agentmail_message_id:
+            logger.warning("No message_id in AgentMail response, skipping persistence")
+            return ""
+
+        now = utcnow()
+        message_id = str(uuid4())
+
+        await self.db.execute(
+            """
+            INSERT INTO email_messages (
+                id, inbox_id, agentmail_message_id, thread_id,
+                subject, sender_email, sender_name,
+                to_addresses, cc_addresses,
+                text_body, html_body, preview, labels,
+                has_attachments, in_reply_to,
+                message_timestamp, processed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                inbox["id"],
+                agentmail_message_id,
+                agentmail_thread_id,
+                subject,
+                inbox["email_address"],
+                inbox.get("display_name"),
+                json_dumps(to_addresses or []),
+                json_dumps(cc_addresses or []),
+                text,
+                html,
+                text[:200] if text else None,
+                json_dumps(["sent"]),
+                1 if has_attachments else 0,
+                None,
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+
+        # Update thread message count
+        await self.db.execute(
+            """
+            UPDATE email_threads
+            SET message_count = message_count + 1, last_message_at = ?, updated_at = ?
+            WHERE agentmail_thread_id = ? AND deleted_at IS NULL
+            """,
+            (now.isoformat(), now.isoformat(), agentmail_thread_id),
+        )
+
+        logger.info(
+            "Persisted sent message %s in thread %s",
+            message_id, agentmail_thread_id,
+        )
+        return message_id

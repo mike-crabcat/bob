@@ -27,6 +27,14 @@
     </div>
 </div>
 
+<!-- Sync Button -->
+<div class="mb-6">
+    <button onclick="syncEmails(this)" class="px-4 py-2 rounded-lg bg-accent-cyan/10 border border-accent-cyan/30 text-accent-cyan text-sm hover:bg-accent-cyan/20 transition-colors cursor-pointer">
+        Sync from AgentMail
+    </button>
+    <span id="sync-result" class="text-xs text-text-muted ml-3"></span>
+</div>
+
 <!-- Thread List -->
 <div class="space-y-4">
     {% for thread in threads %}
@@ -114,19 +122,21 @@
                 <div class="flex items-center justify-between mb-2">
                     <div class="text-xs text-accent-cyan font-semibold">AGENDA</div>
                     <button type="button"
-                            onclick="this.parentElement.nextElementSibling.classList.toggle('hidden'); this.textContent = this.textContent === 'Edit' ? 'Cancel' : 'Edit'"
+                            onclick="toggleAgendaEdit(this)"
                             class="text-xs text-text-muted hover:text-accent-cyan transition-colors">
                         Edit
                     </button>
                 </div>
-                <div class="text-sm text-text-primary whitespace-pre-line mb-3">{{ thread.agenda or "(no agenda set)" }}</div>
+                <div data-agenda-display class="text-sm text-text-primary whitespace-pre-line mb-3">{{ thread.agenda or "(no agenda set)" }}</div>
                 <form hx-patch="/api/v1/email/threads/{{ thread.id }}/agenda"
                       hx-target="closest .glass-card"
                       hx-swap="none"
                       hx-on::after-request="location.reload()"
+                      data-agenda-form
                       class="hidden space-y-2">
                     <textarea name="agenda"
                               rows="4"
+                              placeholder="Enter agenda for this thread..."
                               class="w-full bg-bg-card border border-accent-cyan/20 rounded-lg p-3 text-sm text-text-primary placeholder-text-muted focus:border-accent-cyan focus:outline-none">{{ thread.agenda or '' }}</textarea>
                     <div class="flex gap-2">
                         <button type="submit"
@@ -159,6 +169,44 @@ function toggleThread(id) {
         chevron.style.transform = 'rotate(180deg)';
     } else {
         chevron.style.transform = 'rotate(0deg)';
+    }
+}
+
+function toggleAgendaEdit(btn) {
+    const container = btn.closest('.border-t');
+    const display = container.querySelector('[data-agenda-display]');
+    const form = container.querySelector('[data-agenda-form]');
+    if (form.classList.contains('hidden')) {
+        display.classList.add('hidden');
+        form.classList.remove('hidden');
+        form.querySelector('textarea').focus();
+        btn.textContent = 'Cancel';
+    } else {
+        display.classList.remove('hidden');
+        form.classList.add('hidden');
+        btn.textContent = 'Edit';
+    }
+}
+
+async function syncEmails(btn) {
+    const result = document.getElementById('sync-result');
+    btn.disabled = true;
+    btn.textContent = 'Syncing...';
+    result.textContent = '';
+    try {
+        const resp = await fetch('/api/v1/email/sync', { method: 'POST' });
+        if (resp.ok) {
+            const data = await resp.json();
+            result.textContent = `Synced ${data.synced} message(s)`;
+            if (data.synced > 0) setTimeout(() => location.reload(), 1000);
+        } else {
+            result.textContent = 'Sync failed: ' + await resp.text();
+        }
+    } catch (err) {
+        result.textContent = 'Error: ' + err.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Sync from AgentMail';
     }
 }
 </script>

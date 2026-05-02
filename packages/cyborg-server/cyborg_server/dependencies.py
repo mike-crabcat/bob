@@ -8,6 +8,7 @@ from cyborg_server.config import Settings
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ForbiddenError
 from cyborg_server.services.calendar_service import CalendarService
+from cyborg_server.services.dispatch_service import DispatchService
 from cyborg_server.services.notification_service import NotificationService
 from cyborg_server.services.project_execution_service import ProjectExecutionService
 from cyborg_server.services.source_discovery_service import SourceDiscoveryService
@@ -82,3 +83,8 @@ def get_source_discovery_service(database: Database = Depends(get_database)) -> 
     """Build a source discovery service for the current request."""
 
     return SourceDiscoveryService(database)
+
+def get_dispatch_service(database: Database = Depends(get_database)) -> DispatchService:
+    """Build a dispatch service for the current request."""
+
+    return DispatchService(database)

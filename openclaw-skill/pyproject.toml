@@ -4,5 +4,5 @@ version = "0.2.0"
 description = "Cyborg CLI skill for OpenClaw"
 requires-python = ">=3.12"
 dependencies = [
-    "cyborg-server>=0.4.8",
+    "cyborg-server>=0.4.10",
 ]

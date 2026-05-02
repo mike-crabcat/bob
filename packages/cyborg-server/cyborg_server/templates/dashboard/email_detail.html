@@ -67,4 +67,72 @@
     <p class="text-sm text-text-muted">(no body content)</p>
     {% endif %}
 </div>
+
+{% if dispatches %}
+<!-- Dispatches -->
+<div class="glass-card rounded-xl p-6 mb-6">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-orange">&#9654;</span>
+        Dispatches
+    </h2>
+    <div class="space-y-3">
+        {% for d in dispatches %}
+        <div class="p-3 rounded-lg bg-bg-card/50 border border-accent-orange/10">
+            <div class="flex items-center justify-between gap-3 mb-1">
+                <div class="text-sm font-medium">
+                    {{ d.notification_type | replace('_', ' ') | title }}
+                    {% if d.task_title %}
+                    — {{ d.task_title }}
+                    {% elif d.project_title %}
+                    — {{ d.project_title }}
+                    {% endif %}
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded {% if d.status == 'active' %}bg-accent-orange/20 text-accent-orange{% elif d.status == 'completed' %}bg-accent-green/20 text-accent-green{% elif d.status == 'failed' %}bg-accent-red/20 text-accent-red{% else %}bg-bg-elevated text-text-muted{% endif %}">
+                    {{ d.status | upper }}
+                </span>
+            </div>
+            <div class="text-xs text-text-muted">
+                Dispatched {{ d.dispatched_at | relative_time }}
+                {% if d.duration_seconds %}
+                · {{ "%.0f" | format(d.duration_seconds) }}s
+                {% endif %}
+                {% if d.tap_count %}
+                · tapped {{ d.tap_count }}x
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if prompt_history %}
+<!-- Prompt History -->
+<div class="glass-card rounded-xl p-6">
+    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+        <span class="text-accent-purple">&#9998;</span>
+        Prompt History
+    </h2>
+    <div class="space-y-3">
+        {% for p in prompt_history %}
+        <details class="group">
+            <summary class="cursor-pointer p-3 rounded-lg bg-bg-card/50 border border-accent-purple/10 hover:border-accent-purple/30 transition-colors">
+                <div class="flex items-center justify-between gap-3">
+                    <div class="text-sm">
+                        <span class="text-accent-purple">{{ p.category | replace('_', ' ') | title }}</span>
+                        {% if p.token_count_estimate %}
+                        <span class="text-text-muted ml-2">~{{ p.token_count_estimate }} tokens</span>
+                        {% endif %}
+                    </div>
+                    <span class="text-xs text-text-muted">{{ p.timestamp | relative_time }}</span>
+                </div>
+            </summary>
+            <div class="mt-2 p-3 rounded-lg bg-bg-deep/80 border border-accent-purple/10">
+                <pre class="whitespace-pre-wrap text-xs text-text-secondary max-h-96 overflow-y-auto">{{ p.prompt_text }}</pre>
+            </div>
+        </details>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
 {% endblock %}
