@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from cyborg_server.config import Settings
 from cyborg_server.database import Database
@@ -14,3 +15,4 @@ class AppContext:
 
     db: Database
     settings: Settings
+    voice_engines: Any | None = None

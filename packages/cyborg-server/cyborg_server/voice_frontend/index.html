@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Bob Voice">
+    <meta name="theme-color" content="#1a1a2e">
+    <title>Bob Voice</title>
+    <base href="/voice/">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-192.png">
+</head>
+<body>
+    <div id="app">
+        <!-- Connection overlay (shown when disconnected) -->
+        <div id="connect-overlay" class="overlay">
+            <div class="overlay-content">
+                <h1>🎙️ Bob Voice</h1>
+                <p class="subtitle">Talk to Bob, hands-free</p>
+                <div class="connect-form">
+                    <label for="server-url">Bridge Server</label>
+                    <input type="url" id="server-url" placeholder="Auto-detected from current URL" 
+                           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                    <div class="field-hint">Leave blank to auto-detect</div>
+                    
+                    <label for="user-id">User</label>
+                    <input type="text" id="user-id" placeholder="mike" value="mike"
+                           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                    
+                    <div class="btn-group">
+                        <button id="connect-btn" class="btn-primary" onclick="app.connect('chat')">
+                            Chat
+                        </button>
+                        <button id="pt-teacher-btn" class="btn-secondary" onclick="app.connect('portuguese_teacher')">
+                            Portuguese Teacher
+                        </button>
+                        <button id="fr-teacher-btn" class="btn-secondary" onclick="app.connect('french_teacher')">
+                            French Teacher
+                        </button>
+                        <button id="beginner-fr-btn" class="btn-secondary" onclick="app.connect('beginner_french')">
+                            Beginner French
+                        </button>
+                    </div>
+                </div>
+                <div id="connect-error" class="error-msg hidden"></div>
+            </div>
+        </div>
+
+        <!-- Main interface (shown when connected) -->
+        <div id="main-ui" class="hidden">
+            <!-- Status bar -->
+            <div id="status-bar">
+                <span id="status-indicator" class="status-dot idle"></span>
+                <span id="status-text">Ready</span>
+                <span id="connection-badge" class="connection-badge" onclick="app.showSettings()">●</span>
+            </div>
+
+            <!-- Conversation area -->
+            <div id="conversation">
+                <div id="messages"></div>
+            </div>
+
+            <!-- Latency display -->
+            <div id="latency-bar" class="hidden">
+                <span id="latency-info"></span>
+            </div>
+
+            <!-- Push-to-talk area -->
+            <div id="ptt-area">
+                <button id="ptt-btn" 
+                        ontouchstart="app.pttStart(event)" 
+                        ontouchend="app.pttEnd(event)"
+                        onmousedown="app.pttStart(event)"
+                        onmouseup="app.pttEnd(event)"
+                        onmouseleave="app.pttEnd(event)"
+                        disabled>
+                    <span id="ptt-icon">🎙️</span>
+                    <span id="ptt-label">Hold to Talk</span>
+                </button>
+                <div id="audio-visualizer" class="hidden">
+                    <canvas id="viz-canvas" width="200" height="40"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings panel (slide-up) -->
+        <div id="settings-panel" class="hidden">
+            <div class="settings-backdrop" onclick="app.hideSettings()"></div>
+            <div class="settings-content">
+                <h3>Settings</h3>
+                <div class="setting-row">
+                    <label>Language</label>
+                    <select id="language-select" onchange="app.setLanguage(this.value)">
+                        <option value="en">English</option>
+                        <option value="fr">French</option>
+                        <option value="pt">Portuguese</option>
+                        <option value="auto">Auto-detect</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <label>Connected to</label>
+                    <span id="settings-server-url" class="mono"></span>
+                </div>
+                <button class="btn-secondary" onclick="app.clearHistory()">Clear History</button>
+                <button class="btn-danger" onclick="app.disconnect()">Disconnect</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

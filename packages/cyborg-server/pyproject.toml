@@ -33,6 +33,15 @@ dev = [
   "pytest-cov>=6.0",
 ]
 
+[project.optional-dependencies]
+voice = [
+  "faster-whisper>=1.2.1",
+  "soundfile>=0.13.1",
+  "numpy>=2.0.0",
+  "omnivoice>=0.1.4",
+  "av>=14.0.0",
+]
+
 [project.scripts]
 cyborg = "cyborg_server.cli:app"
 
@@ -48,4 +57,6 @@ include = [
   "cyborg_server/**/*.py",
   "cyborg_server/**/*.sql",
   "cyborg_server/**/*.html",
+  "cyborg_server/voice_data/**",
+  "cyborg_server/voice_frontend/**",
 ]

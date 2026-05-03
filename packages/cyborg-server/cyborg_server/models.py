@@ -140,16 +140,24 @@ class NotificationEntityType(StrEnum):
 
 
 class NotificationType(StrEnum):
+    """Persisted user-facing notification types stored in the notifications table."""
     NEEDS_INPUT = "needs_input"
-    EVENT_REMINDER = "event_reminder"
-    TASK_ASSIGNMENT = "task_assignment"
-    TASK_RESULT = "task_result"
     PROJECT_RESULT = "project_result"
+
+
+class DispatchCategory(StrEnum):
+    """Agent dispatch categories — labels for the dispatches table.
+
+    These are agent prompts sent through the dispatch system. They bypass the
+    notifications table entirely and are tracked via DispatchService.
+    """
+    TASK_ASSIGNMENT = "task_assignment"
     TASK_RETRY = "task_retry"
     TASK_INPUT_RESPONSE = "task_input_response"
     TASK_TAP = "task_tap"
     SUBMISSION_REVIEW = "submission_review"
     NEXT_ACTION = "next_action"
+    VOICE_CHAT = "voice_chat"
 
 
 class NotificationStatus(StrEnum):

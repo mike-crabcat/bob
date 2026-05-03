@@ -457,6 +457,37 @@ class OpenClawHookService(BaseService):
             "agent", params, expect_final=True, timeout_seconds=timeout,
         )
 
+    async def prepare_streaming_agent_dispatch(
+        self,
+        *,
+        message: str,
+        session_key: str,
+        idempotency_key: str,
+        on_delta: Any | None = None,
+        on_tool_start: Any | None = None,
+        timeout_seconds: float | None = None,
+    ) -> Coroutine:
+        """Return a gateway coroutine with streaming callbacks for dispatch_service.track().
+
+        Identical to prepare_agent_dispatch but forwards streaming agent events
+        (text deltas, tool-start) to the provided callbacks for real-time TTS.
+        """
+        timeout = timeout_seconds or int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
+        params: dict[str, Any] = {
+            "message": message,
+            "deliver": False,
+            "sessionKey": session_key,
+            "thinking": "off",
+            "timeout": timeout,
+            "idempotencyKey": idempotency_key,
+        }
+        if self.settings.agent_id:
+            params["agentId"] = self.settings.agent_id
+        return self._send_gateway_request(
+            "agent", params, expect_final=True, timeout_seconds=timeout,
+            on_delta=on_delta, on_tool_start=on_tool_start,
+        )
+
     async def _send_gateway_request(
         self,
         method: str,
@@ -464,12 +495,16 @@ class OpenClawHookService(BaseService):
         *,
         expect_final: bool = False,
         timeout_seconds: float | None = None,
+        on_delta: Any | None = None,
+        on_tool_start: Any | None = None,
     ) -> dict[str, Any]:
         return await self._send_gateway_request_via_websocket(
             method,
             params,
             expect_final=expect_final,
             timeout_seconds=timeout_seconds,
+            on_delta=on_delta,
+            on_tool_start=on_tool_start,
         )
 
     async def _send_gateway_request_via_websocket(
@@ -479,6 +514,8 @@ class OpenClawHookService(BaseService):
         *,
         expect_final: bool,
         timeout_seconds: float | None,
+        on_delta: Any | None = None,
+        on_tool_start: Any | None = None,
     ) -> dict[str, Any]:
         gateway_url = self.settings.resolved_gateway_url
         if not gateway_url:
@@ -525,6 +562,8 @@ class OpenClawHookService(BaseService):
                 request_id,
                 timeout_seconds=timeout,
                 expect_final=expect_final,
+                on_delta=on_delta,
+                on_tool_start=on_tool_start,
             )
 
     def _build_gateway_connect_params(self) -> dict[str, Any]:
@@ -611,6 +650,8 @@ class OpenClawHookService(BaseService):
         *,
         timeout_seconds: float,
         expect_final: bool = False,
+        on_delta: Any | None = None,
+        on_tool_start: Any | None = None,
     ) -> dict[str, Any]:
         timeout = timeout_seconds
         while True:
@@ -621,7 +662,19 @@ class OpenClawHookService(BaseService):
                 raise RuntimeError(f"OpenClaw gateway returned invalid JSON: {raw!r}") from exc
 
             if frame.get("type") == "event":
-                # Pre-connect challenges and background events are not relevant here.
+                if on_delta is not None or on_tool_start is not None:
+                    if frame.get("event") == "agent":
+                        payload = frame.get("payload")
+                        if isinstance(payload, dict):
+                            stream = payload.get("stream")
+                            data = payload.get("data")
+                            if on_delta is not None and stream == "assistant" and isinstance(data, dict):
+                                text = data.get("text", "")
+                                if text:
+                                    await on_delta(text)
+                            if on_tool_start is not None and stream == "item" and isinstance(data, dict):
+                                if data.get("kind") == "tool" and data.get("phase") == "start":
+                                    await on_tool_start()
                 continue
             if frame.get("type") != "res" or frame.get("id") != expected_id:
                 continue

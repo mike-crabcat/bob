@@ -171,6 +171,21 @@ class OpenClawHookSettings:
 
 
 @dataclass(slots=True)
+class VoiceSettings:
+    """Configuration for the voice chat subsystem."""
+
+    enabled: bool = True
+    stt_model: str = "large-v3-turbo"
+    stt_device: str = "cuda"
+    stt_compute_type: str = "int8"
+    tts_num_steps: int = 32
+    voices_dir: Path = Path(__file__).parent / "voice_data" / "voices"
+    lessons_dir: Path | None = None
+    frontend_dir: Path | None = None
+    session_max_age_days: int = 30
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -188,6 +203,7 @@ class Settings:
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
     agentmail: AgentMailSettings = field(default_factory=AgentMailSettings)
     email_polling_enabled: bool = True
+    voice: VoiceSettings = field(default_factory=VoiceSettings)
     heartbeat_interval_seconds: float = 60.0
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
@@ -292,6 +308,18 @@ class Settings:
         )
         email_polling_enabled = os.getenv("CYBORG_EMAIL_POLLING_ENABLED", "true").lower() in ("true", "1", "yes", "on")
 
+        voice = VoiceSettings(
+            enabled=os.getenv("CYBORG_VOICE_ENABLED", "true").lower() not in ("false", "0", "no", "off"),
+            stt_model=os.getenv("CYBORG_VOICE_STT_MODEL", "large-v3-turbo"),
+            stt_device=os.getenv("CYBORG_VOICE_STT_DEVICE", "cuda"),
+            stt_compute_type=os.getenv("CYBORG_VOICE_STT_COMPUTE_TYPE", "int8"),
+            tts_num_steps=int(os.getenv("CYBORG_VOICE_TTS_NUM_STEPS", "32")),
+            voices_dir=_env_path("CYBORG_VOICE_VOICES_DIR", Path.home() / ".openclaw" / "bobvoice-voices"),
+            lessons_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_LESSONS_DIR")) else None,
+            frontend_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_FRONTEND_DIR")) else None,
+            session_max_age_days=int(os.getenv("CYBORG_VOICE_SESSION_MAX_AGE_DAYS", "30")),
+        )
+
         dispatch_shutdown_timeout_seconds = float(
             os.getenv("CYBORG_DISPATCH_SHUTDOWN_TIMEOUT_SECONDS", "30")
         )
@@ -316,6 +344,7 @@ class Settings:
             openclaw=openclaw,
             agentmail=agentmail,
             email_polling_enabled=email_polling_enabled,
+            voice=voice,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             projects_base_dir=projects_base_dir,
             public_url=public_url,

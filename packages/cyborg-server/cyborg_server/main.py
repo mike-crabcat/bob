@@ -55,6 +55,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app_ctx = AppContext(db=database, settings=resolved_settings)
 
+        # Conditional voice engine preload
+        if resolved_settings.voice.enabled:
+            try:
+                from cyborg_server.services.voice_engines import VoiceEngineManager
+
+                voice_engines = VoiceEngineManager(resolved_settings.voice)
+                await voice_engines.preload()
+                app.state.voice_engines = voice_engines
+                app_ctx.voice_engines = voice_engines
+            except ImportError:
+                logger.warning("Voice dependencies not installed — install with: pip install cyborg-server[voice]")
+                resolved_settings.voice.enabled = False
+            except Exception:
+                logger.exception("Voice engine preload failed — disabling voice")
+                resolved_settings.voice.enabled = False
+
         # Attach database log handler for structured logging
         from cyborg_server.structured_logging import attach_database_handler
         attach_database_handler(database)
@@ -147,6 +163,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(email.router)
     app.include_router(dashboard.router)  # Web dashboard
     app.include_router(dispatches.router)
+
+    # Conditional voice chat router
+    if resolved_settings.voice.enabled:
+        from cyborg_server.routers import voice as voice_router
+        app.include_router(voice_router.router, prefix="/voice")
+        voice_router.mount_frontend(app, resolved_settings.voice.frontend_dir)
 
     return app
 

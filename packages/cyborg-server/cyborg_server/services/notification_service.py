@@ -17,6 +17,7 @@ from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import NotFoundError
 from cyborg_server.models import (
+    DispatchCategory,
     NotificationAcknowledgeRequest,
     NotificationDeliveryStatus,
     NotificationEntityType,
@@ -268,7 +269,7 @@ class NotificationService(BaseService):
             return
         metadata = ctx["task_metadata"]
         await self._dispatch_agent_via_dispatch(
-            notification_type=NotificationType.TASK_ASSIGNMENT,
+            category=DispatchCategory.TASK_ASSIGNMENT,
             title=f"Task to action: {ctx['task_row']['title']}",
             message=self._build_task_assignment_message(ctx),
             metadata=metadata,
@@ -300,7 +301,7 @@ class NotificationService(BaseService):
         if suggestions:
             message_parts += ["", "Suggestions:"] + [f"  - {s}" for s in suggestions]
         await self._dispatch_agent_via_dispatch(
-            notification_type=NotificationType.TASK_RETRY,
+            category=DispatchCategory.TASK_RETRY,
             title=f"Task retry: {ctx['task_row']['title']}",
             message="\n".join(message_parts),
             metadata=metadata,
@@ -327,7 +328,7 @@ class NotificationService(BaseService):
         response_text = ", ".join(input_response) if isinstance(input_response, list) else input_response
         metadata = {**ctx["task_metadata"], "input_response": input_response, "input_prompt": input_prompt, "approval_id": approval_id}
         await self._dispatch_agent_via_dispatch(
-            notification_type=NotificationType.TASK_INPUT_RESPONSE,
+            category=DispatchCategory.TASK_INPUT_RESPONSE,
             title=f"Task input received: {ctx['task_row']['title']}",
             message=f"Question: {input_prompt}\n\nUser response: {response_text}",
             metadata=metadata,
@@ -352,7 +353,7 @@ class NotificationService(BaseService):
         title = f"Task tap: {ctx['task_row']['title']}"
         message = f"Status check on active task: {ctx['task_row']['title']}"
         await self._dispatch_agent_via_dispatch(
-            notification_type=NotificationType.TASK_TAP,
+            category=DispatchCategory.TASK_TAP,
             title=title,
             message=message,
             metadata=metadata,
@@ -381,7 +382,7 @@ class NotificationService(BaseService):
             "result_summary": ctx["task_row"].get("result"),
         }
         await self._dispatch_agent_via_dispatch(
-            notification_type=NotificationType.SUBMISSION_REVIEW,
+            category=DispatchCategory.SUBMISSION_REVIEW,
             title=f"Review submission: {ctx['task_row']['title']}",
             message=f"Task submitted for review: {ctx['task_row']['title']}",
             metadata=metadata,
@@ -422,7 +423,7 @@ class NotificationService(BaseService):
         }
 
         await self._dispatch_agent_via_dispatch(
-            notification_type=NotificationType.NEXT_ACTION,
+            category=DispatchCategory.NEXT_ACTION,
             title=f"Decide next action: {project['title']}",
             message=prompt,
             metadata=metadata,
@@ -612,7 +613,7 @@ class NotificationService(BaseService):
     async def _dispatch_agent_via_dispatch(
         self,
         *,
-        notification_type: NotificationType,
+        category: DispatchCategory,
         title: str,
         message: str,
         metadata: dict[str, Any],
@@ -635,7 +636,7 @@ class NotificationService(BaseService):
             "id": str(uuid4()),
             "entity_type": "task" if task_id else "project",
             "entity_id": entity_id,
-            "notification_type": notification_type.value,
+            "notification_type": category.value,
             "title": title,
             "message": message,
             "metadata": metadata,
@@ -648,7 +649,7 @@ class NotificationService(BaseService):
         from cyborg_server.services.prompt_history import log_prompt
         await log_prompt(
             self.db,
-            category=notification_type.value,
+            category=category.value,
             prompt_text=message,
             project_id=project_id,
             task_id=task_id,
@@ -656,7 +657,7 @@ class NotificationService(BaseService):
         )
 
         dispatch_id = await DispatchService(self.ctx).record_dispatch(
-            notification_type=notification_type.value,
+            notification_type=category.value,
             session_key=session_key,
             task_id=task_id,
             project_id=project_id,
