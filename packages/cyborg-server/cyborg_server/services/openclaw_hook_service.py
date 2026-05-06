@@ -176,6 +176,101 @@ def build_device_auth(
     }
 
 
+class _GatewayConnection:
+    """Persistent websocket connection to the OpenClaw gateway.
+
+    Handles the connect handshake once, then multiplexes agent requests
+    over the same connection using request ID correlation. Closes after
+    an idle timeout to avoid holding connections indefinitely.
+    """
+
+    _IDLE_TIMEOUT = 300  # 5 minutes
+
+    def __init__(self, service: OpenClawHookService) -> None:
+        self._service = service
+        self._ws: Any = None
+        self._lock = asyncio.Lock()
+        self._idle_timer: asyncio.Task | None = None
+
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        expect_final: bool = False,
+        timeout_seconds: float | None = None,
+        on_delta: Any | None = None,
+        on_tool_start: Any | None = None,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            if self._idle_timer and not self._idle_timer.done():
+                self._idle_timer.cancel()
+                self._idle_timer = None
+            await self._ensure_connected(timeout_seconds)
+            request_id = str(uuid4())
+            await self._ws.send(json.dumps({
+                "type": "req",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }))
+            result = await self._service._await_gateway_response(
+                self._ws, request_id,
+                timeout_seconds=timeout_seconds,
+                expect_final=expect_final,
+                on_delta=on_delta,
+                on_tool_start=on_tool_start,
+            )
+            self._reset_idle_timer()
+            return result
+
+    async def _ensure_connected(self, timeout_seconds: float | None) -> None:
+        from websockets.protocol import State
+        if self._ws is not None and self._ws.state is State.OPEN:
+            return
+        await self._close()
+        import websockets
+
+        gateway_url = self._service.settings.resolved_gateway_url
+        if not gateway_url:
+            raise RuntimeError("OpenClaw gateway URL is not configured")
+
+        timeout = timeout_seconds or self._service.settings.timeout_seconds
+        self._ws = await websockets.connect(
+            gateway_url, open_timeout=timeout, close_timeout=timeout, max_size=1_048_576,
+        )
+        nonce = await self._service._await_gateway_challenge(self._ws, timeout_seconds=timeout)
+        connect_params = self._service._build_gateway_connect_params_with_device(nonce)
+        connect_id = str(uuid4())
+        await self._ws.send(json.dumps({
+            "type": "req", "id": connect_id,
+            "method": "connect", "params": connect_params,
+        }))
+        await self._service._await_gateway_response(self._ws, connect_id, timeout_seconds=timeout)
+        logger.info("Persistent gateway connection established")
+
+    def _reset_idle_timer(self) -> None:
+        if self._idle_timer and not self._idle_timer.done():
+            self._idle_timer.cancel()
+        self._idle_timer = asyncio.create_task(self._idle_close())
+
+    async def _idle_close(self) -> None:
+        await asyncio.sleep(self._IDLE_TIMEOUT)
+        logger.info("Gateway connection idle for %ds, closing", self._IDLE_TIMEOUT)
+        await self._close()
+
+    async def _close(self) -> None:
+        if self._idle_timer and not self._idle_timer.done():
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+
 class OpenClawHookService(BaseService):
     """Send Cyborg notifications to OpenClaw via the gateway RPC surface."""
 
@@ -183,7 +278,7 @@ class OpenClawHookService(BaseService):
     GATEWAY_PROTOCOL_VERSION = 3
     GATEWAY_CLIENT_ID = "gateway-client"
     GATEWAY_CLIENT_MODE = "backend"
-    GATEWAY_SCOPES = ["operator.write"]
+    GATEWAY_SCOPES = ["operator.write", "operator.admin"]
     BOOTSTRAP_TIMEOUT_SECONDS = 10800.0
     DISPATCH_ACCEPT_TIMEOUT = 30.0  # Max wait for gateway to accept a notification
 
@@ -206,6 +301,7 @@ class OpenClawHookService(BaseService):
         super().__init__(ctx)
         self._routing_service = routing_service
         self._cyborg_service_url = cyborg_service_url
+        self._gateway_conn: _GatewayConnection | None = None
 
     @property
     def routing_service(self) -> SessionRouteService:
@@ -366,7 +462,9 @@ class OpenClawHookService(BaseService):
         )
 
     async def close(self) -> None:
-        return None
+        if self._gateway_conn is not None:
+            await self._gateway_conn._close()
+            self._gateway_conn = None
 
     async def _resolve_project_session_key(self, notification: dict[str, Any]) -> str | None:
         """Resolve a project's subagent_session_key from the notification's entity_id."""
@@ -457,6 +555,14 @@ class OpenClawHookService(BaseService):
             "agent", params, expect_final=True, timeout_seconds=timeout,
         )
 
+    async def patch_session_model(self, session_key: str) -> None:
+        if not self.settings.voice_model:
+            return
+        await self._send_gateway_request_persistent(
+            "sessions.patch",
+            {"key": session_key, "model": self.settings.voice_model},
+        )
+
     async def prepare_streaming_agent_dispatch(
         self,
         *,
@@ -469,8 +575,8 @@ class OpenClawHookService(BaseService):
     ) -> Coroutine:
         """Return a gateway coroutine with streaming callbacks for dispatch_service.track().
 
-        Identical to prepare_agent_dispatch but forwards streaming agent events
-        (text deltas, tool-start) to the provided callbacks for real-time TTS.
+        Uses a persistent websocket connection to avoid re-handshaking on every
+        voice dispatch, eliminating queued-message issues and reducing latency.
         """
         timeout = timeout_seconds or int(max(self.BOOTSTRAP_TIMEOUT_SECONDS, self.settings.timeout_seconds))
         params: dict[str, Any] = {
@@ -483,10 +589,48 @@ class OpenClawHookService(BaseService):
         }
         if self.settings.agent_id:
             params["agentId"] = self.settings.agent_id
-        return self._send_gateway_request(
+        return self._send_gateway_request_persistent(
             "agent", params, expect_final=True, timeout_seconds=timeout,
             on_delta=on_delta, on_tool_start=on_tool_start,
         )
+
+    async def _send_gateway_request_persistent(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        expect_final: bool = False,
+        timeout_seconds: float | None = None,
+        on_delta: Any | None = None,
+        on_tool_start: Any | None = None,
+    ) -> dict[str, Any]:
+        """Send a request over the persistent gateway connection.
+
+        Creates the connection on first use, reuses it for subsequent requests,
+        and reconnects with one retry if the connection drops mid-request.
+        """
+        import websockets
+
+        if self._gateway_conn is None:
+            self._gateway_conn = _GatewayConnection(self)
+        try:
+            return await self._gateway_conn.request(
+                method, params,
+                expect_final=expect_final,
+                timeout_seconds=timeout_seconds,
+                on_delta=on_delta,
+                on_tool_start=on_tool_start,
+            )
+        except (websockets.ConnectionClosed, websockets.InvalidState):
+            logger.warning("Persistent gateway connection dropped, reconnecting")
+            await self._gateway_conn._close()
+            return await self._gateway_conn.request(
+                method, params,
+                expect_final=expect_final,
+                timeout_seconds=timeout_seconds,
+                on_delta=on_delta,
+                on_tool_start=on_tool_start,
+            )
 
     async def _send_gateway_request(
         self,

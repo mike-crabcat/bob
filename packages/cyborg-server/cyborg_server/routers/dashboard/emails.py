@@ -57,7 +57,7 @@ async def email_threads(
                em.preview, em.thread_id, et.id as thread_row_id
         FROM email_messages em
         JOIN email_threads et ON et.agentmail_thread_id = em.thread_id
-        ORDER BY em.message_timestamp ASC
+        ORDER BY em.message_timestamp DESC
         """,
     )
 

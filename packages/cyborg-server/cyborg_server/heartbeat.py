@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from cyborg_server.config import Settings
@@ -157,3 +158,51 @@ class EmailSyncTask:
                 logger.info("Periodic email sync persisted %d missing message(s)", count)
         finally:
             await client.close()
+
+
+_last_call_cleanup: datetime | None = None
+
+
+class CallCleanupTask:
+    """Delete old phone call recordings and database records."""
+
+    name = "call_cleanup"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_call_cleanup
+        settings = ctx.settings
+        if not settings.phone.enabled:
+            return
+
+        # Only run once per 24 hours
+        now = datetime.now(timezone.utc)
+        if _last_call_cleanup and (now - _last_call_cleanup) < timedelta(hours=24):
+            return
+
+        max_age_days = settings.phone.call_recording_max_age_days
+        cutoff = (now - timedelta(days=max_age_days)).isoformat()
+
+        old_calls = await ctx.db.fetch_all(
+            "SELECT id, recording_path FROM phone_calls WHERE completed_at < ?",
+            (cutoff,),
+        )
+        if not old_calls:
+            _last_call_cleanup = now
+            return
+
+        for call in old_calls:
+            if call["recording_path"]:
+                audio_path = settings.data_dir / "calls" / call["recording_path"]
+                if audio_path.exists():
+                    audio_path.unlink()
+            await ctx.db.execute(
+                "DELETE FROM phone_call_exchanges WHERE call_id = ?",
+                (call["id"],),
+            )
+            await ctx.db.execute(
+                "DELETE FROM phone_calls WHERE id = ?",
+                (call["id"],),
+            )
+
+        _last_call_cleanup = now
+        logger.info("Cleaned up %d old phone call(s)", len(old_calls))

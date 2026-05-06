@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,34 @@ from cyborg_server.services.voice_protocol import (
     parse_client_message,
 )
 from cyborg_server.services.voice_service import VoiceService
+from cyborg_server.services.voice_transport import BrowserTransport
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["voice"])
+
+
+class _PipelineWaiter:
+    """Wraps a transport and signals when the voice pipeline completes."""
+
+    def __init__(self, transport: BrowserTransport) -> None:
+        self._transport = transport
+        self.done = asyncio.Event()
+
+    async def send_audio(self, wav_bytes: bytes) -> None:
+        await self._transport.send_audio(wav_bytes)
+
+    async def send_status(self, state: str) -> None:
+        await self._transport.send_status(state)
+
+    async def send_error(self, message: str) -> None:
+        await self._transport.send_error(message)
+        self.done.set()
+
+    async def send_message(self, msg_type: str, data: dict) -> None:
+        if msg_type == "latency":
+            self.done.set()
+        await self._transport.send_message(msg_type, data)
 
 _FRONTEND_DIR = Path(__file__).parent.parent / "voice_frontend"
 
@@ -55,10 +80,14 @@ async def voice_websocket(websocket: WebSocket) -> None:
             pass
         return
 
+    transport = BrowserTransport(websocket)
     audio_chunks: list[bytes] = []
     language: str | None = None
     user_id: str = "mike"
     session_mode: str = "chat"
+
+    from cyborg_server.context import AppContext
+    ctx = AppContext(db=websocket.app.state.db, settings=websocket.app.state.settings, voice_engines=engines)
 
     try:
         while True:
@@ -79,12 +108,14 @@ async def voice_websocket(websocket: WebSocket) -> None:
                         session_mode = parsed.sessionMode
 
                     case parsed if parsed.type == "stop_recording":
-                        from cyborg_server.context import AppContext
-
-                        app = websocket.app
-                        ctx = AppContext(db=app.state.db, settings=app.state.settings, voice_engines=engines)
                         service = VoiceService(ctx, engines)
-                        await service.process_audio(websocket, audio_chunks, language, user_id, session_mode)
+                        waiter = _PipelineWaiter(transport)
+                        await service.process_audio(waiter, audio_chunks, language, user_id, session_mode)
+                        if not waiter.done.is_set():
+                            try:
+                                await asyncio.wait_for(waiter.done.wait(), timeout=120)
+                            except asyncio.TimeoutError:
+                                logger.warning("Voice pipeline timed out in browser WS")
 
                     case parsed if parsed.type == "cancel":
                         audio_chunks = []
@@ -94,10 +125,7 @@ async def voice_websocket(websocket: WebSocket) -> None:
 
                     case parsed if parsed.type == "session_history":
                         from cyborg_server.services.voice_session_store import VoiceSessionStore
-                        from cyborg_server.context import AppContext
 
-                        app = websocket.app
-                        ctx = AppContext(db=app.state.db, settings=app.state.settings)
                         store = VoiceSessionStore(ctx)
                         key = _get_session_key(parsed.userId, parsed.sessionMode)
                         messages = await store.get_messages(key)
@@ -109,23 +137,16 @@ async def voice_websocket(websocket: WebSocket) -> None:
 
                     case parsed if parsed.type == "clear_history":
                         from cyborg_server.services.voice_session_store import VoiceSessionStore
-                        from cyborg_server.context import AppContext
 
-                        app = websocket.app
-                        ctx = AppContext(db=app.state.db, settings=app.state.settings)
                         store = VoiceSessionStore(ctx)
                         key = _get_session_key(parsed.userId, parsed.sessionMode)
                         await store.delete_session(key)
                         await store.reset_all_lessons(parsed.userId, parsed.sessionMode)
 
                     case parsed if parsed.type == "replay_tts":
-                        from cyborg_server.context import AppContext
-
-                        app = websocket.app
-                        ctx = AppContext(db=app.state.db, settings=app.state.settings, voice_engines=engines)
                         service = VoiceService(ctx, engines)
                         default_lang = "en" if parsed.sessionMode == "beginner_french" else (language or "en")
-                        await service.replay_tts(websocket, parsed.text, default_lang)
+                        await service.replay_tts(transport, parsed.text, default_lang)
 
             elif "bytes" in msg:
                 audio_chunks.append(msg["bytes"])

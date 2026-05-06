@@ -14,6 +14,9 @@ dev = [
 voice = [
   "cyborg-server[voice]",
 ]
+phone = [
+  "cyborg-server[phone]",
+]
 
 [tool.uv.sources]
 cyborg-server = { path = "packages/cyborg-server", editable = true }

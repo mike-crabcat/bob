@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cyborg-server"
-version = "0.4.10"
+version = "0.4.13"
 description = "Cyborg data service — server, CLI, and shared libraries"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -40,6 +40,9 @@ voice = [
   "numpy>=2.0.0",
   "omnivoice>=0.1.4",
   "av>=14.0.0",
+]
+phone = [
+  "twilio>=9.0.0",
 ]
 
 [project.scripts]

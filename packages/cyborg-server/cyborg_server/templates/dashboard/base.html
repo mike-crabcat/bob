@@ -74,6 +74,7 @@
     <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/client-side-templates.js"></script>
 
     <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.13.3/dist/cdn.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
 
     <style>
@@ -344,6 +345,9 @@
                         <a href="/dashboard/emails" class="nav-link text-sm {% if '/emails' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
                             Email
                         </a>
+                        <a href="/dashboard/calls" class="nav-link text-sm {% if '/calls' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
+                            Calls
+                        </a>
                         <a href="/dashboard/contacts" class="nav-link text-sm {% if '/contacts' in request.path %}text-accent-cyan{% else %}text-text-secondary hover:text-text-primary{% endif %}">
                             Contacts
                         </a>
@@ -377,6 +381,9 @@
                         </a>
                         <a href="/dashboard/emails" class="px-3 py-1.5 rounded-full text-sm border {% if '/emails' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
                             Email
+                        </a>
+                        <a href="/dashboard/calls" class="px-3 py-1.5 rounded-full text-sm border {% if '/calls' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
+                            Calls
                         </a>
                         <a href="/dashboard/contacts" class="px-3 py-1.5 rounded-full text-sm border {% if '/contacts' in request.path %}bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30{% else %}bg-bg-card text-text-secondary border-accent-cyan/10{% endif %}">
                             Contacts

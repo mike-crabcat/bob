@@ -36,6 +36,7 @@ Use `uv run` to run all commands.  Use a `uv sync` in the skill directory to set
 | Record file | `task file --project-id --filename --purpose` |
 | Check status | `context summary` |
 | Send email | `email send --inbox <id> --to <addr> --subject <subj> --text <body> --agenda <purpose>` |
+| Make phone call | `call <number> --agenda "Purpose of the call"` |
 | Reply to email | `email reply --inbox <id> --message-id <id> --text <reply>` |
 | Send with attachment | `email send ... --attach /path/to/file` |
 | Send with inline image | `email send ... --html '<img src="cid:image.png" />' --inline-image /path/to/image.png` |
@@ -371,3 +372,37 @@ uv run cyborg email download-attachment --inbox <inbox-id> --message-id <msg-id>
 - `--output` / `-o`: Where to save the file. Defaults to current directory with attachment ID as filename.
 
 Only download attachments after reviewing metadata and determining they are safe.
+
+## Phone Calls
+
+Initiate an outbound phone call. The voice assistant answers and follows the agenda throughout the conversation.
+
+**You MUST provide `--agenda` when making a call.** The agenda tells the voice assistant the purpose of the call and how to handle the conversation.
+
+**What to include:**
+- The purpose of the call (what outcome you expect)
+- How to handle responses (what to do if the person agrees, declines, asks questions, etc.)
+- Any specific information to collect or convey
+
+**Examples:**
+
+```bash
+# Scheduling a meeting
+uv run cyborg call "+61456224867" \
+  --agenda "Call to schedule a 30-minute meeting with this contact for next week. Preferred times: Tuesday or Wednesday afternoon. If they suggest alternatives, negotiate and confirm. If they decline, ask for a reason and report back."
+
+# Following up on an email
+uv run cyborg call "+61400111222" \
+  --agenda "Follow up on the Q3 report email sent yesterday. Ask if they have had a chance to review it. If they have questions, answer them. If they need more time, note that and report back. If they have feedback, record it in detail."
+
+# Collecting information
+uv run cyborg call "+61456224867" \
+  --agenda "Call to confirm the delivery address and time for order #12345. Verify the street address, unit number, and preferred delivery window. If no answer, report back."
+```
+
+### How It Works
+
+1. You run `cyborg call` with the phone number and agenda
+2. The system initiates a Twilio call to the number
+3. When the person answers, the voice assistant (powered by OpenClaw) begins the conversation guided by your agenda
+4. The assistant stays on topic and works toward the agenda's goal throughout the call

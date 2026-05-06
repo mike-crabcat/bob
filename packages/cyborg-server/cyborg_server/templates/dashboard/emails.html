@@ -36,22 +36,22 @@
 </div>
 
 <!-- Thread List -->
-<div class="space-y-4">
+<div class="flex flex-col gap-4">
     {% for thread in threads %}
     {% set thread_messages = messages_by_thread.get(thread.id, []) %}
-    <div class="glass-card rounded-xl overflow-hidden card-hover">
+    <div x-data="{ open: false }" class="bg-bg-card border border-accent-cyan/10 rounded-xl overflow-hidden">
         <!-- Thread Header (clickable) -->
-        <button onclick="toggleThread('thread-{{ loop.index }}')"
-                class="w-full text-left p-6 flex items-start gap-4 hover:bg-accent-cyan/5 transition-colors">
+        <button @click="open = !open"
+                class="w-full text-left p-5 flex items-start gap-4 hover:bg-accent-cyan/5 transition-colors">
             <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-3 mb-2">
-                    <h3 class="text-lg font-semibold truncate">{{ thread.subject or "(no subject)" }}</h3>
+                <div class="flex items-center gap-3 mb-1">
+                    <h3 class="text-base font-semibold truncate">{{ thread.subject or "(no subject)" }}</h3>
                     {% if thread.is_active %}
                     <span class="text-xs px-2 py-0.5 rounded bg-accent-green/20 text-accent-green border border-accent-green/30">Active</span>
                     {% else %}
                     <span class="text-xs px-2 py-0.5 rounded bg-bg-elevated text-text-muted border border-accent-cyan/10">Inactive</span>
                     {% endif %}
-                    <span class="text-xs text-text-muted">{{ thread_messages|length }} message{{ 's' if thread_messages|length != 1 else '' }}</span>
+                    <span class="text-xs text-text-muted">{{ thread_messages|length }} msg{{ 's' if thread_messages|length != 1 else '' }}</span>
                 </div>
 
                 <div class="flex flex-wrap items-center gap-3 text-xs text-text-muted">
@@ -61,64 +61,54 @@
                     {% if thread.last_message_at %}
                     <span>Last: {{ thread.last_message_at|relative_time }}</span>
                     {% endif %}
+                    {% if thread_messages and thread_messages[0].preview %}
+                    <span class="truncate max-w-md text-text-muted">{{ thread_messages[0].preview[:100] }}</span>
+                    {% endif %}
                 </div>
             </div>
 
             <!-- Expand/collapse chevron -->
-            <svg id="chevron-thread-{{ loop.index }}" class="w-5 h-5 text-text-muted shrink-0 mt-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg :class="open ? 'rotate-180' : ''" class="w-5 h-5 text-text-muted shrink-0 mt-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
             </svg>
         </button>
 
-        <!-- Collapsible message list -->
-        <div id="thread-{{ loop.index }}" class="hidden">
+        <!-- Collapsible content -->
+        <div x-show="open" x-collapse>
             <!-- Messages -->
             {% if thread_messages %}
             <div class="border-t border-accent-cyan/10">
                 {% for msg in thread_messages %}
                 <a href="/dashboard/emails/{{ msg.id }}"
-                   class="block px-6 py-3 hover:bg-accent-cyan/5 transition-colors border-b border-accent-cyan/5 last:border-b-0">
-                    <div class="flex items-center gap-4">
-                        <!-- From -->
-                        <div class="min-w-0 w-40 shrink-0">
-                            <div class="text-sm font-medium text-text-primary truncate">
-                                {{ msg.sender_name or msg.sender_email }}
-                            </div>
+                   class="block px-5 py-3 hover:bg-accent-cyan/5 transition-colors border-b border-accent-cyan/5 last:border-b-0">
+                    <div class="flex items-start gap-3">
+                        <!-- Sender -->
+                        <div class="shrink-0 w-36">
+                            <div class="text-sm font-medium text-text-primary truncate">{{ msg.sender_name or msg.sender_email }}</div>
+                            <div class="text-xs text-text-muted">{{ msg.message_timestamp|relative_time }}</div>
                         </div>
 
-                        <!-- Subject / Preview -->
+                        <!-- Content -->
                         <div class="min-w-0 flex-1">
                             {% if msg.subject %}
-                            <div class="text-sm text-text-primary truncate">{{ msg.subject }}</div>
+                            <div class="text-sm text-text-primary truncate mb-0.5">{{ msg.subject }}</div>
                             {% endif %}
                             {% if msg.preview %}
-                            <div class="text-xs text-text-muted truncate">{{ msg.preview }}</div>
-                            {% endif %}
-                        </div>
-
-                        <!-- To -->
-                        <div class="min-w-0 w-40 shrink-0 text-xs text-text-secondary truncate">
-                            {% if msg.to_addresses %}
-                                {{ msg.to_addresses | join(', ') }}
+                            <div class="text-xs text-text-muted truncate">{{ msg.preview[:200] }}</div>
                             {% endif %}
                         </div>
 
                         {% if msg.has_attachments %}
                         <div class="text-text-muted text-sm shrink-0">&#128206;</div>
                         {% endif %}
-
-                        <!-- Time -->
-                        <div class="text-xs text-text-muted whitespace-nowrap font-mono-data shrink-0">
-                            {{ msg.message_timestamp|relative_time }}
-                        </div>
                     </div>
                 </a>
                 {% endfor %}
             </div>
             {% endif %}
 
-            <!-- Agenda (collapsible edit) -->
-            <div class="border-t border-accent-cyan/10 p-6 bg-bg-deep/50">
+            <!-- Agenda -->
+            <div class="border-t border-accent-cyan/10 p-5 bg-bg-deep/30">
                 <div class="flex items-center justify-between mb-2">
                     <div class="text-xs text-accent-cyan font-semibold">AGENDA</div>
                     <button type="button"
@@ -129,7 +119,6 @@
                 </div>
                 <div data-agenda-display class="text-sm text-text-primary whitespace-pre-line mb-3">{{ thread.agenda or "(no agenda set)" }}</div>
                 <form hx-patch="/api/v1/email/threads/{{ thread.id }}/agenda"
-                      hx-target="closest .glass-card"
                       hx-swap="none"
                       hx-on::after-request="location.reload()"
                       data-agenda-form
@@ -161,17 +150,6 @@
 {% endif %}
 
 <script>
-function toggleThread(id) {
-    const el = document.getElementById(id);
-    const chevron = document.getElementById('chevron-' + id);
-    el.classList.toggle('hidden');
-    if (!el.classList.contains('hidden')) {
-        chevron.style.transform = 'rotate(180deg)';
-    } else {
-        chevron.style.transform = 'rotate(0deg)';
-    }
-}
-
 function toggleAgendaEdit(btn) {
     const container = btn.closest('.border-t');
     const display = container.querySelector('[data-agenda-display]');

@@ -1,0 +1,92 @@
+{% if exchanges %}
+<div class="glass-card rounded-xl overflow-hidden">
+    <div class="px-6 py-4 border-b border-accent-cyan/10 flex items-center justify-between">
+        <h2 class="text-lg font-semibold">Timeline</h2>
+        <span class="text-text-muted text-xs">offsets from call start</span>
+    </div>
+
+    {% for ex in exchanges %}
+    <div class="px-6 py-5 border-b border-accent-cyan/5 last:border-b-0">
+        <div class="flex items-center gap-3 mb-3">
+            <span class="text-accent-cyan font-mono font-bold text-sm">#{{ ex.exchange_index + 1 }}</span>
+            <span class="font-mono text-sm font-semibold
+                {% if ex.offset_ms is not none and ex.offset_ms < 10000 %}text-text-primary
+                {% elif ex.offset_ms is not none %}text-accent-orange
+                {% else %}text-text-muted{% endif %}">
+                {{ ex.offset_display }}
+            </span>
+            {% if ex.time_display != "—" %}
+            <span class="text-text-muted text-xs">({{ ex.time_display }})</span>
+            {% endif %}
+        </div>
+
+        <div class="mb-3">
+            <div class="text-text-muted text-xs uppercase tracking-wide mb-1">User</div>
+            <p class="text-text-primary text-sm">{{ ex.user_transcript or "—" }}</p>
+        </div>
+
+        {% if ex.e2e_ms %}
+        {% set e2e = ex.e2e_ms or 0 %}
+        {% set stt = ex.stt_ms or 0 %}
+        {% set gw_prep = ex.gateway_prepare_ms or 0 %}
+        {% set gw_stream = ex.gateway_stream_ms or 0 %}
+        {% set tts_gen = ex.tts_generate_ms or 0 %}
+        {% set bar_total = [e2e, 1]|max %}
+
+        <div class="mb-3">
+            <div class="text-text-muted text-xs uppercase tracking-wide mb-2">Latency</div>
+            {% set stt_pct = (stt / bar_total * 100)|round(1) %}
+            {% set gw_prep_pct = (gw_prep / bar_total * 100)|round(1) %}
+            {% set gw_stream_pct = (gw_stream / bar_total * 100)|round(1) %}
+            {% set tts_pct = (tts_gen / bar_total * 100)|round(1) %}
+            <div class="flex h-6 rounded-full overflow-hidden bg-bg-deep text-xs font-mono">
+                <div class="flex items-center justify-center bg-accent-cyan/40 text-accent-cyan px-2 whitespace-nowrap"
+                     style="width: {{ stt_pct }}%; min-width: 40px;">
+                    {{ stt }}
+                </div>
+                <div class="flex items-center justify-center bg-accent-purple/40 text-accent-purple px-2 whitespace-nowrap"
+                     style="width: {{ gw_prep_pct }}%; min-width: 40px;">
+                    {{ gw_prep }}
+                </div>
+                <div class="flex items-center justify-center bg-accent-pink/40 text-accent-pink px-2 whitespace-nowrap"
+                     style="width: {{ gw_stream_pct }}%; min-width: 40px;">
+                    {{ gw_stream }}
+                </div>
+                <div class="flex items-center justify-center bg-accent-orange/40 text-accent-orange px-2 whitespace-nowrap"
+                     style="width: {{ tts_pct }}%; min-width: 40px;">
+                    {{ tts_gen }}
+                </div>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 mt-2 text-xs">
+                <div class="text-text-muted">STT <span class="text-accent-cyan font-mono">{{ stt }}ms</span></div>
+                <div class="text-text-muted">GW prep <span class="text-accent-purple font-mono">{{ gw_prep }}ms</span></div>
+                <div class="text-text-muted">GW stream <span class="text-accent-pink font-mono">{{ gw_stream }}ms</span></div>
+                <div class="text-text-muted">TTS gen <span class="text-accent-orange font-mono">{{ tts_gen }}ms</span></div>
+                {% if ex.tts_wait_lock_ms %}
+                <div class="text-text-muted">TTS lock wait <span class="font-mono">{{ ex.tts_wait_lock_ms }}ms</span></div>
+                {% endif %}
+                <div class="text-text-muted">First audio at <span class="font-mono">{{ ex.tts_first_chunk_ms or 0 }}ms</span></div>
+                <div class="col-span-2 text-text-muted font-semibold
+                    {% if e2e < 3000 %}text-accent-green
+                    {% elif e2e < 6000 %}text-accent-orange
+                    {% else %}text-accent-red{% endif %}">
+                    E2E: {{ e2e }}ms
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if ex.assistant_transcript %}
+        <div>
+            <div class="text-text-muted text-xs uppercase tracking-wide mb-1">Assistant</div>
+            <p class="text-text-primary text-sm">{{ ex.assistant_transcript }}</p>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="glass-card rounded-xl p-12 text-center">
+    <p class="text-text-muted">No exchanges recorded yet&hellip;</p>
+</div>
+{% endif %}

@@ -142,6 +142,7 @@ class OpenClawHookSettings:
     gateway_url: str = ""
     gateway_token: str = ""
     agent_id: str | None = None
+    voice_model: str | None = None
     timeout_seconds: float = 120.0
 
     @property
@@ -178,11 +179,27 @@ class VoiceSettings:
     stt_model: str = "large-v3-turbo"
     stt_device: str = "cuda"
     stt_compute_type: str = "int8"
-    tts_num_steps: int = 32
+    tts_num_steps: int = 16
     voices_dir: Path = Path(__file__).parent / "voice_data" / "voices"
     lessons_dir: Path | None = None
     frontend_dir: Path | None = None
     session_max_age_days: int = 30
+
+
+@dataclass(slots=True)
+class PhoneSettings:
+    """Configuration for the phone/telephony subsystem (Twilio)."""
+
+    enabled: bool = False
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
+    base_url: str = ""
+    silence_threshold: float = 0.01
+    silence_duration: float = 1.5
+    call_recording_enabled: bool = True
+    call_recording_max_age_days: int = 30
+    openclaw_agent_id: str = ""
 
 
 @dataclass(slots=True)
@@ -204,6 +221,7 @@ class Settings:
     agentmail: AgentMailSettings = field(default_factory=AgentMailSettings)
     email_polling_enabled: bool = True
     voice: VoiceSettings = field(default_factory=VoiceSettings)
+    phone: PhoneSettings = field(default_factory=PhoneSettings)
     heartbeat_interval_seconds: float = 60.0
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
@@ -294,6 +312,7 @@ class Settings:
             gateway_url=os.getenv("CYBORG_OPENCLAW_GATEWAY_URL", "").rstrip("/"),
             gateway_token=os.getenv("CYBORG_OPENCLAW_GATEWAY_TOKEN", ""),
             agent_id=os.getenv("CYBORG_OPENCLAW_AGENT_ID") or None,
+            voice_model=os.getenv("CYBORG_OPENCLAW_VOICE_MODEL") or None,
             timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "120")),
         )
         public_url = os.getenv("CYBORG_PUBLIC_URL", "")
@@ -313,7 +332,7 @@ class Settings:
             stt_model=os.getenv("CYBORG_VOICE_STT_MODEL", "large-v3-turbo"),
             stt_device=os.getenv("CYBORG_VOICE_STT_DEVICE", "cuda"),
             stt_compute_type=os.getenv("CYBORG_VOICE_STT_COMPUTE_TYPE", "int8"),
-            tts_num_steps=int(os.getenv("CYBORG_VOICE_TTS_NUM_STEPS", "32")),
+            tts_num_steps=int(os.getenv("CYBORG_VOICE_TTS_NUM_STEPS", "16")),
             voices_dir=_env_path("CYBORG_VOICE_VOICES_DIR", Path.home() / ".openclaw" / "bobvoice-voices"),
             lessons_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_LESSONS_DIR")) else None,
             frontend_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_FRONTEND_DIR")) else None,
@@ -328,6 +347,18 @@ class Settings:
         )
         dispatch_concurrency_limit = int(
             os.getenv("CYBORG_DISPATCH_CONCURRENCY_LIMIT", "10")
+        )
+
+        phone = PhoneSettings(
+            enabled=os.getenv("CYBORG_PHONE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            twilio_account_sid=os.getenv("CYBORG_PHONE_TWILIO_ACCOUNT_SID", ""),
+            twilio_auth_token=os.getenv("CYBORG_PHONE_TWILIO_AUTH_TOKEN", ""),
+            twilio_phone_number=os.getenv("CYBORG_PHONE_TWILIO_PHONE_NUMBER", ""),
+            base_url=os.getenv("CYBORG_PHONE_BASE_URL", ""),
+            silence_threshold=float(os.getenv("CYBORG_PHONE_SILENCE_THRESHOLD", "0.01")),
+            silence_duration=float(os.getenv("CYBORG_PHONE_SILENCE_DURATION", "1.5")),
+            call_recording_enabled=os.getenv("CYBORG_PHONE_CALL_RECORDING_ENABLED", "true").lower() in ("true", "1", "yes", "on"),
+            call_recording_max_age_days=int(os.getenv("CYBORG_PHONE_CALL_RECORDING_MAX_AGE_DAYS", "30")),
         )
 
         return cls(
@@ -352,6 +383,7 @@ class Settings:
             dispatch_shutdown_timeout_seconds=dispatch_shutdown_timeout_seconds,
             dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
             dispatch_concurrency_limit=dispatch_concurrency_limit,
+            phone=phone,
         )
 
     def ensure_directories(self) -> None:
@@ -359,3 +391,5 @@ class Settings:
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir.mkdir(parents=True, exist_ok=True)
+        if self.phone.enabled:
+            (self.data_dir / "calls").mkdir(parents=True, exist_ok=True)

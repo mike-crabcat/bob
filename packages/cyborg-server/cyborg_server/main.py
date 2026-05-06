@@ -19,6 +19,7 @@ from cyborg_server.database import Database
 from cyborg_server.exceptions import ServiceError
 from cyborg_server.heartbeat import (
     BlockedProjectCheckTask,
+    CallCleanupTask,
     EmailPollingTask,
     EmailSyncTask,
     HeartbeatRunner,
@@ -82,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(EmailPollingTask())
         runner.register(StuckDispatchCheckTask())
         runner.register(EmailSyncTask())
+        runner.register(CallCleanupTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:
             yield
@@ -169,6 +171,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from cyborg_server.routers import voice as voice_router
         app.include_router(voice_router.router, prefix="/voice")
         voice_router.mount_frontend(app, resolved_settings.voice.frontend_dir)
+
+    # Conditional phone/telephony router (requires voice)
+    if resolved_settings.phone.enabled:
+        from cyborg_server.routers import phone as phone_router
+        app.include_router(phone_router.router, prefix="/phone")
 
     return app
 
