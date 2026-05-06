@@ -222,6 +222,14 @@ async def initiate_call(request: Request) -> dict:
         "warmup_done": warmup_ok,
     }
 
+    # Create call record immediately so the detail page works on redirect
+    db = request.app.state.db
+    await db.execute(
+        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at)
+           VALUES (?, ?, ?, 'outbound', 'ringing', ?, datetime('now'))""",
+        (call_id, call.sid, to_number, agenda),
+    )
+
     logger.info("Initiated call %s to %s (warmup: %s)", call.sid, to_number, warmup_ok)
     return {"call_sid": call.sid, "call_id": call_id, "status": call.status}
 
@@ -380,11 +388,12 @@ async def media_stream(websocket: WebSocket) -> None:
                 agenda = f"{phone_context} {raw_agenda}".strip() if raw_agenda else phone_context
                 logger.info("Twilio stream started: %s (call: %s, warmup: %s)", stream_sid, call_sid, warmup_ok)
 
-                # Create call record
+                # Update call record to active
                 await db.execute(
-                    """INSERT INTO phone_calls (id, call_sid, stream_sid, phone_number, direction, status, agenda, started_at)
-                       VALUES (?, ?, ?, ?, 'outbound', 'active', ?, datetime('now'))""",
-                    (call_id, call_sid, stream_sid, stored_phone, agenda),
+                    """UPDATE phone_calls
+                       SET stream_sid = ?, status = 'active'
+                       WHERE id = ?""",
+                    (stream_sid, call_id),
                 )
 
                 # If no speech after 5s, say "Hello?"
@@ -408,10 +417,21 @@ async def media_stream(websocket: WebSocket) -> None:
                 mulaw_bytes = base64.b64decode(payload)
                 media_count += 1
 
-                # Only run silence detection when pipeline is idle
-                if not processing_lock.locked():
-                    transport.feed_inbound_audio(mulaw_bytes)
+                # Always feed audio for silence/speech detection
+                transport.feed_inbound_audio(mulaw_bytes)
 
+                if processing_lock.locked():
+                    # Pipeline running — check for barge-in
+                    if transport._has_speech and transport.is_speaking:
+                        logger.info("Barge-in detected at media chunk %d", media_count)
+                        transport.interrupt()
+                        if pipeline_task and not pipeline_task.done():
+                            pipeline_task.cancel()
+                        # Reset transport state for new utterance detection
+                        transport.clear_buffer()
+                        transport.reset_interrupt()
+                else:
+                    # Pipeline idle — normal utterance detection
                     if transport.is_utterance_complete():
                         logger.info("Utterance complete after %d media chunks", media_count)
                         first_utterance_done = True
@@ -558,6 +578,10 @@ async def _run_voice_pipeline(
                 agenda=agenda,
                 warmup_ok=warmup_ok,
             )
+        except asyncio.CancelledError:
+            logger.info("Voice pipeline cancelled for exchange %d (barge-in)", exchange_index)
+            proxy.done.set()
+            raise
         except Exception:
             logger.error("Voice pipeline error during phone call", exc_info=True)
             if not proxy._saved and (proxy.user_transcript or proxy.assistant_transcript):

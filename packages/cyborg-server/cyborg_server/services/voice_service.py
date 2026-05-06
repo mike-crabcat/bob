@@ -13,8 +13,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import WebSocket
-
 from cyborg_server.context import AppContext
 from cyborg_server.services.base import BaseService, utcnow
 from cyborg_server.services.voice_engines import VoiceEngineManager, samples_to_wav
@@ -23,10 +21,9 @@ from cyborg_server.services.voice_protocol import (
     LatencyMessage,
     PartialResponseMessage,
     ResponseTextMessage,
-    StatusMessage,
-    TranscriptMessage,
 )
 from cyborg_server.services.voice_session_store import VoiceSessionStore
+from cyborg_server.services.voice_transport import VoiceTransport
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +31,7 @@ _SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
 _LANG_TAG_RE = re.compile(r"<lang\s+(\w+)>(.*?)</lang>", re.DOTALL)
 _STEP_COMPLETE_RE = re.compile(r'<step_complete\s+lesson="(\d+)"\s+step="(\d+)"\s*/?>')
 _LESSON_COMPLETE_RE = re.compile(r'<lesson_complete\s+lesson="(\d+)"\s*/?>')
+_HANGUP_RE = re.compile(r"<hangup\s*/?>")
 
 _LANGUAGE_NAMES: dict[str, str] = {
     "pt": "Portuguese", "es": "Spanish", "fr": "French", "de": "German",
@@ -72,14 +70,16 @@ def _extract_instruction_tokens(text: str) -> tuple[str, list[tuple[int, int]], 
     lessons = [int(m.group(1)) for m in _LESSON_COMPLETE_RE.finditer(text)]
     cleaned = _STEP_COMPLETE_RE.sub("", text)
     cleaned = _LESSON_COMPLETE_RE.sub("", cleaned)
+    cleaned = _HANGUP_RE.sub("", cleaned)
     return cleaned, steps, lessons
 
 
 def _clean_display_text(text: str) -> str:
-    """Strip all non-display markup: <lang> tags, step_complete, lesson_complete."""
+    """Strip all non-display markup: <lang> tags, step_complete, lesson_complete, hangup."""
     text = _LANG_TAG_RE.sub(r"\2", text)
     text = _STEP_COMPLETE_RE.sub("", text)
     text = _LESSON_COMPLETE_RE.sub("", text)
+    text = _HANGUP_RE.sub("", text)
     return text
 
 
@@ -109,19 +109,21 @@ class VoiceService(BaseService):
 
     async def process_audio(
         self,
-        websocket: WebSocket,
+        transport: VoiceTransport,
         audio_chunks: list[bytes],
         language: str | None,
         user_id: str = "mike",
         session_mode: str = "chat",
+        agenda: str = "",
+        warmup_ok: bool = False,
     ) -> None:
         """Run the full voice pipeline: STT → OpenClaw → TTS, tracked as a dispatch."""
         audio_data = b"".join(audio_chunks)
         if not audio_data:
-            await self._send_error(websocket, "No audio data received")
+            await transport.send_error("No audio data received")
             return
 
-        await self._send_status(websocket, "transcribing")
+        await transport.send_status("transcribing")
         t0 = time.monotonic()
 
         # --- STT ---
@@ -131,23 +133,20 @@ class VoiceService(BaseService):
             )
         except Exception:
             logger.error("STT transcription failed", exc_info=True)
-            await self._send_error(websocket, "Transcription failed")
+            await transport.send_error("Transcription failed")
             return
         stt_ms = int((time.monotonic() - t0) * 1000)
 
         if not text:
-            await self._send_error(websocket, "Could not transcribe audio")
+            await transport.send_error("Could not transcribe audio")
             return
 
-        try:
-            await websocket.send_text(
-                TranscriptMessage(text=text, language=detected_lang, latency_ms=stt_ms).model_dump_json()
-            )
-        except Exception:
-            return
+        await transport.send_message("transcript", {
+            "text": text, "language": detected_lang, "latency_ms": stt_ms,
+        })
 
         # --- Dispatch through the dispatch system ---
-        await self._send_status(websocket, "thinking")
+        await transport.send_status("thinking")
 
         is_beginner = session_mode == "beginner_french"
         default_tts_lang = "en" if is_beginner else detected_lang
@@ -167,7 +166,7 @@ class VoiceService(BaseService):
         )
 
         coro = self._voice_dispatch_coro(
-            websocket=websocket,
+            transport=transport,
             text=text,
             detected_lang=detected_lang,
             session_key=session_key,
@@ -178,13 +177,15 @@ class VoiceService(BaseService):
             lesson_context=lesson_context,
             t0=t0,
             stt_ms=stt_ms,
+            agenda=agenda,
+            warmup_ok=warmup_ok,
         )
         dispatch_service.track(dispatch_id, coro)
 
     async def _voice_dispatch_coro(
         self,
         *,
-        websocket: WebSocket,
+        transport: VoiceTransport,
         text: str,
         detected_lang: str,
         session_key: str,
@@ -195,6 +196,8 @@ class VoiceService(BaseService):
         lesson_context: str | None,
         t0: float,
         stt_ms: int,
+        agenda: str = "",
+        warmup_ok: bool = False,
     ) -> None:
         """Coroutine that runs the streaming gateway call + TTS pipeline.
 
@@ -202,19 +205,24 @@ class VoiceService(BaseService):
         """
         t1 = time.monotonic()
 
+        # Timing breakdown
+        latency: dict[str, int] = {"stt_ms": stt_ms}
+        t_dispatch_start = t1
+
         sentence_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
         speech_buffer = ""
         tts_pos = 0
         tts_first_chunk_ms: int | None = None
         last_accumulated = ""
         filler_index = 0
+        cancel_requested = asyncio.Event()
 
         async def on_tool_start() -> None:
             nonlocal filler_index
             wav = self.engines.filler_sounds[filler_index % len(self.engines.filler_sounds)]
             filler_index += 1
             try:
-                await websocket.send_bytes(wav)
+                await transport.send_audio(wav)
             except Exception:
                 pass
 
@@ -253,51 +261,83 @@ class VoiceService(BaseService):
                 tts_pos += match.end()
                 clean_sentence = _STEP_COMPLETE_RE.sub("", sentence)
                 clean_sentence = _LESSON_COMPLETE_RE.sub("", clean_sentence)
+                clean_sentence = _HANGUP_RE.sub("", clean_sentence)
                 fragments = _process_language_tags(clean_sentence, default_tts_lang)
                 for frag_text, frag_lang in fragments:
                     await sentence_queue.put((frag_text, frag_lang))
                 try:
-                    await websocket.send_text(
-                        PartialResponseMessage(text=_clean_display_text(accumulated)).model_dump_json()
-                    )
+                    await transport.send_message("partial_response", {
+                        "text": _clean_display_text(accumulated),
+                    })
                 except Exception:
                     pass
 
         async def tts_consumer() -> None:
             nonlocal tts_first_chunk_ms
-            while True:
-                item = await sentence_queue.get()
+            prev_send: asyncio.Task | None = None
+            while not cancel_requested.is_set():
+                try:
+                    item = await asyncio.wait_for(sentence_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
                 if item is None:
                     break
                 sentence_text, sentence_lang = item
                 try:
+                    t_before_lock = time.monotonic()
                     async with self.engines.tts.lock:
+                        t_lock_acquired = time.monotonic()
                         audio, sr = await asyncio.to_thread(
                             self.engines.tts.generate, sentence_text, sentence_lang,
                         )
+                        t_tts_done = time.monotonic()
                         wav_bytes = samples_to_wav(audio, sr)
+                    logger.info(
+                        "TTS: %.0fms (+encode %.0fms) for %r",
+                        (t_tts_done - t_lock_acquired) * 1000,
+                        (time.monotonic() - t_tts_done) * 1000,
+                        sentence_text[:60],
+                    )
                     if tts_first_chunk_ms is None:
                         tts_first_chunk_ms = int((time.monotonic() - t1) * 1000)
+                        latency["tts_first_chunk_ms"] = tts_first_chunk_ms
+                        latency["tts_wait_lock_ms"] = int((t_lock_acquired - t_before_lock) * 1000)
+                        latency["tts_generate_ms"] = int((t_tts_done - t_lock_acquired) * 1000)
                         try:
-                            await self._send_status(websocket, "speaking")
+                            await transport.send_status("speaking")
                         except Exception:
                             pass
-                    try:
-                        await websocket.send_bytes(wav_bytes)
-                    except Exception:
-                        pass
+                    if prev_send is not None:
+                        await prev_send
+                    prev_send = asyncio.create_task(transport.send_audio(wav_bytes))
                 except Exception:
                     logger.warning("TTS failed for %r (lang=%s)", sentence_text[:80], sentence_lang, exc_info=True)
+            if prev_send is not None:
+                await prev_send
 
         tts_task = asyncio.create_task(tts_consumer())
 
         # --- OpenClaw streaming call ---
+        t_gateway_connect = time.monotonic()
+        t_prepare = t_gateway_connect
+        t_stream_start = t_gateway_connect
         try:
             from cyborg_server.services.openclaw_hook_service import OpenClawHookService
             from uuid import uuid4
 
-            openclaw_service = OpenClawHookService(self.ctx)
-            message = self._build_message(text, detected_lang, session_mode, lesson_context)
+            if self.ctx.openclaw_hook_service is None:
+                self.ctx.openclaw_hook_service = OpenClawHookService(self.ctx)
+            openclaw_service = self.ctx.openclaw_hook_service
+            if warmup_ok:
+                message = text
+            else:
+                message = self._build_message(text, detected_lang, session_mode, lesson_context, agenda=agenda)
+            t_prepare = time.monotonic()
+            if not warmup_ok:
+                try:
+                    await openclaw_service.patch_session_model(session_key)
+                except Exception:
+                    logger.warning("session model patch failed (non-fatal)", exc_info=True)
             coro = await openclaw_service.prepare_streaming_agent_dispatch(
                 message=message,
                 session_key=session_key,
@@ -305,12 +345,26 @@ class VoiceService(BaseService):
                 on_delta=on_delta,
                 on_tool_start=on_tool_start,
             )
+            t_stream_start = time.monotonic()
             response = await coro
         except Exception:
             logger.exception("OpenClaw gateway error during voice dispatch")
             response = "Sorry, I couldn't reach the AI service."
 
-        openclaw_ms = int((time.monotonic() - t1) * 1000)
+        t_gateway_done = time.monotonic()
+        openclaw_ms = int((t_gateway_done - t1) * 1000)
+        latency["openclaw_total_ms"] = openclaw_ms
+        latency["gateway_prepare_ms"] = int((t_prepare - t_gateway_connect) * 1000)
+        latency["gateway_stream_ms"] = int((t_gateway_done - t_stream_start) * 1000)
+        latency["first_audio_at_ms"] = tts_first_chunk_ms
+        logger.info(
+            "Voice pipeline timing: STT=%dms prepare=%dms stream=%dms openclaw_total=%dms tts_first_chunk=%dms",
+            stt_ms,
+            latency["gateway_prepare_ms"],
+            latency["gateway_stream_ms"],
+            openclaw_ms,
+            tts_first_chunk_ms or 0,
+        )
 
         if last_accumulated:
             response = last_accumulated
@@ -323,6 +377,7 @@ class VoiceService(BaseService):
             tts_pos = len(speech_buffer)
             clean_remaining = _STEP_COMPLETE_RE.sub("", remaining)
             clean_remaining = _LESSON_COMPLETE_RE.sub("", clean_remaining)
+            clean_remaining = _HANGUP_RE.sub("", clean_remaining)
             if clean_remaining.strip():
                 fragments = _process_language_tags(clean_remaining, default_tts_lang)
                 for frag_text, frag_lang in fragments:
@@ -330,6 +385,13 @@ class VoiceService(BaseService):
 
         await sentence_queue.put(None)
         await tts_task
+
+        # Signal hangup if agent requested it
+        if _HANGUP_RE.search(response):
+            try:
+                await transport.send_message("hangup", {})
+            except Exception:
+                pass
 
         # --- Persist session ---
         if is_beginner:
@@ -346,35 +408,25 @@ class VoiceService(BaseService):
         if tts_first_chunk_ms is None:
             tts_first_chunk_ms = int((time.monotonic() - t1) * 1000)
 
-        try:
-            await websocket.send_text(
-                ResponseTextMessage(text=_clean_display_text(clean_response)).model_dump_json()
-            )
-        except Exception:
-            pass
+        await transport.send_message("response_text", {
+            "text": _clean_display_text(clean_response),
+        })
 
         e2e_ms = int((time.monotonic() - t0) * 1000)
-        try:
-            await websocket.send_text(AudioDoneMessage().model_dump_json())
-            await websocket.send_text(
-                LatencyMessage(
-                    stt_ms=stt_ms,
-                    openclaw_total_ms=openclaw_ms,
-                    tts_first_chunk_ms=tts_first_chunk_ms,
-                    e2e_ms=e2e_ms,
-                ).model_dump_json()
-            )
-            await self._send_status(websocket, "idle")
-        except Exception:
-            pass
+        latency["e2e_ms"] = e2e_ms
+        await transport.send_message("audio_done", {})
+        await transport.send_message("latency", latency)
+        await transport.send_status("idle")
 
-    def _build_message(self, text: str, language: str, session_mode: str, lesson_context: str | None) -> str:
+    def _build_message(self, text: str, language: str, session_mode: str, lesson_context: str | None, *, agenda: str = "") -> str:
         if lesson_context:
             return f"{lesson_context} {text}"
         if session_mode.endswith("_teacher"):
             prompt = self._load_prompt_template(session_mode)
             return f"{prompt} {text}" if prompt else text
         prefix = "[You are a voice assistant. Respond in plain spoken language: no emojis, no markdown formatting, no asterisks, no bullet points. Just natural speech.]"
+        if agenda:
+            prefix += f" [CALL AGENDA: {agenda}. Follow this agenda throughout the conversation. Stay on topic and work toward the agenda's goal.]"
         if language and language != "en":
             lang_name = _LANGUAGE_NAMES.get(language, language)
             prefix += f" [Respond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes.]"
@@ -419,30 +471,17 @@ class VoiceService(BaseService):
             USER_ID=user_id,
         )
 
-    async def replay_tts(self, websocket: WebSocket, text: str, default_lang: str) -> None:
+    async def replay_tts(self, transport: VoiceTransport, text: str, default_lang: str) -> None:
         """Replay TTS for a given text (e.g., replay button)."""
         fragments = _process_language_tags(text, default_lang)
         for frag_text, frag_lang in fragments:
             try:
                 async with self.engines.tts.lock:
-                    audio, sr = await asyncio.to_thread(self.engines.tts.generate, frag_text, frag_lang)
+                    audio, sr = await asyncio.to_thread(
+                        self.engines.tts.generate, frag_text, frag_lang
+                    )
                     wav_bytes = samples_to_wav(audio, sr)
-                await websocket.send_bytes(wav_bytes)
+                await transport.send_audio(wav_bytes)
             except Exception:
                 logger.warning("Replay TTS failed for %r (lang=%s)", frag_text[:80], frag_lang, exc_info=True)
-        try:
-            await websocket.send_text(AudioDoneMessage().model_dump_json())
-        except Exception:
-            pass
-
-    async def _send_status(self, websocket: WebSocket, state: str) -> None:
-        await websocket.send_text(StatusMessage(state=state).model_dump_json())  # type: ignore[arg-type]
-
-    async def _send_error(self, websocket: WebSocket, message: str) -> None:
-        from cyborg_server.services.voice_protocol import ErrorMessage
-
-        try:
-            await websocket.send_text(ErrorMessage(message=message).model_dump_json())
-            await self._send_status(websocket, "idle")
-        except Exception:
-            pass
+        await transport.send_message("audio_done", {})
