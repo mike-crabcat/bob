@@ -27,7 +27,7 @@ from cyborg_server.heartbeat import (
     StuckDispatchCheckTask,
 )
 from cyborg_server.models import HealthResponse
-from cyborg_server.routers import calendars, contacts, context, dashboard, dispatches, email, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks
+from cyborg_server.routers import calendars, contacts, context, dashboard, dispatches, email, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks, whatsapp
 from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from cyborg_server.structured_logging import attach_database_handler
         attach_database_handler(database)
 
+        # Conditional WhatsApp bridge service
+        wa_bridge_service = None
+        if resolved_settings.whatsapp_bridge.enabled:
+            try:
+                from cyborg_server.services.whatsapp_bridge_service import WhatsAppBridgeService
+                wa_bridge_service = WhatsAppBridgeService(app_ctx)
+                await wa_bridge_service.start()
+                app.state.whatsapp_bridge_service = wa_bridge_service
+                logger.info("WhatsApp bridge service started")
+            except Exception:
+                logger.exception("WhatsApp bridge service failed to start")
+
         stop_event = asyncio.Event()
         runner = HeartbeatRunner(app_ctx, interval_seconds=resolved_settings.heartbeat_interval_seconds)
         runner.register(NotificationDispatchTask())
@@ -114,6 +126,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await heartbeat_worker
             except asyncio.CancelledError:
                 pass
+
+            if wa_bridge_service is not None:
+                await wa_bridge_service.stop()
+
             await database.close()
 
     # Create FastAPI app
@@ -176,6 +192,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if resolved_settings.phone.enabled:
         from cyborg_server.routers import phone as phone_router
         app.include_router(phone_router.router, prefix="/phone")
+
+    # Conditional WhatsApp bridge router
+    if resolved_settings.whatsapp_bridge.enabled:
+        app.include_router(whatsapp.router)
 
     # Conditional Z.ai evaluation router
     if resolved_settings.zai.enabled:

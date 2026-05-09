@@ -9,6 +9,8 @@ import os
 import shutil
 import shlex
 import subprocess
+import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -16,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+import qrcode
 import typer
 import uvicorn
 
@@ -764,6 +767,7 @@ def serve(
         zai=env_settings.zai,
         openai=env_settings.openai,
         harness=env_settings.harness,
+        whatsapp_bridge=env_settings.whatsapp_bridge,
     )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
 
@@ -3443,6 +3447,77 @@ async def _eval_history(limit: int) -> None:
             )
     finally:
         await db.close()
+
+
+# ============================================================================
+# WhatsApp commands
+# ============================================================================
+
+whatsapp_app = typer.Typer(help="WhatsApp bridge operations")
+
+
+@whatsapp_app.command("status")
+def whatsapp_status() -> None:
+    """Show WhatsApp bridge connection status."""
+    result = _api_call("GET", "/whatsapp/status")
+    _echo_json(result)
+
+
+@whatsapp_app.command("pair")
+def whatsapp_pair(
+    method: Annotated[str, typer.Option("--method", help="Pairing method: 'qr' or 'phone-code'")] = "qr",
+    phone_number: Annotated[Optional[str], typer.Option("--phone-number", help="Phone number for phone-code pairing (E.164 format)")] = None,
+) -> None:
+    """Request WhatsApp device pairing via QR code or phone number code."""
+    if method == "phone-code" and not phone_number:
+        raise typer.BadParameter("--phone-number is required for phone-code pairing")
+    payload = {"method": method}
+    if phone_number:
+        payload["phone_number"] = phone_number
+    result = _api_call("POST", "/whatsapp/pair", payload)
+
+    # Poll for the QR/pairing code
+    typer.echo("Waiting for pairing info...")
+    for _ in range(10):
+        time.sleep(1)
+        status = _api_call("GET", "/whatsapp/bridge-status").get("data", {})
+        if method == "qr" and status.get("last_qr_code"):
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(status["last_qr_code"])
+            qr.make(fit=True)
+            qr.print_ascii(sys.stdout)
+            typer.echo("Scan this QR code with WhatsApp (Settings > Linked Devices > Link a device)")
+            return
+        if method == "phone-code" and status.get("last_pairing_code"):
+            typer.echo(f"Pairing code: {status['last_pairing_code']}")
+            typer.echo("Enter this code on your phone (Settings > Linked Devices > Link with phone number)")
+            return
+
+    typer.echo("Timed out waiting for pairing info. Try 'cyborg whatsapp bridge-status' to check.")
+
+
+@whatsapp_app.command("send")
+def whatsapp_send(
+    chat_id: Annotated[str, typer.Option("--chat-id", help="WhatsApp chat JID (e.g., 1234567890@s.whatsapp.net)")],
+    text: Annotated[str, typer.Option("--text", help="Message text to send")],
+    reply_to: Annotated[Optional[str], typer.Option("--reply-to", help="WhatsApp message ID to reply to")] = None,
+) -> None:
+    """Send a WhatsApp message."""
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+    result = _api_call("POST", "/whatsapp/send", payload)
+    _echo_json(result)
+
+
+@whatsapp_app.command("bridge-status")
+def whatsapp_bridge_status() -> None:
+    """Show internal bridge status including queue sizes and uptime."""
+    result = _api_call("GET", "/whatsapp/bridge-status")
+    _echo_json(result)
+
+
+app.add_typer(whatsapp_app, name="whatsapp")
 
 
 def main() -> int:

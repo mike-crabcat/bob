@@ -241,6 +241,16 @@ class HarnessSettings:
 
 
 @dataclass(slots=True)
+class WhatsAppBridgeSettings:
+    """Configuration for the WhatsApp bridge companion service."""
+
+    enabled: bool = False
+    url: str = "ws://127.0.0.1:8430/ws"
+    token: str = ""
+    reconnect_interval_seconds: float = 10.0
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -263,6 +273,7 @@ class Settings:
     zai: ZaiSettings = field(default_factory=ZaiSettings)
     openai: OpenAISettings = field(default_factory=OpenAISettings)
     harness: HarnessSettings = field(default_factory=HarnessSettings)
+    whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     heartbeat_interval_seconds: float = 60.0
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
@@ -423,6 +434,13 @@ class Settings:
             max_history_messages=int(os.getenv("CYBORG_HARNESS_MAX_HISTORY_MESSAGES", "20")),
         )
 
+        whatsapp_bridge = WhatsAppBridgeSettings(
+            enabled=os.getenv("CYBORG_WHATSAPP_BRIDGE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            url=os.getenv("CYBORG_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:8430/ws"),
+            token=os.getenv("CYBORG_WHATSAPP_BRIDGE_TOKEN", ""),
+            reconnect_interval_seconds=float(os.getenv("CYBORG_WHATSAPP_BRIDGE_RECONNECT_INTERVAL_SECONDS", "10")),
+        )
+
         return cls(
             host=host,
             port=port,
@@ -449,6 +467,7 @@ class Settings:
             zai=zai,
             openai=openai_llm,
             harness=harness,
+            whatsapp_bridge=whatsapp_bridge,
         )
 
     def ensure_directories(self) -> None:
