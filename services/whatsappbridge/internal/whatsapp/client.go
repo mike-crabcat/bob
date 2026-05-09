@@ -115,6 +115,22 @@ func (c *Client) ParseJID(s string) (types.JID, bool) {
 	return jid, jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer || jid.Server == types.GroupServer
 }
 
+// ResolveLID resolves a LID (linked ID) to a phone number JID.
+func (c *Client) ResolveLID(jid types.JID) types.JID {
+	if jid.Server != types.HiddenUserServer {
+		return jid
+	}
+	if c.client.Store.LIDs == nil {
+		return jid
+	}
+	pn, err := c.client.Store.LIDs.GetPNForLID(context.Background(), jid)
+	if err != nil || pn.IsEmpty() {
+		c.log.Debug("could not resolve LID to PN", "lid", jid.String(), "error", err)
+		return jid
+	}
+	return pn
+}
+
 func (c *Client) handleEvent(raw any) {
 	switch evt := raw.(type) {
 	case *events.Connected:
@@ -183,11 +199,15 @@ func (c *Client) handleMessage(evt *events.Message) {
 		senderName = info.PushName
 	}
 
+	// Resolve LIDs to phone number JIDs
+	chatJID := c.ResolveLID(info.Chat)
+	senderJID := c.ResolveLID(info.Sender)
+
 	msgEvt := IncomingMessageEvent{
 		WhatsAppMessageID: info.ID,
-		ChatID:            info.Chat.String(),
+		ChatID:            chatJID.String(),
 		ChatKind:          chatKind,
-		SenderJID:         info.Sender.String(),
+		SenderJID:         senderJID.String(),
 		SenderName:        senderName,
 		Text:              text,
 		Timestamp:         info.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),

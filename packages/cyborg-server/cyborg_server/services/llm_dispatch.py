@@ -406,3 +406,95 @@ class LLMDispatchService(BaseService):
                 dispatch_id=dispatch_id,
             )
             raise
+
+    async def chat_stream_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Tool],
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        max_iterations: int = 10,
+        call_category: str = "voice_chat",
+        session_key: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        dispatch_id: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream chat with tool calling support.
+
+        Handles the tool loop non-streamingly (tool calls need full responses),
+        then streams the final text response for real-time TTS/consumption.
+        """
+        resolved_provider = self._resolve_provider(provider)
+        resolved_model = self._resolve_model(resolved_provider, model)
+        service = self._get_provider_service(resolved_provider)
+
+        openai_tools = [t.to_openai_format() for t in tools]
+        tool_handlers = {t.name: t.handler for t in tools}
+
+        # Tool loop: non-streaming rounds until LLM gives a text response
+        for iteration in range(max_iterations):
+            response = await service.client.chat.completions.create(
+                model=resolved_model,
+                messages=messages,
+                tools=openai_tools,
+            )
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                # No tool calls — yield the final text and return
+                final_text = message.content or ""
+                if final_text:
+                    yield final_text
+                return
+
+            # Execute tool calls and append to messages
+            messages.append({
+                "role": message.role,
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in message.tool_calls
+                ],
+            })
+
+            for tc in message.tool_calls:
+                handler = tool_handlers.get(tc.function.name)
+                if handler is None:
+                    result = f"Error: unknown tool '{tc.function.name}'"
+                else:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        result = await handler(**args)
+                    except Exception as e:
+                        result = f"Error: {e}"
+                        logger.warning("Tool %s failed: %s", tc.function.name, e)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+            logger.info(
+                "chat_stream_with_tools: iteration=%d tool_calls=%d",
+                iteration + 1,
+                len(message.tool_calls),
+            )
+
+        # Hit max iterations — make one final streaming call
+        logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)
+        async for chunk in service.chat_stream(
+            messages=messages,
+            model=resolved_model,
+        ):
+            if chunk:
+                yield chunk

@@ -361,8 +361,14 @@ class VoiceService(BaseService):
             t_prepare = time.monotonic()
             t_stream_start = t_prepare
             accumulated = ""
-            async for chunk in dispatch.chat_stream(
+
+            # Build workspace tools for file access during conversation
+            from cyborg_server.services.workspace_tools import make_workspace_tools
+            tools = make_workspace_tools(self.ctx)
+
+            async for chunk in dispatch.chat_stream_with_tools(
                 messages,
+                tools=tools,
                 provider="openai",
                 model=settings.harness.default_model,
                 call_category="voice_chat",

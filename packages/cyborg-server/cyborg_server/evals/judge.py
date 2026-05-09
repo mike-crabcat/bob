@@ -181,9 +181,20 @@ class LLMJudge:
             for msg in input_messages:
                 role = msg.get("role", "unknown")
                 content = msg.get("content", "")
-                if isinstance(content, str) and len(content) > 2000:
-                    content = content[:2000] + "... [truncated]"
-                formatted.append(f"[{role}]: {content}")
+                tool_calls = msg.get("tool_calls")
+
+                if tool_calls:
+                    call_descs = []
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        call_descs.append(f"{fn.get('name', '?')}({fn.get('arguments', '')})")
+                    line = f"[{role} called tools]: " + ", ".join(call_descs)
+                elif isinstance(content, str) and len(content) > 2000:
+                    line = f"[{role}]: {content[:2000]}... [truncated]"
+                else:
+                    line = f"[{role}]: {content}"
+
+                formatted.append(line)
             input_section = f"\nINPUT MESSAGES:\n" + "\n".join(formatted) + "\n"
 
         prompt = (
