@@ -14,6 +14,7 @@ from cyborg_server.evals.case import (
     StructuralCheck,
     StructuralCheckResult,
 )
+from cyborg_server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ class StructuralJudge:
 class LLMJudge:
     """Uses an LLM call to evaluate response quality."""
 
-    def __init__(self, ctx: Any) -> None:
+    def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
 
     async def judge(
@@ -158,6 +159,7 @@ class LLMJudge:
         case: EvalCase,
         response: str,
         threshold: float = 0.7,
+        input_messages: list[dict[str, Any]] | None = None,
     ) -> JudgeResult:
         from cyborg_server.services.llm_dispatch import LLMDispatchService
 
@@ -173,10 +175,21 @@ class LLMJudge:
         if case.judge_criteria.extra_instructions:
             extra = f"\nADDITIONAL GUIDANCE:\n{case.judge_criteria.extra_instructions}"
 
+        input_section = ""
+        if input_messages:
+            formatted = []
+            for msg in input_messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                if isinstance(content, str) and len(content) > 2000:
+                    content = content[:2000] + "... [truncated]"
+                formatted.append(f"[{role}]: {content}")
+            input_section = f"\nINPUT MESSAGES:\n" + "\n".join(formatted) + "\n"
+
         prompt = (
             f"You are an evaluation judge. Score the response on each dimension from 0.0 to 1.0.\n\n"
             f"EVAL CASE: {case.description}\n"
-            f"INPUT CONTEXT: {case.description}\n\n"
+            f"{input_section}\n"
             f"RESPONSE TO EVALUATE:\n{response}\n\n"
             f"DIMENSIONS:\n" + "\n".join(dimensions) + extra +
             "\n\nRespond with valid JSON only:\n"

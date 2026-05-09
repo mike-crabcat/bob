@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from cyborg_server.context import AppContext
+
 
 @dataclass
 class StructuralCheck:
@@ -42,7 +44,7 @@ class EvalCase:
     id: str
     category: str
     description: str
-    run: Callable[..., Awaitable[dict[str, Any]]]
+    run: Callable[[AppContext], Awaitable[dict[str, Any]]]
     structural_checks: list[StructuralCheck] = field(default_factory=list)
     judge_criteria: JudgeCriteria = field(default_factory=JudgeCriteria)
     timeout_seconds: float = 120.0
@@ -74,6 +76,7 @@ class EvalCaseResult:
     judge_result: JudgeResult | None = None
     llm_response: str = ""
     llm_latency_seconds: float = 0.0
+    input_messages: list[dict[str, Any]] = field(default_factory=list)
     llm_tokens_used: int | None = None
     judge_latency_seconds: float | None = None
     error_message: str | None = None

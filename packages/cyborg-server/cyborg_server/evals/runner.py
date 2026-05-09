@@ -10,6 +10,7 @@ from uuid import uuid4
 from cyborg_server.evals.case import EvalCase, EvalCaseResult
 from cyborg_server.evals.judge import LLMJudge, StructuralJudge
 from cyborg_server.evals.registry import get_all_cases, get_cases_by_category, get_case_by_id
+from cyborg_server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 class EvalRunner:
     """Orchestrates running eval cases and recording results."""
 
-    def __init__(self, ctx: Any) -> None:
+    def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
         self.structural = StructuralJudge()
         self.llm_judge = LLMJudge(ctx)
@@ -68,6 +69,7 @@ class EvalRunner:
             output = await case.run(self.ctx)
             response = output.get("response", "")
             context = output.get("context", {})
+            input_messages = output.get("input_messages", [])
             elapsed = time.monotonic() - t0
 
             # Structural checks
@@ -77,7 +79,7 @@ class EvalRunner:
             # LLM judge
             judge_result = None
             if not skip_judge and case.judge_criteria.extra_instructions:
-                judge_result = await self.llm_judge.judge(case, response, judge_threshold)
+                judge_result = await self.llm_judge.judge(case, response, judge_threshold, input_messages)
 
             passed = all_structural_pass and (judge_result is None or judge_result.passed)
 
@@ -89,6 +91,7 @@ class EvalRunner:
                 judge_result=judge_result,
                 llm_response=response,
                 llm_latency_seconds=elapsed,
+                input_messages=input_messages,
             )
         except Exception as e:
             elapsed = time.monotonic() - t0
@@ -130,12 +133,13 @@ class EvalRunner:
                 {"kind": r.check.kind, "passed": r.passed, "detail": r.detail}
                 for r in result.structural_results
             ])
+            input_json = json.dumps(result.input_messages) if result.input_messages else None
             await self.ctx.db.execute(
                 """INSERT INTO eval_case_results
                    (id, run_id, case_id, category, passed, llm_response,
                     llm_latency_seconds, judge_score, judge_reasoning,
-                    structural_results_json, error_message)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    structural_results_json, input_messages_json, error_message)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(uuid4()), run_id, result.case_id, result.category,
                     1 if result.passed else 0,
@@ -144,11 +148,9 @@ class EvalRunner:
                     result.judge_result.overall if result.judge_result else None,
                     result.judge_result.reasoning if result.judge_result else None,
                     struct_json,
+                    input_json,
                     result.error_message,
                 ),
             )
         except Exception:
             logger.warning("Failed to record eval case result", exc_info=True)
-
-
-from typing import Any

@@ -52,7 +52,7 @@ async def tool_calling_create_task(ctx):
     )
 
     tool_calls = _extract_tool_calls(messages)
-    return {"response": response, "context": {"tool_calls": tool_calls}}
+    return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
 
 
 @eval_case(
@@ -99,7 +99,7 @@ async def tool_calling_close_project(ctx):
     )
 
     tool_calls = _extract_tool_calls(messages)
-    return {"response": response, "context": {"tool_calls": tool_calls}}
+    return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:

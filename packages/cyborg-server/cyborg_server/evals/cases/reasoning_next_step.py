@@ -50,8 +50,6 @@ async def reasoning_next_step_basic(ctx):
     )
 
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat(
-        [{"role": "user", "content": prompt}],
-        call_category="eval",
-    )
-    return {"response": response}
+    messages = [{"role": "user", "content": prompt}]
+    response = await dispatch.chat(messages, call_category="eval")
+    return {"response": response, "input_messages": messages}
