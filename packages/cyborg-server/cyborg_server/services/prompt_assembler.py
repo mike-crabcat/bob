@@ -1,0 +1,87 @@
+"""Assembles prompt messages from workspace files and session history."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md")
+
+# Module-level cache for workspace file content.
+_cached_prompt: tuple[Any, str] | None = None  # (mtime_hash, content)
+_cached_mtime: dict[str, float] = {}
+
+
+def load_workspace_prompt(workspace_dir: Path) -> str:
+    """Load and concatenate workspace files. Cached until any file changes."""
+    global _cached_prompt, _cached_mtime
+
+    workspace_dir = workspace_dir.expanduser()
+    mtimes: dict[str, float] = {}
+    for name in _WORKSPACE_FILES:
+        path = workspace_dir / name
+        mtimes[name] = path.stat().st_mtime if path.is_file() else 0.0
+
+    mtime_hash = tuple(mtimes.items())
+    if _cached_prompt is not None and _cached_prompt[0] == mtime_hash:
+        return _cached_prompt[1]
+
+    parts: list[str] = []
+    for name in _WORKSPACE_FILES:
+        path = workspace_dir / name
+        if path.is_file():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(content)
+
+    combined = "\n\n".join(parts)
+    _cached_prompt = (mtime_hash, combined)
+    if _cached_mtime != mtimes:
+        logger.info(
+            "Workspace loaded: dir=%s chars=%d files=%s",
+            workspace_dir, len(combined),
+            [n for n in _WORKSPACE_FILES if mtimes.get(n)],
+        )
+        _cached_mtime.update(mtimes)
+    return combined
+
+
+async def build_chat_messages(
+    user_message: str,
+    session_key: str = "",
+    *,
+    db: Any = None,
+    system_content: str = "",
+    voice_instructions: str = "",
+    max_history: int = 20,
+) -> list[dict[str, str]]:
+    """Build a messages array: system prompt + session history + user message."""
+    system_parts: list[str] = []
+    if system_content:
+        system_parts.append(system_content)
+    if voice_instructions:
+        system_parts.append(voice_instructions)
+
+    messages: list[dict[str, str]] = []
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
+    if session_key and db is not None:
+        from cyborg_server.services.voice_session_store import VoiceSessionStore
+        from cyborg_server.context import AppContext
+
+        # Use a lightweight approach — just query directly
+        rows = await db.fetch_all(
+            "SELECT role, text FROM voice_session_messages "
+            "WHERE session_key = ? ORDER BY created_at ASC LIMIT ?",
+            (session_key, max_history),
+        )
+        for row in rows:
+            if row["role"] in ("user", "assistant") and row["text"]:
+                messages.append({"role": row["role"], "content": row["text"]})
+
+    messages.append({"role": "user", "content": user_message})
+    return messages

@@ -203,6 +203,44 @@ class PhoneSettings:
 
 
 @dataclass(slots=True)
+class ZaiSettings:
+    """Configuration for direct Z.ai LLM API access."""
+
+    api_key: str = ""
+    base_url: str = "https://api.z.ai/api/coding/paas/v4/"
+    default_model: str = "glm-5.1"
+    timeout_seconds: float = 120.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(slots=True)
+class OpenAISettings:
+    """Configuration for direct OpenAI LLM API access."""
+
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    default_model: str = "gpt-4.1-mini"
+    timeout_seconds: float = 120.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(slots=True)
+class HarnessSettings:
+    """Configuration for the local LLM harness (replaces OpenClaw for voice/phone)."""
+
+    enabled: bool = False
+    workspace_dir: Path = Path("~/.config/cyborg/harness")
+    default_model: str = "gpt-5.4-nano"
+    max_history_messages: int = 20
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -222,6 +260,9 @@ class Settings:
     email_polling_enabled: bool = True
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     phone: PhoneSettings = field(default_factory=PhoneSettings)
+    zai: ZaiSettings = field(default_factory=ZaiSettings)
+    openai: OpenAISettings = field(default_factory=OpenAISettings)
+    harness: HarnessSettings = field(default_factory=HarnessSettings)
     heartbeat_interval_seconds: float = 60.0
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
@@ -361,6 +402,27 @@ class Settings:
             call_recording_max_age_days=int(os.getenv("CYBORG_PHONE_CALL_RECORDING_MAX_AGE_DAYS", "30")),
         )
 
+        zai = ZaiSettings(
+            api_key=os.getenv("CYBORG_ZAI_API_KEY", ""),
+            base_url=os.getenv("CYBORG_ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4/"),
+            default_model=os.getenv("CYBORG_ZAI_DEFAULT_MODEL", "glm-5.1"),
+            timeout_seconds=float(os.getenv("CYBORG_ZAI_TIMEOUT_SECONDS", "120")),
+        )
+
+        openai_llm = OpenAISettings(
+            api_key=os.getenv("CYBORG_OPENAI_API_KEY", ""),
+            base_url=os.getenv("CYBORG_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            default_model=os.getenv("CYBORG_OPENAI_DEFAULT_MODEL", "gpt-4.1-mini"),
+            timeout_seconds=float(os.getenv("CYBORG_OPENAI_TIMEOUT_SECONDS", "120")),
+        )
+
+        harness = HarnessSettings(
+            enabled=os.getenv("CYBORG_HARNESS_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            workspace_dir=_env_path("CYBORG_HARNESS_WORKSPACE_DIR", Path("~/.config/cyborg/harness")),
+            default_model=os.getenv("CYBORG_HARNESS_DEFAULT_MODEL", "gpt-5.4-nano"),
+            max_history_messages=int(os.getenv("CYBORG_HARNESS_MAX_HISTORY_MESSAGES", "20")),
+        )
+
         return cls(
             host=host,
             port=port,
@@ -384,6 +446,9 @@ class Settings:
             dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
             dispatch_concurrency_limit=dispatch_concurrency_limit,
             phone=phone,
+            zai=zai,
+            openai=openai_llm,
+            harness=harness,
         )
 
     def ensure_directories(self) -> None:

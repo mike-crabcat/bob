@@ -24,6 +24,9 @@ dependencies = [
   "typer>=0.16.0",
   "uvicorn>=0.35.0",
   "websockets>=15.0.0",
+  "openai>=1.0.0",
+  "zai-sdk>=0.2.0",
+  "twilio>=9.0.0",
 ]
 
 [dependency-groups]
@@ -40,9 +43,6 @@ voice = [
   "numpy>=2.0.0",
   "omnivoice>=0.1.4",
   "av>=14.0.0",
-]
-phone = [
-  "twilio>=9.0.0",
 ]
 
 [project.scripts]

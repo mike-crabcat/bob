@@ -1,4 +1,4 @@
-"""LLM reasoning through OpenClaw gateway."""
+"""LLM reasoning service for project planning, evaluation, and decision-making."""
 
 from __future__ import annotations
 
@@ -6,36 +6,21 @@ import json
 import logging
 import ast
 import re
-from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.services.base import BaseService, json_loads
 from cyborg_server.services.context_builder import ContextBuilder, ContextScope
-from cyborg_server.services.prompt_history import log_prompt
 
 logger = logging.getLogger(__name__)
-
-# Import structured logging helpers (lazy import to avoid circular dependency)
-_structured_logger = None
-
-
-def _get_structured_logger():
-    """Lazy import structured logging helpers."""
-    global _structured_logger
-    if _structured_logger is None:
-        from cyborg_server.structured_logging import get_logger as _get_logger
-        _structured_logger = _get_logger(__name__)
-    return _structured_logger
 
 
 class OpenClawReasoningService(BaseService):
     """
-    All LLM reasoning goes through OpenClaw.
+    All LLM reasoning for project management.
 
-    Cyborg builds context → OpenClaw does reasoning → Cyborg parses result
+    Builds context → calls LLM via LLMDispatchService → parses result.
     """
 
     TIMEOUT_DEFAULT = 10800
@@ -43,22 +28,6 @@ class OpenClawReasoningService(BaseService):
     def __init__(self, ctx: AppContext):
         super().__init__(ctx)
         self.context_builder = ContextBuilder(ctx)
-
-        # Lazy load OpenClawHookService to avoid circular import
-        self._openclaw_service = None
-
-    @property
-    def openclaw_service(self):
-        """Lazy-load OpenClawHookService."""
-        if self._openclaw_service is None:
-            from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-            from cyborg_server.services.session_route_service import SessionRouteService
-
-            self._openclaw_service = OpenClawHookService(
-                self.ctx,
-                routing_service=SessionRouteService(self.ctx)
-            )
-        return self._openclaw_service
 
     async def generate_project_plan(
         self,
@@ -76,7 +45,7 @@ class OpenClawReasoningService(BaseService):
         prompt = self._build_plan_prompt(aim, method, success_criteria, source_context=source_context)
 
         # Call OpenClaw
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_DEFAULT,
@@ -100,7 +69,7 @@ class OpenClawReasoningService(BaseService):
         prompt = self._build_source_discovery_prompt(aim, method, closed_projects)
 
         try:
-            response = await self._call_openclaw(
+            response = await self._call_llm(
                 prompt=prompt,
                 response_format="json",
                 timeout=self.TIMEOUT_DEFAULT,
@@ -211,7 +180,7 @@ class OpenClawReasoningService(BaseService):
         prompt = self._build_evaluation_prompt(context)
 
         # Call OpenClaw
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_DEFAULT,
@@ -242,7 +211,7 @@ class OpenClawReasoningService(BaseService):
         prompt = self._build_next_step_prompt(context, completed_task_id)
 
         try:
-            response = await self._call_openclaw(
+            response = await self._call_llm(
                 prompt=prompt,
                 response_format="json",
                 timeout=self.TIMEOUT_DEFAULT,
@@ -280,7 +249,7 @@ class OpenClawReasoningService(BaseService):
         prompt = self._build_refinement_prompt(context, trigger_task_id)
 
         # Call OpenClaw
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_DEFAULT,
@@ -307,7 +276,7 @@ class OpenClawReasoningService(BaseService):
 
         prompt = self._build_learning_prompt(context)
 
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_DEFAULT,
@@ -370,7 +339,7 @@ class OpenClawReasoningService(BaseService):
             dependency_files=dependency_files,
         )
 
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="text",
             timeout=self.TIMEOUT_DEFAULT,
@@ -397,7 +366,7 @@ class OpenClawReasoningService(BaseService):
 
         prompt = self._build_health_analysis_prompt(context)
 
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_DEFAULT,
@@ -424,7 +393,7 @@ class OpenClawReasoningService(BaseService):
 
         prompt = self._build_follow_up_tasks_prompt(context, unmet_criteria)
 
-        response = await self._call_openclaw(
+        response = await self._call_llm(
             prompt=prompt,
             response_format="json",
             timeout=self.TIMEOUT_DEFAULT,
@@ -518,7 +487,7 @@ class OpenClawReasoningService(BaseService):
         prompt = "\n".join(parts)
 
         try:
-            response = await self._call_openclaw(
+            response = await self._call_llm(
                 prompt=prompt,
                 response_format="json",
                 timeout=self.TIMEOUT_DEFAULT,
@@ -530,7 +499,7 @@ class OpenClawReasoningService(BaseService):
             logger.warning("Spec revision failed for project %s: %s", reference_project_id, e)
             return None
 
-    async def _call_openclaw(
+    async def _call_llm(
         self,
         prompt: str,
         response_format: str = "text",
@@ -540,111 +509,28 @@ class OpenClawReasoningService(BaseService):
         project_id: str | None = None,
         task_id: str | None = None,
     ) -> str:
-        """
-        Call OpenClaw gateway for reasoning.
+        """Call LLM via LLMDispatchService for reasoning."""
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
 
-        Uses a separate internal session for reasoning (not user-facing).
-        """
-        from cyborg_server.structured_logging import log_reasoning_request
-
-        # Use a fresh session for each reasoning call
-        if session_key:
-            reasoning_session = session_key
-        else:
-            short_uuid = str(uuid4())[:8]
-            type_slug = (reasoning_type or "unknown").replace("_", "-")
-            reasoning_session = f"cyborg:reasoning:{type_slug}:{short_uuid}"
-
-        if not self.openclaw_service.is_configured():
-            log_reasoning_request(
-                _get_structured_logger(),
-                reasoning_type or "unknown",
-                project_id=project_id,
-                task_id=task_id,
-                success=False,
-                error="OpenClaw not configured",
-            )
-            raise RuntimeError("OpenClaw reasoning is not configured")
-
-        # Build gateway params
-        params = {
-            "message": prompt,
-            "deliver": False,  # Not delivering to a user
-            "sessionKey": reasoning_session,
-            "thinking": "on",
-            "timeout": timeout * 1000,
-            "idempotencyKey": str(uuid4()),
-        }
-
-        # Add response format hint
         if response_format == "json":
-            params["message"] += "\n\nIMPORTANT: Respond with valid JSON only. No markdown formatting, no code blocks, no explanation outside the JSON."
+            prompt += "\n\nIMPORTANT: Respond with valid JSON only. No markdown formatting, no code blocks, no explanation outside the JSON."
 
-        # Log the prompt to prompt_history
-        await log_prompt(
-            self.db,
-            category=reasoning_type or "unknown",
-            prompt_text=params["message"],
-            project_id=project_id,
-            task_id=task_id,
-            session_key=reasoning_session,
-        )
+        messages: list[dict[str, str]] = [
+            {"role": "user", "content": prompt},
+        ]
 
-        # Track timing
-        start_time = datetime.now(timezone.utc)
-
-        # Log request start
-        log_reasoning_request(
-            _get_structured_logger(),
-            reasoning_type or "unknown",
-            project_id=project_id,
-            task_id=task_id,
-            timeout_seconds=timeout,
-            response_format=response_format,
-        )
-
-        # Call gateway
+        dispatch = LLMDispatchService(self.ctx)
         try:
-            response = await self.openclaw_service._send_gateway_request(
-                method="agent",
-                params=params,
-                expect_final=True,
-                timeout_seconds=timeout,
-            )
-
-            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-            response_text = self._extract_response_text(response)
-
-            # Log success
-            log_reasoning_request(
-                _get_structured_logger(),
-                reasoning_type or "unknown",
+            return await dispatch.chat(
+                messages,
+                call_category=reasoning_type or "reasoning",
+                session_key=session_key,
                 project_id=project_id,
                 task_id=task_id,
-                duration_seconds=duration,
-                success=True,
-                response_length=len(response_text),
             )
-
-            return response_text
-
         except Exception as e:
-            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-            # Log failure
-            log_reasoning_request(
-                _get_structured_logger(),
-                reasoning_type or "unknown",
-                project_id=project_id,
-                task_id=task_id,
-                duration_seconds=duration,
-                success=False,
-                error=str(e),
-                error_type=type(e).__name__,
-            )
-
-            logger.error("OpenClaw reasoning call failed: %s", e)
-            raise RuntimeError(f"OpenClaw reasoning failed: {e}") from e
+            logger.error("LLM reasoning call failed: %s", e)
+            raise RuntimeError(f"LLM reasoning failed: {e}") from e
 
     def _format_upstream_context_for_prompt(
         self,
@@ -1432,53 +1318,6 @@ class OpenClawReasoningService(BaseService):
             ]
         )
         return "\n".join(lines)
-
-    def _extract_response_text(self, response: Any) -> str:
-        """Extract the most useful text payload from an OpenClaw gateway response."""
-
-        if isinstance(response, str):
-            return response.strip()
-
-        if isinstance(response, dict):
-            result = response.get("result")
-            if isinstance(result, dict):
-                payload_text = self._extract_payload_text(result.get("payloads"))
-                if payload_text:
-                    return payload_text
-                for key in ("content", "text", "message"):
-                    value = result.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-
-            payload_text = self._extract_payload_text(response.get("payloads"))
-            if payload_text:
-                return payload_text
-
-            for key in ("content", "text", "message"):
-                value = response.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-
-            for key in ("summary",):
-                value = response.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-
-        return str(response)
-
-    def _extract_payload_text(self, payloads: Any) -> str:
-        """Extract text from OpenClaw payload arrays."""
-
-        if not isinstance(payloads, list):
-            return ""
-        parts: list[str] = []
-        for item in payloads:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text")
-            if isinstance(text, str) and text.strip():
-                parts.append(text.strip())
-        return "\n".join(parts).strip()
 
     def _load_json_payload(self, response: str) -> Any:
         """Load JSON from a strict or lightly wrapped model response."""

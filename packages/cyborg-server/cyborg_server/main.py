@@ -177,6 +177,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from cyborg_server.routers import phone as phone_router
         app.include_router(phone_router.router, prefix="/phone")
 
+    # Conditional Z.ai evaluation router
+    if resolved_settings.zai.enabled:
+        try:
+            from cyborg_server.routers import zai as zai_router
+            app.include_router(zai_router.router)
+        except ImportError:
+            logger.warning("Z.ai SDK not installed — install with: pip install cyborg-server[zai]")
+
+    # Conditional OpenAI evaluation router
+    if resolved_settings.openai.enabled:
+        try:
+            from cyborg_server.routers import openai_llm as openai_router
+            app.include_router(openai_router.router)
+        except ImportError:
+            logger.warning("OpenAI SDK not installed — install with: pip install cyborg-server[openai]")
+
     return app
 
 app = create_app()

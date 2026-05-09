@@ -117,7 +117,7 @@ class VoiceService(BaseService):
         agenda: str = "",
         warmup_ok: bool = False,
     ) -> None:
-        """Run the full voice pipeline: STT → OpenClaw → TTS, tracked as a dispatch."""
+        """Run the full voice pipeline: STT → LLM dispatch → TTS, tracked as a dispatch."""
         audio_data = b"".join(audio_chunks)
         if not audio_data:
             await transport.send_error("No audio data received")
@@ -179,6 +179,7 @@ class VoiceService(BaseService):
             stt_ms=stt_ms,
             agenda=agenda,
             warmup_ok=warmup_ok,
+            dispatch_id=dispatch_id,
         )
         dispatch_service.track(dispatch_id, coro)
 
@@ -198,6 +199,7 @@ class VoiceService(BaseService):
         stt_ms: int,
         agenda: str = "",
         warmup_ok: bool = False,
+        dispatch_id: str = "",
     ) -> None:
         """Coroutine that runs the streaming gateway call + TTS pipeline.
 
@@ -317,52 +319,78 @@ class VoiceService(BaseService):
 
         tts_task = asyncio.create_task(tts_consumer())
 
-        # --- OpenClaw streaming call ---
+        # --- LLM streaming call ---
+        from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        settings = self._get_settings()
         t_gateway_connect = time.monotonic()
         t_prepare = t_gateway_connect
         t_stream_start = t_gateway_connect
         try:
-            from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-            from uuid import uuid4
+            voice_instructions = ""
+            message = text
 
-            if self.ctx.openclaw_hook_service is None:
-                self.ctx.openclaw_hook_service = OpenClawHookService(self.ctx)
-            openclaw_service = self.ctx.openclaw_hook_service
-            if warmup_ok:
-                message = text
+            if lesson_context:
+                message = f"{lesson_context} {text}"
+            elif session_mode.endswith("_teacher"):
+                prompt = self._load_prompt_template(session_mode)
+                message = f"{prompt} {text}" if prompt else text
             else:
-                message = self._build_message(text, detected_lang, session_mode, lesson_context, agenda=agenda)
-            t_prepare = time.monotonic()
-            if not warmup_ok:
-                try:
-                    await openclaw_service.patch_session_model(session_key)
-                except Exception:
-                    logger.warning("session model patch failed (non-fatal)", exc_info=True)
-            coro = await openclaw_service.prepare_streaming_agent_dispatch(
-                message=message,
-                session_key=session_key,
-                idempotency_key=str(uuid4()),
-                on_delta=on_delta,
-                on_tool_start=on_tool_start,
+                voice_instructions = (
+                    "You are participating in a live voice conversation. "
+                    "Respond in plain spoken language: no emojis, no markdown formatting, "
+                    "no asterisks, no bullet points. Just natural speech."
+                )
+                if agenda:
+                    voice_instructions += f"\n\nCALL AGENDA: {agenda}. Follow this agenda throughout the conversation. Stay on topic and work toward the agenda's goal."
+                if detected_lang and detected_lang != "en":
+                    lang_name = _LANGUAGE_NAMES.get(detected_lang, detected_lang)
+                    voice_instructions += f"\n\nRespond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes."
+
+            workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+            messages = await build_chat_messages(
+                message, session_key,
+                db=self.db,
+                system_content=workspace_prompt,
+                voice_instructions=voice_instructions,
+                max_history=settings.harness.max_history_messages,
             )
-            t_stream_start = time.monotonic()
-            response = await coro
+
+            dispatch = LLMDispatchService(self.ctx)
+            t_prepare = time.monotonic()
+            t_stream_start = t_prepare
+            accumulated = ""
+            async for chunk in dispatch.chat_stream(
+                messages,
+                provider="openai",
+                model=settings.harness.default_model,
+                call_category="voice_chat",
+                session_key=session_key,
+                dispatch_id=dispatch_id,
+            ):
+                if chunk:
+                    accumulated += chunk
+                    await on_delta(accumulated)
+                    if on_tool_start and len(accumulated) < 20:
+                        await on_tool_start()
+            response = accumulated
         except Exception:
-            logger.exception("OpenClaw gateway error during voice dispatch")
+            logger.exception("LLM dispatch error during voice dispatch")
             response = "Sorry, I couldn't reach the AI service."
 
         t_gateway_done = time.monotonic()
-        openclaw_ms = int((t_gateway_done - t1) * 1000)
-        latency["openclaw_total_ms"] = openclaw_ms
+        llm_ms = int((t_gateway_done - t1) * 1000)
+        latency["llm_total_ms"] = llm_ms
         latency["gateway_prepare_ms"] = int((t_prepare - t_gateway_connect) * 1000)
         latency["gateway_stream_ms"] = int((t_gateway_done - t_stream_start) * 1000)
-        latency["first_audio_at_ms"] = tts_first_chunk_ms
+        latency["first_audio_at_ms"] = tts_first_chunk_ms or 0
         logger.info(
-            "Voice pipeline timing: STT=%dms prepare=%dms stream=%dms openclaw_total=%dms tts_first_chunk=%dms",
+            "Voice pipeline timing: STT=%dms prepare=%dms stream=%dms llm_total=%dms tts_first_chunk=%dms",
             stt_ms,
             latency["gateway_prepare_ms"],
             latency["gateway_stream_ms"],
-            openclaw_ms,
+            llm_ms,
             tts_first_chunk_ms or 0,
         )
 
@@ -417,20 +445,6 @@ class VoiceService(BaseService):
         await transport.send_message("audio_done", {})
         await transport.send_message("latency", latency)
         await transport.send_status("idle")
-
-    def _build_message(self, text: str, language: str, session_mode: str, lesson_context: str | None, *, agenda: str = "") -> str:
-        if lesson_context:
-            return f"{lesson_context} {text}"
-        if session_mode.endswith("_teacher"):
-            prompt = self._load_prompt_template(session_mode)
-            return f"{prompt} {text}" if prompt else text
-        prefix = "[You are a voice assistant. Respond in plain spoken language: no emojis, no markdown formatting, no asterisks, no bullet points. Just natural speech.]"
-        if agenda:
-            prefix += f" [CALL AGENDA: {agenda}. Follow this agenda throughout the conversation. Stay on topic and work toward the agenda's goal.]"
-        if language and language != "en":
-            lang_name = _LANGUAGE_NAMES.get(language, language)
-            prefix += f" [Respond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes.]"
-        return f"{prefix} {text}"
 
     def _load_prompt_template(self, name: str) -> str | None:
         prompts_dir = self._prompts_dir()

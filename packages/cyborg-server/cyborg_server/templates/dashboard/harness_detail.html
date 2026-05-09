@@ -1,0 +1,131 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}LLM Call Detail - Cyborg Dashboard{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+    <a href="/dashboard/harness" class="text-accent-cyan hover:underline text-sm">&larr; Back to LLM Call Logs</a>
+</div>
+
+<div class="mb-6 flex flex-wrap items-center gap-3">
+    <h1 class="text-2xl font-bold neon-text">LLM Call Detail</h1>
+    <span class="px-2 py-0.5 rounded text-xs font-mono-data
+        {% if entry.status == 'completed' %}bg-green-500/20 text-green-400
+        {% elif entry.status == 'failed' %}bg-red-500/20 text-accent-red
+        {% else %}bg-yellow-500/20 text-yellow-400{% endif %}">
+        {{ entry.status }}
+    </span>
+</div>
+
+<!-- Metadata -->
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+        <div>
+            <span class="text-text-muted">Timestamp</span>
+            <p class="font-mono-data text-text-primary">{{ entry.timestamp }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Provider</span>
+            <p class="font-mono-data text-accent-cyan">{{ entry.provider }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Model</span>
+            <p class="font-mono-data text-accent-cyan">{{ entry.model }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Category</span>
+            <p class="font-mono-data text-accent-purple">{{ entry.call_category }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Latency</span>
+            <p class="font-mono-data text-accent-purple">{{ entry.latency_seconds or '--' }}s</p>
+        </div>
+        <div>
+            <span class="text-text-muted">TTFT</span>
+            <p class="font-mono-data text-accent-purple">{{ entry.ttft_seconds or '--' }}s</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Prompt Tokens</span>
+            <p class="font-mono-data text-text-primary">{{ entry.prompt_tokens or '--' }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Completion Tokens</span>
+            <p class="font-mono-data text-text-primary">{{ entry.completion_tokens or '--' }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Total Tokens</span>
+            <p class="font-mono-data text-text-primary">{{ entry.total_tokens or '--' }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Cached Tokens</span>
+            <p class="font-mono-data text-yellow-400">{{ entry.cached_tokens or '--' }}</p>
+        </div>
+        <div>
+            <span class="text-text-muted">Session</span>
+            <p class="font-mono-data text-text-primary text-xs">{{ entry.session_key or '--' }}</p>
+        </div>
+    </div>
+</div>
+
+<!-- System Prompt -->
+{% if entry.system_prompt %}
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-accent-cyan">System Prompt</h2>
+        <span class="text-text-muted text-xs font-mono-data">{{ entry.system_prompt|length }} chars</span>
+    </div>
+    <pre class="text-sm text-text-secondary bg-bg-deep p-4 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto">{{ entry.system_prompt }}</pre>
+</div>
+{% endif %}
+
+<!-- User Message -->
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-accent-purple">User Message</h2>
+        <span class="text-text-muted text-xs font-mono-data">{{ entry.user_message|length }} chars</span>
+    </div>
+    <pre class="text-sm text-text-primary bg-bg-deep p-4 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto">{{ entry.user_message }}</pre>
+</div>
+
+<!-- Response -->
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-green-400">Response</h2>
+        <span class="text-text-muted text-xs font-mono-data">{{ entry.response|length }} chars</span>
+    </div>
+    {% if entry.response %}
+    <pre class="text-sm text-text-primary bg-bg-deep p-4 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto">{{ entry.response }}</pre>
+    {% elif entry.error_message %}
+    <pre class="text-sm text-accent-red bg-bg-deep p-4 rounded-lg overflow-x-auto whitespace-pre-wrap">{{ entry.error_message }}</pre>
+    {% else %}
+    <p class="text-text-muted text-sm">No response recorded.</p>
+    {% endif %}
+</div>
+
+<!-- Full Messages Chain -->
+{% if entry.messages_json and entry.messages_json != '[]' %}
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-accent-orange">Full Messages Chain</h2>
+        <span class="text-text-muted text-xs font-mono-data">{{ entry.messages|length }} messages</span>
+    </div>
+    <div class="space-y-2">
+        {% for msg in entry.messages %}
+        <div class="bg-bg-deep rounded-lg p-3">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-mono-data px-2 py-0.5 rounded
+                    {% if msg.role == 'system' %}bg-accent-cyan/20 text-accent-cyan
+                    {% elif msg.role == 'user' %}bg-accent-purple/20 text-accent-purple
+                    {% else %}bg-green-500/20 text-green-400{% endif %}">
+                    {{ msg.role }}
+                </span>
+                <span class="text-text-muted text-xs font-mono-data">{{ msg.content|length }} chars</span>
+            </div>
+            <pre class="text-xs text-text-secondary overflow-x-auto whitespace-pre-wrap max-h-48 overflow-y-auto">{{ msg.content[:2000] }}{% if msg.content|length > 2000 %}...
+[truncated]{% endif %}</pre>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

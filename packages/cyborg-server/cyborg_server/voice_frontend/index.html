@@ -71,12 +71,9 @@
 
             <!-- Push-to-talk area -->
             <div id="ptt-area">
-                <button id="ptt-btn" 
-                        ontouchstart="app.pttStart(event)" 
-                        ontouchend="app.pttEnd(event)"
-                        onmousedown="app.pttStart(event)"
-                        onmouseup="app.pttEnd(event)"
-                        onmouseleave="app.pttEnd(event)"
+                <button id="ptt-btn"
+                        onpointerdown="app.pttStart(event)"
+                        onpointerup="app.pttEnd(event)"
                         disabled>
                     <span id="ptt-icon">🎙️</span>
                     <span id="ptt-label">Hold to Talk</span>

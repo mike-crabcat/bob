@@ -423,6 +423,7 @@ body {
     align-items: center;
     justify-content: center;
     gap: 0.3rem;
+    touch-action: none;
     transition: transform 0.15s, border-color 0.2s, background 0.2s, box-shadow 0.2s;
     -webkit-user-select: none;
     user-select: none;

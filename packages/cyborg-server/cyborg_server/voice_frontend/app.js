@@ -252,6 +252,11 @@ const app = {
         if (event) event.preventDefault();
         if (!this.isConnected || this.isRecording || this.isProcessing) return;
 
+        // Capture pointer so move/release outside button still works
+        if (event.target && event.target.setPointerCapture) {
+            try { event.target.setPointerCapture(event.pointerId); } catch (e) {}
+        }
+
         // Resume AudioContext (required on iOS after user gesture)
         if (this.audioContext && this.audioContext.state === 'suspended') {
             await this.audioContext.resume();
@@ -312,6 +317,7 @@ const app = {
 
             // Start recording with 100ms timeslice for streaming chunks
             this.mediaRecorder.start(100);
+            this.recordStartTime = Date.now();
 
         } catch (e) {
             console.error('PTT start error:', e);
@@ -352,8 +358,12 @@ const app = {
             }
         };
 
+        // Ensure at least 200ms of audio so MediaRecorder has time to produce a chunk
+        const elapsed = Date.now() - (this.recordStartTime || 0);
+        const minDelay = Math.max(0, 200 - elapsed);
+
         if (recorder && recorder.state !== 'inactive') {
-            recorder.onstop = () => sendStop();
+            recorder.onstop = () => setTimeout(sendStop, minDelay);
             try {
                 recorder.stop();
             } catch (e) {
