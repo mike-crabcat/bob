@@ -147,6 +147,8 @@ async def harness_log_detail(
         "error_message": row.get("error_message"),
         "messages_json": row.get("messages_json", "[]"),
         "messages": json.loads(row.get("messages_json", "[]")) if row.get("messages_json") else [],
+        "tools_json": row.get("tools_json"),
+        "tools": json.loads(row.get("tools_json", "[]")) if row.get("tools_json") else [],
     }
 
     return _render_template(

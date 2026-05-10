@@ -102,6 +102,33 @@
     {% endif %}
 </div>
 
+<!-- Registered Tools -->
+{% if entry.tools and entry.tools|length > 0 %}
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-accent-cyan">Registered Tools</h2>
+        <span class="text-text-muted text-xs font-mono-data">{{ entry.tools|length }} tool{{ "" if entry.tools|length == 1 else "s" }}</span>
+    </div>
+    <div class="space-y-3">
+        {% for t in entry.tools %}
+        <div class="bg-bg-deep rounded-lg p-3">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-mono-data px-2 py-0.5 rounded bg-accent-cyan/20 text-accent-cyan">{{ t.function.name }}</span>
+                <span class="text-text-muted text-xs">{{ t.function.description }}</span>
+            </div>
+            {% if t.function.parameters and t.function.parameters.properties %}
+            <div class="mt-2 text-xs font-mono-data text-text-secondary">
+                {% for pname, pschema in t.function.parameters.properties.items() %}
+                <span class="inline-block mr-3"><span class="text-accent-purple">{{ pname }}</span>: {{ pschema.type }}{% if pname in t.function.parameters.required %}<span class="text-accent-red">*</span>{% endif %}{% if pschema.description %} <span class="text-text-muted">— {{ pschema.description }}</span>{% endif %}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 <!-- Full Messages Chain -->
 {% if entry.messages_json and entry.messages_json != '[]' %}
 <div class="glass-card neon-border rounded-xl p-4 mb-6">
@@ -116,13 +143,31 @@
                 <span class="text-xs font-mono-data px-2 py-0.5 rounded
                     {% if msg.role == 'system' %}bg-accent-cyan/20 text-accent-cyan
                     {% elif msg.role == 'user' %}bg-accent-purple/20 text-accent-purple
+                    {% elif msg.role == 'tool' %}bg-yellow-500/20 text-yellow-400
                     {% else %}bg-green-500/20 text-green-400{% endif %}">
                     {{ msg.role }}
                 </span>
-                <span class="text-text-muted text-xs font-mono-data">{{ msg.content|length }} chars</span>
+                {% if msg.tool_calls %}
+                <span class="text-xs font-mono-data px-2 py-0.5 rounded bg-accent-orange/20 text-accent-orange">
+                    {{ msg.tool_calls|length }} tool call{{ "" if msg.tool_calls|length == 1 else "s" }}
+                </span>
+                {% elif msg.tool_call_id %}
+                <span class="text-xs font-mono-data text-text-muted">id={{ msg.tool_call_id }}</span>
+                {% else %}
+                <span class="text-text-muted text-xs font-mono-data">{{ msg.content|length if msg.content else 0 }} chars</span>
+                {% endif %}
             </div>
+            {% if msg.tool_calls %}
+            {% for tc in msg.tool_calls %}
+            <div class="mb-2 border-l-2 border-accent-orange/40 pl-3">
+                <p class="text-xs font-mono-data text-accent-orange mb-1">{{ tc.function.name }}({{ tc.function.arguments[:500] }}{% if tc.function.arguments|length > 500 %}...{% endif %})</p>
+            </div>
+            {% endfor %}
+            {% endif %}
+            {% if msg.content %}
             <pre class="text-xs text-text-secondary overflow-x-auto whitespace-pre-wrap max-h-48 overflow-y-auto">{{ msg.content[:2000] }}{% if msg.content|length > 2000 %}...
 [truncated]{% endif %}</pre>
+            {% endif %}
         </div>
         {% endfor %}
     </div>

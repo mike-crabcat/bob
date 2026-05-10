@@ -215,6 +215,7 @@ class LLMJudge:
                 [{"role": "user", "content": prompt}],
                 call_category="eval_judge",
                 temperature=0.3,
+                model="gpt-5.4-nano",
             )
             data = json.loads(judge_response)
             overall = float(data.get("overall", 0))

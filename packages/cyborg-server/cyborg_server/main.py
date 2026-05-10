@@ -27,7 +27,7 @@ from cyborg_server.heartbeat import (
     StuckDispatchCheckTask,
 )
 from cyborg_server.models import HealthResponse
-from cyborg_server.routers import calendars, contacts, context, dashboard, dispatches, email, health, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks, whatsapp
+from cyborg_server.routers import calendars, contacts, context, dashboard, dispatches, email, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks, whatsapp
 from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(notifications.router)
     app.include_router(openclaw.router)
     app.include_router(planning.router)
-    app.include_router(health.router)
     app.include_router(learning.router)
     app.include_router(session_routes.router)
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")

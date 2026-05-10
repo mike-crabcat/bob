@@ -70,18 +70,16 @@ async def build_chat_messages(
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
     if session_key and db is not None:
-        from cyborg_server.services.voice_session_store import VoiceSessionStore
-        from cyborg_server.context import AppContext
-
         # Use a lightweight approach — just query directly
         rows = await db.fetch_all(
-            "SELECT role, text FROM voice_session_messages "
-            "WHERE session_key = ? ORDER BY created_at ASC LIMIT ?",
+            "SELECT role, content FROM session_messages "
+            "WHERE session_key = ? AND role IN ('user', 'assistant') "
+            "ORDER BY created_at ASC LIMIT ?",
             (session_key, max_history),
         )
         for row in rows:
-            if row["role"] in ("user", "assistant") and row["text"]:
-                messages.append({"role": row["role"], "content": row["text"]})
+            if row["content"]:
+                messages.append({"role": row["role"], "content": row["content"]})
 
     messages.append({"role": "user", "content": user_message})
     return messages

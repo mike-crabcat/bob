@@ -37,13 +37,15 @@ def _extract_from_messages(
 async def _record_log(
     db: Any,
     *,
-    provider: str,
-    model: str,
-    call_category: str,
+    log_id: str | None = None,
+    provider: str = "",
+    model: str = "",
+    call_category: str = "",
     session_key: str | None = None,
     system_prompt: str = "",
     user_message: str = "",
     messages_json: str | None = None,
+    tools_json: str | None = None,
     response_text: str = "",
     latency_seconds: float | None = None,
     ttft_seconds: float | None = None,
@@ -56,27 +58,54 @@ async def _record_log(
     project_id: str | None = None,
     task_id: str | None = None,
     dispatch_id: str | None = None,
-) -> None:
-    """Record an LLM call to the unified log. Non-blocking."""
+) -> str:
+    """Record or update an LLM call log entry. Returns the log_id.
+
+    If log_id is provided and a row with that id exists, UPDATE it.
+    Otherwise INSERT a new row.
+    """
     try:
+        if log_id is not None:
+            existing = await db.fetch_one(
+                "SELECT id FROM llm_call_log WHERE id = ?", (log_id,),
+            )
+            if existing:
+                await db.execute(
+                    """UPDATE llm_call_log SET
+                       response_text=?, latency_seconds=?, ttft_seconds=?,
+                       prompt_tokens=?, completion_tokens=?, total_tokens=?, cached_tokens=?,
+                       status=?, error_message=?, messages_json=COALESCE(?, messages_json)
+                       WHERE id = ?""",
+                    (
+                        response_text, latency_seconds, ttft_seconds,
+                        prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                        status, error_message, messages_json,
+                        log_id,
+                    ),
+                )
+                return log_id
+
+        row_id = log_id or str(uuid4())
         await db.execute(
             """INSERT INTO llm_call_log
                (id, provider, model, call_category, session_key,
-                system_prompt, user_message, messages_json,
+                system_prompt, user_message, messages_json, tools_json,
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                 status, error_message, project_id, task_id, dispatch_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                str(uuid4()), provider, model, call_category, session_key,
-                system_prompt, user_message, messages_json,
+                row_id, provider, model, call_category, session_key,
+                system_prompt, user_message, messages_json, tools_json,
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                 status, error_message, project_id, task_id, dispatch_id,
             ),
         )
+        return row_id
     except Exception:
         logger.warning("Failed to record LLM call log", exc_info=True)
+        return log_id or str(uuid4())
 
 
 class LLMDispatchService(BaseService):
@@ -335,11 +364,11 @@ class LLMDispatchService(BaseService):
         service = self._get_provider_service(resolved_provider)
 
         system_prompt, user_message = _extract_from_messages(messages)
-        initial_messages_json = json.dumps(messages)
 
         # Convert tools to provider format
         openai_tools = [t.to_openai_format() for t in tools]
         tool_handlers = {t.name: t.handler for t in tools}
+        tools_json = json.dumps(openai_tools) if openai_tools else None
 
         t0 = time.monotonic()
         try:
@@ -364,7 +393,8 @@ class LLMDispatchService(BaseService):
                 session_key=session_key,
                 system_prompt=system_prompt,
                 user_message=user_message,
-                messages_json=initial_messages_json,
+                messages_json=json.dumps(messages),
+                tools_json=tools_json,
                 response_text=result,
                 latency_seconds=elapsed,
                 prompt_tokens=stream_result.prompt_tokens,
@@ -397,7 +427,8 @@ class LLMDispatchService(BaseService):
                 session_key=session_key,
                 system_prompt=system_prompt,
                 user_message=user_message,
-                messages_json=initial_messages_json,
+                messages_json=json.dumps(messages),
+                tools_json=tools_json,
                 latency_seconds=elapsed,
                 status="failed",
                 error_message=str(exc),
@@ -430,71 +461,121 @@ class LLMDispatchService(BaseService):
         resolved_model = self._resolve_model(resolved_provider, model)
         service = self._get_provider_service(resolved_provider)
 
+        system_prompt, user_message = _extract_from_messages(messages)
+
         openai_tools = [t.to_openai_format() for t in tools]
         tool_handlers = {t.name: t.handler for t in tools}
+        tools_json = json.dumps(openai_tools) if openai_tools else None
 
-        # Tool loop: non-streaming rounds until LLM gives a text response
-        for iteration in range(max_iterations):
-            response = await service.client.chat.completions.create(
-                model=resolved_model,
-                messages=messages,
-                tools=openai_tools,
-            )
-            message = response.choices[0].message
+        t0 = time.monotonic()
+        log_id = await _record_log(
+            self.db,
+            provider=resolved_provider, model=resolved_model,
+            call_category=call_category, session_key=session_key,
+            system_prompt=system_prompt, user_message=user_message,
+            messages_json=json.dumps(messages),
+            tools_json=tools_json,
+            status="running",
+            project_id=project_id, task_id=task_id,
+            dispatch_id=dispatch_id,
+        )
+        accumulated = ""
+        ttft: float | None = None
 
-            if not message.tool_calls:
-                # No tool calls — yield the final text and return
-                final_text = message.content or ""
-                if final_text:
-                    yield final_text
-                return
+        try:
+            # Tool loop: non-streaming rounds until LLM gives a text response
+            for iteration in range(max_iterations):
+                response = await service.client.chat.completions.create(
+                    model=resolved_model,
+                    messages=messages,
+                    tools=openai_tools,
+                )
+                message = response.choices[0].message
 
-            # Execute tool calls and append to messages
-            messages.append({
-                "role": message.role,
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in message.tool_calls
-                ],
-            })
+                if not message.tool_calls:
+                    # No tool calls — yield the final text
+                    final_text = message.content or ""
+                    if final_text:
+                        ttft = time.monotonic() - t0
+                        accumulated = final_text
+                        yield final_text
+                    await _record_log(self.db, log_id=log_id,
+                        response_text=accumulated,
+                        latency_seconds=time.monotonic() - t0,
+                        ttft_seconds=ttft,
+                        messages_json=json.dumps(messages),
+                        status="completed",
+                    )
+                    return
 
-            for tc in message.tool_calls:
-                handler = tool_handlers.get(tc.function.name)
-                if handler is None:
-                    result = f"Error: unknown tool '{tc.function.name}'"
-                else:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                        result = await handler(**args)
-                    except Exception as e:
-                        result = f"Error: {e}"
-                        logger.warning("Tool %s failed: %s", tc.function.name, e)
-
+                # Execute tool calls and append to messages
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
+                    "role": message.role,
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in message.tool_calls
+                    ],
                 })
 
-            logger.info(
-                "chat_stream_with_tools: iteration=%d tool_calls=%d",
-                iteration + 1,
-                len(message.tool_calls),
+                for tc in message.tool_calls:
+                    handler = tool_handlers.get(tc.function.name)
+                    if handler is None:
+                        result = f"Error: unknown tool '{tc.function.name}'"
+                    else:
+                        try:
+                            args = json.loads(tc.function.arguments)
+                            result = await handler(**args)
+                        except Exception as e:
+                            result = f"Error: {e}"
+                            logger.warning("Tool %s failed: %s", tc.function.name, e)
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+
+                logger.info(
+                    "chat_stream_with_tools: iteration=%d tool_calls=%d",
+                    iteration + 1,
+                    len(message.tool_calls),
+                )
+
+            # Hit max iterations — make one final streaming call
+            logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)
+            async for chunk in service.chat_stream(
+                messages=messages,
+                model=resolved_model,
+            ):
+                if chunk:
+                    if ttft is None:
+                        ttft = time.monotonic() - t0
+                    accumulated += chunk
+                    yield chunk
+
+            await _record_log(self.db, log_id=log_id,
+                response_text=accumulated,
+                latency_seconds=time.monotonic() - t0,
+                ttft_seconds=ttft,
+                messages_json=json.dumps(messages),
+                status="completed",
             )
 
-        # Hit max iterations — make one final streaming call
-        logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)
-        async for chunk in service.chat_stream(
-            messages=messages,
-            model=resolved_model,
-        ):
-            if chunk:
-                yield chunk
+        except Exception as exc:
+            await _record_log(self.db, log_id=log_id,
+                response_text=accumulated,
+                latency_seconds=time.monotonic() - t0,
+                ttft_seconds=ttft,
+                messages_json=json.dumps(messages),
+                status="failed",
+                error_message=str(exc),
+            )
+            raise

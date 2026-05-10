@@ -193,8 +193,6 @@ async def send_email(
         CUSTOM_AGENDA_TEMPLATE,
         resolve_or_create_email_thread,
     )
-    from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-
     inbox = await database.fetch_one(
         "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
         (str(inbox_id),),
@@ -259,23 +257,13 @@ async def send_email(
         has_attachments=bool(payload.attachments),
     )
 
-    # Dispatch to OpenClaw
-    if settings.openclaw.enabled:
-        hook_service = OpenClawHookService(
-            ctx,
-            cyborg_service_url=settings.resolved_public_url,
-        )
+    # Dispatch to LLM for context priming
+    if settings.openai.enabled:
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+        from cyborg_server.services.session_service import SessionService
+        from cyborg_server.services.dispatch_service import DispatchService
 
-        # Combined dispatch: agenda + outgoing email context
         send_parts: list[str] = []
-
-        if is_new_thread:
-            from cyborg_server.services.email_polling_service import _inbox_flag
-            inbox_flag = await _inbox_flag(database, inbox)
-            send_parts.append(CUSTOM_AGENDA_TEMPLATE.format(
-                agenda=payload.agenda, inbox_flag=inbox_flag,
-            ))
-            send_parts.append("")
 
         send_parts += [
             "## Email You Just Sent",
@@ -287,48 +275,42 @@ async def send_email(
             payload.text,
         ]
 
-        send_prompt = "\n".join(send_parts)
-        send_key = f"email:send:{agentmail_message_id}"
+        send_content = "\n".join(send_parts)
         session_key = thread["session_key"]
 
         logger.info(
-            "Dispatching send to OpenClaw session=%s idempotency=%s timeout=%ds new_thread=%s\n%s",
-            session_key, send_key,
-            int(settings.openclaw.timeout_seconds),
-            is_new_thread,
-            send_prompt,
+            "Dispatching send to LLM session=%s new_thread=%s",
+            session_key, is_new_thread,
         )
 
-        from cyborg_server.services.prompt_history import log_prompt
-        from cyborg_server.services.dispatch_service import DispatchService
+        from cyborg_server.services.prompt_assembler import load_workspace_prompt
 
-        await log_prompt(
-            database,
-            category="email_outgoing",
-            prompt_text=send_prompt,
-            session_key=session_key,
-        )
+        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        custom_agenda = CUSTOM_AGENDA_TEMPLATE.format(agenda=payload.agenda) if is_new_thread and payload.agenda else None
+        system_parts = [p for p in (workspace_prompt, custom_agenda, "You are managing an email conversation. The following is an outgoing email you sent for your context.") if p]
+
+        messages = [
+            {"role": "system", "content": "\n\n".join(system_parts)},
+            {"role": "user", "content": send_content},
+        ]
+
         dispatch_id = await DispatchService(ctx).record_dispatch(
             notification_type="email_outgoing",
             session_key=session_key,
         )
 
-        DispatchService(ctx).track(
-            dispatch_id,
-            hook_service._send_gateway_request(
-                "agent",
-                {
-                    "message": send_prompt,
-                    "deliver": False,
-                    "sessionKey": session_key,
-                    "thinking": "on",
-                    "timeout": int(settings.openclaw.timeout_seconds),
-                    "idempotencyKey": send_key,
-                },
-                expect_final=True,
-                timeout_seconds=int(settings.openclaw.timeout_seconds),
-            ),
-        )
+        async def _run_send_dispatch() -> str:
+            result = await LLMDispatchService(ctx).chat_with_tools(
+                messages, [],
+                call_category="email_outgoing",
+                session_key=session_key,
+                dispatch_id=dispatch_id,
+            )
+            session_svc = SessionService(ctx)
+            await session_svc.add_message(session_key, "assistant", payload.text, channel="email")
+            return result
+
+        DispatchService(ctx).track(dispatch_id, _run_send_dispatch())
         logger.info("Send dispatch tracking for thread %s (dispatch=%s)", thread["id"], dispatch_id)
 
     return result

@@ -222,7 +222,7 @@ class OpenAISettings:
 
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
-    default_model: str = "gpt-4.1-mini"
+    default_model: str = "gpt-5.4-mini"
     timeout_seconds: float = 120.0
 
     @property
@@ -236,7 +236,7 @@ class HarnessSettings:
 
     enabled: bool = False
     workspace_dir: Path = Path("~/.config/cyborg/harness")
-    default_model: str = "gpt-5.4-nano"
+    default_model: str = "gpt-5.4-mini"
     max_history_messages: int = 20
 
 

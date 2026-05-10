@@ -16,37 +16,40 @@ class VoiceSessionStore(BaseService):
     async def add_message(
         self, session_key: str, role: str, text: str, language: str | None = None,
     ) -> None:
-        now = utcnow().isoformat()
-        await self.db.execute(
-            "INSERT INTO voice_session_messages (session_key, role, text, language, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_key, role, text, language, now),
+        from cyborg_server.services.session_service import SessionService
+        svc = SessionService(self.ctx)
+        metadata = {}
+        if language:
+            metadata["language"] = language
+        await svc.add_message(
+            session_key, role, text,
+            channel="voice",
+            metadata=metadata or None,
         )
 
     async def get_messages(
         self, session_key: str, limit: int = 200,
     ) -> list[dict[str, str | None]]:
-        rows = await self.db.fetch_all(
-            "SELECT role, text, language FROM voice_session_messages WHERE session_key = ? ORDER BY created_at ASC LIMIT ?",
-            (session_key, limit),
-        )
-        return [{"role": row["role"], "text": row["text"], "language": row["language"]} for row in rows]
+        from cyborg_server.services.session_service import SessionService
+        svc = SessionService(self.ctx)
+        msgs = await svc.get_messages(session_key, limit=limit)
+        return [{"role": m.role, "text": m.content, "language": m.metadata.get("language")} for m in msgs]
 
     async def delete_session(self, session_key: str) -> None:
-        await self.db.execute(
-            "DELETE FROM voice_session_messages WHERE session_key = ?",
-            (session_key,),
-        )
+        from cyborg_server.services.session_service import SessionService
+        svc = SessionService(self.ctx)
+        await svc.delete_session(session_key)
 
     async def delete_old_sessions(self, max_age_days: int = 30) -> int:
         from datetime import timedelta
 
         cutoff = (utcnow() - timedelta(days=max_age_days)).isoformat()
         count = await self.db.execute(
-            "DELETE FROM voice_session_messages WHERE created_at < ?",
+            "DELETE FROM session_messages WHERE created_at < ? AND channel = 'voice'",
             (cutoff,),
         )
         if count:
-            logger.info("Purged %d old voice session messages (older than %d days)", count, max_age_days)
+            logger.info("Purged %d old session messages (older than %d days)", count, max_age_days)
         return count
 
     # ---- Lesson progress ----

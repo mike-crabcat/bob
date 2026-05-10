@@ -48,6 +48,7 @@ class EmailDeliveryService(BaseService):
     ) -> dict[str, Any]:
         """Send a reply in an existing email thread.
 
+        thread_id is the agentmail_thread_id (not the local email_threads.id).
         Finds the latest message in the thread and replies to it.
         Falls back to sending a new threaded message if no existing message found.
         """
