@@ -344,7 +344,14 @@ class VoiceService(BaseService):
                 )
                 if agenda:
                     voice_instructions += f"\n\nCALL AGENDA: {agenda}. Follow this agenda throughout the conversation. Stay on topic and work toward the agenda's goal."
-                if detected_lang and detected_lang != "en":
+
+            # Check for stored session agenda
+            from cyborg_server.services.session_agenda_service import SessionAgendaService
+            session_agenda = await SessionAgendaService(self.ctx).get_agenda(session_key)
+            if session_agenda and not agenda:
+                voice_instructions += f"\n\nAGENDA: {session_agenda}"
+
+            if detected_lang and detected_lang != "en":
                     lang_name = _LANGUAGE_NAMES.get(detected_lang, detected_lang)
                     voice_instructions += f"\n\nRespond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes."
 

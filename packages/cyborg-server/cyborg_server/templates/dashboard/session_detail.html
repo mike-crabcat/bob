@@ -40,6 +40,20 @@
     </div>
 </div>
 
+<!-- Agenda Editor -->
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <form method="POST" action="/dashboard/sessions/{{ session_key_enc }}/agenda">
+        <div class="flex items-center justify-between mb-3">
+            <h2 class="text-lg font-semibold text-accent-orange">Agenda</h2>
+            <button type="submit" class="px-3 py-1.5 rounded-lg text-sm bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 hover:bg-accent-cyan/30 transition-colors">
+                Save
+            </button>
+        </div>
+        <textarea name="agenda" rows="6" class="w-full bg-bg-deep text-text-primary text-sm font-mono-data p-3 rounded-lg border border-accent-cyan/10 focus:border-accent-cyan/40 focus:outline-none resize-y" placeholder="No agenda set. Add instructions to guide the LLM's behavior for this session...">{{ current_agenda }}</textarea>
+        <p class="text-text-muted text-xs mt-2">The agenda extends the system prompt for all subsequent LLM calls in this session.</p>
+    </form>
+</div>
+
 <!-- LLM Calls -->
 {% if calls %}
 <div class="glass-card neon-border rounded-xl p-4 mb-6">

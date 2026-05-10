@@ -505,24 +505,21 @@ class EmailPollingService(BaseService):
 
         prompt_parts: list[str] = []
 
-        # 1. Agenda framing (always, using stored agenda if available)
-        stored_agenda = thread.get("agenda")
-        if stored_agenda:
-            agenda_text = stored_agenda
-        else:
-            contact_id = thread.get("contact_id")
-            if contact_id:
-                contact = await self.db.fetch_one(
-                    "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL LIMIT 1",
-                    (contact_id,),
-                )
-                is_trusted = bool(contact.get("is_trusted", 0)) if contact else False
-                if is_trusted:
-                    agenda_text = DEFAULT_AGENDA
-                else:
-                    agenda_text = KNOWN_UNTRUSTED_AGENDA
-            else:
-                agenda_text = UNTRUSTED_EXTERNAL_AGENDA
+        # 1. Resolve agenda
+        from cyborg_server.services.session_agenda_service import SessionAgendaService
+        contact_id = thread.get("contact_id")
+        is_trusted = False
+        if contact_id:
+            contact = await self.db.fetch_one(
+                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+                (contact_id,),
+            )
+            is_trusted = bool(contact.get("is_trusted", 0)) if contact else False
+        agenda_svc = SessionAgendaService(self.ctx)
+        agenda_text = await agenda_svc.get_effective_agenda(
+            thread["session_key"], "email",
+            contact_id=contact_id, is_trusted=is_trusted,
+        )
 
         # 2. Prior outgoing email context — only on the first incoming reply
         if is_new_thread:

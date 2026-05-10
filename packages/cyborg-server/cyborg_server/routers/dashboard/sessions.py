@@ -6,7 +6,7 @@ import json
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from cyborg_server.database import Database
 from cyborg_server.dependencies import get_database
@@ -122,14 +122,24 @@ async def session_detail(
     completed = sum(1 for c in calls if c["status"] == "completed")
     failed = sum(1 for c in calls if c["status"] == "failed")
 
+    # Agenda
+    from cyborg_server.services.session_agenda_service import SessionAgendaService
+    from cyborg_server.context import AppContext
+    from cyborg_server.dependencies import get_app_context
+    ctx = get_app_context(request)
+    agenda_svc = SessionAgendaService(ctx)
+    current_agenda = await agenda_svc.get_agenda(session_key) or ""
+
     return _render_template(
         "dashboard/session_detail.html",
         request,
         {
             "version": settings.version,
             "session_key": session_key,
+            "session_key_enc": quote(session_key, safe=""),
             "channel": channel,
             "calls": calls,
+            "current_agenda": current_agenda,
             "stats": {
                 "total_calls": total_calls,
                 "completed": completed,
@@ -138,3 +148,22 @@ async def session_detail(
             "pending_count": pending_count,
         },
     )
+
+
+@router.post("/sessions/{session_key:path}/agenda", response_class=HTMLResponse)
+async def update_session_agenda(
+    request: Request,
+    session_key: str,
+    db: Database = Depends(get_database),
+) -> HTMLResponse:
+    session_key = unquote(session_key)
+    form = await request.form()
+    agenda = str(form.get("agenda", ""))
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.dependencies import get_app_context
+    from cyborg_server.services.session_agenda_service import SessionAgendaService
+    ctx = get_app_context(request)
+    await SessionAgendaService(ctx).set_agenda(session_key, agenda)
+
+    return RedirectResponse(url=f"/dashboard/sessions/{quote(session_key, safe='')}", status_code=303)
