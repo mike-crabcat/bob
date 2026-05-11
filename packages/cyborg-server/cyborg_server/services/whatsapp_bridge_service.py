@@ -176,6 +176,24 @@ class WhatsAppBridgeService(BaseService):
         except Exception:
             logger.warning("failed to send ack for %s", message_id, exc_info=True)
 
+    async def _build_participants_prompt(self, session_key: str) -> str:
+        rows = await self.db.fetch_all(
+            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
+            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
+            (session_key,),
+        )
+        if not rows:
+            return ""
+        lines = ["## Participants"]
+        for r in rows:
+            name = r["display_name"] or r["identifier"]
+            if r["contact_id"]:
+                trust = "trusted" if r["is_trusted"] else "untrusted"
+                lines.append(f"- {name} (contact, {trust})")
+            else:
+                lines.append(f"- {name} ({r['identifier']}, not in contacts)")
+        return "\n".join(lines)
+
     async def _on_message(self, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type", "")
         payload = msg.get("payload", {})
@@ -250,6 +268,20 @@ class WhatsAppBridgeService(BaseService):
             key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
+        # Upsert sender as session participant
+        now_iso = utcnow().isoformat()
+        await self.db.execute(
+            """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_key, identifier) DO UPDATE SET
+                   display_name = excluded.display_name,
+                   contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
+                   is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
+                   last_active_at = excluded.last_active_at""",
+            (session_key, phone_number, sender_name or phone_number,
+             contact_id, 1 if is_trusted else 0, now_iso),
+        )
+
         # Create session route — DM needs contact_id, group needs chat_id
         route_service = SessionRouteService(self.ctx)
         from cyborg_server.exceptions import ConflictError
@@ -290,9 +322,11 @@ class WhatsAppBridgeService(BaseService):
             contact_id=contact_id, is_trusted=is_trusted,
         )
 
-        # Build system prompt: workspace context + agenda
+        # Build system prompt: workspace context + agenda + participants
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
         workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+
+        participants_prompt = await self._build_participants_prompt(session_key)
 
         user_content = "\n".join([
             "## Incoming WhatsApp Message",
@@ -306,7 +340,7 @@ class WhatsAppBridgeService(BaseService):
             user_content,
             session_key,
             db=self.db,
-            system_content="\n\n".join(p for p in (workspace_prompt, agenda) if p),
+            system_content="\n\n".join(p for p in (workspace_prompt, agenda, participants_prompt) if p),
             max_history=20,
         )
 
@@ -321,8 +355,19 @@ class WhatsAppBridgeService(BaseService):
         tools = make_workspace_tools(self.ctx)
         wa_service = self
 
+        # Add outreach tools for trusted DM contacts
+        if contact_id and is_trusted and chat_kind == "dm":
+            from cyborg_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
+            tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
+
+        message_was_sent = [False]
+
         async def _send_whatsapp_message(text: str) -> str:
-            """Send a reply message to the WhatsApp chat."""
+            """Send a reply message to the WhatsApp chat.
+            If you do not want to reply, send "NO_REPLY" as the text."""
+            message_was_sent[0] = True
+            if text.strip().upper() == "NO_REPLY":
+                return "No reply sent."
             request_id = await wa_service.send_message(chat_id, text)
             return f"Message sent (request_id={request_id})"
 
@@ -347,6 +392,10 @@ class WhatsAppBridgeService(BaseService):
                 session_key=session_key,
                 dispatch_id=dispatch_id,
             )
+            # Auto-send if the LLM generated text but didn't use the tool
+            if not message_was_sent[0] and result:
+                logger.info("LLM did not use send_whatsapp_message, auto-sending response")
+                await wa_service.send_message(chat_id, result)
             # Record to unified session history
             session_svc = SessionService(self.ctx)
             await session_svc.add_message(session_key, "user", text, channel="whatsapp", sender_id=contact_id)

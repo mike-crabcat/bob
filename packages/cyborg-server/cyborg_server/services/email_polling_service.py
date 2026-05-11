@@ -521,6 +521,10 @@ class EmailPollingService(BaseService):
             contact_id=contact_id, is_trusted=is_trusted,
         )
 
+        # Upsert email participants (sender + to/cc)
+        session_key = thread["session_key"]
+        await self._upsert_email_participants(session_key, message)
+
         # 2. Prior outgoing email context — only on the first incoming reply
         if is_new_thread:
             prior_outgoing = await self.db.fetch_one(
@@ -587,7 +591,6 @@ class EmailPollingService(BaseService):
         ]
 
         email_content = "\n".join(prompt_parts)
-        session_key = thread["session_key"]
 
         logger.info(
             "Dispatching email to LLM session=%s new_thread=%s",
@@ -602,7 +605,8 @@ class EmailPollingService(BaseService):
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
         workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
-        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, "You are managing an email conversation. Use the available tools to respond.") if p)
+        participants_prompt = await self._build_participants_prompt(session_key)
+        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.") if p)
 
         messages = await build_chat_messages(
             email_content,
@@ -632,6 +636,67 @@ class EmailPollingService(BaseService):
             return result
 
         DispatchService(self.ctx).track(dispatch_id, _run_dispatch())
+
+    async def _upsert_email_participants(self, session_key: str, message: dict[str, Any]) -> None:
+        """Upsert sender and to/cc addresses as session participants."""
+        now_iso = utcnow().isoformat()
+        sender_email, sender_name = _parse_from(message.get("from"))
+        to_addrs: list[str] = message.get("to", []) or []
+        cc_addrs: list[str] = message.get("cc", []) or []
+
+        all_addresses: list[tuple[str, str | None]] = []
+        if sender_email:
+            all_addresses.append((sender_email, sender_name))
+        for addr in to_addrs + cc_addrs:
+            if isinstance(addr, str) and addr.strip():
+                all_addresses.append((addr.strip(), None))
+            elif isinstance(addr, dict):
+                email = addr.get("email", "").strip()
+                name = addr.get("name", "")
+                if email:
+                    all_addresses.append((email, name or None))
+
+        for email, name in all_addresses:
+            email_lower = email.lower()
+            # Resolve to contact
+            contact_id = None
+            is_trusted = 0
+            contact = await self.db.fetch_one(
+                "SELECT id, is_trusted FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
+                (email_lower,),
+            )
+            if contact:
+                contact_id = contact["id"]
+                is_trusted = 1 if contact.get("is_trusted") else 0
+            display_name = name or email_lower
+            await self.db.execute(
+                """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_key, identifier) DO UPDATE SET
+                       display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE session_participants.display_name END,
+                       contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
+                       is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
+                       last_active_at = excluded.last_active_at""",
+                (session_key, email_lower, display_name, contact_id, is_trusted, now_iso),
+            )
+
+    async def _build_participants_prompt(self, session_key: str) -> str:
+        rows = await self.db.fetch_all(
+            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
+            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
+            (session_key,),
+        )
+        if not rows:
+            return ""
+        lines = ["## Participants"]
+        for r in rows:
+            name = r["display_name"] or r["identifier"]
+            if r["contact_id"]:
+                trust = "trusted" if r["is_trusted"] else "untrusted"
+                lines.append(f"- {name} <{r['identifier']}> (contact, {trust})")
+            else:
+                lines.append(f"- {name} <{r['identifier']}> (not in contacts)")
+        return "\n".join(lines)
 
     def _should_poll(self, inbox: dict[str, Any], poll_interval: float) -> bool:
         """Check if enough time has elapsed since the last poll for this inbox."""

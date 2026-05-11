@@ -122,6 +122,27 @@ async def session_detail(
     completed = sum(1 for c in calls if c["status"] == "completed")
     failed = sum(1 for c in calls if c["status"] == "failed")
 
+    # Participants
+    participants: list[dict] = []
+    participants_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_participants'"
+    )
+    if participants_table:
+        rows = await db.fetch_all(
+            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
+            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
+            (session_key,),
+        )
+        for row in rows:
+            last_active = (row["last_active_at"] or "")[:19].replace("T", " ")
+            participants.append({
+                "display_name": row["display_name"] or row["identifier"],
+                "identifier": row["identifier"],
+                "contact_id": row["contact_id"],
+                "is_trusted": bool(row.get("is_trusted", 0)),
+                "last_active": last_active,
+            })
+
     # Agenda
     from cyborg_server.services.session_agenda_service import SessionAgendaService
     from cyborg_server.context import AppContext
@@ -145,6 +166,7 @@ async def session_detail(
                 "completed": completed,
                 "failed": failed,
             },
+            "participants": participants,
             "pending_count": pending_count,
         },
     )
