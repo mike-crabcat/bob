@@ -144,14 +144,37 @@ def make_whatsapp_outreach_tools(
         agenda_service = SessionAgendaService(ctx)
         await agenda_service.set_agenda(target_session_key, agenda)
 
-        # Store initial context message in target session
+        # Store the outreach turn in the target DM session so it appears in
+        # conversation history when the contact replies.
         session_service = SessionService(ctx)
+        user_context = (
+            f"[Outreach initiated by {requestor_name}] "
+            f"Purpose: {purpose}"
+        )
         await session_service.add_message(
-            target_session_key,
-            "assistant",
-            message,
+            target_session_key, "user", user_context,
             channel="whatsapp",
             metadata={"outreach": True, "purpose": purpose, "requestor": requestor_name},
+        )
+        await session_service.add_message(
+            target_session_key, "assistant", message,
+            channel="whatsapp",
+            metadata={"outreach": True, "purpose": purpose, "requestor": requestor_name},
+        )
+
+        # Upsert the contact as a participant in the target session
+        from cyborg_server.services.base import utcnow
+        now_iso = utcnow().isoformat()
+        await db.execute(
+            """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_key, identifier) DO UPDATE SET
+                   display_name = excluded.display_name,
+                   contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
+                   is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
+                   last_active_at = excluded.last_active_at""",
+            (target_session_key, phone, contact["name"],
+             contact["id"], 1, now_iso),
         )
 
         logger.info(
