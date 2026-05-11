@@ -37,6 +37,12 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
             if content:
                 parts.append(content)
 
+    # Load skills
+    from cyborg_server.services.skill_loader import load_skills_prompt
+    skills = load_skills_prompt(workspace_dir)
+    if skills:
+        parts.append("## Skills\n\n" + skills)
+
     combined = "\n\n".join(parts)
     _cached_prompt = (mtime_hash, combined)
     if _cached_mtime != mtimes:
@@ -74,8 +80,11 @@ async def build_chat_messages(
         rows = await db.fetch_all(
             "SELECT role, content FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "ORDER BY created_at ASC LIMIT ?",
-            (session_key, max_history),
+            "AND rowid IN (SELECT rowid FROM session_messages "
+            "WHERE session_key = ? AND role IN ('user', 'assistant') "
+            "ORDER BY created_at DESC LIMIT ?) "
+            "ORDER BY created_at ASC",
+            (session_key, session_key, max_history),
         )
         for row in rows:
             if row["content"]:

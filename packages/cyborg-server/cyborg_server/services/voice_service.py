@@ -371,7 +371,7 @@ class VoiceService(BaseService):
 
             # Build workspace tools for file access during conversation
             from cyborg_server.services.workspace_tools import make_workspace_tools
-            tools = make_workspace_tools(self.ctx)
+            tools = make_workspace_tools(self.ctx, session_key=session_key)
 
             async for chunk in dispatch.chat_stream_with_tools(
                 messages,

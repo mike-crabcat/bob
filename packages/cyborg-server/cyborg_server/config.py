@@ -238,6 +238,10 @@ class HarnessSettings:
     workspace_dir: Path = Path("~/.config/cyborg/harness")
     default_model: str = "gpt-5.4-mini"
     max_history_messages: int = 20
+    skill_dev_enabled: bool = False
+    skill_dev_model: str = "sonnet"
+    skill_dev_max_budget_usd: float = 5.0
+    skill_dev_timeout_seconds: float = 300.0
 
 
 @dataclass(slots=True)
@@ -423,15 +427,19 @@ class Settings:
         openai_llm = OpenAISettings(
             api_key=os.getenv("CYBORG_OPENAI_API_KEY", ""),
             base_url=os.getenv("CYBORG_OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            default_model=os.getenv("CYBORG_OPENAI_DEFAULT_MODEL", "gpt-4.1-mini"),
+            default_model=os.getenv("CYBORG_OPENAI_DEFAULT_MODEL", "gpt-5.4-mini"),
             timeout_seconds=float(os.getenv("CYBORG_OPENAI_TIMEOUT_SECONDS", "120")),
         )
 
         harness = HarnessSettings(
             enabled=os.getenv("CYBORG_HARNESS_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             workspace_dir=_env_path("CYBORG_HARNESS_WORKSPACE_DIR", Path("~/.config/cyborg/harness")),
-            default_model=os.getenv("CYBORG_HARNESS_DEFAULT_MODEL", "gpt-5.4-nano"),
+            default_model=os.getenv("CYBORG_HARNESS_DEFAULT_MODEL", "gpt-5.4-mini"),
             max_history_messages=int(os.getenv("CYBORG_HARNESS_MAX_HISTORY_MESSAGES", "20")),
+            skill_dev_enabled=os.getenv("CYBORG_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            skill_dev_model=os.getenv("CYBORG_HARNESS_SKILL_DEV_MODEL", "sonnet"),
+            skill_dev_max_budget_usd=float(os.getenv("CYBORG_HARNESS_SKILL_DEV_MAX_BUDGET_USD", "5.0")),
+            skill_dev_timeout_seconds=float(os.getenv("CYBORG_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "300")),
         )
 
         whatsapp_bridge = WhatsAppBridgeSettings(

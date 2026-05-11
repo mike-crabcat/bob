@@ -48,6 +48,8 @@ AVAILABLE CAPABILITIES:
 - If asked to contact someone, use search_contacts to find them, then
   send_whatsapp_to_contact to reach out. Provide a clear purpose.
 - To check what someone said, use get_contact_session_messages.
+- If you need a capability you don't have, use delegate_to_claude with a clear
+  user story describing the skill. Review the plan, then implement_delegation to proceed.
 
 Keep responses concise and natural for a messaging context.\
 """

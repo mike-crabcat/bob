@@ -30,15 +30,18 @@ def _resolve_path(ctx: AppContext, path: str) -> Path:
     return resolved
 
 
-def make_workspace_tools(ctx: AppContext):
-    """Create workspace file tools bound to the given context."""
+def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
+    """Create workspace file tools bound to the given context.
+
+    If session_key is provided, also includes an update_agenda tool.
+    """
 
     @tool
     async def list_files(
         path: str = "",
         depth: int = 1,
     ) -> str:
-        """List files and directories in the workspace. Depth controls recursion (1=immediate, 2=one level deeper)."""
+        """List files and directories in the workspace. Paths are relative to the workspace root ('/'). Depth controls recursion (1=immediate, 2=one level deeper)."""
         workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
         target = _resolve_path(ctx, path) if path else workspace
         if not target.is_dir():
@@ -78,7 +81,7 @@ def make_workspace_tools(ctx: AppContext):
     async def read_file(
         path: str,
     ) -> str:
-        """Read the contents of a file in the workspace."""
+        """Read the contents of a file in the workspace. Path is relative to the workspace root ('/')."""
         resolved = _resolve_path(ctx, path)
         if not resolved.is_file():
             return f"Error: '{path}' is not a file"
@@ -98,7 +101,7 @@ def make_workspace_tools(ctx: AppContext):
         path: str,
         content: str,
     ) -> str:
-        """Write content to a file in the workspace. Creates parent directories if needed."""
+        """Write content to a file in the workspace. Path is relative to the workspace root ('/'). Creates parent directories if needed."""
         if len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
             return f"Error: content exceeds {_MAX_WRITE_BYTES} bytes"
 
@@ -111,4 +114,18 @@ def make_workspace_tools(ctx: AppContext):
         logger.info("Workspace write: %s (%d bytes)", path, len(content))
         return json.dumps({"ok": True, "path": path, "bytes": len(content.encode("utf-8"))})
 
-    return [list_files, read_file, write_file]
+    tools = [list_files, read_file, write_file]
+
+    if session_key:
+        @tool
+        async def update_agenda(agenda: str) -> str:
+            """Update the agenda for this session. The agenda extends the system prompt,
+            guiding your behavior for all subsequent turns. Replace the full agenda text —
+            use this to mark tasks complete, add new goals, or change your instructions."""
+            from cyborg_server.services.session_agenda_service import SessionAgendaService
+            await SessionAgendaService(ctx).set_agenda(session_key, agenda)
+            return json.dumps({"ok": True})
+
+        tools.append(update_agenda)
+
+    return tools

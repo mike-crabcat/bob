@@ -352,13 +352,16 @@ class WhatsAppBridgeService(BaseService):
         from cyborg_server.services.workspace_tools import make_workspace_tools
 
         # Build tools: workspace file access + whatsapp reply
-        tools = make_workspace_tools(self.ctx)
+        tools = make_workspace_tools(self.ctx, session_key=session_key)
         wa_service = self
 
         # Add outreach tools for trusted DM contacts
         if contact_id and is_trusted and chat_kind == "dm":
             from cyborg_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
+            if settings.harness.skill_dev_enabled:
+                from cyborg_server.services.delegation_tools import make_delegation_tools
+                tools.extend(make_delegation_tools(self.ctx, session_key))
 
         message_was_sent = [False]
 

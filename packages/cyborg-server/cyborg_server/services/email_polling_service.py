@@ -616,7 +616,7 @@ class EmailPollingService(BaseService):
             max_history=20,
         )
 
-        tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"]) + make_workspace_tools(self.ctx)
+        tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"]) + make_workspace_tools(self.ctx, session_key=session_key)
 
         dispatch_id = await DispatchService(self.ctx).record_dispatch(
             notification_type="email_incoming",

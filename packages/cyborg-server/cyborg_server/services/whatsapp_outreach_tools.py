@@ -137,12 +137,14 @@ def make_whatsapp_outreach_tools(
             if requestor:
                 requestor_name = requestor["name"]
 
-        agenda = WHATSAPP_OUTREACH_AGENDA_TEMPLATE.format(
+        outreach_agenda = WHATSAPP_OUTREACH_AGENDA_TEMPLATE.format(
             requestor_name=requestor_name,
             purpose=purpose,
         )
         agenda_service = SessionAgendaService(ctx)
-        await agenda_service.set_agenda(target_session_key, agenda)
+        existing_agenda = await agenda_service.get_agenda(target_session_key) or ""
+        combined_agenda = f"{existing_agenda}\n\n{outreach_agenda}" if existing_agenda else outreach_agenda
+        await agenda_service.set_agenda(target_session_key, combined_agenda)
 
         # Store the outreach turn in the target DM session so it appears in
         # conversation history when the contact replies.
