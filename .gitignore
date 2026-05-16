@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 scripts/publish.sh
 scripts/rollout.sh
+.claude/
+services/whatsappbridge/bin

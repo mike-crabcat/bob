@@ -69,17 +69,15 @@ class Tool:
     handler: Callable[..., Awaitable[str]]
 
     def to_openai_format(self) -> dict[str, Any]:
-        """Convert to OpenAI tool definition format."""
+        """Convert to OpenAI Responses API tool definition format."""
         return {
             "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": self.parameters,
-                    "required": self.required,
-                },
+            "name": self.name,
+            "description": self.description,
+            "parameters": {
+                "type": "object",
+                "properties": self.parameters,
+                "required": self.required,
             },
         }
 

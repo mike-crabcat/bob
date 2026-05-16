@@ -355,8 +355,8 @@ class WhatsAppBridgeService(BaseService):
         tools = make_workspace_tools(self.ctx, session_key=session_key)
         wa_service = self
 
-        # Add outreach tools for trusted DM contacts
-        if contact_id and is_trusted and chat_kind == "dm":
+        # Add outreach tools for trusted contacts (DM or group)
+        if contact_id and is_trusted:
             from cyborg_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
             if settings.harness.skill_dev_enabled:
@@ -376,7 +376,11 @@ class WhatsAppBridgeService(BaseService):
 
         tools.append(Tool(
             name="send_whatsapp_message",
-            description="Send a reply message to the current WhatsApp conversation.",
+            description=(
+                "Send a reply to the current WhatsApp conversation. "
+                "You MUST call this tool to deliver your response — your text output will NOT be sent. "
+                "Call this with 'NO_REPLY' if you do not want to respond."
+            ),
             parameters={"text": {"type": "string", "description": "The message text to send."}},
             required=["text"],
             handler=_send_whatsapp_message,
@@ -395,10 +399,17 @@ class WhatsAppBridgeService(BaseService):
                 session_key=session_key,
                 dispatch_id=dispatch_id,
             )
-            # Auto-send if the LLM generated text but didn't use the tool
-            if not message_was_sent[0] and result:
-                logger.info("LLM did not use send_whatsapp_message, auto-sending response")
-                await wa_service.send_message(chat_id, result)
+            # Auto-send fallback: if LLM produced text but never called send_whatsapp_message,
+            # deliver it anyway — the LLM likely intended it as the reply.
+            if not message_was_sent[0] and result.strip():
+                logger.warning(
+                    "LLM did not use send_whatsapp_message, auto-sending text output (%d chars)",
+                    len(result),
+                )
+                try:
+                    await wa_service.send_message(chat_id, result)
+                except Exception:
+                    logger.exception("Auto-send fallback failed for chat %s", chat_id)
             # Record to unified session history
             session_svc = SessionService(self.ctx)
             await session_svc.add_message(session_key, "user", text, channel="whatsapp", sender_id=contact_id)

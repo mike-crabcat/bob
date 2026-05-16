@@ -184,6 +184,20 @@ def make_whatsapp_outreach_tools(
             contact["name"], phone, target_session_key, request_id,
         )
 
+        # Record in llm_call_log so the session appears in the dashboard
+        from uuid import uuid4
+        from cyborg_server.services.llm_dispatch import _record_log
+        await _record_log(
+            db,
+            provider="outreach",
+            model="",
+            call_category="whatsapp_outreach",
+            session_key=target_session_key,
+            user_message=f"[Outreach to {contact['name']}] {purpose}",
+            response_text=message,
+            status="completed",
+        )
+
         return json.dumps({
             "ok": True,
             "contact_name": contact["name"],

@@ -1,4 +1,4 @@
-"""Unified LLM dispatch service — routes to providers and logs all interactions."""
+"""Unified LLM dispatch service — logs all LLM interactions."""
 
 from __future__ import annotations
 
@@ -12,8 +12,24 @@ from uuid import uuid4
 from cyborg_server.services.tools import Tool
 
 from cyborg_server.services.base import BaseService
+from cyborg_server.services.openai_service import OpenAIService, StreamResult
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Recursively convert non-serializable objects to plain dicts."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return _sanitize_for_json(obj.model_dump())
+    if hasattr(obj, "__dict__"):
+        return _sanitize_for_json(vars(obj))
+    return str(obj)
 
 
 def _extract_from_messages(
@@ -109,45 +125,20 @@ async def _record_log(
 
 
 class LLMDispatchService(BaseService):
-    """Routes LLM calls to providers and logs all interactions."""
+    """Routes LLM calls to OpenAI and logs all interactions."""
 
-    def _resolve_provider(self, provider: str | None = None) -> str:
-        """Resolve which provider to use."""
-        if provider:
-            return provider
-        settings = self._get_settings()
-        if settings.openai.enabled:
-            return "openai"
-        if settings.zai.enabled:
-            return "zai"
-        raise RuntimeError("No LLM provider configured. Set CYBORG_OPENAI_API_KEY or CYBORG_ZAI_API_KEY.")
+    def _get_service(self) -> OpenAIService:
+        return OpenAIService(self.ctx)
 
-    def _get_provider_service(self, provider: str) -> Any:
-        """Get the provider service instance."""
-        if provider == "openai":
-            from cyborg_server.services.openai_service import OpenAIService
-            return OpenAIService(self.ctx)
-        if provider == "zai":
-            from cyborg_server.services.zai_service import ZaiService
-            return ZaiService(self.ctx)
-        raise ValueError(f"Unknown LLM provider: {provider}")
-
-    def _resolve_model(self, provider: str, model: str | None = None) -> str:
-        """Resolve model for the given provider."""
+    def _resolve_model(self, model: str | None = None) -> str:
         if model:
             return model
-        settings = self._get_settings()
-        if provider == "openai":
-            return settings.openai.default_model
-        if provider == "zai":
-            return settings.zai.default_model
-        raise ValueError(f"Unknown provider: {provider}")
+        return self._get_settings().openai.default_model
 
     async def chat(
         self,
         messages: list[dict[str, Any]],
         *,
-        provider: str | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
@@ -158,9 +149,8 @@ class LLMDispatchService(BaseService):
         dispatch_id: str | None = None,
     ) -> str:
         """Non-streaming chat completion with automatic logging."""
-        resolved_provider = self._resolve_provider(provider)
-        resolved_model = self._resolve_model(resolved_provider, model)
-        service = self._get_provider_service(resolved_provider)
+        resolved_model = self._resolve_model(model)
+        service = self._get_service()
 
         system_prompt, user_message = _extract_from_messages(messages)
         messages_json = json.dumps(messages)
@@ -177,7 +167,7 @@ class LLMDispatchService(BaseService):
 
             await _record_log(
                 self.db,
-                provider=resolved_provider,
+                provider="openai",
                 model=resolved_model,
                 call_category=call_category,
                 session_key=session_key,
@@ -193,9 +183,9 @@ class LLMDispatchService(BaseService):
             )
 
             logger.info(
-                "LLM dispatch: provider=%s model=%s category=%s latency=%.2fs "
+                "LLM dispatch: model=%s category=%s latency=%.2fs "
                 "input_chars=%d output_chars=%d",
-                resolved_provider, resolved_model, call_category, elapsed,
+                resolved_model, call_category, elapsed,
                 sum(len(m.get("content", "")) for m in messages),
                 len(result or ""),
             )
@@ -203,10 +193,10 @@ class LLMDispatchService(BaseService):
 
         except Exception as exc:
             elapsed = time.monotonic() - t0
-            logger.error("LLM dispatch failed: provider=%s model=%s error=%s", resolved_provider, resolved_model, exc)
+            logger.error("LLM dispatch failed: model=%s error=%s", resolved_model, exc)
             await _record_log(
                 self.db,
-                provider=resolved_provider,
+                provider="openai",
                 model=resolved_model,
                 call_category=call_category,
                 session_key=session_key,
@@ -226,7 +216,6 @@ class LLMDispatchService(BaseService):
         self,
         messages: list[dict[str, Any]],
         *,
-        provider: str | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
@@ -237,36 +226,25 @@ class LLMDispatchService(BaseService):
         dispatch_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion with automatic logging."""
-        resolved_provider = self._resolve_provider(provider)
-        resolved_model = self._resolve_model(resolved_provider, model)
-        service = self._get_provider_service(resolved_provider)
+        resolved_model = self._resolve_model(model)
+        service = self._get_service()
 
         system_prompt, user_message = _extract_from_messages(messages)
         messages_json = json.dumps(messages)
 
-        # For OpenAI, use StreamResult to capture token counts
-        stream_result: Any = None
-        if resolved_provider == "openai":
-            from cyborg_server.services.openai_service import StreamResult
-            stream_result = StreamResult()
-
+        stream_result = StreamResult()
         t0 = time.monotonic()
         ttft: float | None = None
         accumulated = ""
 
         try:
-            kwargs: dict[str, Any] = {
-                "messages": messages,
-                "model": resolved_model,
-                "temperature": temperature,
-            }
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-
-            if stream_result is not None:
-                kwargs["stream_result"] = stream_result
-
-            async for chunk in service.chat_stream(**kwargs):
+            async for chunk in service.chat_stream(
+                messages=messages,
+                model=resolved_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream_result=stream_result,
+            ):
                 if chunk:
                     if ttft is None:
                         ttft = time.monotonic() - t0
@@ -275,20 +253,9 @@ class LLMDispatchService(BaseService):
 
             elapsed = time.monotonic() - t0
 
-            # Extract token counts from StreamResult if available
-            prompt_tokens = None
-            completion_tokens = None
-            total_tokens = None
-            cached_tokens = None
-            if stream_result is not None:
-                prompt_tokens = stream_result.prompt_tokens
-                completion_tokens = stream_result.completion_tokens
-                total_tokens = stream_result.total_tokens
-                cached_tokens = stream_result.cached_tokens
-
             await _record_log(
                 self.db,
-                provider=resolved_provider,
+                provider="openai",
                 model=resolved_model,
                 call_category=call_category,
                 session_key=session_key,
@@ -298,10 +265,10 @@ class LLMDispatchService(BaseService):
                 response_text=accumulated,
                 latency_seconds=elapsed,
                 ttft_seconds=ttft,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                cached_tokens=cached_tokens,
+                prompt_tokens=stream_result.prompt_tokens,
+                completion_tokens=stream_result.completion_tokens,
+                total_tokens=stream_result.total_tokens,
+                cached_tokens=stream_result.cached_tokens,
                 status="completed",
                 project_id=project_id,
                 task_id=task_id,
@@ -309,20 +276,20 @@ class LLMDispatchService(BaseService):
             )
 
             logger.info(
-                "LLM dispatch stream: provider=%s model=%s category=%s latency=%.2fs ttft=%.2fs "
+                "LLM dispatch stream: model=%s category=%s latency=%.2fs ttft=%.2fs "
                 "input_chars=%d output_chars=%d tokens=%s",
-                resolved_provider, resolved_model, call_category, elapsed, ttft or 0,
+                resolved_model, call_category, elapsed, ttft or 0,
                 sum(len(m.get("content", "")) for m in messages),
                 len(accumulated),
-                total_tokens,
+                stream_result.total_tokens,
             )
 
         except Exception as exc:
             elapsed = time.monotonic() - t0
-            logger.error("LLM dispatch stream failed: provider=%s model=%s error=%s", resolved_provider, resolved_model, exc)
+            logger.error("LLM dispatch stream failed: model=%s error=%s", resolved_model, exc)
             await _record_log(
                 self.db,
-                provider=resolved_provider,
+                provider="openai",
                 model=resolved_model,
                 call_category=call_category,
                 session_key=session_key,
@@ -345,7 +312,6 @@ class LLMDispatchService(BaseService):
         messages: list[dict[str, Any]],
         tools: list[Tool],
         *,
-        provider: str | None = None,
         model: str | None = None,
         max_iterations: int = 10,
         call_category: str = "tool_call",
@@ -359,20 +325,17 @@ class LLMDispatchService(BaseService):
         The caller provides a list of Tool objects (created via @tool decorator)
         and this method handles the multi-turn tool call loop automatically.
         """
-        resolved_provider = self._resolve_provider(provider)
-        resolved_model = self._resolve_model(resolved_provider, model)
-        service = self._get_provider_service(resolved_provider)
+        resolved_model = self._resolve_model(model)
+        service = self._get_service()
 
         system_prompt, user_message = _extract_from_messages(messages)
 
-        # Convert tools to provider format
         openai_tools = [t.to_openai_format() for t in tools]
         tool_handlers = {t.name: t.handler for t in tools}
         tools_json = json.dumps(openai_tools) if openai_tools else None
 
         t0 = time.monotonic()
         try:
-            from cyborg_server.services.openai_service import StreamResult
             stream_result = StreamResult()
 
             result = await service.chat_with_tools(
@@ -387,13 +350,13 @@ class LLMDispatchService(BaseService):
 
             await _record_log(
                 self.db,
-                provider=resolved_provider,
+                provider="openai",
                 model=resolved_model,
                 call_category=call_category,
                 session_key=session_key,
                 system_prompt=system_prompt,
                 user_message=user_message,
-                messages_json=json.dumps(messages),
+                messages_json=json.dumps(_sanitize_for_json(messages)),
                 tools_json=tools_json,
                 response_text=result,
                 latency_seconds=elapsed,
@@ -408,9 +371,9 @@ class LLMDispatchService(BaseService):
             )
 
             logger.info(
-                "LLM dispatch tools: provider=%s model=%s category=%s latency=%.2fs "
+                "LLM dispatch tools: model=%s category=%s latency=%.2fs "
                 "tools=%d output_chars=%d tokens=%s",
-                resolved_provider, resolved_model, call_category, elapsed,
+                resolved_model, call_category, elapsed,
                 len(tools), len(result),
                 stream_result.total_tokens,
             )
@@ -418,16 +381,16 @@ class LLMDispatchService(BaseService):
 
         except Exception as exc:
             elapsed = time.monotonic() - t0
-            logger.error("LLM dispatch tools failed: provider=%s model=%s error=%s", resolved_provider, resolved_model, exc)
+            logger.error("LLM dispatch tools failed: model=%s error=%s", resolved_model, exc)
             await _record_log(
                 self.db,
-                provider=resolved_provider,
+                provider="openai",
                 model=resolved_model,
                 call_category=call_category,
                 session_key=session_key,
                 system_prompt=system_prompt,
                 user_message=user_message,
-                messages_json=json.dumps(messages),
+                messages_json=json.dumps(_sanitize_for_json(messages)),
                 tools_json=tools_json,
                 latency_seconds=elapsed,
                 status="failed",
@@ -443,7 +406,6 @@ class LLMDispatchService(BaseService):
         messages: list[dict[str, Any]],
         tools: list[Tool],
         *,
-        provider: str | None = None,
         model: str | None = None,
         max_iterations: int = 10,
         call_category: str = "voice_chat",
@@ -457,9 +419,8 @@ class LLMDispatchService(BaseService):
         Handles the tool loop non-streamingly (tool calls need full responses),
         then streams the final text response for real-time TTS/consumption.
         """
-        resolved_provider = self._resolve_provider(provider)
-        resolved_model = self._resolve_model(resolved_provider, model)
-        service = self._get_provider_service(resolved_provider)
+        resolved_model = self._resolve_model(model)
+        service = self._get_service()
 
         system_prompt, user_message = _extract_from_messages(messages)
 
@@ -470,10 +431,10 @@ class LLMDispatchService(BaseService):
         t0 = time.monotonic()
         log_id = await _record_log(
             self.db,
-            provider=resolved_provider, model=resolved_model,
+            provider="openai", model=resolved_model,
             call_category=call_category, session_key=session_key,
             system_prompt=system_prompt, user_message=user_message,
-            messages_json=json.dumps(messages),
+            messages_json=json.dumps(_sanitize_for_json(messages)),
             tools_json=tools_json,
             status="running",
             project_id=project_id, task_id=task_id,
@@ -483,77 +444,12 @@ class LLMDispatchService(BaseService):
         ttft: float | None = None
 
         try:
-            # Tool loop: non-streaming rounds until LLM gives a text response
-            for iteration in range(max_iterations):
-                response = await service.client.chat.completions.create(
-                    model=resolved_model,
-                    messages=messages,
-                    tools=openai_tools,
-                )
-                message = response.choices[0].message
-
-                if not message.tool_calls:
-                    # No tool calls — yield the final text
-                    final_text = message.content or ""
-                    if final_text:
-                        ttft = time.monotonic() - t0
-                        accumulated = final_text
-                        yield final_text
-                    await _record_log(self.db, log_id=log_id,
-                        response_text=accumulated,
-                        latency_seconds=time.monotonic() - t0,
-                        ttft_seconds=ttft,
-                        messages_json=json.dumps(messages),
-                        status="completed",
-                    )
-                    return
-
-                # Execute tool calls and append to messages
-                messages.append({
-                    "role": message.role,
-                    "content": message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in message.tool_calls
-                    ],
-                })
-
-                for tc in message.tool_calls:
-                    handler = tool_handlers.get(tc.function.name)
-                    if handler is None:
-                        result = f"Error: unknown tool '{tc.function.name}'"
-                    else:
-                        try:
-                            args = json.loads(tc.function.arguments)
-                            result = await handler(**args)
-                        except Exception as e:
-                            result = f"Error: {e}"
-                            logger.warning("Tool %s failed: %s", tc.function.name, e)
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    })
-
-                logger.info(
-                    "chat_stream_with_tools: iteration=%d tool_calls=%d",
-                    iteration + 1,
-                    len(message.tool_calls),
-                )
-
-            # Hit max iterations — make one final streaming call
-            logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)
-            async for chunk in service.chat_stream(
+            async for chunk in service.chat_stream_with_tools(
                 messages=messages,
+                tools=openai_tools,
+                tool_handlers=tool_handlers,
                 model=resolved_model,
+                max_iterations=max_iterations,
             ):
                 if chunk:
                     if ttft is None:
@@ -565,7 +461,7 @@ class LLMDispatchService(BaseService):
                 response_text=accumulated,
                 latency_seconds=time.monotonic() - t0,
                 ttft_seconds=ttft,
-                messages_json=json.dumps(messages),
+                messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="completed",
             )
 
@@ -574,7 +470,7 @@ class LLMDispatchService(BaseService):
                 response_text=accumulated,
                 latency_seconds=time.monotonic() - t0,
                 ttft_seconds=ttft,
-                messages_json=json.dumps(messages),
+                messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="failed",
                 error_message=str(exc),
             )

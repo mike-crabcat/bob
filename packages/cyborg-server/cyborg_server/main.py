@@ -196,14 +196,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if resolved_settings.whatsapp_bridge.enabled:
         app.include_router(whatsapp.router)
 
-    # Conditional Z.ai evaluation router
-    if resolved_settings.zai.enabled:
-        try:
-            from cyborg_server.routers import zai as zai_router
-            app.include_router(zai_router.router)
-        except ImportError:
-            logger.warning("Z.ai SDK not installed — install with: pip install cyborg-server[zai]")
-
     # Conditional OpenAI evaluation router
     if resolved_settings.openai.enabled:
         try:

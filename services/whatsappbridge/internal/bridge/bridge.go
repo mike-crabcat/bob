@@ -58,6 +58,10 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 
 	// Wire event handlers
 	b.srv = server.New(cfg.ListenAddr(), cfg.Token, log.With("component", "server"), b.handleClientMessage)
+	b.srv.OnConnect(func() {
+		b.log.Info("cyborg client connected, draining incoming queue")
+		b.drainIncoming()
+	})
 	b.wa.SetEventHandler(b.handleWhatsAppEvent)
 
 	return b, nil

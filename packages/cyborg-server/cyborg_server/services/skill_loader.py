@@ -3,32 +3,96 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache keyed by mtime hash.
+# Module-level caches keyed by mtime hash.
 _skills_cache: tuple[Any, str] | None = None
+_index_cache: tuple[Any, str] | None = None
+
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
-def load_skills_prompt(workspace_dir: Path) -> str:
-    """Scan skills/ directory, parse skill.md frontmatter, return combined prompt."""
-    global _skills_cache
+def _parse_frontmatter(text: str) -> dict[str, str]:
+    """Extract YAML-like frontmatter key: value pairs from text."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}
+    result: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            result[key.strip()] = value.strip()
+    return result
 
-    workspace_dir = workspace_dir.expanduser()
+
+def _scan_skills(workspace_dir: Path) -> dict[str, float]:
+    """Return {skill_name: mtime} for all skills with a skill.md."""
     skills_dir = workspace_dir / "skills"
-
     if not skills_dir.is_dir():
-        return ""
-
-    # Build mtime hash from all skill.md files
+        return {}
     mtimes: dict[str, float] = {}
     for skill_path in sorted(skills_dir.iterdir()):
         md = skill_path / "skill.md"
         if skill_path.is_dir() and md.is_file():
             mtimes[skill_path.name] = md.stat().st_mtime
+    return mtimes
 
+
+def load_skills_index(workspace_dir: Path) -> str:
+    """Return a compact skill index (name, path, description, trigger) for the system prompt."""
+    global _index_cache
+
+    workspace_dir = workspace_dir.expanduser()
+    mtimes = _scan_skills(workspace_dir)
+    if not mtimes:
+        return ""
+
+    mtime_hash = tuple(sorted(mtimes.items()))
+    if _index_cache is not None and _index_cache[0] == mtime_hash:
+        return _index_cache[1]
+
+    skills_dir = workspace_dir / "skills"
+    lines: list[str] = []
+    lines.append(
+        "When a skill trigger matches the user's request, call the `use_skill` tool "
+        "with the skill name to load the full instructions and script paths.\n"
+    )
+    for skill_name in sorted(mtimes):
+        md = skills_dir / skill_name / "skill.md"
+        content = md.read_text(encoding="utf-8").strip()
+        fm = _parse_frontmatter(content)
+        desc = fm.get("description", "")
+        trigger = fm.get("trigger", "")
+        lines.append(f"- **{skill_name}** (skills/{skill_name}/): {desc}")
+        if trigger:
+            lines.append(f"  Trigger: {trigger}")
+
+    combined = "\n".join(lines)
+    _index_cache = (mtime_hash, combined)
+    logger.info("Skills index: %d skills, %d chars", len(mtimes), len(combined))
+    return combined
+
+
+def load_skill(workspace_dir: Path, skill_name: str) -> str:
+    """Load a single skill's full instructions, prefixed with its directory path."""
+    workspace_dir = workspace_dir.expanduser()
+    md = workspace_dir / "skills" / skill_name / "skill.md"
+    if not md.is_file():
+        return f"Error: skill '{skill_name}' not found"
+    content = md.read_text(encoding="utf-8").strip()
+    return f"Skill: {skill_name}\nPath: skills/{skill_name}/\n\n{content}"
+
+
+def load_skills_prompt(workspace_dir: Path) -> str:
+    """Load full skill.md content for all skills. Used for testing/diagnostics."""
+    global _skills_cache
+
+    workspace_dir = workspace_dir.expanduser()
+    mtimes = _scan_skills(workspace_dir)
     if not mtimes:
         return ""
 
@@ -36,6 +100,7 @@ def load_skills_prompt(workspace_dir: Path) -> str:
     if _skills_cache is not None and _skills_cache[0] == mtime_hash:
         return _skills_cache[1]
 
+    skills_dir = workspace_dir / "skills"
     parts: list[str] = []
     for skill_name in sorted(mtimes):
         md = skills_dir / skill_name / "skill.md"

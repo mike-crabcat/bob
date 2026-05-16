@@ -45,7 +45,6 @@ planning_app = typer.Typer(help="AI-powered project planning")
 health_app = typer.Typer(help="Project health monitoring")
 learning_app = typer.Typer(help="Project insights and learning")
 phone_app = typer.Typer(help="Phone call operations")
-zai_app = typer.Typer(help="Z.ai LLM evaluation commands")
 openai_app = typer.Typer(help="OpenAI LLM evaluation commands")
 eval_app = typer.Typer(help="LLM eval framework")
 
@@ -65,7 +64,6 @@ app.add_typer(planning_app, name="planning")
 app.add_typer(health_app, name="health")
 app.add_typer(learning_app, name="learning")
 app.add_typer(phone_app, name="call")
-app.add_typer(zai_app, name="zai")
 app.add_typer(openai_app, name="openai")
 app.add_typer(eval_app, name="eval")
 
@@ -764,7 +762,6 @@ def serve(
         dispatch_shutdown_timeout_seconds=env_settings.dispatch_shutdown_timeout_seconds,
         dispatch_stuck_timeout_minutes=env_settings.dispatch_stuck_timeout_minutes,
         dispatch_concurrency_limit=env_settings.dispatch_concurrency_limit,
-        zai=env_settings.zai,
         openai=env_settings.openai,
         harness=env_settings.harness,
         whatsapp_bridge=env_settings.whatsapp_bridge,
@@ -3286,21 +3283,6 @@ def phone_status(
         if e2e:
             typer.echo(f"  Latency:   STT {ex.get('stt_ms', '—')}ms | LLM {ex.get('openclaw_ms', '—')}ms | TTFP {ex.get('tts_first_chunk_ms', '—')}ms | E2E {e2e}ms")
         typer.echo()
-
-# ── Z.ai evaluation commands ────────────────────────────────────────────────
-
-@zai_app.command("prompt")
-def zai_prompt(
-    prompt: Annotated[str, typer.Argument(help="Prompt text to send")],
-    model: Annotated[Optional[str], typer.Option("--model", "-m", help="Model name")] = None,
-    temperature: Annotated[float, typer.Option("--temperature", "-t", help="Sampling temperature")] = 0.7,
-) -> None:
-    """Send a prompt to Z.ai and print the response."""
-    data: dict[str, Any] = {"prompt": prompt, "temperature": temperature}
-    if model:
-        data["model"] = model
-    result = _api_call("POST", "/api/v1/zai/prompt", data)
-    typer.echo(result["data"]["content"])
 
 
 @openai_app.command("prompt")

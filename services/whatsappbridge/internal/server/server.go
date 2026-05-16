@@ -18,6 +18,7 @@ var upgrader = websocket.Upgrader{
 }
 
 type MessageHandler func(env wsproto.Envelope)
+type ConnectHandler func()
 
 type Server struct {
 	cfg     serverConfig
@@ -28,6 +29,7 @@ type Server struct {
 	client        *clientConn
 	started       time.Time
 	extraHandlers map[string]http.HandlerFunc
+	onConnect     ConnectHandler
 }
 
 type serverConfig struct {
@@ -49,6 +51,10 @@ func New(listenAddr, token string, log *slog.Logger, handler MessageHandler) *Se
 		log:     log,
 		handler: handler,
 	}
+}
+
+func (s *Server) OnConnect(h ConnectHandler) {
+	s.onConnect = h
 }
 
 func (s *Server) RegisterHandler(path string, handler http.HandlerFunc) {
@@ -126,6 +132,11 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.mu.Unlock()
 
 	s.log.Info("client connected")
+
+	// Notify bridge that a client connected (e.g., to drain queued messages)
+	if s.onConnect != nil {
+		go s.onConnect()
+	}
 
 	// Read pump
 	go s.readPump(c)

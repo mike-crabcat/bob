@@ -203,20 +203,6 @@ class PhoneSettings:
 
 
 @dataclass(slots=True)
-class ZaiSettings:
-    """Configuration for direct Z.ai LLM API access."""
-
-    api_key: str = ""
-    base_url: str = "https://api.z.ai/api/coding/paas/v4/"
-    default_model: str = "glm-5.1"
-    timeout_seconds: float = 120.0
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key)
-
-
-@dataclass(slots=True)
 class OpenAISettings:
     """Configuration for direct OpenAI LLM API access."""
 
@@ -224,6 +210,7 @@ class OpenAISettings:
     base_url: str = "https://api.openai.com/v1"
     default_model: str = "gpt-5.4-mini"
     timeout_seconds: float = 120.0
+    web_search_enabled: bool = False
 
     @property
     def enabled(self) -> bool:
@@ -274,7 +261,6 @@ class Settings:
     email_polling_enabled: bool = True
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     phone: PhoneSettings = field(default_factory=PhoneSettings)
-    zai: ZaiSettings = field(default_factory=ZaiSettings)
     openai: OpenAISettings = field(default_factory=OpenAISettings)
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
@@ -417,18 +403,12 @@ class Settings:
             call_recording_max_age_days=int(os.getenv("CYBORG_PHONE_CALL_RECORDING_MAX_AGE_DAYS", "30")),
         )
 
-        zai = ZaiSettings(
-            api_key=os.getenv("CYBORG_ZAI_API_KEY", ""),
-            base_url=os.getenv("CYBORG_ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4/"),
-            default_model=os.getenv("CYBORG_ZAI_DEFAULT_MODEL", "glm-5.1"),
-            timeout_seconds=float(os.getenv("CYBORG_ZAI_TIMEOUT_SECONDS", "120")),
-        )
-
         openai_llm = OpenAISettings(
             api_key=os.getenv("CYBORG_OPENAI_API_KEY", ""),
             base_url=os.getenv("CYBORG_OPENAI_BASE_URL", "https://api.openai.com/v1"),
             default_model=os.getenv("CYBORG_OPENAI_DEFAULT_MODEL", "gpt-5.4-mini"),
             timeout_seconds=float(os.getenv("CYBORG_OPENAI_TIMEOUT_SECONDS", "120")),
+            web_search_enabled=os.getenv("CYBORG_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
         )
 
         harness = HarnessSettings(
@@ -472,7 +452,6 @@ class Settings:
             dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
             dispatch_concurrency_limit=dispatch_concurrency_limit,
             phone=phone,
-            zai=zai,
             openai=openai_llm,
             harness=harness,
             whatsapp_bridge=whatsapp_bridge,

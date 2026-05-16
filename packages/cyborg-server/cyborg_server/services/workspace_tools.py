@@ -7,11 +7,14 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import shutil
 from pathlib import Path
 
 from cyborg_server.context import AppContext
+from cyborg_server.services.skill_env import build_skill_env
 from cyborg_server.services.tools import tool
 
 logger = logging.getLogger(__name__)
@@ -19,6 +22,7 @@ logger = logging.getLogger(__name__)
 _MAX_LIST_ENTRIES = 100
 _MAX_READ_BYTES = 50 * 1024
 _MAX_WRITE_BYTES = 100 * 1024
+_SCRIPT_TIMEOUT_SECONDS = 60
 
 
 def _resolve_path(ctx: AppContext, path: str) -> Path:
@@ -114,7 +118,61 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         logger.info("Workspace write: %s (%d bytes)", path, len(content))
         return json.dumps({"ok": True, "path": path, "bytes": len(content.encode("utf-8"))})
 
-    tools = [list_files, read_file, write_file]
+    @tool
+    async def run_script(
+        path: str,
+        args: list[str] = [],
+    ) -> str:
+        """Run a Python script in the workspace. Path is relative to the workspace root.
+        The script runs via `uv run` from its parent directory (so per-script pyproject.toml works).
+        Returns the script's stdout. Args are passed as command-line arguments."""
+        resolved = _resolve_path(ctx, path)
+        if not resolved.is_file():
+            return f"Error: '{path}' is not a file"
+        if not resolved.suffix == ".py":
+            return f"Error: '{path}' is not a Python file"
+
+        uv_bin = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
+        cmd = [uv_bin, "run", str(resolved.name)]
+        if args:
+            cmd.extend(args)
+
+        logger.info("run_script: %s %s", path, args)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(resolved.parent),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=build_skill_env(),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=_SCRIPT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"Error: script timed out after {_SCRIPT_TIMEOUT_SECONDS}s"
+
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+
+        if proc.returncode != 0:
+            return f"Error (exit code {proc.returncode}):\n{err or out}"
+
+        return out
+
+    @tool
+    async def use_skill(
+        skill_name: str,
+    ) -> str:
+        """Load the full instructions for a skill by name. Returns the skill's instructions
+        and the workspace-relative path to its directory so you can call run_script with correct paths."""
+        from cyborg_server.services.skill_loader import load_skill
+        return load_skill(ctx.settings.harness.workspace_dir, skill_name)
+
+    tools = [list_files, read_file, write_file, run_script, use_skill]
 
     if session_key:
         @tool

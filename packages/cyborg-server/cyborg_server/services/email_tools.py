@@ -16,7 +16,7 @@ def make_email_tools(ctx: AppContext, thread_id: str, inbox_id: str):
 
     @tool
     async def email_reply(body: str) -> str:
-        """Send a reply to the current email thread."""
+        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output."""
         from cyborg_server.services.email_delivery_service import EmailDeliveryService
 
         svc = EmailDeliveryService(ctx)

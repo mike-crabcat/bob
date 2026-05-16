@@ -37,11 +37,21 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
             if content:
                 parts.append(content)
 
-    # Load skills
-    from cyborg_server.services.skill_loader import load_skills_prompt
-    skills = load_skills_prompt(workspace_dir)
-    if skills:
-        parts.append("## Skills\n\n" + skills)
+    # Load skills index (lightweight — full skill loaded on-demand via use_skill tool)
+    from cyborg_server.services.skill_loader import load_skills_index
+    skills_index = load_skills_index(workspace_dir)
+    if skills_index:
+        parts.append("## Available Skills\n\n" + skills_index)
+
+    # Append grounding rules to reduce hallucinated tool claims
+    parts.append(
+        "## Grounding Rules\n"
+        "- Only state that you have done something if you used a tool that confirmed success.\n"
+        "- If you did not call a tool, the action did not happen — do not claim it did.\n"
+        "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
+        "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
+        "- CRITICAL: To reply, you MUST call the send_whatsapp_message (WhatsApp) or email_reply (email) tool. Your text output is NOT delivered — it is discarded. If you write a response without calling the tool, the user will NOT receive it."
+    )
 
     combined = "\n\n".join(parts)
     _cached_prompt = (mtime_hash, combined)

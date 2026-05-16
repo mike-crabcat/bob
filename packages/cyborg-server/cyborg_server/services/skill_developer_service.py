@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import shutil
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -15,36 +16,100 @@ from cyborg_server.services.base import BaseService, utcnow
 logger = logging.getLogger(__name__)
 
 SKILL_DEV_SYSTEM_PROMPT = """\
-You are a skill developer for an AI agent called Cyborg.
-Your job is to create skills as markdown definitions with optional scripts.
+You are a skill developer for an AI agent called Cyborg. \
+Your job is to create executable Python skills that Cyborg can run. \
+Every skill MUST include a Python helper script — skills are never markdown-only.
 
-SKILL FORMAT:
-- Each skill lives in skills/{skill_name}/skill.md
-- skill.md has YAML frontmatter and a body with instructions:
+## Your Tools
 
-```
----
-name: skill_name
-description: What this skill does
-trigger: when to activate this skill
----
+You have these tools available:
+- **Read**: Read file contents. Use this to examine existing skills and workspace files.
+- **Write**: Create or overwrite files. Use this to create skill files.
+- **Glob**: Find files matching a pattern. Use this to discover existing skills.
+- **Grep**: Search file contents. Use this to search across workspace files.
 
-## Instructions
-Step-by-step instructions for the agent to follow when this skill activates.
-Reference tools Cyborg has: list_files, read_file, write_file, update_agenda,
-send_whatsapp_message, search_contacts, send_whatsapp_to_contact,
-email_reply, email_skip.
-```
+## Skill Format
 
-- Optional Python scripts alongside skill.md (e.g. skills/{name}/helper.py)
-- Instructions should be clear and actionable
-- Keep skills focused on a single capability
+Each skill is a directory under `skills/` containing at minimum a `skill.md` and a \
+`helper.py`. The helper.py is the executable core; skill.md tells Cyborg when and \
+how to use it.
 
-PROCESS:
-1. Read existing skills to understand patterns
-2. Plan what skill to create (what files, what content)
-3. For PLANNING: describe your plan but do NOT create files yet
-4. For IMPLEMENTATION: create the skill files using Read/Write tools
+    skills/{skill_name}/
+      skill.md          (required — trigger + instructions for Cyborg)
+      helper.py         (required — the Python script Cyborg runs via run_script)
+      pyproject.toml    (optional — if the script needs third-party dependencies)
+
+### skill.md format
+
+    ---
+    name: skill_name
+    description: One-line summary of what this skill does
+    trigger: When or why this skill activates
+    ---
+
+    ## Instructions
+
+    Step-by-step instructions for Cyborg to follow when this skill activates.
+    Must include a step that calls `run_script` to execute helper.py.
+
+    ## Example
+
+    Concrete example of expected input/output.
+
+### helper.py format
+
+The script should:
+- Accept command-line arguments via `sys.argv` (or argparse for complex skills)
+- Print results to stdout (Cyborg captures this as the tool result)
+- Exit 0 on success, non-zero on failure (stderr is captured on error)
+- Be self-contained — avoid assuming a specific working directory
+
+### pyproject.toml (optional)
+
+If the script needs third-party packages (e.g. `requests`, `beautifulsoup4`), \
+create a minimal pyproject.toml in the skill directory so `uv run` installs them:
+
+    [project]
+    name = "skill_name"
+    version = "0.1.0"
+    dependencies = ["requests"]
+
+## Cyborg's Runtime Tools (Reference Only)
+
+Skills can instruct Cyborg to use these tools. You cannot call them yourself:
+
+- **run_script(path, args)**: Run a Python script in the workspace. \
+  Use this to execute your helper.py.
+- Communication: send_whatsapp_message, send_whatsapp_to_contact, email_reply, email_skip
+- Workspace: list_files, read_file, write_file, update_agenda
+- Search: search_contacts
+
+## Available Environment Variables
+
+When helper.py runs via run_script, these standard environment variables are available:
+
+- `OPENAI_API_KEY`: OpenAI API key (if configured). Use with `OpenAI()` directly.
+- `OPENAI_BASE_URL`: Custom OpenAI API base URL (if configured).
+- `AGENTMAIL_API_KEY`: AgentMail API key (if configured).
+
+Skills should use `os.environ.get("VAR_NAME")` or rely on SDK auto-detection. \
+Do NOT reference CYBORG_-prefixed variable names.
+
+## Workflow
+
+When asked to create a skill:
+1. Use Read or Glob to examine existing skills in `skills/` for patterns
+2. Read workspace files (SOUL.md, IDENTITY.md, USER.md) for context about Cyborg's persona
+3. Design the skill: name, trigger, what the Python script will do
+4. Use Write to create ALL of these files:
+   - `skills/{name}/skill.md` — trigger + instructions referencing run_script
+   - `skills/{name}/helper.py` — the Python script with the actual logic
+   - `skills/{name}/pyproject.toml` — only if third-party dependencies are needed
+5. Test mentally: trace through what happens when Cyborg follows skill.md's \
+   instructions and calls run_script on helper.py
+
+Keep skills focused on a single capability. The helper.py must actually work — \
+write real, runnable Python code, not pseudocode or stubs.
 """
 
 
@@ -68,17 +133,38 @@ class SkillDeveloperService(BaseService):
         skills_dir = workspace_dir / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
 
-        prompt = (
-            f"USER STORY:\n{user_story}\n\n"
-            "Create a skill for this. First, read any existing skills to understand patterns, "
-            "then describe your plan for what skill to create (name, files, approach). "
-            "Do NOT create any files yet — just plan."
+        # Gather context about existing workspace state
+        existing_skills = sorted(
+            d.name for d in skills_dir.iterdir()
+            if d.is_dir() and (d / "skill.md").is_file()
+        ) if skills_dir.is_dir() else []
+
+        workspace_files = [
+            f.name for f in workspace_dir.iterdir()
+            if f.is_file() and f.suffix == ".md"
+        ]
+
+        context_parts = [f"USER STORY:\n{user_story}"]
+        if existing_skills:
+            context_parts.append(f"Existing skills: {', '.join(existing_skills)}")
+        if workspace_files:
+            context_parts.append(f"Workspace files: {', '.join(workspace_files)}")
+
+        prompt = "\n".join(context_parts) + (
+            "\n\nTASK: Plan a new skill for this request.\n\n"
+            "Steps:\n"
+            "1. Read 1-2 existing skills to understand the format and patterns\n"
+            "2. Read relevant workspace files (SOUL.md, IDENTITY.md) for persona context\n"
+            "3. Describe your plan: skill name, trigger, what the instructions will cover, "
+            "whether any helper scripts are needed\n\n"
+            "Do NOT create any files yet. Output your plan as clear text that can be "
+            "relayed to the user for approval."
         )
 
         try:
             result = await self._run_claude(
                 prompt,
-                cwd=skills_dir,
+                cwd=workspace_dir,
                 model=settings.harness.skill_dev_model,
                 max_budget=settings.harness.skill_dev_max_budget_usd,
             )
@@ -133,8 +219,15 @@ class SkillDeveloperService(BaseService):
 
         try:
             result = await self._run_claude(
-                "Plan approved. Implement it now — create the skill files.",
-                cwd=skills_dir,
+                (
+                    f"The user has approved your plan. Implement it now.\n\n"
+                    f"APPROVED PLAN:\n{row['plan']}\n\n"
+                    f"Create the skill files using the Write tool. "
+                    f"Create files at paths like skills/{{name}}/skill.md "
+                    f"(and any helper scripts alongside it). "
+                    f"After creating files, briefly summarize what was created."
+                ),
+                cwd=workspace_dir,
                 session_id=claude_session_id,
                 model=settings.harness.skill_dev_model,
                 max_budget=settings.harness.skill_dev_max_budget_usd,
@@ -214,9 +307,9 @@ class SkillDeveloperService(BaseService):
         max_budget: float = 5.0,
     ) -> dict[str, Any]:
         """Run Claude Code as a subprocess and return JSON output."""
-        claude_bin = shutil.which("claude")
-        if not claude_bin:
-            raise RuntimeError("claude CLI not found in PATH")
+        claude_bin = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+        if not Path(claude_bin).is_file():
+            raise RuntimeError(f"claude CLI not found (tried PATH and {claude_bin})")
 
         cmd = [
             claude_bin, "-p",
