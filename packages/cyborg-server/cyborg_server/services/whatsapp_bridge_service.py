@@ -92,6 +92,34 @@ class WhatsAppBridgeService(BaseService):
             logger.warning("cannot send message, not connected to bridge")
         return request_id
 
+    async def send_media(self, chat_id: str, file_path: str, *, caption: str = "") -> str:
+        """Send an image file to a WhatsApp chat."""
+        import base64
+        import mimetypes
+
+        mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        with open(file_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+
+        request_id = str(uuid4())
+        payload = {
+            "type": "send_media",
+            "id": request_id,
+            "timestamp": utcnow().isoformat(),
+            "payload": {
+                "chat_id": chat_id,
+                "mime_type": mime,
+                "data": data,
+                "caption": caption,
+                "request_id": request_id,
+            },
+        }
+        if self._ws is not None:
+            await self._ws.send(json.dumps(payload))
+        else:
+            logger.warning("cannot send media, not connected to bridge")
+        return request_id
+
     async def request_pairing(self, *, method: str = "qr", phone_number: str | None = None) -> dict[str, Any]:
         msg_id = str(uuid4())
         payload = {
@@ -337,6 +365,36 @@ class WhatsAppBridgeService(BaseService):
 
         participants_prompt = await self._build_participants_prompt(session_key)
 
+        # Handle shared contacts — auto-seed into contacts table
+        shared_contacts = payload.get("contacts", [])
+        contacts_block = ""
+        if shared_contacts:
+            contacts_lines = ["## Shared Contacts"]
+            for sc in shared_contacts:
+                name = sc.get("display_name", "Unknown")
+                phone = sc.get("phone", "")
+                vcard = sc.get("vcard", "")
+                # Auto-seed contact from shared vCard
+                if phone:
+                    normalized_phone = _jid_to_phone(phone)
+                    existing = await self.db.fetch_one(
+                        "SELECT id FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                        (normalized_phone,),
+                    )
+                    if not existing:
+                        from uuid import uuid4 as _uuid4
+                        new_cid = str(_uuid4())
+                        await self.db.execute(
+                            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
+                               VALUES (?, ?, ?, 0, ?, ?)""",
+                            (new_cid, name, normalized_phone, now_iso, now_iso),
+                        )
+                        logger.info("auto-seeded shared contact %s (%s)", name, normalized_phone)
+                    contacts_lines.append(f"- **{name}** — {normalized_phone}")
+                else:
+                    contacts_lines.append(f"- **{name}** (no phone)")
+            contacts_block = "\n".join(contacts_lines)
+
         user_content = "\n".join([
             "## Incoming WhatsApp Message",
             f"From: {sender_name} ({sender_jid})" if sender_name else f"From: {sender_jid}",
@@ -345,6 +403,8 @@ class WhatsAppBridgeService(BaseService):
             "",
             text,
         ])
+        if contacts_block:
+            user_content += "\n\n" + contacts_block
         messages = await build_chat_messages(
             user_content,
             session_key,
@@ -372,7 +432,22 @@ class WhatsAppBridgeService(BaseService):
                 from cyborg_server.services.delegation_tools import make_delegation_tools
                 tools.extend(make_delegation_tools(self.ctx, session_key))
 
+        # Add outreach reply tool if this session is an active outreach target
+        route = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes WHERE session_key = ?",
+            (session_key,),
+        )
+        if route and route["metadata"]:
+            try:
+                meta = json.loads(route["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            if "outreach_initiated_from" in meta:
+                from cyborg_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
+                tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))
+
         message_was_sent = [False]
+        sent_texts: list[str] = []
 
         async def _send_whatsapp_message(text: str) -> str:
             """Send a reply message to the WhatsApp chat.
@@ -380,6 +455,7 @@ class WhatsAppBridgeService(BaseService):
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
+            sent_texts.append(text)
             request_id = await wa_service.send_message(chat_id, text)
             return f"Message sent (request_id={request_id})"
 
@@ -393,6 +469,34 @@ class WhatsAppBridgeService(BaseService):
             parameters={"text": {"type": "string", "description": "The message text to send."}},
             required=["text"],
             handler=_send_whatsapp_message,
+        ))
+
+        async def _send_whatsapp_media(file_path: str, caption: str = "") -> str:
+            """Send an image or media file to the current WhatsApp chat."""
+            import os
+            resolved = file_path if os.path.isabs(file_path) else os.path.join(settings.harness.workspace_dir, file_path)
+            if not os.path.isfile(resolved):
+                return f"Error: file not found: {resolved}"
+            message_was_sent[0] = True
+            if caption:
+                sent_texts.append(f"[Image: {caption}]")
+            else:
+                sent_texts.append(f"[Image: {os.path.basename(resolved)}]")
+            request_id = await wa_service.send_media(chat_id, resolved, caption=caption)
+            return f"Media sent (request_id={request_id})"
+
+        tools.append(Tool(
+            name="send_whatsapp_media",
+            description=(
+                "Send an image or media file to the current WhatsApp chat. "
+                "Provide the file path (relative to workspace or absolute) and an optional caption."
+            ),
+            parameters={
+                "file_path": {"type": "string", "description": "Path to the image file. Can be relative to the workspace directory."},
+                "caption": {"type": "string", "description": "Optional caption for the image."},
+            },
+            required=["file_path"],
+            handler=_send_whatsapp_media,
         ))
 
         dispatch_id = await DispatchService(self.ctx).record_dispatch(
@@ -420,10 +524,19 @@ class WhatsAppBridgeService(BaseService):
                     await wa_service.send_message(chat_id, result)
                 except Exception:
                     logger.exception("Auto-send fallback failed for chat %s", chat_id)
-            # Record to unified session history
+            # Record to unified session history — combine LLM text output + all sent messages
+            parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
+            assistant_text = "\n\n".join(parts) if parts else result
             session_svc = SessionService(self.ctx)
             await session_svc.add_message(session_key, "user", text, channel="whatsapp", sender_id=contact_id)
-            await session_svc.add_message(session_key, "assistant", result, channel="whatsapp")
+            await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+            if self.ctx.event_bus:
+                await self.ctx.event_bus.publish("whatsapp.message.received", {
+                    "session_key": session_key,
+                    "sender_name": sender_name,
+                    "chat_kind": chat_kind,
+                    "text_preview": text[:100],
+                })
             return result
 
         DispatchService(self.ctx).track(dispatch_id, _run_dispatch())

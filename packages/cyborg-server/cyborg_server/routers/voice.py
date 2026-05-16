@@ -87,7 +87,7 @@ async def voice_websocket(websocket: WebSocket) -> None:
     session_mode: str = "chat"
 
     from cyborg_server.context import AppContext
-    ctx = AppContext(db=websocket.app.state.db, settings=websocket.app.state.settings, voice_engines=engines)
+    ctx = AppContext(db=websocket.app.state.db, settings=websocket.app.state.settings, voice_engines=engines, event_bus=websocket.app.state.event_bus)
 
     try:
         while True:

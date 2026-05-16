@@ -61,4 +61,5 @@ include = [
   "cyborg_server/**/*.html",
   "cyborg_server/voice_data/**",
   "cyborg_server/voice_frontend/**",
+  "cyborg_server/ui_dist/**",
 ]

@@ -128,6 +128,22 @@ async def _record_log(
 class LLMDispatchService(BaseService):
     """Routes LLM calls to OpenAI and logs all interactions."""
 
+    async def _publish_call(self, *, status: str, session_key: str | None,
+                            call_category: str, model: str, latency_seconds: float | None,
+                            total_tokens: int | None, **kwargs: Any) -> None:
+        if self.ctx.event_bus is None:
+            return
+        event_type = f"llm.call.{status}"
+        await self.ctx.event_bus.publish(event_type, {
+            "session_key": session_key,
+            "call_category": call_category,
+            "model": model,
+            "status": status,
+            "latency_seconds": latency_seconds,
+            "total_tokens": total_tokens,
+            **kwargs,
+        })
+
     def _get_service(self) -> OpenAIService:
         return OpenAIService(self.ctx)
 
@@ -192,6 +208,11 @@ class LLMDispatchService(BaseService):
                 sum(len(m.get("content", "")) for m in messages),
                 len(result or ""),
             )
+            await self._publish_call(
+                status="completed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=elapsed, total_tokens=None,
+            )
             return result
 
         except Exception as exc:
@@ -213,6 +234,12 @@ class LLMDispatchService(BaseService):
                 task_id=task_id,
                 dispatch_id=dispatch_id,
                 contact_id=contact_id,
+            )
+            await self._publish_call(
+                status="failed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=elapsed, total_tokens=None,
+                error_message=str(exc),
             )
             raise
 
@@ -289,6 +316,12 @@ class LLMDispatchService(BaseService):
                 len(accumulated),
                 stream_result.total_tokens,
             )
+            await self._publish_call(
+                status="completed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=elapsed, total_tokens=stream_result.total_tokens,
+                ttft_seconds=ttft,
+            )
 
         except Exception as exc:
             elapsed = time.monotonic() - t0
@@ -311,6 +344,12 @@ class LLMDispatchService(BaseService):
                 task_id=task_id,
                 dispatch_id=dispatch_id,
                 contact_id=contact_id,
+            )
+            await self._publish_call(
+                status="failed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=elapsed, total_tokens=None,
+                error_message=str(exc),
             )
             raise
 
@@ -386,6 +425,11 @@ class LLMDispatchService(BaseService):
                 len(tools), len(result),
                 stream_result.total_tokens,
             )
+            await self._publish_call(
+                status="completed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=elapsed, total_tokens=stream_result.total_tokens,
+            )
             return result
 
         except Exception as exc:
@@ -408,6 +452,12 @@ class LLMDispatchService(BaseService):
                 task_id=task_id,
                 dispatch_id=dispatch_id,
                 contact_id=contact_id,
+            )
+            await self._publish_call(
+                status="failed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=elapsed, total_tokens=None,
+                error_message=str(exc),
             )
             raise
 
@@ -475,6 +525,12 @@ class LLMDispatchService(BaseService):
                 messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="completed",
             )
+            await self._publish_call(
+                status="completed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=time.monotonic() - t0, total_tokens=None,
+                ttft_seconds=ttft,
+            )
 
         except Exception as exc:
             await _record_log(self.db, log_id=log_id,
@@ -483,6 +539,12 @@ class LLMDispatchService(BaseService):
                 ttft_seconds=ttft,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="failed",
+                error_message=str(exc),
+            )
+            await self._publish_call(
+                status="failed", session_key=session_key,
+                call_category=call_category, model=resolved_model,
+                latency_seconds=time.monotonic() - t0, total_tokens=None,
                 error_message=str(exc),
             )
             raise

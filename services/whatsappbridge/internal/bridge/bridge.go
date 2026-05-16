@@ -2,9 +2,11 @@ package bridge
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,6 +142,16 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			QuotedMessageID:   evt.QuotedMessageID,
 			Timestamp:         evt.Timestamp,
 		}
+		if len(evt.Contacts) > 0 {
+			payload.Contacts = make([]wsproto.SharedContact, len(evt.Contacts))
+			for i, c := range evt.Contacts {
+				payload.Contacts[i] = wsproto.SharedContact{
+					DisplayName: c.DisplayName,
+					Vcard:       c.Vcard,
+					Phone:       c.Phone,
+				}
+			}
+		}
 		env := wsproto.NewEnvelope(wsproto.TypeIncomingMessage, payload)
 
 		// Always enqueue for durability
@@ -183,6 +195,14 @@ func (b *Bridge) handleClientMessage(env wsproto.Envelope) {
 			return
 		}
 		b.handleSend(payload)
+
+	case wsproto.TypeSendMedia:
+		var payload wsproto.SendMediaPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			b.log.Warn("invalid send_media payload", "error", err)
+			return
+		}
+		b.handleSendMedia(payload)
 
 	case wsproto.TypeAck:
 		var payload wsproto.AckPayload
@@ -258,6 +278,66 @@ func (b *Bridge) handlePairingRequest(payload wsproto.RequestPairingPayload) {
 		// QR code is handled automatically by whatsmeow events
 		b.wa.RequestQRCode()
 	}
+}
+
+func (b *Bridge) handleSendMedia(payload wsproto.SendMediaPayload) {
+	if !b.wa.IsConnected() {
+		b.log.Warn("whatsapp not connected, cannot send media", "request_id", payload.RequestID)
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     "whatsapp not connected",
+		})
+		return
+	}
+
+	jid, ok := b.wa.ParseJID(payload.ChatID)
+	if !ok {
+		b.log.Warn("invalid jid for media send", "chat_id", payload.ChatID)
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     "invalid jid",
+		})
+		return
+	}
+
+	data, err := base64.StdEncoding.DecodeString(payload.Data)
+	if err != nil {
+		b.log.Warn("invalid base64 data for media send", "error", err, "request_id", payload.RequestID)
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     "invalid base64 data",
+		})
+		return
+	}
+
+	var msgID string
+	mime := strings.ToLower(payload.MimeType)
+	if strings.HasPrefix(mime, "image/") {
+		msgID, err = b.wa.SendImage(jid, data, payload.MimeType, payload.Caption)
+	} else {
+		fileName := "file"
+		msgID, err = b.wa.SendDocument(jid, data, payload.MimeType, fileName, payload.Caption)
+	}
+
+	if err != nil {
+		b.log.Warn("media send failed", "error", err, "chat_id", payload.ChatID, "request_id", payload.RequestID)
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     err.Error(),
+		})
+		return
+	}
+
+	b.log.Info("media sent", "chat_id", payload.ChatID, "mime_type", payload.MimeType, "request_id", payload.RequestID, "msg_id", msgID)
+	b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+		RequestID:         payload.RequestID,
+		Success:           true,
+		WhatsAppMessageID: msgID,
+	})
 }
 
 func (b *Bridge) drainIncoming() {

@@ -253,3 +253,124 @@ def make_whatsapp_outreach_tools(
         })
 
     return [search_contacts, send_whatsapp_to_contact, get_contact_session_messages]
+
+
+def _session_key_to_chat_id(session_key: str) -> str | None:
+    """Derive a WhatsApp chat_id (JID) from a session key."""
+    parts = session_key.split(":")
+    if len(parts) < 5 or parts[2] != "whatsapp":
+        return None
+    kind = parts[3]
+    ident = parts[4]
+    if kind == "dm":
+        return f"{ident}@s.whatsapp.net"
+    if kind == "group":
+        return f"{ident}@g.us"
+    return None
+
+
+def make_outreach_reply_tools(
+    ctx: AppContext,
+    wa_service: WhatsAppBridgeService,
+    current_session_key: str,
+) -> list:
+    """Create the report_outreach_result tool for an active outreach target session.
+
+    Only call this when the session route has outreach_initiated_from in metadata.
+    """
+
+    @tool
+    async def report_outreach_result(result: str) -> str:
+        """Report the outcome of an outreach conversation back to the session
+        that requested it. Call this once you have the information requested.
+        You can only call this once — after reporting, the outreach is complete."""
+        from cyborg_server.services.session_agenda_service import SessionAgendaService
+        from cyborg_server.services.session_service import SessionService
+        from cyborg_server.services.llm_dispatch import _record_log
+        from uuid import uuid4
+
+        db = ctx.db
+
+        # Find originating session from route metadata
+        route = await db.fetch_one(
+            "SELECT metadata FROM session_routes WHERE session_key = ?",
+            (current_session_key,),
+        )
+        if not route or not route["metadata"]:
+            return json.dumps({"ok": False, "error": "No active outreach to report"})
+
+        meta = json.loads(route["metadata"])
+        origin_session_key = meta.get("outreach_initiated_from")
+        if not origin_session_key:
+            return json.dumps({"ok": False, "error": "No active outreach to report"})
+
+        # Derive chat_id for originating session
+        chat_id = _session_key_to_chat_id(origin_session_key)
+        if not chat_id:
+            return json.dumps({"ok": False, "error": f"Cannot resolve chat for session {origin_session_key}"})
+
+        # Send message back to originating session
+        if not wa_service.connected:
+            return json.dumps({"ok": False, "error": "WhatsApp bridge is not connected"})
+
+        request_id = await wa_service.send_message(chat_id, result)
+
+        # Store in originating session's message history
+        session_svc = SessionService(ctx)
+        await session_svc.add_message(
+            origin_session_key, "assistant", result,
+            channel="whatsapp",
+            metadata={"outreach_result": True, "source_session": current_session_key},
+        )
+
+        # Record in llm_call_log under originating session
+        await _record_log(
+            db,
+            provider="outreach_reply",
+            model="",
+            call_category="outreach_result",
+            session_key=origin_session_key,
+            user_message=f"[Outreach result from {current_session_key}]",
+            response_text=result,
+            status="completed",
+        )
+
+        # Clear outreach_initiated_from from route metadata
+        meta.pop("outreach_initiated_from", None)
+        await db.execute(
+            "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
+            (json.dumps(meta) if meta else None, current_session_key),
+        )
+
+        # Clear outreach agenda from current session
+        agenda_service = SessionAgendaService(ctx)
+        current_agenda = await agenda_service.get_agenda(current_session_key) or ""
+        # Remove the outreach agenda template block
+        lines = current_agenda.split("\n")
+        filtered = []
+        skip = False
+        for line in lines:
+            if "proactively initiated by the agent" in line.lower() or "outreach context" in line.lower():
+                skip = True
+            if skip:
+                if line.strip() == "" or "proactively initiated" in line.lower() or "outreach context" in line.lower() or "requested by:" in line.lower() or "purpose:" in line.lower() or "engage naturally" in line.lower() or "acknowledge it" in line.lower() or "send_whatsapp_message" in line.lower() or "no response is warranted" in line.lower() or "keep responses" in line.lower() or "report_outreach_result" in line.lower() or "your role" in line.lower():
+                    continue
+                else:
+                    skip = False
+            if not skip:
+                filtered.append(line)
+        cleaned = "\n".join(filtered).strip()
+        await agenda_service.set_agenda(current_session_key, cleaned)
+
+        logger.info(
+            "Outreach result reported from %s to %s: %s",
+            current_session_key, origin_session_key, result[:100],
+        )
+
+        return json.dumps({
+            "ok": True,
+            "reported_to": origin_session_key,
+            "request_id": request_id,
+        })
+
+    return [report_outreach_result]

@@ -15,6 +15,12 @@ type PairingCodeEvent struct {
 	PhoneNumber string
 }
 
+type SharedContact struct {
+	DisplayName string
+	Vcard       string
+	Phone       string
+}
+
 type IncomingMessageEvent struct {
 	WhatsAppMessageID string
 	ChatID            string
@@ -23,6 +29,7 @@ type IncomingMessageEvent struct {
 	SenderName        string
 	Text              string
 	QuotedMessageID   string
+	Contacts          []SharedContact
 	Timestamp         string
 }
 

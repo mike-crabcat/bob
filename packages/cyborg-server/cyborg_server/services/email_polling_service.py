@@ -648,6 +648,12 @@ class EmailPollingService(BaseService):
             session_svc = SessionService(self.ctx)
             await session_svc.add_message(session_key, "user", body, channel="email")
             await session_svc.add_message(session_key, "assistant", result, channel="email")
+            if self.ctx.event_bus:
+                await self.ctx.event_bus.publish("email.message.received", {
+                    "session_key": session_key,
+                    "subject": thread.get("subject", ""),
+                    "from_address": message.get("from", ""),
+                })
             return result
 
         DispatchService(self.ctx).track(dispatch_id, _run_dispatch())

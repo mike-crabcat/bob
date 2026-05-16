@@ -57,15 +57,16 @@ type PairingCodePayload struct {
 }
 
 type IncomingMessagePayload struct {
-	WhatsAppMessageID string      `json:"whatsapp_message_id"`
-	ChatID            string      `json:"chat_id"`
-	ChatKind          string      `json:"chat_kind"` // "dm" or "group"
-	SenderJID         string      `json:"sender_jid"`
-	SenderName        string      `json:"sender_name,omitempty"`
-	Text              string      `json:"text,omitempty"`
-	QuotedMessageID   string      `json:"quoted_message_id,omitempty"`
-	Media             *MediaInfo  `json:"media,omitempty"`
-	Timestamp         string      `json:"timestamp"`
+	WhatsAppMessageID string           `json:"whatsapp_message_id"`
+	ChatID            string           `json:"chat_id"`
+	ChatKind          string           `json:"chat_kind"` // "dm" or "group"
+	SenderJID         string           `json:"sender_jid"`
+	SenderName        string           `json:"sender_name,omitempty"`
+	Text              string           `json:"text,omitempty"`
+	QuotedMessageID   string           `json:"quoted_message_id,omitempty"`
+	Media             *MediaInfo       `json:"media,omitempty"`
+	Contacts          []SharedContact  `json:"contacts,omitempty"`
+	Timestamp         string           `json:"timestamp"`
 }
 
 type MediaInfo struct {
@@ -74,6 +75,12 @@ type MediaInfo struct {
 	Filename  string `json:"filename,omitempty"`
 	SizeBytes int64  `json:"size_bytes"`
 	Data      string `json:"data,omitempty"` // base64
+}
+
+type SharedContact struct {
+	DisplayName string `json:"display_name"`
+	Vcard       string `json:"vcard,omitempty"`
+	Phone       string `json:"phone,omitempty"` // first TEL from vcard, normalized
 }
 
 type MessageAckedPayload struct {
@@ -106,6 +113,14 @@ type SendMessagePayload struct {
 	RequestID          string `json:"request_id"`
 }
 
+type SendMediaPayload struct {
+	ChatID    string `json:"chat_id"`
+	MimeType  string `json:"mime_type"`
+	Data      string `json:"data"`      // base64-encoded
+	Caption   string `json:"caption,omitempty"`
+	RequestID string `json:"request_id"`
+}
+
 type AckPayload struct {
 	MessageID string `json:"message_id"`
 }
@@ -126,6 +141,7 @@ const (
 	TypeMessageAcked     = "whatsapp.message_acked"
 	TypeBridgeStatus     = "bridge.status"
 	TypeSendMessage      = "send_message"
+	TypeSendMedia        = "send_media"
 	TypeAck              = "ack"
 	TypeRequestPairing   = "request_pairing"
 	TypeSendMessageResult = "send_message_result"

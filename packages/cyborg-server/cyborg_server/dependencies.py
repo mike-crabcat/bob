@@ -51,7 +51,11 @@ def get_database(request: Request) -> Database:
 def get_app_context(request: Request) -> AppContext:
     """Build an AppContext from the current request."""
 
-    return AppContext(db=request.app.state.db, settings=request.app.state.settings)
+    return AppContext(
+        db=request.app.state.db,
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
 
 
 def get_task_service(ctx: AppContext = Depends(get_app_context)) -> TaskService:

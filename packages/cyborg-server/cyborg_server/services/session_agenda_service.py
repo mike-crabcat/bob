@@ -65,6 +65,7 @@ Your role: engage naturally with this contact to obtain the information requeste
 When they provide an answer, acknowledge it clearly.
 Use the send_whatsapp_message tool to send your reply.
 If no response is warranted, call send_whatsapp_message with "NO_REPLY".
+When you have the information, call report_outreach_result to relay it back to the requesting session.
 Keep responses concise and conversational.\
 """
 

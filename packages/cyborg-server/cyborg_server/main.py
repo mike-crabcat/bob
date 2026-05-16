@@ -28,7 +28,8 @@ from cyborg_server.heartbeat import (
     StuckDispatchCheckTask,
 )
 from cyborg_server.models import HealthResponse
-from cyborg_server.routers import calendars, contacts, context, dashboard, dispatches, email, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks, whatsapp
+from cyborg_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, dispatches, email, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks, whatsapp
+from cyborg_server.services.event_bus import EventBus
 from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.db = database
 
         app_ctx = AppContext(db=database, settings=resolved_settings)
+
+        event_bus = EventBus()
+        app_ctx.event_bus = event_bus
+        app.state.event_bus = event_bus
 
         # Conditional voice engine preload
         if resolved_settings.voice.enabled:
@@ -180,8 +185,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
     app.include_router(email.router)
-    app.include_router(dashboard.router)  # Web dashboard
     app.include_router(dispatches.router)
+
+    # Dashboard API (HTTP) + WebSocket (live events)
+    app.include_router(dashboard_api.router, prefix="/dashboard")
+    app.include_router(dashboard_ws.router, prefix="/dashboard")
+
+    # Dashboard SPA static files (must be last dashboard-related mount)
+    dashboard_dist = Path(__file__).parent / "ui_dist"
+    if dashboard_dist.is_dir():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/dashboard", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard_spa")
+        logger.info("Dashboard SPA mounted from %s", dashboard_dist)
 
     # Conditional voice chat router
     if resolved_settings.voice.enabled:

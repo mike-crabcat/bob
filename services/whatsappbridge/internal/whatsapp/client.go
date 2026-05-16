@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"go.mau.fi/whatsmeow"
@@ -107,6 +108,63 @@ func (c *Client) SendMessage(jid types.JID, text string) (string, error) {
 	return string(resp.ServerID), nil
 }
 
+func (c *Client) SendImage(jid types.JID, imageData []byte, mimeType, caption string) (string, error) {
+	uploaded, err := c.client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
+	if err != nil {
+		return "", fmt.Errorf("upload image: %w", err)
+	}
+
+	msg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Mimetype:      &mimeType,
+			MediaKey:      uploaded.MediaKey,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    &uploaded.FileLength,
+			URL:           &uploaded.URL,
+			DirectPath:    &uploaded.DirectPath,
+		},
+	}
+	if caption != "" {
+		msg.ImageMessage.Caption = &caption
+	}
+
+	resp, err := c.client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return "", err
+	}
+	return string(resp.ServerID), nil
+}
+
+func (c *Client) SendDocument(jid types.JID, data []byte, mimeType, fileName, caption string) (string, error) {
+	uploaded, err := c.client.Upload(context.Background(), data, whatsmeow.MediaDocument)
+	if err != nil {
+		return "", fmt.Errorf("upload document: %w", err)
+	}
+
+	msg := &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{
+			Mimetype:      &mimeType,
+			FileName:      &fileName,
+			MediaKey:      uploaded.MediaKey,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    &uploaded.FileLength,
+			URL:           &uploaded.URL,
+			DirectPath:    &uploaded.DirectPath,
+		},
+	}
+	if caption != "" {
+		msg.DocumentMessage.Caption = &caption
+	}
+
+	resp, err := c.client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return "", err
+	}
+	return string(resp.ServerID), nil
+}
+
 func (c *Client) ParseJID(s string) (types.JID, bool) {
 	jid, err := types.ParseJID(s)
 	if err != nil {
@@ -178,12 +236,7 @@ func (c *Client) handleEvent(raw any) {
 
 func (c *Client) handleMessage(evt *events.Message) {
 	info := evt.Info
-	text := ""
-	if evt.Message.GetConversation() != "" {
-		text = evt.Message.GetConversation()
-	} else if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
-		text = ext.GetText()
-	}
+	text, contacts := extractTextAndContacts(evt.Message)
 
 	if text == "" {
 		return
@@ -210,6 +263,7 @@ func (c *Client) handleMessage(evt *events.Message) {
 		SenderJID:         senderJID.String(),
 		SenderName:        senderName,
 		Text:              text,
+		Contacts:          contacts,
 		Timestamp:         info.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 
@@ -220,6 +274,61 @@ func (c *Client) handleMessage(evt *events.Message) {
 	if c.onEvent != nil {
 		c.onEvent(msgEvt)
 	}
+}
+
+// extractTextAndContacts pulls readable text and structured contacts from any supported message type.
+func extractTextAndContacts(msg *waE2E.Message) (string, []SharedContact) {
+	if msg.GetConversation() != "" {
+		return msg.GetConversation(), nil
+	}
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		return ext.GetText(), nil
+	}
+	if contact := msg.GetContactMessage(); contact != nil {
+		c := parseContact(contact.GetDisplayName(), contact.GetVcard())
+		text := formatContact(c.DisplayName, c.Phone)
+		return text, []SharedContact{c}
+	}
+	if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		var parsed []SharedContact
+		var parts []string
+		for _, c := range contacts.GetContacts() {
+			sc := parseContact(c.GetDisplayName(), c.GetVcard())
+			parsed = append(parsed, sc)
+			parts = append(parts, formatContact(sc.DisplayName, sc.Phone))
+		}
+		header := "Shared contacts:"
+		if name := contacts.GetDisplayName(); name != "" {
+			header = fmt.Sprintf("Shared contacts (%s):", name)
+		}
+		return header + "\n" + strings.Join(parts, "\n"), parsed
+	}
+	return "", nil
+}
+
+func parseContact(displayName, vcard string) SharedContact {
+	var phone string
+	for _, line := range strings.Split(vcard, "\n") {
+		if strings.HasPrefix(line, "TEL") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 && parts[1] != "" {
+				phone = parts[1]
+				break
+			}
+		}
+	}
+	return SharedContact{
+		DisplayName: displayName,
+		Vcard:       vcard,
+		Phone:       phone,
+	}
+}
+
+func formatContact(displayName, phone string) string {
+	if phone != "" {
+		return fmt.Sprintf("[Contact] %s (%s)", displayName, phone)
+	}
+	return fmt.Sprintf("[Contact] %s", displayName)
 }
 
 func (c *Client) handleReceipt(evt *events.Receipt) {

@@ -71,6 +71,14 @@ class DispatchService(BaseService):
             "Recorded dispatch %s for %s (session=%s, task=%s, project=%s)",
             dispatch_id, notification_type, session_key, task_id, project_id,
         )
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish("dispatch.created", {
+                "id": dispatch_id,
+                "notification_type": notification_type,
+                "session_key": session_key,
+                "task_id": task_id,
+                "project_id": project_id,
+            })
         return dispatch_id
 
     def track(self, dispatch_id: str, coro: Coroutine[Any, Any, Any]) -> None:
@@ -111,6 +119,11 @@ class DispatchService(BaseService):
             (DispatchStatus.COMPLETED.value, now_iso, now_iso, now_iso, dispatch_id, DispatchStatus.ACTIVE.value),
         )
         logger.info("Dispatch %s completed", dispatch_id)
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish("dispatch.completed", {
+                "id": dispatch_id,
+                "status": "completed",
+            })
         await self._on_dispatch_completed(dispatch_id)
 
     async def _on_dispatch_completed(self, dispatch_id: str) -> None:
@@ -178,6 +191,11 @@ class DispatchService(BaseService):
             """,
             (status.value, now_iso, now_iso, now_iso, dispatch_id, DispatchStatus.ACTIVE.value),
         )
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish("dispatch.status_changed", {
+                "id": dispatch_id,
+                "status": status.value,
+            })
 
     async def complete_dispatches_for_task(
         self,

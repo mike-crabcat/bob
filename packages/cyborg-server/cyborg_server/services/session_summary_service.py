@@ -196,6 +196,14 @@ class SessionSummaryService(BaseService):
                 model_used,
             ),
         )
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish("session.summary.created", {
+                "id": summary_id,
+                "session_key": session_key,
+                "summary_text": summary_text,
+                "topics": topics,
+                "participants": participants,
+            })
         return summary_id
 
     async def get_summaries(self, session_key: str) -> list[dict[str, Any]]:
