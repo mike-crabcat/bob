@@ -77,6 +77,45 @@
 </div>
 {% endif %}
 
+<!-- Session Summaries -->
+{% if summaries %}
+<div class="glass-card neon-border rounded-xl p-4 mb-6">
+    <h2 class="text-lg font-semibold text-accent-green mb-4">Session Summaries ({{ summaries|length }})</h2>
+    <div class="space-y-4">
+        {% for s in summaries %}
+        <div class="bg-bg-deep rounded-lg p-4">
+            <div class="flex flex-wrap items-center gap-3 mb-2">
+                <span class="text-text-muted text-xs font-mono-data">{{ (s.active_from or '')[:19] }}</span>
+                <span class="text-text-muted text-xs">&rarr;</span>
+                <span class="text-text-muted text-xs font-mono-data">{{ (s.active_to or '')[:19] }}</span>
+                <span class="px-2 py-0.5 rounded text-xs bg-accent-green/20 text-accent-green font-mono-data">
+                    {{ s.message_count }} messages
+                </span>
+            </div>
+            <p class="text-sm text-text-primary mb-3">{{ s.summary_text }}</p>
+            {% if s.topics %}
+            <div class="flex flex-wrap gap-1.5 mb-2">
+                {% for topic in s.topics %}
+                <span class="px-2 py-0.5 rounded text-xs bg-accent-cyan/15 text-accent-cyan">{{ topic }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if s.memory_prompts %}
+            <div class="mt-2 border-t border-accent-cyan/10 pt-2">
+                <span class="text-xs text-accent-orange">Memory Prompts</span>
+                <ul class="text-xs text-text-secondary mt-1 space-y-0.5">
+                    {% for prompt in s.memory_prompts %}
+                    <li>{{ prompt }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 <!-- LLM Calls -->
 {% if calls %}
 <div class="glass-card neon-border rounded-xl p-4 mb-6">
@@ -94,6 +133,9 @@
                 </span>
                 {% if call.call_category %}
                 <span class="px-2 py-0.5 rounded text-xs font-mono-data bg-accent-purple/20 text-accent-purple">{{ call.call_category }}</span>
+                {% endif %}
+                {% if call.contact_name %}
+                <a href="/dashboard/contacts/{{ call.contact_id }}" class="px-2 py-0.5 rounded text-xs font-mono-data bg-accent-orange/20 text-accent-orange" title="{{ call.contact_name }}">{{ call.contact_name[:20] }}{% if call.contact_name|length > 20 %}...{% endif %}</a>
                 {% endif %}
                 {% if call.latency_seconds %}
                 <span class="text-accent-purple text-xs font-mono-data">{{ call.latency_seconds }}s</span>

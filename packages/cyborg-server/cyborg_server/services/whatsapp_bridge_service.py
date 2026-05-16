@@ -259,6 +259,18 @@ class WhatsAppBridgeService(BaseService):
             logger.info("resolved contact %s (trusted=%s) for phone %s", contact_id, is_trusted, phone_number)
         else:
             logger.info("no contact found for phone %s", phone_number)
+            # Auto-seed an untrusted contact for unknown WhatsApp senders
+            from uuid import uuid4
+            new_id = str(uuid4())
+            now_iso = utcnow().isoformat()
+            await self.db.execute(
+                """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
+                   VALUES (?, ?, ?, 0, ?, ?)""",
+                (new_id, sender_name or phone_number, phone_number, now_iso, now_iso),
+            )
+            contact_id = new_id
+            is_trusted = False
+            logger.info("auto-seeded untrusted contact %s for phone %s", contact_id, phone_number)
 
         # Derive session key
         agent_id = "main"
@@ -298,9 +310,6 @@ class WhatsAppBridgeService(BaseService):
                     },
                 ))
             else:
-                if contact_id is None:
-                    logger.warning("dropping WhatsApp DM from unknown contact %s (no contact_id for session route)", phone_number)
-                    return
                 await route_service.create_route(SessionRouteCreate(
                     channel="whatsapp",
                     session_key=session_key,
@@ -398,6 +407,7 @@ class WhatsAppBridgeService(BaseService):
                 call_category="whatsapp_incoming",
                 session_key=session_key,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
             # Auto-send fallback: if LLM produced text but never called send_whatsapp_message,
             # deliver it anyway — the LLM likely intended it as the reply.

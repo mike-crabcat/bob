@@ -397,7 +397,7 @@ class EmailPollingService(BaseService):
         now: Any,
     ) -> tuple[dict[str, Any], bool]:
         """Find or create an email_threads record for this message."""
-        sender_email, _ = _parse_from(message.get("from"))
+        sender_email, sender_name = _parse_from(message.get("from"))
         contact_id = None
         is_trusted = False
         if sender_email:
@@ -408,6 +408,20 @@ class EmailPollingService(BaseService):
             if contact:
                 contact_id = contact["id"]
                 is_trusted = bool(contact.get("is_trusted", 0))
+            else:
+                # Auto-seed an untrusted contact for unknown email senders
+                from uuid import uuid4
+                from cyborg_server.services.base import utcnow
+                new_id = str(uuid4())
+                now_iso = utcnow().isoformat()
+                await self.db.execute(
+                    """INSERT INTO contacts (id, name, email, is_trusted, created_at, updated_at)
+                       VALUES (?, ?, ?, 0, ?, ?)""",
+                    (new_id, sender_name or sender_email, sender_email, now_iso, now_iso),
+                )
+                contact_id = new_id
+                is_trusted = False
+                logger.info("auto-seeded untrusted contact %s for email %s", contact_id, sender_email)
 
         if contact_id is not None and is_trusted:
             default_agenda = DEFAULT_AGENDA
@@ -629,6 +643,7 @@ class EmailPollingService(BaseService):
                 call_category="email_incoming",
                 session_key=session_key,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
             session_svc = SessionService(self.ctx)
             await session_svc.add_message(session_key, "user", body, channel="email")

@@ -196,6 +196,7 @@ def make_whatsapp_outreach_tools(
             user_message=f"[Outreach to {contact['name']}] {purpose}",
             response_text=message,
             status="completed",
+            contact_id=contact["id"],
         )
 
         return json.dumps({

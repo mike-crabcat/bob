@@ -163,6 +163,66 @@ class EmailSyncTask:
 _last_call_cleanup: datetime | None = None
 
 
+class SessionIdleSummaryTask:
+    """Detect idle sessions and generate summaries for their active periods."""
+
+    name = "session_idle_summary"
+
+    async def run(self, ctx: AppContext) -> None:
+        from cyborg_server.services.session_summary_service import SessionSummaryService
+
+        service = SessionSummaryService(ctx)
+        idle_threshold = ctx.settings.session_summary_idle_minutes
+        idle_sessions = await service.find_idle_sessions(idle_threshold)
+
+        if not idle_sessions:
+            return
+
+        for session in idle_sessions:
+            try:
+                messages = await service.get_messages_for_period(
+                    session["session_key"],
+                    session["active_from"],
+                    session["last_message_at"],
+                )
+                if not messages:
+                    continue
+
+                participants = await service.get_participants_for_period(
+                    session["session_key"],
+                    session["active_from"],
+                    session["last_message_at"],
+                )
+                name_map = await service.get_participant_name_map(
+                    session["session_key"],
+                )
+                result = await service.generate_summary(
+                    messages, participants,
+                    session["active_from"], session["last_message_at"],
+                    name_map=name_map,
+                )
+                await service.store_summary(
+                    session_key=session["session_key"],
+                    active_from=session["active_from"],
+                    active_to=session["last_message_at"],
+                    summary_text=result["summary_text"],
+                    topics=result["topics"],
+                    participants=participants,
+                    memory_prompts=result["memory_prompts"],
+                    message_count=session["message_count"],
+                    model_used=ctx.settings.openai.default_model,
+                )
+                logger.info(
+                    "Session summary generated for %s (%d messages)",
+                    session["session_key"], session["message_count"],
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to generate summary for session %s",
+                    session["session_key"],
+                )
+
+
 class CallCleanupTask:
     """Delete old phone call recordings and database records."""
 

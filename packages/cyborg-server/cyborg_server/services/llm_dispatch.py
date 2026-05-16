@@ -74,6 +74,7 @@ async def _record_log(
     project_id: str | None = None,
     task_id: str | None = None,
     dispatch_id: str | None = None,
+    contact_id: str | None = None,
 ) -> str:
     """Record or update an LLM call log entry. Returns the log_id.
 
@@ -108,14 +109,14 @@ async def _record_log(
                 system_prompt, user_message, messages_json, tools_json,
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                status, error_message, project_id, task_id, dispatch_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                status, error_message, project_id, task_id, dispatch_id, contact_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row_id, provider, model, call_category, session_key,
                 system_prompt, user_message, messages_json, tools_json,
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                status, error_message, project_id, task_id, dispatch_id,
+                status, error_message, project_id, task_id, dispatch_id, contact_id,
             ),
         )
         return row_id
@@ -147,6 +148,7 @@ class LLMDispatchService(BaseService):
         project_id: str | None = None,
         task_id: str | None = None,
         dispatch_id: str | None = None,
+        contact_id: str | None = None,
     ) -> str:
         """Non-streaming chat completion with automatic logging."""
         resolved_model = self._resolve_model(model)
@@ -180,6 +182,7 @@ class LLMDispatchService(BaseService):
                 project_id=project_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
 
             logger.info(
@@ -209,6 +212,7 @@ class LLMDispatchService(BaseService):
                 project_id=project_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
             raise
 
@@ -224,6 +228,7 @@ class LLMDispatchService(BaseService):
         project_id: str | None = None,
         task_id: str | None = None,
         dispatch_id: str | None = None,
+        contact_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion with automatic logging."""
         resolved_model = self._resolve_model(model)
@@ -273,6 +278,7 @@ class LLMDispatchService(BaseService):
                 project_id=project_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
 
             logger.info(
@@ -304,6 +310,7 @@ class LLMDispatchService(BaseService):
                 project_id=project_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
             raise
 
@@ -319,6 +326,7 @@ class LLMDispatchService(BaseService):
         project_id: str | None = None,
         task_id: str | None = None,
         dispatch_id: str | None = None,
+        contact_id: str | None = None,
     ) -> str:
         """Chat with tool calling. Loops until LLM finishes or max iterations.
 
@@ -368,6 +376,7 @@ class LLMDispatchService(BaseService):
                 project_id=project_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
 
             logger.info(
@@ -398,6 +407,7 @@ class LLMDispatchService(BaseService):
                 project_id=project_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
+                contact_id=contact_id,
             )
             raise
 
@@ -413,6 +423,7 @@ class LLMDispatchService(BaseService):
         project_id: str | None = None,
         task_id: str | None = None,
         dispatch_id: str | None = None,
+        contact_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat with tool calling support.
 
@@ -438,7 +449,7 @@ class LLMDispatchService(BaseService):
             tools_json=tools_json,
             status="running",
             project_id=project_id, task_id=task_id,
-            dispatch_id=dispatch_id,
+            dispatch_id=dispatch_id, contact_id=contact_id,
         )
         accumulated = ""
         ttft: float | None = None

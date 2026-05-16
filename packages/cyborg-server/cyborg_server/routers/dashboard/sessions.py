@@ -96,11 +96,14 @@ async def session_detail(
     )
     if table_exists:
         rows = await db.fetch_all(
-            """SELECT id, created_at, call_category, status, latency_seconds,
-                      ttft_seconds, total_tokens, user_message, response_text, error_message
-               FROM llm_call_log
-               WHERE session_key = ?
-               ORDER BY created_at DESC""",
+            """SELECT l.id, l.created_at, l.call_category, l.status, l.latency_seconds,
+                      l.ttft_seconds, l.total_tokens, l.user_message, l.response_text,
+                      l.error_message, l.contact_id,
+                      c.name as contact_name
+               FROM llm_call_log l
+               LEFT JOIN contacts c ON c.id = l.contact_id AND c.deleted_at IS NULL
+               WHERE l.session_key = ?
+               ORDER BY l.created_at DESC""",
             (session_key,),
         )
         for row in rows:
@@ -115,6 +118,8 @@ async def session_detail(
                 "user_message": row.get("user_message", ""),
                 "response_preview": (row.get("response_text") or "")[:200],
                 "error_message": row.get("error_message"),
+                "contact_id": row.get("contact_id"),
+                "contact_name": row.get("contact_name"),
             })
 
     # Stats
@@ -151,6 +156,15 @@ async def session_detail(
     agenda_svc = SessionAgendaService(ctx)
     current_agenda = await agenda_svc.get_agenda(session_key) or ""
 
+    # Summaries
+    summaries: list[dict] = []
+    summaries_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_summaries'"
+    )
+    if summaries_table:
+        from cyborg_server.services.session_summary_service import SessionSummaryService
+        summaries = await SessionSummaryService(ctx).get_summaries(session_key)
+
     return _render_template(
         "dashboard/session_detail.html",
         request,
@@ -167,6 +181,7 @@ async def session_detail(
                 "failed": failed,
             },
             "participants": participants,
+            "summaries": summaries,
             "pending_count": pending_count,
         },
     )

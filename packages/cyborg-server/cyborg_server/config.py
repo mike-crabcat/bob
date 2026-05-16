@@ -271,6 +271,7 @@ class Settings:
     dispatch_shutdown_timeout_seconds: float = 30.0
     dispatch_stuck_timeout_minutes: float = 60.0
     dispatch_concurrency_limit: int = 10
+    session_summary_idle_minutes: float = 5.0
 
     @property
     def dashboard_secret_configured(self) -> bool:
@@ -390,6 +391,9 @@ class Settings:
         dispatch_concurrency_limit = int(
             os.getenv("CYBORG_DISPATCH_CONCURRENCY_LIMIT", "10")
         )
+        session_summary_idle_minutes = float(
+            os.getenv("CYBORG_SESSION_SUMMARY_IDLE_MINUTES", "5.0")
+        )
 
         phone = PhoneSettings(
             enabled=os.getenv("CYBORG_PHONE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
@@ -451,6 +455,7 @@ class Settings:
             dispatch_shutdown_timeout_seconds=dispatch_shutdown_timeout_seconds,
             dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
             dispatch_concurrency_limit=dispatch_concurrency_limit,
+            session_summary_idle_minutes=session_summary_idle_minutes,
             phone=phone,
             openai=openai_llm,
             harness=harness,
