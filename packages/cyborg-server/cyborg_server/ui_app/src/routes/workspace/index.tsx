@@ -131,9 +131,9 @@ function WorkspacePage() {
 
       <div className="flex-1 min-h-0 flex flex-col md:flex-row">
         {/* File list */}
-        <div className="md:w-56 shrink-0 md:border-r border-b md:border-b-0 border-border overflow-x-auto md:overflow-y-auto md:overflow-x-hidden flex md:flex-col">
+        <div className="md:w-56 shrink-0 md:border-r border-b md:border-b-0 border-border overflow-y-auto max-h-36 md:max-h-none flex flex-col">
           {currentPath && (
-            <button onClick={goUp} className="shrink-0 text-left px-2 py-1.5 text-xs text-muted hover:bg-surface border-b md:border-b border-border">
+            <button onClick={goUp} className="text-left px-2 py-1.5 text-xs text-muted hover:bg-surface border-b border-border">
               ..
             </button>
           )}
@@ -144,7 +144,7 @@ function WorkspacePage() {
               <button
                 key={entry.name}
                 onClick={() => entry.type === "dir" ? navigateTo(displayName) : (setSelectedFile(entry.name), setEditing(false))}
-                className={`shrink-0 md:shrink md:w-auto text-left px-2 py-1.5 text-xs border-b md:border-b border-border hover:bg-surface transition-colors flex items-center gap-1.5 ${
+                className={`text-left px-2 py-1.5 text-xs border-b border-border hover:bg-surface transition-colors flex items-center gap-1.5 ${
                   isSelected ? "bg-surface text-accent" : "text-text"
                 }`}
               >
