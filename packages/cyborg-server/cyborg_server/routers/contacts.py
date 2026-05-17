@@ -171,6 +171,8 @@ async def update_contact(
         updates["phone_number"] = _normalize_phone_number(payload.phone_number)
     if payload.email is not None:
         updates["email"] = payload.email
+    if payload.is_trusted is not None:
+        updates["is_trusted"] = 1 if payload.is_trusted else 0
     if payload.whatsapp_groups is not None:
         updates["whatsapp_groups"] = json.dumps(payload.whatsapp_groups)
     if payload.metadata is not None:

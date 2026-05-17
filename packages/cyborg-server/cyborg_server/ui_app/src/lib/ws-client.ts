@@ -13,13 +13,16 @@ export class DashboardWS {
   private delay = 1000;
   private url: string;
   private _connected = false;
+  private _started = false;
 
   constructor() {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const base = import.meta.env.DEV ? `${proto}//${location.host}` : "";
     const wsBase = import.meta.env.BASE_URL.replace(/\/$/, "");
     const secret = this.getSecret();
-    this.url = `${base}${wsBase}/ws${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
+    if (import.meta.env.DEV) {
+      this.url = `ws://127.0.0.1:8420${wsBase}/ws${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
+    } else {
+      this.url = `${wsBase}/ws${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
+    }
   }
 
   private getSecret(): string {
@@ -27,8 +30,16 @@ export class DashboardWS {
     return m ? m[1] : "";
   }
 
-  connect() {
-    if (this.ws?.readyState === WebSocket.OPEN) return;
+  /** Start the WS connection. Safe to call multiple times — only connects once. */
+  start() {
+    if (this._started) return;
+    this._started = true;
+    this.connect();
+  }
+
+  private connect() {
+    const state = this.ws?.readyState;
+    if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
 
     try {
       this.ws = new WebSocket(this.url);
@@ -57,30 +68,8 @@ export class DashboardWS {
     };
 
     this.ws.onerror = () => {
-      this.ws?.close();
+      // onclose fires after onerror, so reconnect is handled there
     };
-  }
-
-  disconnect() {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.ws?.close();
-    this.ws = null;
-    this._connected = false;
-  }
-
-  send(msg: Record<string, unknown>) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
-    }
-  }
-
-  subscribe(fn: Listener): () => void {
-    this.listeners.add(fn);
-    return () => this.listeners.delete(fn);
-  }
-
-  get connected() {
-    return this._connected;
   }
 
   private scheduleReconnect() {
@@ -89,6 +78,17 @@ export class DashboardWS {
       this.delay = Math.min(this.delay * 2, 30000);
       this.connect();
     }, this.delay);
+  }
+
+  subscribe(fn: Listener): () => void {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  get connected() {
+    return this._connected;
   }
 }
 

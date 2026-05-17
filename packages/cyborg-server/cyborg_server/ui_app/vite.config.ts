@@ -20,10 +20,12 @@ export default defineConfig({
     proxy: {
       "/dashboard/api": {
         target: "http://127.0.0.1:8420",
+        changeOrigin: true,
       },
       "/dashboard/ws": {
         target: "ws://127.0.0.1:8420",
         ws: true,
+        changeOrigin: true,
       },
     },
   },

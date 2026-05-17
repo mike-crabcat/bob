@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 
 from cyborg_server.database import Database
 
@@ -14,11 +16,28 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"}
+_MAX_READ_BYTES = 200 * 1024
+
+
+def _resolve_workspace_path(settings: Any, path: str) -> Path:
+    """Resolve a relative path against the workspace dir, preventing traversal."""
+    workspace = settings.harness.workspace_dir.expanduser().resolve()
+    resolved = (workspace / path).resolve() if path else workspace
+    if not str(resolved).startswith(str(workspace)):
+        raise ValueError(f"Path escapes workspace directory")
+    return resolved
+
 
 def _utc(val: str | None) -> str | None:
     if val and not val.endswith("Z") and not val.endswith("+00:00"):
         return val + "Z"
     return val
+
+
+def _utc_now() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_channel(session_key: str) -> str:
@@ -525,6 +544,36 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
     }
 
 
+@router.put("/api/contacts/{contact_id}")
+async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+
+    body = await request.json()
+    updates: dict[str, Any] = {}
+    if "name" in body and body["name"] is not None:
+        updates["name"] = str(body["name"]).strip()
+    if "phone_number" in body and body["phone_number"] is not None:
+        updates["phone_number"] = str(body["phone_number"])
+    if "email" in body:
+        updates["email"] = body["email"]
+    if "is_trusted" in body and body["is_trusted"] is not None:
+        updates["is_trusted"] = 1 if body["is_trusted"] else 0
+
+    if not updates:
+        return {"ok": True, "updated": False}
+
+    updates["updated_at"] = _utc_now()
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [contact_id]
+    await db.execute(
+        f"UPDATE contacts SET {set_clause} WHERE id = ? AND deleted_at IS NULL",
+        tuple(values),
+    )
+    return {"ok": True, "updated": True}
+
+
 @router.get("/api/calls/{call_id}")
 async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
     if not _check_auth(request):
@@ -578,3 +627,104 @@ async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
         "system_prompt": row["system_prompt"],
         "error_message": row["error_message"],
     }
+
+
+@router.get("/api/workspace")
+async def list_workspace(request: Request, path: str = "", depth: int = 1) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    try:
+        target = _resolve_workspace_path(settings, path)
+    except ValueError:
+        return {"error": "invalid path"}
+    if not target.is_dir():
+        return {"error": "not a directory"}
+
+    workspace = settings.harness.workspace_dir.expanduser().resolve()
+    entries: list[dict[str, Any]] = []
+
+    def _walk(dir_path: Path, current_depth: int) -> None:
+        if len(entries) >= 200:
+            return
+        try:
+            children = sorted(dir_path.iterdir())
+        except PermissionError:
+            return
+        for child in children:
+            if len(entries) >= 200:
+                break
+            rel = str(child.relative_to(workspace))
+            entry: dict[str, Any] = {"name": rel, "type": "dir" if child.is_dir() else "file"}
+            if child.is_file():
+                try:
+                    entry["size_bytes"] = child.stat().st_size
+                except OSError:
+                    pass
+            entries.append(entry)
+            if child.is_dir() and current_depth < depth:
+                _walk(child, current_depth + 1)
+
+    _walk(target, 1)
+    return {"entries": entries, "path": path, "root": str(workspace)}
+
+
+@router.get("/api/workspace/file")
+async def read_workspace_file(request: Request, path: str = "") -> Any:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    if not path:
+        return {"error": "path required"}
+    settings = request.app.state.settings
+    try:
+        resolved = _resolve_workspace_path(settings, path)
+    except ValueError:
+        return {"error": "invalid path"}
+    if not resolved.is_file():
+        return {"error": "not a file"}
+
+    size = resolved.stat().st_size
+    suffix = resolved.suffix.lower()
+
+    # Images: return raw bytes with correct Content-Type
+    if suffix in _IMAGE_EXTENSIONS:
+        mime_map = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+            ".bmp": "image/bmp", ".ico": "image/x-icon",
+        }
+        content_type = mime_map.get(suffix, "application/octet-stream")
+        data = resolved.read_bytes() if size <= _MAX_READ_BYTES else resolved.read_bytes(_MAX_READ_BYTES)
+        return Response(content=data, media_type=content_type)
+
+    # Text files
+    data = resolved.read_bytes() if size <= _MAX_READ_BYTES else resolved.read_bytes(_MAX_READ_BYTES)
+    # Count null bytes — a few may indicate encoding corruption, many means binary
+    null_count = data[:8192].count(b"\x00")
+    if null_count > 5:
+        return {"type": "binary", "size_bytes": size, "path": path}
+
+    return {"type": "text", "content": data.decode("utf-8", errors="replace"), "path": path, "size_bytes": size}
+
+
+@router.put("/api/workspace/file")
+async def write_workspace_file(request: Request, path: str = "") -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    if not path:
+        return {"error": "path required"}
+    settings = request.app.state.settings
+    try:
+        resolved = _resolve_workspace_path(settings, path)
+    except ValueError:
+        return {"error": "invalid path"}
+
+    body = await request.json()
+    content = body.get("content", "")
+    if len(content.encode("utf-8")) > 200 * 1024:
+        return {"error": "content too large (max 200KB)"}
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content, encoding="utf-8")
+    logger.info("Dashboard workspace write: %s (%d bytes)", path, len(content))
+    return {"ok": True}

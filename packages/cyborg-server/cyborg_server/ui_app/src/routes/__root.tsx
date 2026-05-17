@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { to: "/" as const, label: "Home" },
   { to: "/sessions" as const, label: "Sessions" },
   { to: "/contacts" as const, label: "Contacts" },
+  { to: "/workspace" as const, label: "Workspace" },
 ];
 
 function RootLayout() {
@@ -17,7 +18,7 @@ function RootLayout() {
   const connected = useWSConnected();
 
   useEffect(() => {
-    ws.connect();
+    ws.start();
     const unsub = ws.subscribe((event: WSEvent) => {
       if (event.type.startsWith("llm.call.")) {
         queryClient.invalidateQueries({ queryKey: ["home"] });
@@ -32,10 +33,7 @@ function RootLayout() {
         queryClient.invalidateQueries({ queryKey: ["session-detail"] });
       }
     });
-    return () => {
-      unsub();
-      ws.disconnect();
-    };
+    return unsub;
   }, [queryClient]);
 
   return (

@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as ContactsIndexRouteImport } from './routes/contacts/index'
 import { Route as SessionsSessionKeyRouteImport } from './routes/sessions/$sessionKey'
@@ -20,6 +21,11 @@ import { Route as SessionsSessionKeyCallsCallIdRouteImport } from './routes/sess
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
+  id: '/workspace/',
+  path: '/workspace/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SessionsIndexRoute = SessionsIndexRouteImport.update({
@@ -60,6 +66,7 @@ export interface FileRoutesByFullPath {
   '/sessions/$sessionKey': typeof SessionsSessionKeyRouteWithChildren
   '/contacts/': typeof ContactsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/workspace/': typeof WorkspaceIndexRoute
   '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
 }
@@ -68,6 +75,7 @@ export interface FileRoutesByTo {
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/contacts': typeof ContactsIndexRoute
   '/sessions': typeof SessionsIndexRoute
+  '/workspace': typeof WorkspaceIndexRoute
   '/sessions/$sessionKey': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
 }
@@ -78,6 +86,7 @@ export interface FileRoutesById {
   '/sessions/$sessionKey': typeof SessionsSessionKeyRouteWithChildren
   '/contacts/': typeof ContactsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/workspace/': typeof WorkspaceIndexRoute
   '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
 }
@@ -89,6 +98,7 @@ export interface FileRouteTypes {
     | '/sessions/$sessionKey'
     | '/contacts/'
     | '/sessions/'
+    | '/workspace/'
     | '/sessions/$sessionKey/'
     | '/sessions/$sessionKey/calls/$callId'
   fileRoutesByTo: FileRoutesByTo
@@ -97,6 +107,7 @@ export interface FileRouteTypes {
     | '/contacts/$contactId'
     | '/contacts'
     | '/sessions'
+    | '/workspace'
     | '/sessions/$sessionKey'
     | '/sessions/$sessionKey/calls/$callId'
   id:
@@ -106,6 +117,7 @@ export interface FileRouteTypes {
     | '/sessions/$sessionKey'
     | '/contacts/'
     | '/sessions/'
+    | '/workspace/'
     | '/sessions/$sessionKey/'
     | '/sessions/$sessionKey/calls/$callId'
   fileRoutesById: FileRoutesById
@@ -116,6 +128,7 @@ export interface RootRouteChildren {
   SessionsSessionKeyRoute: typeof SessionsSessionKeyRouteWithChildren
   ContactsIndexRoute: typeof ContactsIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
+  WorkspaceIndexRoute: typeof WorkspaceIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -125,6 +138,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workspace/': {
+      id: '/workspace/'
+      path: '/workspace'
+      fullPath: '/workspace/'
+      preLoaderRoute: typeof WorkspaceIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sessions/': {
@@ -191,6 +211,7 @@ const rootRouteChildren: RootRouteChildren = {
   SessionsSessionKeyRoute: SessionsSessionKeyRouteWithChildren,
   ContactsIndexRoute: ContactsIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
+  WorkspaceIndexRoute: WorkspaceIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
