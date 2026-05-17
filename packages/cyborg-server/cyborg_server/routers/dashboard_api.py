@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 
 from cyborg_server.database import Database
 
@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"}
-_MAX_READ_BYTES = 200 * 1024
 
 
 def _resolve_workspace_path(settings: Any, path: str) -> Path:
@@ -686,7 +685,7 @@ async def read_workspace_file(request: Request, path: str = "") -> Any:
     size = resolved.stat().st_size
     suffix = resolved.suffix.lower()
 
-    # Images: return raw bytes with correct Content-Type
+    # Images: stream directly via FileResponse
     if suffix in _IMAGE_EXTENSIONS:
         mime_map = {
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -694,11 +693,10 @@ async def read_workspace_file(request: Request, path: str = "") -> Any:
             ".bmp": "image/bmp", ".ico": "image/x-icon",
         }
         content_type = mime_map.get(suffix, "application/octet-stream")
-        data = resolved.read_bytes() if size <= _MAX_READ_BYTES else resolved.read_bytes(_MAX_READ_BYTES)
-        return Response(content=data, media_type=content_type)
+        return FileResponse(resolved, media_type=content_type)
 
     # Text files
-    data = resolved.read_bytes() if size <= _MAX_READ_BYTES else resolved.read_bytes(_MAX_READ_BYTES)
+    data = resolved.read_bytes()
     # Count null bytes — a few may indicate encoding corruption, many means binary
     null_count = data[:8192].count(b"\x00")
     if null_count > 5:
