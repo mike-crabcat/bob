@@ -30,6 +30,7 @@ export function LLMChart({ buckets, categories }: Props) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    setW(Math.floor(el.clientWidth));
     const ro = new ResizeObserver(([entry]) => {
       setW(Math.floor(entry.contentRect.width));
     });

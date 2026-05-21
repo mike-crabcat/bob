@@ -11,11 +11,15 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
+import { Route as SkillsIndexRouteImport } from './routes/skills/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
+import { Route as PhoneIndexRouteImport } from './routes/phone/index'
 import { Route as ContactsIndexRouteImport } from './routes/contacts/index'
+import { Route as SkillsDelegationIdRouteImport } from './routes/skills/$delegationId'
 import { Route as SessionsSessionKeyRouteImport } from './routes/sessions/$sessionKey'
 import { Route as ContactsContactIdRouteImport } from './routes/contacts/$contactId'
 import { Route as SessionsSessionKeyIndexRouteImport } from './routes/sessions/$sessionKey/index'
+import { Route as PhoneCallIdIndexRouteImport } from './routes/phone/$callId/index'
 import { Route as SessionsSessionKeyCallsCallIdRouteImport } from './routes/sessions/$sessionKey/calls/$callId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -28,14 +32,29 @@ const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
   path: '/workspace/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SkillsIndexRoute = SkillsIndexRouteImport.update({
+  id: '/skills/',
+  path: '/skills/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsIndexRoute = SessionsIndexRouteImport.update({
   id: '/sessions/',
   path: '/sessions/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PhoneIndexRoute = PhoneIndexRouteImport.update({
+  id: '/phone/',
+  path: '/phone/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ContactsIndexRoute = ContactsIndexRouteImport.update({
   id: '/contacts/',
   path: '/contacts/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsDelegationIdRoute = SkillsDelegationIdRouteImport.update({
+  id: '/skills/$delegationId',
+  path: '/skills/$delegationId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SessionsSessionKeyRoute = SessionsSessionKeyRouteImport.update({
@@ -53,6 +72,11 @@ const SessionsSessionKeyIndexRoute = SessionsSessionKeyIndexRouteImport.update({
   path: '/',
   getParentRoute: () => SessionsSessionKeyRoute,
 } as any)
+const PhoneCallIdIndexRoute = PhoneCallIdIndexRouteImport.update({
+  id: '/phone/$callId/',
+  path: '/phone/$callId/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsSessionKeyCallsCallIdRoute =
   SessionsSessionKeyCallsCallIdRouteImport.update({
     id: '/calls/$callId',
@@ -64,18 +88,26 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/sessions/$sessionKey': typeof SessionsSessionKeyRouteWithChildren
+  '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
+  '/phone/': typeof PhoneIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
+  '/phone/$callId/': typeof PhoneCallIdIndexRoute
   '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
+  '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts': typeof ContactsIndexRoute
+  '/phone': typeof PhoneIndexRoute
   '/sessions': typeof SessionsIndexRoute
+  '/skills': typeof SkillsIndexRoute
   '/workspace': typeof WorkspaceIndexRoute
+  '/phone/$callId': typeof PhoneCallIdIndexRoute
   '/sessions/$sessionKey': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
 }
@@ -84,9 +116,13 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/sessions/$sessionKey': typeof SessionsSessionKeyRouteWithChildren
+  '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
+  '/phone/': typeof PhoneIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
+  '/phone/$callId/': typeof PhoneCallIdIndexRoute
   '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
 }
@@ -96,18 +132,26 @@ export interface FileRouteTypes {
     | '/'
     | '/contacts/$contactId'
     | '/sessions/$sessionKey'
+    | '/skills/$delegationId'
     | '/contacts/'
+    | '/phone/'
     | '/sessions/'
+    | '/skills/'
     | '/workspace/'
+    | '/phone/$callId/'
     | '/sessions/$sessionKey/'
     | '/sessions/$sessionKey/calls/$callId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/contacts/$contactId'
+    | '/skills/$delegationId'
     | '/contacts'
+    | '/phone'
     | '/sessions'
+    | '/skills'
     | '/workspace'
+    | '/phone/$callId'
     | '/sessions/$sessionKey'
     | '/sessions/$sessionKey/calls/$callId'
   id:
@@ -115,9 +159,13 @@ export interface FileRouteTypes {
     | '/'
     | '/contacts/$contactId'
     | '/sessions/$sessionKey'
+    | '/skills/$delegationId'
     | '/contacts/'
+    | '/phone/'
     | '/sessions/'
+    | '/skills/'
     | '/workspace/'
+    | '/phone/$callId/'
     | '/sessions/$sessionKey/'
     | '/sessions/$sessionKey/calls/$callId'
   fileRoutesById: FileRoutesById
@@ -126,9 +174,13 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ContactsContactIdRoute: typeof ContactsContactIdRoute
   SessionsSessionKeyRoute: typeof SessionsSessionKeyRouteWithChildren
+  SkillsDelegationIdRoute: typeof SkillsDelegationIdRoute
   ContactsIndexRoute: typeof ContactsIndexRoute
+  PhoneIndexRoute: typeof PhoneIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
+  SkillsIndexRoute: typeof SkillsIndexRoute
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
+  PhoneCallIdIndexRoute: typeof PhoneCallIdIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -147,6 +199,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/skills/': {
+      id: '/skills/'
+      path: '/skills'
+      fullPath: '/skills/'
+      preLoaderRoute: typeof SkillsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions/': {
       id: '/sessions/'
       path: '/sessions'
@@ -154,11 +213,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/phone/': {
+      id: '/phone/'
+      path: '/phone'
+      fullPath: '/phone/'
+      preLoaderRoute: typeof PhoneIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/contacts/': {
       id: '/contacts/'
       path: '/contacts'
       fullPath: '/contacts/'
       preLoaderRoute: typeof ContactsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills/$delegationId': {
+      id: '/skills/$delegationId'
+      path: '/skills/$delegationId'
+      fullPath: '/skills/$delegationId'
+      preLoaderRoute: typeof SkillsDelegationIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sessions/$sessionKey': {
@@ -181,6 +254,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/sessions/$sessionKey/'
       preLoaderRoute: typeof SessionsSessionKeyIndexRouteImport
       parentRoute: typeof SessionsSessionKeyRoute
+    }
+    '/phone/$callId/': {
+      id: '/phone/$callId/'
+      path: '/phone/$callId'
+      fullPath: '/phone/$callId/'
+      preLoaderRoute: typeof PhoneCallIdIndexRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/sessions/$sessionKey/calls/$callId': {
       id: '/sessions/$sessionKey/calls/$callId'
@@ -209,9 +289,13 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ContactsContactIdRoute: ContactsContactIdRoute,
   SessionsSessionKeyRoute: SessionsSessionKeyRouteWithChildren,
+  SkillsDelegationIdRoute: SkillsDelegationIdRoute,
   ContactsIndexRoute: ContactsIndexRoute,
+  PhoneIndexRoute: PhoneIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
+  SkillsIndexRoute: SkillsIndexRoute,
   WorkspaceIndexRoute: WorkspaceIndexRoute,
+  PhoneCallIdIndexRoute: PhoneCallIdIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

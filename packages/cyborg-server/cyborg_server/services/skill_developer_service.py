@@ -183,6 +183,7 @@ class SkillDeveloperService(BaseService):
                WHERE id = ?""",
             (plan_text, claude_session_id, cost, utcnow().isoformat(), delegation_id),
         )
+        await self._publish_event(delegation_id, "plan_ready")
 
         logger.info(
             "Skill plan ready: delegation=%s session=%s cost=%.4f",
@@ -256,6 +257,7 @@ class SkillDeveloperService(BaseService):
                 delegation_id,
             ),
         )
+        await self._publish_event(delegation_id, "completed")
 
         # Clear skill loader cache so new skills appear
         from cyborg_server.services.skill_loader import _skills_cache
@@ -370,6 +372,14 @@ class SkillDeveloperService(BaseService):
                 "UPDATE skill_delegations SET status = ?, updated_at = ? WHERE id = ?",
                 (status, now, delegation_id),
             )
+        await self._publish_event(delegation_id, status)
+
+    async def _publish_event(self, delegation_id: str, status: str) -> None:
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish("skill.delegation.updated", {
+                "delegation_id": delegation_id,
+                "status": status,
+            })
 
     async def _find_new_skills(self, skills_dir: Path) -> list[str]:
         """List skill directories that contain a skill.md."""

@@ -377,6 +377,7 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
             (session_key,),
         )
         for row in rows:
+            is_reflection = row.get("call_category") == "reflection"
             calls.append({
                 "id": row["id"],
                 "created_at": _utc(row["created_at"]),
@@ -386,8 +387,8 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
                 "ttft_seconds": row.get("ttft_seconds"),
                 "total_tokens": row.get("total_tokens"),
                 "model": row.get("model", ""),
-                "user_message": (row.get("user_message") or "")[:300],
-                "response_preview": (row.get("response_text") or "")[:300],
+                "user_message": (row.get("user_message") or "") if is_reflection else (row.get("user_message") or "")[:300],
+                "response_preview": (row.get("response_text") or "") if is_reflection else (row.get("response_text") or "")[:300],
                 "error_message": row.get("error_message"),
                 "contact_id": row.get("contact_id"),
                 "contact_name": row.get("contact_name"),
@@ -455,6 +456,44 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
             "failed": sum(1 for c in calls if c["status"] == "failed"),
         },
     }
+
+
+@router.put("/api/sessions/{session_key:path}/agenda")
+async def put_agenda(request: Request, session_key: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    agenda = (body.get("agenda") or "").strip()
+    db = _db(request)
+    now = _utc_now()
+    await db.execute(
+        """INSERT INTO session_agendas (session_key, agenda, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(session_key) DO UPDATE SET agenda = excluded.agenda, updated_at = excluded.updated_at""",
+        (session_key, agenda, now),
+    )
+    return {"ok": True}
+
+
+@router.post("/api/sessions/{session_key:path}/reflect")
+async def post_reflect(request: Request, session_key: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    if not query:
+        return {"error": "query required"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.reflection_service import ReflectionService
+
+    ctx = AppContext(db=_db(request), settings=request.app.state.settings)
+    service = ReflectionService(ctx)
+    try:
+        result = await service.reflect(session_key, query)
+        return result
+    except Exception as exc:
+        logger.error("Reflection failed for session=%s: %s", session_key, exc)
+        return {"error": "reflection failed", "detail": str(exc)}
 
 
 @router.get("/api/contacts")
@@ -726,3 +765,288 @@ async def write_workspace_file(request: Request, path: str = "") -> dict[str, An
     resolved.write_text(content, encoding="utf-8")
     logger.info("Dashboard workspace write: %s (%d bytes)", path, len(content))
     return {"ok": True}
+
+
+# ── Skills ──────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/skills/installed")
+async def get_installed_skills(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir.expanduser().resolve()
+    skills_dir = workspace / "skills"
+    if not skills_dir.is_dir():
+        return {"skills": []}
+
+    from cyborg_server.services.skill_loader import _parse_frontmatter
+
+    skills: list[dict[str, Any]] = []
+    for child in sorted(skills_dir.iterdir()):
+        md = child / "skill.md"
+        if not child.is_dir() or not md.is_file():
+            continue
+        content = md.read_text(encoding="utf-8").strip()
+        fm = _parse_frontmatter(content)
+        skills.append({
+            "name": child.name,
+            "description": fm.get("description", ""),
+            "trigger": fm.get("trigger", ""),
+            "has_helper": (child / "helper.py").is_file(),
+            "has_pyproject": (child / "pyproject.toml").is_file(),
+        })
+    return {"skills": skills}
+
+
+@router.get("/api/skills/delegations")
+async def get_skill_delegations(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_delegations'"
+    )
+    if not table_exists:
+        return {"delegations": []}
+
+    rows = await db.fetch_all(
+        """SELECT id, session_key, user_story, plan, status,
+                  files_created_json, result_summary, cost_usd,
+                  error_message, created_at, updated_at
+           FROM skill_delegations
+           ORDER BY created_at DESC LIMIT 50"""
+    )
+    delegations: list[dict[str, Any]] = []
+    for row in rows:
+        files: list[str] = []
+        if row["files_created_json"]:
+            try:
+                files = json.loads(row["files_created_json"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        delegations.append({
+            "id": row["id"],
+            "session_key": row["session_key"],
+            "user_story": row["user_story"],
+            "plan_preview": (row["plan"] or "")[:300],
+            "status": row["status"],
+            "files_created": files,
+            "result_summary": row["result_summary"],
+            "cost_usd": row["cost_usd"] or 0,
+            "error_message": row["error_message"],
+            "created_at": _utc(row["created_at"]),
+            "updated_at": _utc(row["updated_at"]),
+        })
+    return {"delegations": delegations}
+
+
+@router.get("/api/skills/delegations/{delegation_id}")
+async def get_skill_delegation_detail(request: Request, delegation_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one(
+        """SELECT id, session_key, user_story, plan, status,
+                  files_created_json, result_summary, cost_usd,
+                  error_message, created_at, updated_at
+           FROM skill_delegations WHERE id = ?""",
+        (delegation_id,),
+    )
+    if not row:
+        return {"error": "not found"}
+    files: list[str] = []
+    if row["files_created_json"]:
+        try:
+            files = json.loads(row["files_created_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {
+        "id": row["id"],
+        "session_key": row["session_key"],
+        "user_story": row["user_story"],
+        "plan": row["plan"],
+        "status": row["status"],
+        "files_created": files,
+        "result_summary": row["result_summary"],
+        "cost_usd": row["cost_usd"] or 0,
+        "error_message": row["error_message"],
+        "created_at": _utc(row["created_at"]),
+        "updated_at": _utc(row["updated_at"]),
+    }
+
+
+@router.post("/api/skills/delegations/{delegation_id}/implement")
+async def implement_skill_delegation(request: Request, delegation_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.skill_developer_service import SkillDeveloperService
+
+    ctx = AppContext(
+        db=_db(request),
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
+    svc = SkillDeveloperService(ctx)
+    try:
+        result = await svc.implement_skill(delegation_id)
+        return result
+    except Exception as exc:
+        logger.error("Skill implement failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/skills/delegations/{delegation_id}/reject")
+async def reject_skill_delegation(request: Request, delegation_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    reason = (body.get("reason") or "").strip()
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.skill_developer_service import SkillDeveloperService
+
+    ctx = AppContext(
+        db=_db(request),
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
+    svc = SkillDeveloperService(ctx)
+    try:
+        result = await svc.reject_skill(delegation_id, reason)
+        return result
+    except Exception as exc:
+        logger.error("Skill reject failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Phone ────────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/phone/calls")
+async def get_phone_calls(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='phone_calls'"
+    )
+    if not table_exists:
+        return {"calls": []}
+    rows = await db.fetch_all(
+        """SELECT pc.id, pc.call_sid, pc.phone_number, pc.direction, pc.status,
+                  pc.agenda, pc.exchange_count, pc.duration_seconds, pc.recording_path,
+                  pc.started_at, pc.completed_at,
+                  c.id as contact_id, c.name as contact_name
+           FROM phone_calls pc
+           LEFT JOIN contacts c ON c.phone_number = pc.phone_number AND c.deleted_at IS NULL
+           ORDER BY pc.started_at DESC
+           LIMIT 50"""
+    )
+    calls: list[dict[str, Any]] = []
+    for row in rows:
+        calls.append({
+            "id": row["id"],
+            "call_sid": row["call_sid"],
+            "phone_number": row["phone_number"],
+            "direction": row["direction"],
+            "status": row["status"],
+            "agenda": row["agenda"],
+            "exchange_count": row["exchange_count"] or 0,
+            "duration_seconds": row["duration_seconds"],
+            "recording_path": row["recording_path"],
+            "started_at": _utc(row["started_at"]),
+            "completed_at": _utc(row["completed_at"]),
+            "contact_id": row["contact_id"],
+            "contact_name": row["contact_name"],
+        })
+    return {"calls": calls}
+
+
+@router.get("/api/phone/calls/{call_id}")
+async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    call = await db.fetch_one(
+        """SELECT pc.id, pc.call_sid, pc.phone_number, pc.direction, pc.status,
+                  pc.agenda, pc.exchange_count, pc.duration_seconds, pc.recording_path,
+                  pc.started_at, pc.completed_at,
+                  c.id as contact_id, c.name as contact_name
+           FROM phone_calls pc
+           LEFT JOIN contacts c ON c.phone_number = pc.phone_number AND c.deleted_at IS NULL
+           WHERE pc.id = ? OR pc.call_sid = ?""",
+        (call_id, call_id),
+    )
+    if not call:
+        return {"error": "Call not found"}
+    exchanges = await db.fetch_all(
+        """SELECT exchange_index, user_transcript, assistant_transcript,
+                  stt_ms, openclaw_ms, tts_first_chunk_ms, e2e_ms,
+                  started_at, created_at
+           FROM phone_call_exchanges
+           WHERE call_id = ?
+           ORDER BY exchange_index""",
+        (call["id"],),
+    )
+    return {
+        "call": {
+            "id": call["id"],
+            "call_sid": call["call_sid"],
+            "phone_number": call["phone_number"],
+            "direction": call["direction"],
+            "status": call["status"],
+            "agenda": call["agenda"],
+            "exchange_count": call["exchange_count"] or 0,
+            "duration_seconds": call["duration_seconds"],
+            "recording_path": call["recording_path"],
+            "started_at": _utc(call["started_at"]),
+            "completed_at": _utc(call["completed_at"]),
+            "contact_id": call["contact_id"],
+            "contact_name": call["contact_name"],
+        },
+        "exchanges": [dict(e) for e in exchanges],
+    }
+
+
+@router.post("/api/phone/call")
+async def dashboard_initiate_call(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    to_number = body.get("to", "").strip()
+    if not to_number:
+        return {"error": "Missing 'to' phone number"}
+    agenda = body.get("agenda", "").strip()
+    phone_settings = request.app.state.settings.phone
+    if not phone_settings.enabled:
+        return {"error": "Phone subsystem is not enabled"}
+
+    from cyborg_server.routers.phone import initiate_outbound_call
+    return await initiate_outbound_call(
+        db=_db(request),
+        settings=request.app.state.settings,
+        phone_settings=phone_settings,
+        to_number=to_number,
+        agenda=agenda,
+        app_state=request.app.state,
+    )
+
+
+@router.get("/api/phone/recording/{call_id}")
+async def get_phone_recording(request: Request, call_id: str) -> Any:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    call = await db.fetch_one(
+        "SELECT recording_path FROM phone_calls WHERE id = ? OR call_sid = ?",
+        (call_id, call_id),
+    )
+    if not call or not call["recording_path"]:
+        return {"error": "No recording available"}
+    rec_path = Path(call["recording_path"])
+    if not rec_path.is_file():
+        return {"error": "Recording file not found"}
+    return FileResponse(rec_path, media_type="audio/wav")

@@ -18,11 +18,8 @@ export class DashboardWS {
   constructor() {
     const wsBase = import.meta.env.BASE_URL.replace(/\/$/, "");
     const secret = this.getSecret();
-    if (import.meta.env.DEV) {
-      this.url = `ws://127.0.0.1:8420${wsBase}/ws${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
-    } else {
-      this.url = `${wsBase}/ws${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
-    }
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    this.url = `${proto}//${window.location.host}${wsBase}/ws${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
   }
 
   private getSecret(): string {

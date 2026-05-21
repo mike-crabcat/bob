@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["phone"])
 
+# Shared in-memory store for call agenda data, used by both the HTTP endpoint
+# and the LLM phone tool. Previously lived on app.state.
+_call_agendas: dict[str, dict] = {}
+
 
 def _build_phone_context() -> str:
     return (
@@ -171,6 +175,79 @@ async def _run_warmup(
         return False
 
 
+async def _emit_event(app_state: Any, event_type: str, payload: dict) -> None:
+    event_bus = getattr(app_state, "event_bus", None)
+    if event_bus:
+        await event_bus.publish(event_type, payload)
+
+
+async def initiate_outbound_call(
+    db: Any,
+    settings: Any,
+    phone_settings: Any,
+    to_number: str,
+    agenda: str,
+    app_state: Any | None = None,
+) -> dict:
+    """Initiate an outbound phone call via Twilio.
+
+    Shared by the HTTP endpoint and the LLM phone tool.
+    Returns {"call_id", "call_sid", "status"} on success or {"error": ...} on failure.
+    """
+    if not phone_settings.enabled:
+        return {"error": "Phone subsystem is not enabled"}
+
+    call_id = str(uuid4())
+    session_key = f"bobvoice:chat:phone:{call_id}"
+
+    warmup_message = _build_warmup_message(_build_phone_context(), agenda)
+    warmup_ok = await _run_warmup(
+        db=db,
+        settings=settings,
+        session_key=session_key,
+        warmup_message=warmup_message,
+    )
+
+    from twilio.rest import Client
+
+    client = Client(phone_settings.twilio_account_sid, phone_settings.twilio_auth_token)
+    base_url = phone_settings.base_url or settings.resolved_public_url
+
+    call = client.calls.create(
+        to=to_number,
+        from_=phone_settings.twilio_phone_number,
+        url=f"{base_url}/phone/twiml",
+        status_callback=f"{base_url}/phone/status",
+        status_callback_event=["initiated", "ringing", "answered", "completed"],
+    )
+
+    _call_agendas[call.sid] = {
+        "agenda": agenda,
+        "phone_number": to_number,
+        "call_id": call_id,
+        "session_key": session_key,
+        "warmup_done": warmup_ok,
+    }
+
+    await db.execute(
+        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at)
+           VALUES (?, ?, ?, 'outbound', 'ringing', ?, datetime('now'))""",
+        (call_id, call.sid, to_number, agenda),
+    )
+
+    logger.info("Initiated call %s to %s (warmup: %s)", call.sid, to_number, warmup_ok)
+
+    if app_state:
+        await _emit_event(app_state, "phone.call.ringing", {
+            "call_id": call_id,
+            "phone_number": to_number,
+            "direction": "outbound",
+            "agenda": agenda,
+        })
+
+    return {"call_sid": call.sid, "call_id": call_id, "status": call.status}
+
+
 @router.post("/call")
 async def initiate_call(request: Request) -> dict:
     """Initiate an outbound phone call via Twilio."""
@@ -181,57 +258,14 @@ async def initiate_call(request: Request) -> dict:
 
     agenda = body.get("agenda", "").strip()
 
-    settings = request.app.state.settings.phone
-    if not settings.enabled:
-        return {"error": "Phone subsystem is not enabled"}
-
-    # Generate call_id and session_key upfront for warmup
-    call_id = str(uuid4())
-    session_key = f"bobvoice:chat:phone:{call_id}"
-
-    # Warm up the OpenClaw session before placing the call
-    warmup_message = _build_warmup_message(_build_phone_context(), agenda)
-    warmup_ok = await _run_warmup(
+    return await initiate_outbound_call(
         db=request.app.state.db,
         settings=request.app.state.settings,
-        session_key=session_key,
-        warmup_message=warmup_message,
+        phone_settings=request.app.state.settings.phone,
+        to_number=to_number,
+        agenda=agenda,
+        app_state=request.app.state,
     )
-
-    from twilio.rest import Client
-
-    client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-    base_url = settings.base_url or request.app.state.settings.resolved_public_url
-
-    call = client.calls.create(
-        to=to_number,
-        from_=settings.twilio_phone_number,
-        url=f"{base_url}/phone/twiml",
-        status_callback=f"{base_url}/phone/status",
-        status_callback_event=["initiated", "ringing", "answered", "completed"],
-    )
-
-    # Store enriched data for retrieval during media stream
-    if not hasattr(request.app.state, "call_agendas"):
-        request.app.state.call_agendas = {}
-    request.app.state.call_agendas[call.sid] = {
-        "agenda": agenda,
-        "phone_number": to_number,
-        "call_id": call_id,
-        "session_key": session_key,
-        "warmup_done": warmup_ok,
-    }
-
-    # Create call record immediately so the detail page works on redirect
-    db = request.app.state.db
-    await db.execute(
-        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at)
-           VALUES (?, ?, ?, 'outbound', 'ringing', ?, datetime('now'))""",
-        (call_id, call.sid, to_number, agenda),
-    )
-
-    logger.info("Initiated call %s to %s (warmup: %s)", call.sid, to_number, warmup_ok)
-    return {"call_sid": call.sid, "call_id": call_id, "status": call.status}
 
 
 @router.post("/twiml")
@@ -261,8 +295,7 @@ async def call_status(request: Request) -> dict:
 
     # Clean up stored call data when call terminates
     if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
-        agendas = getattr(request.app.state, "call_agendas", {})
-        call_data = agendas.pop(call_sid, None)
+        call_data = _call_agendas.pop(call_sid, None)
         if call_data and isinstance(call_data, str):
             # Legacy format — just an agenda string
             pass
@@ -371,8 +404,7 @@ async def media_stream(websocket: WebSocket) -> None:
                     silence_duration=settings.silence_duration,
                     record=settings.call_recording_enabled,
                 )
-                agendas = getattr(websocket.app.state, "call_agendas", {})
-                stored = agendas.get(call_sid, {})
+                stored = _call_agendas.get(call_sid, {})
                 if isinstance(stored, dict):
                     raw_agenda = stored.get("agenda", "")
                     stored_phone = stored.get("phone_number", "")
@@ -395,6 +427,9 @@ async def media_stream(websocket: WebSocket) -> None:
                        WHERE id = ?""",
                     (stream_sid, call_id),
                 )
+                await _emit_event(websocket.app.state, "phone.call.active", {
+                    "call_id": call_id,
+                })
 
                 # If no speech after 5s, say "Hello?"
                 hello_task = asyncio.create_task(
@@ -494,6 +529,10 @@ async def media_stream(websocket: WebSocket) -> None:
                        WHERE id = ?""",
                     (exchange_index, rec_path, None, call_id),
                 )
+                await _emit_event(websocket.app.state, "phone.call.completed", {
+                    "call_id": call_id,
+                    "exchange_count": exchange_index,
+                })
             except Exception:
                 logger.warning("Failed to finalize call record", exc_info=True)
         logger.info("Twilio Media Stream disconnected")

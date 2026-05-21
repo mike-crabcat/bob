@@ -14,6 +14,19 @@ export async function fetchAPI<T>(path: string): Promise<T> {
   return res.json();
 }
 
+export async function postAPI<T>(path: string, body: unknown): Promise<T> {
+  const secret = getSecret();
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${base}/api${path}${secret ? `${sep}secret=${encodeURIComponent(secret)}` : ""}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
 export async function putAPI<T>(path: string, body: unknown): Promise<T> {
   const secret = getSecret();
   const sep = path.includes("?") ? "&" : "?";

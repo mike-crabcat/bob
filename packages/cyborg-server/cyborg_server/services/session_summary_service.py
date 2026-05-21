@@ -7,6 +7,8 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+import re
+
 from cyborg_server.services.base import BaseService
 
 logger = logging.getLogger(__name__)
@@ -17,7 +19,22 @@ _SUMMARY_SYSTEM_PROMPT = (
     '- "summary": exactly 2 sentences giving a high-level summary of the conversation.\n'
     '- "topics": array of short topic strings discussed.\n'
     '- "memory_prompts": array of specific facts or action items worth remembering.\n'
+    "\n"
+    "When referring to a person by name, use the contact reference format: {{contact:ID|Name}}\n"
+    "For example, if contact ID 'abc123' has display name 'Mike', write: {{contact:abc123|Mike}}\n"
+    "Use this format in summary, topics, and memory_prompts wherever a person's name appears.\n"
 )
+
+_CONTACT_REF_RE = re.compile(r"\{\{contact:([^|}]+)\|([^}]+)\}\}")
+
+
+def _validate_refs(text: str, valid_ids: set[str]) -> str:
+    """Remove contact refs with unknown IDs, keeping just the display name."""
+    def _replace(m: re.Match[str]) -> str:
+        if m.group(1) in valid_ids:
+            return m.group(0)
+        return m.group(2)
+    return _CONTACT_REF_RE.sub(_replace, text)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -63,24 +80,25 @@ class SessionSummaryService(BaseService):
 
     async def get_participant_name_map(
         self, session_key: str
-    ) -> dict[str, str]:
-        """Map sender_id (contact_id) to display_name for a session."""
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Return (contact_to_name, identifier_to_name) mappings."""
         rows = await self.db.fetch_all(
             """SELECT contact_id, identifier, display_name FROM session_participants
                WHERE session_key = ?""",
             (session_key,),
         )
         if not rows:
-            return {}
-        name_map: dict[str, str] = {}
+            return {}, {}
+        contact_to_name: dict[str, str] = {}
+        identifier_to_name: dict[str, str] = {}
         for r in rows:
             name = r["display_name"]
             if not name:
                 continue
             if r["contact_id"]:
-                name_map[r["contact_id"]] = name
-            name_map[r["identifier"]] = name
-        return name_map
+                contact_to_name[r["contact_id"]] = name
+            identifier_to_name[r["identifier"]] = name
+        return contact_to_name, identifier_to_name
 
     async def get_messages_for_period(
         self, session_key: str, active_from: str, active_to: str
@@ -114,12 +132,14 @@ class SessionSummaryService(BaseService):
         participants: list[str],
         active_from: str,
         active_to: str,
-        name_map: dict[str, str] | None = None,
+        contact_to_name: dict[str, str] | None = None,
+        identifier_to_name: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Call the LLM to generate a summary. Returns {summary_text, topics, memory_prompts}."""
         from cyborg_server.services.llm_dispatch import LLMDispatchService
 
-        resolved = name_map or {}
+        resolved = identifier_to_name or {}
+        contact_map = contact_to_name or {}
 
         def _speaker(m: dict[str, Any]) -> str:
             if m["role"] == "assistant":
@@ -133,9 +153,15 @@ class SessionSummaryService(BaseService):
             f"[{_speaker(m)}] {m['content'][:500]}" for m in messages[-50:]
         )
 
+        contact_lines = [
+            f"  {cid} -> {name}" for cid, name in contact_map.items()
+        ]
+        contact_mapping = "\n".join(contact_lines) if contact_lines else "  (no contacts)"
+
         system = _SUMMARY_SYSTEM_PROMPT + (
             f"\nActive period: {active_from} to {active_to}\n"
-            f"Participants: {', '.join(participants) if participants else 'unknown'}"
+            f"Participants: {', '.join(participants) if participants else 'unknown'}\n"
+            f"Contact ID mappings:\n{contact_mapping}"
         )
 
         llm = LLMDispatchService(self.ctx)
@@ -151,10 +177,14 @@ class SessionSummaryService(BaseService):
 
         try:
             parsed = json.loads(_strip_code_fences(response))
+            valid_ids = set(contact_map)
+            summary_text = _validate_refs(parsed.get("summary", ""), valid_ids)
+            topics = [_validate_refs(t, valid_ids) for t in parsed.get("topics", [])]
+            memory_prompts = [_validate_refs(p, valid_ids) for p in parsed.get("memory_prompts", [])]
             return {
-                "summary_text": parsed.get("summary", ""),
-                "topics": parsed.get("topics", []),
-                "memory_prompts": parsed.get("memory_prompts", []),
+                "summary_text": summary_text,
+                "topics": topics,
+                "memory_prompts": memory_prompts,
             }
         except (json.JSONDecodeError, ValueError):
             logger.warning("Failed to parse LLM summary as JSON")

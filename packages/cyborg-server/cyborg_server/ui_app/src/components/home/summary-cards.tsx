@@ -1,4 +1,6 @@
+import type React from "react";
 import type { SummaryItem } from "@/routes";
+import { RichText } from "@/components/shared/rich-text";
 
 interface Props {
   summaries: SummaryItem[];
@@ -39,9 +41,9 @@ export function SummaryCards({ summaries }: Props) {
             <span className="text-[11px] text-accent truncate">{shortKey(s.session_key)}</span>
             <span className="text-[10px] text-muted shrink-0">{relativeTime(s.created_at)}</span>
           </div>
-          <div className="text-xs text-text leading-relaxed">{s.summary_text}</div>
+          <div className="text-xs text-text leading-relaxed"><RichText text={s.summary_text} /></div>
           {s.topics.length > 0 && (
-            <div className="text-[10px] text-muted mt-1">{s.topics.join(", ")}</div>
+            <div className="text-[10px] text-muted mt-1">{s.topics.map((t, i) => <RichText key={i} text={t} />).reduce<React.ReactNode[]>((acc, el, i) => i === 0 ? [el] : [...acc, ", ", el], [])}</div>
           )}
         </div>
       ))}

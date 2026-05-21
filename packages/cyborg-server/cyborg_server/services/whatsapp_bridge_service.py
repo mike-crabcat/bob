@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any
 from uuid import uuid4
@@ -35,7 +36,69 @@ def _jid_to_phone(jid: str) -> str:
         return "+" + digits
     if len(digits) > 8:
         return "+" + digits
-    return "+" + digits
+
+
+# The Go bridge has a 1 MB WebSocket read limit.
+# base64 adds ~33% overhead, so raw image bytes must stay well under 750 KB.
+_BRIDGE_MAX_PAYLOAD_BYTES = 700_000
+_WHATSAPP_MAX_DIMENSION = 1920
+
+
+async def _prepare_media(path: str) -> str | None:
+    """Resize/convert an image to fit WhatsApp and bridge WebSocket limits. Returns path to send."""
+    import mimetypes
+
+    mime = (mimetypes.guess_type(path)[0] or "").lower()
+    if not mime.startswith("image/"):
+        return path
+
+    needs_resize = os.path.getsize(path) > _BRIDGE_MAX_PAYLOAD_BYTES
+    if not needs_resize:
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                w, h = img.size
+            if max(w, h) <= _WHATSAPP_MAX_DIMENSION:
+                return path
+        except Exception:
+            return path
+
+    import functools
+    import tempfile
+
+    def _resize() -> str | None:
+        from io import BytesIO
+        from PIL import Image
+
+        img = Image.open(path)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+
+        # Scale down dimensions until file fits, starting from max allowed
+        w, h = img.size
+        dim = min(max(w, h), _WHATSAPP_MAX_DIMENSION)
+        for quality in (85, 70, 55, 40):
+            ratio = dim / max(w, h)
+            scaled = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            buf = BytesIO()
+            scaled.save(buf, format="JPEG", quality=quality, optimize=True)
+            if buf.tell() <= _BRIDGE_MAX_PAYLOAD_BYTES:
+                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                tmp.write(buf.getvalue())
+                tmp.close()
+                img.close()
+                return tmp.name
+            dim = int(dim * 0.75)
+
+        img.close()
+        return None
+
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, functools.partial(_resize))
+    except Exception:
+        logger.exception("failed to resize image %s", path)
+        return None
 
 
 class WhatsAppBridgeService(BaseService):
@@ -405,11 +468,36 @@ class WhatsAppBridgeService(BaseService):
         ])
         if contacts_block:
             user_content += "\n\n" + contacts_block
+
+        # Check for active outreach request and inject into system prompt
+        outreach_prompt = ""
+        route_for_outreach = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes WHERE session_key = ?",
+            (session_key,),
+        )
+        if route_for_outreach and route_for_outreach["metadata"]:
+            try:
+                route_meta = json.loads(route_for_outreach["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                route_meta = {}
+            if "outreach_initiated_from" in route_meta:
+                outreach_prompt = (
+                    "## Active Outreach Request\n"
+                    "You proactively sent a message to this contact.\n"
+                    f"- Requested by: {route_meta.get('outreach_requestor', 'unknown')}\n"
+                    f"- Objective: {route_meta.get('outreach_objective', 'unknown')}\n"
+                    f"- Your initial message: \"{route_meta.get('outreach_message', '')}\"\n\n"
+                    "Your goal is to achieve the objective through this conversation. "
+                    "When you have the information needed, call the finish_outreach tool to relay the result back."
+                )
+
         messages = await build_chat_messages(
             user_content,
             session_key,
             db=self.db,
-            system_content="\n\n".join(p for p in (workspace_prompt, agenda, participants_prompt) if p),
+            system_content="\n\n".join(
+                p for p in (workspace_prompt, agenda, participants_prompt, outreach_prompt) if p
+            ),
             max_history=20,
         )
 
@@ -426,11 +514,25 @@ class WhatsAppBridgeService(BaseService):
 
         # Add outreach tools for trusted contacts (DM or group)
         if contact_id and is_trusted:
+            from cyborg_server.services.contact_tools import make_contact_tools
             from cyborg_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
+            tools.extend(make_contact_tools(self.ctx))
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
+            from cyborg_server.services.reflection_service import make_reflection_tools
+            tools.extend(make_reflection_tools(self.ctx, session_key))
             if settings.harness.skill_dev_enabled:
                 from cyborg_server.services.delegation_tools import make_delegation_tools
                 tools.extend(make_delegation_tools(self.ctx, session_key))
+
+        # Add phone call tools when phone subsystem is enabled
+        if settings.phone.enabled:
+            from cyborg_server.services.contact_tools import make_contact_tools
+            from cyborg_server.services.phone_tools import make_phone_tools
+            existing_names = {t.name for t in tools}
+            contact_tools = make_contact_tools(self.ctx)
+            tools.extend(t for t in contact_tools if t.name not in existing_names)
+            phone_tools = make_phone_tools(self.ctx)
+            tools.extend(t for t in phone_tools if t.name not in existing_names)
 
         # Add outreach reply tool if this session is an active outreach target
         route = await self.db.fetch_one(
@@ -471,31 +573,36 @@ class WhatsAppBridgeService(BaseService):
             handler=_send_whatsapp_message,
         ))
 
-        async def _send_whatsapp_media(file_path: str, caption: str = "") -> str:
+        async def _send_whatsapp_media(workspace_path: str, caption: str = "") -> str:
             """Send an image or media file to the current WhatsApp chat."""
-            import os
-            resolved = file_path if os.path.isabs(file_path) else os.path.join(settings.harness.workspace_dir, file_path)
-            if not os.path.isfile(resolved):
-                return f"Error: file not found: {resolved}"
+            workspace = settings.harness.workspace_dir.expanduser().resolve()
+            resolved = (workspace / workspace_path).resolve()
+            if not str(resolved).startswith(str(workspace)):
+                return f"Error: path escapes workspace"
+            if not resolved.is_file():
+                return f"Error: file not found: {workspace_path}"
+            prepared = await _prepare_media(str(resolved))
+            if prepared is None:
+                return "Error: failed to prepare media for sending"
             message_was_sent[0] = True
             if caption:
                 sent_texts.append(f"[Image: {caption}]")
             else:
-                sent_texts.append(f"[Image: {os.path.basename(resolved)}]")
-            request_id = await wa_service.send_media(chat_id, resolved, caption=caption)
+                sent_texts.append(f"[Image: {resolved.name}]")
+            request_id = await wa_service.send_media(chat_id, prepared, caption=caption)
             return f"Media sent (request_id={request_id})"
 
         tools.append(Tool(
             name="send_whatsapp_media",
             description=(
                 "Send an image or media file to the current WhatsApp chat. "
-                "Provide the file path (relative to workspace or absolute) and an optional caption."
+                "Provide a path relative to the workspace directory."
             ),
             parameters={
-                "file_path": {"type": "string", "description": "Path to the image file. Can be relative to the workspace directory."},
+                "workspace_path": {"type": "string", "description": "Path to the image file, relative to the workspace directory."},
                 "caption": {"type": "string", "description": "Optional caption for the image."},
             },
-            required=["file_path"],
+            required=["workspace_path"],
             handler=_send_whatsapp_media,
         ))
 

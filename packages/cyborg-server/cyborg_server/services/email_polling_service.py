@@ -632,6 +632,22 @@ class EmailPollingService(BaseService):
 
         tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"]) + make_workspace_tools(self.ctx, session_key=session_key)
 
+        if contact_id and is_trusted:
+            from cyborg_server.services.contact_tools import make_contact_tools
+            from cyborg_server.services.reflection_service import make_reflection_tools
+            tools.extend(make_contact_tools(self.ctx))
+            tools.extend(make_reflection_tools(self.ctx, session_key))
+
+        # Add phone call tools when phone subsystem is enabled
+        if self.ctx.settings.phone.enabled:
+            from cyborg_server.services.contact_tools import make_contact_tools
+            from cyborg_server.services.phone_tools import make_phone_tools
+            existing_names = {t.name for t in tools}
+            contact_tools = make_contact_tools(self.ctx)
+            tools.extend(t for t in contact_tools if t.name not in existing_names)
+            phone_tools = make_phone_tools(self.ctx)
+            tools.extend(t for t in phone_tools if t.name not in existing_names)
+
         dispatch_id = await DispatchService(self.ctx).record_dispatch(
             notification_type="email_incoming",
             session_key=session_key,

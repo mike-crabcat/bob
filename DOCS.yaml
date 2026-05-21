@@ -1,0 +1,4 @@
+- path: ./docs/outreach.md
+  prompt: | 
+          This document must describe the outreach process.  It should include any high level ascii architecture diagrams to aid a coherent
+          description suitable for a software developer to understand the system and how it works. It should also start with the purpose and intent of the feature.

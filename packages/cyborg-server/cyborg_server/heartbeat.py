@@ -196,10 +196,12 @@ class SessionIdleSummaryTask:
                 name_map = await service.get_participant_name_map(
                     session["session_key"],
                 )
+                contact_to_name, identifier_to_name = name_map
                 result = await service.generate_summary(
                     messages, participants,
                     session["active_from"], session["last_message_at"],
-                    name_map=name_map,
+                    contact_to_name=contact_to_name,
+                    identifier_to_name=identifier_to_name,
                 )
                 await service.store_summary(
                     session_key=session["session_key"],

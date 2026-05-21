@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _MAX_LIST_ENTRIES = 100
 _MAX_READ_BYTES = 50 * 1024
 _MAX_WRITE_BYTES = 100 * 1024
-_SCRIPT_TIMEOUT_SECONDS = 60
+_SCRIPT_TIMEOUT_SECONDS = 900
 
 
 def _resolve_path(ctx: AppContext, path: str) -> Path:
