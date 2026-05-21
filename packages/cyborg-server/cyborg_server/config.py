@@ -142,6 +142,7 @@ class OpenClawHookSettings:
     gateway_url: str = ""
     gateway_token: str = ""
     agent_id: str | None = None
+    voice_model: str | None = None
     timeout_seconds: float = 120.0
 
     @property
@@ -171,6 +172,76 @@ class OpenClawHookSettings:
 
 
 @dataclass(slots=True)
+class VoiceSettings:
+    """Configuration for the voice chat subsystem."""
+
+    enabled: bool = True
+    stt_model: str = "large-v3-turbo"
+    stt_device: str = "cuda"
+    stt_compute_type: str = "int8"
+    tts_num_steps: int = 16
+    voices_dir: Path = Path(__file__).parent / "voice_data" / "voices"
+    lessons_dir: Path | None = None
+    frontend_dir: Path | None = None
+    session_max_age_days: int = 30
+
+
+@dataclass(slots=True)
+class PhoneSettings:
+    """Configuration for the phone/telephony subsystem (Twilio)."""
+
+    enabled: bool = False
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
+    base_url: str = ""
+    silence_threshold: float = 0.01
+    silence_duration: float = 1.5
+    call_recording_enabled: bool = True
+    call_recording_max_age_days: int = 30
+    openclaw_agent_id: str = ""
+
+
+@dataclass(slots=True)
+class OpenAISettings:
+    """Configuration for direct OpenAI LLM API access."""
+
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    default_model: str = "gpt-5.4-mini"
+    timeout_seconds: float = 120.0
+    web_search_enabled: bool = False
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(slots=True)
+class HarnessSettings:
+    """Configuration for the local LLM harness (replaces OpenClaw for voice/phone)."""
+
+    enabled: bool = False
+    workspace_dir: Path = Path("~/.config/cyborg/harness")
+    default_model: str = "gpt-5.4-mini"
+    max_history_messages: int = 20
+    skill_dev_enabled: bool = False
+    skill_dev_model: str = "sonnet"
+    skill_dev_max_budget_usd: float = 5.0
+    skill_dev_timeout_seconds: float = 300.0
+
+
+@dataclass(slots=True)
+class WhatsAppBridgeSettings:
+    """Configuration for the WhatsApp bridge companion service."""
+
+    enabled: bool = False
+    url: str = "ws://127.0.0.1:8430/ws"
+    token: str = ""
+    reconnect_interval_seconds: float = 10.0
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -188,10 +259,19 @@ class Settings:
     openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
     agentmail: AgentMailSettings = field(default_factory=AgentMailSettings)
     email_polling_enabled: bool = True
+    voice: VoiceSettings = field(default_factory=VoiceSettings)
+    phone: PhoneSettings = field(default_factory=PhoneSettings)
+    openai: OpenAISettings = field(default_factory=OpenAISettings)
+    harness: HarnessSettings = field(default_factory=HarnessSettings)
+    whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     heartbeat_interval_seconds: float = 60.0
     projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
+    dispatch_shutdown_timeout_seconds: float = 30.0
+    dispatch_stuck_timeout_minutes: float = 60.0
+    dispatch_concurrency_limit: int = 10
+    session_summary_idle_minutes: float = 5.0
 
     @property
     def dashboard_secret_configured(self) -> bool:
@@ -275,6 +355,7 @@ class Settings:
             gateway_url=os.getenv("CYBORG_OPENCLAW_GATEWAY_URL", "").rstrip("/"),
             gateway_token=os.getenv("CYBORG_OPENCLAW_GATEWAY_TOKEN", ""),
             agent_id=os.getenv("CYBORG_OPENCLAW_AGENT_ID") or None,
+            voice_model=os.getenv("CYBORG_OPENCLAW_VOICE_MODEL") or None,
             timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "120")),
         )
         public_url = os.getenv("CYBORG_PUBLIC_URL", "")
@@ -288,6 +369,69 @@ class Settings:
             poll_interval_seconds=float(os.getenv("CYBORG_AGENTMAIL_POLL_INTERVAL_SECONDS", "30")),
         )
         email_polling_enabled = os.getenv("CYBORG_EMAIL_POLLING_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+
+        voice = VoiceSettings(
+            enabled=os.getenv("CYBORG_VOICE_ENABLED", "true").lower() not in ("false", "0", "no", "off"),
+            stt_model=os.getenv("CYBORG_VOICE_STT_MODEL", "large-v3-turbo"),
+            stt_device=os.getenv("CYBORG_VOICE_STT_DEVICE", "cuda"),
+            stt_compute_type=os.getenv("CYBORG_VOICE_STT_COMPUTE_TYPE", "int8"),
+            tts_num_steps=int(os.getenv("CYBORG_VOICE_TTS_NUM_STEPS", "16")),
+            voices_dir=_env_path("CYBORG_VOICE_VOICES_DIR", Path.home() / ".openclaw" / "bobvoice-voices"),
+            lessons_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_LESSONS_DIR")) else None,
+            frontend_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_FRONTEND_DIR")) else None,
+            session_max_age_days=int(os.getenv("CYBORG_VOICE_SESSION_MAX_AGE_DAYS", "30")),
+        )
+
+        dispatch_shutdown_timeout_seconds = float(
+            os.getenv("CYBORG_DISPATCH_SHUTDOWN_TIMEOUT_SECONDS", "30")
+        )
+        dispatch_stuck_timeout_minutes = float(
+            os.getenv("CYBORG_DISPATCH_STUCK_TIMEOUT_MINUTES", "60")
+        )
+        dispatch_concurrency_limit = int(
+            os.getenv("CYBORG_DISPATCH_CONCURRENCY_LIMIT", "10")
+        )
+        session_summary_idle_minutes = float(
+            os.getenv("CYBORG_SESSION_SUMMARY_IDLE_MINUTES", "5.0")
+        )
+
+        phone = PhoneSettings(
+            enabled=os.getenv("CYBORG_PHONE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            twilio_account_sid=os.getenv("CYBORG_PHONE_TWILIO_ACCOUNT_SID", ""),
+            twilio_auth_token=os.getenv("CYBORG_PHONE_TWILIO_AUTH_TOKEN", ""),
+            twilio_phone_number=os.getenv("CYBORG_PHONE_TWILIO_PHONE_NUMBER", ""),
+            base_url=os.getenv("CYBORG_PHONE_BASE_URL", ""),
+            silence_threshold=float(os.getenv("CYBORG_PHONE_SILENCE_THRESHOLD", "0.01")),
+            silence_duration=float(os.getenv("CYBORG_PHONE_SILENCE_DURATION", "1.5")),
+            call_recording_enabled=os.getenv("CYBORG_PHONE_CALL_RECORDING_ENABLED", "true").lower() in ("true", "1", "yes", "on"),
+            call_recording_max_age_days=int(os.getenv("CYBORG_PHONE_CALL_RECORDING_MAX_AGE_DAYS", "30")),
+        )
+
+        openai_llm = OpenAISettings(
+            api_key=os.getenv("CYBORG_OPENAI_API_KEY", ""),
+            base_url=os.getenv("CYBORG_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            default_model=os.getenv("CYBORG_OPENAI_DEFAULT_MODEL", "gpt-5.4-mini"),
+            timeout_seconds=float(os.getenv("CYBORG_OPENAI_TIMEOUT_SECONDS", "120")),
+            web_search_enabled=os.getenv("CYBORG_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
+        )
+
+        harness = HarnessSettings(
+            enabled=os.getenv("CYBORG_HARNESS_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            workspace_dir=_env_path("CYBORG_HARNESS_WORKSPACE_DIR", Path("~/.config/cyborg/harness")),
+            default_model=os.getenv("CYBORG_HARNESS_DEFAULT_MODEL", "gpt-5.4-mini"),
+            max_history_messages=int(os.getenv("CYBORG_HARNESS_MAX_HISTORY_MESSAGES", "20")),
+            skill_dev_enabled=os.getenv("CYBORG_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            skill_dev_model=os.getenv("CYBORG_HARNESS_SKILL_DEV_MODEL", "sonnet"),
+            skill_dev_max_budget_usd=float(os.getenv("CYBORG_HARNESS_SKILL_DEV_MAX_BUDGET_USD", "5.0")),
+            skill_dev_timeout_seconds=float(os.getenv("CYBORG_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "300")),
+        )
+
+        whatsapp_bridge = WhatsAppBridgeSettings(
+            enabled=os.getenv("CYBORG_WHATSAPP_BRIDGE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            url=os.getenv("CYBORG_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:8430/ws"),
+            token=os.getenv("CYBORG_WHATSAPP_BRIDGE_TOKEN", ""),
+            reconnect_interval_seconds=float(os.getenv("CYBORG_WHATSAPP_BRIDGE_RECONNECT_INTERVAL_SECONDS", "10")),
+        )
 
         return cls(
             host=host,
@@ -303,10 +447,19 @@ class Settings:
             openclaw=openclaw,
             agentmail=agentmail,
             email_polling_enabled=email_polling_enabled,
+            voice=voice,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             projects_base_dir=projects_base_dir,
             public_url=public_url,
             dashboard_secret=dashboard_secret,
+            dispatch_shutdown_timeout_seconds=dispatch_shutdown_timeout_seconds,
+            dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
+            dispatch_concurrency_limit=dispatch_concurrency_limit,
+            session_summary_idle_minutes=session_summary_idle_minutes,
+            phone=phone,
+            openai=openai_llm,
+            harness=harness,
+            whatsapp_bridge=whatsapp_bridge,
         )
 
     def ensure_directories(self) -> None:
@@ -314,3 +467,5 @@ class Settings:
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir.mkdir(parents=True, exist_ok=True)
+        if self.phone.enabled:
+            (self.data_dir / "calls").mkdir(parents=True, exist_ok=True)

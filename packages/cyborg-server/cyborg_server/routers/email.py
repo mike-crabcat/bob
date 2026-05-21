@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -10,8 +10,10 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
+from cyborg_server.config import Settings
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
-from cyborg_server.dependencies import get_database
+from cyborg_server.dependencies import get_app_context, get_database, get_settings
 from cyborg_server.models import (
     EmailInboxCreate,
     EmailInboxResponse,
@@ -50,6 +52,7 @@ def _row_to_thread(row: dict[str, Any]) -> EmailThreadResponse:
         contact_id=UUID(row["contact_id"]) if row.get("contact_id") else None,
         project_id=UUID(row["project_id"]) if row.get("project_id") else None,
         session_key=row["session_key"],
+        agenda=row.get("agenda"),
         message_count=int(row.get("message_count") or 0),
         last_message_at=datetime.fromisoformat(row["last_message_at"]) if row.get("last_message_at") else None,
         is_active=bool(row.get("is_active", 1)),
@@ -181,27 +184,21 @@ async def send_email(
     inbox_id: UUID,
     payload: EmailSendRequest,
     database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+    ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Send a new email from a registered inbox."""
-    from cyborg_server.config import Settings
     from cyborg_server.services.agentmail_client import AgentMailClient
     from cyborg_server.services.email_polling_service import (
         CUSTOM_AGENDA_TEMPLATE,
-        DEFAULT_AGENDA,
         resolve_or_create_email_thread,
     )
-    from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-
     inbox = await database.fetch_one(
         "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
         (str(inbox_id),),
     )
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found or inactive")
-
-    settings = getattr(database, "settings", None)
-    if not isinstance(settings, Settings):
-        settings = Settings.from_env()
 
     # Send via AgentMail
     async with AgentMailClient(
@@ -246,69 +243,27 @@ async def send_email(
     )
 
     # Store outgoing message record
-    now = utcnow()
-    message_id = str(uuid4())
-    await database.execute(
-        """
-        INSERT INTO email_messages (
-            id, inbox_id, agentmail_message_id, thread_id,
-            subject, sender_email, sender_name,
-            to_addresses, cc_addresses,
-            text_body, html_body, preview, labels,
-            has_attachments, in_reply_to,
-            message_timestamp, processed_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            message_id,
-            inbox["id"],
-            agentmail_message_id,
-            agentmail_thread_id,
-            payload.subject,
-            inbox["email_address"],
-            inbox["display_name"],
-            json_dumps([payload.to] if isinstance(payload.to, str) else payload.to),
-            json_dumps(payload.cc or []),
-            payload.text,
-            payload.html,
-            payload.text[:200] if payload.text else None,
-            json_dumps(["sent"]),
-            1 if payload.attachments else 0,
-            None,
-            now.isoformat(),
-            now.isoformat(),
-            now.isoformat(),
-        ),
+    from cyborg_server.services.email_delivery_service import EmailDeliveryService
+    delivery_service = EmailDeliveryService(ctx)
+    await delivery_service._persist_sent_message(
+        inbox=inbox,
+        agentmail_response=result,
+        agentmail_thread_id=agentmail_thread_id,
+        text=payload.text,
+        html=payload.html,
+        subject=payload.subject,
+        to_addresses=[payload.to] if isinstance(payload.to, str) else payload.to,
+        cc_addresses=payload.cc,
+        has_attachments=bool(payload.attachments),
     )
 
-    # Update thread message count
-    await database.execute(
-        """
-        UPDATE email_threads
-        SET message_count = message_count + 1, last_message_at = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (now.isoformat(), now.isoformat(), thread["id"]),
-    )
+    # Dispatch to LLM for context priming
+    if settings.openai.enabled:
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+        from cyborg_server.services.session_service import SessionService
+        from cyborg_server.services.dispatch_service import DispatchService
 
-    # Dispatch to OpenClaw
-    if settings.openclaw.enabled:
-        hook_service = OpenClawHookService(
-            database,
-            cyborg_service_url=settings.resolved_public_url,
-        )
-
-        # Combined dispatch: agenda + outgoing email context
         send_parts: list[str] = []
-
-        if is_new_thread:
-            if payload.agenda:
-                send_parts.append(CUSTOM_AGENDA_TEMPLATE.format(
-                    agenda=payload.agenda, inbox_id=inbox["id"],
-                ))
-            else:
-                send_parts.append(DEFAULT_AGENDA.format(inbox_id=inbox["id"]))
-            send_parts.append("")
 
         send_parts += [
             "## Email You Just Sent",
@@ -320,28 +275,43 @@ async def send_email(
             payload.text,
         ]
 
-        send_prompt = "\n".join(send_parts)
-        send_key = f"email:send:{agentmail_message_id}"
+        send_content = "\n".join(send_parts)
+        session_key = thread["session_key"]
 
         logger.info(
-            "Dispatching send to OpenClaw session=%s idempotency=%s timeout=%ds new_thread=%s\n%s",
-            thread["session_key"], send_key,
-            int(settings.openclaw.timeout_seconds),
-            is_new_thread,
-            send_prompt,
+            "Dispatching send to LLM session=%s new_thread=%s",
+            session_key, is_new_thread,
         )
-        await hook_service._send_gateway_request(
-            "agent",
-            {
-                "message": send_prompt,
-                "deliver": False,
-                "sessionKey": thread["session_key"],
-                "thinking": "on",
-                "timeout": int(settings.openclaw.timeout_seconds),
-                "idempotencyKey": send_key,
-            },
+
+        from cyborg_server.services.prompt_assembler import load_workspace_prompt
+
+        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        custom_agenda = CUSTOM_AGENDA_TEMPLATE.format(agenda=payload.agenda) if is_new_thread and payload.agenda else None
+        system_parts = [p for p in (workspace_prompt, custom_agenda, "You are managing an email conversation. The following is an outgoing email you sent for your context.") if p]
+
+        messages = [
+            {"role": "system", "content": "\n\n".join(system_parts)},
+            {"role": "user", "content": send_content},
+        ]
+
+        dispatch_id = await DispatchService(ctx).record_dispatch(
+            notification_type="email_outgoing",
+            session_key=session_key,
         )
-        logger.info("Send dispatch accepted for thread %s", thread["id"])
+
+        async def _run_send_dispatch() -> str:
+            result = await LLMDispatchService(ctx).chat_with_tools(
+                messages, [],
+                call_category="email_outgoing",
+                session_key=session_key,
+                dispatch_id=dispatch_id,
+            )
+            session_svc = SessionService(ctx)
+            await session_svc.add_message(session_key, "assistant", payload.text, channel="email")
+            return result
+
+        DispatchService(ctx).track(dispatch_id, _run_send_dispatch())
+        logger.info("Send dispatch tracking for thread %s (dispatch=%s)", thread["id"], dispatch_id)
 
     return result
 
@@ -351,9 +321,10 @@ async def reply_to_email(
     inbox_id: UUID,
     payload: EmailReplyRequest,
     database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+    ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Reply to an email message."""
-    from cyborg_server.config import Settings
     from cyborg_server.services.agentmail_client import AgentMailClient
 
     inbox = await database.fetch_one(
@@ -362,10 +333,6 @@ async def reply_to_email(
     )
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found or inactive")
-
-    settings = getattr(database, "settings", None)
-    if not isinstance(settings, Settings):
-        settings = Settings.from_env()
 
     async with AgentMailClient(
         base_url=settings.agentmail.base_url,
@@ -379,6 +346,24 @@ async def reply_to_email(
             reply_all=payload.reply_all,
             attachments=[a.model_dump(exclude_none=True) for a in payload.attachments] if payload.attachments else None,
         )
+
+    # Persist the reply
+    agentmail_thread_id = result.get("thread_id", "")
+    if agentmail_thread_id:
+        from cyborg_server.services.email_delivery_service import EmailDeliveryService
+        delivery_service = EmailDeliveryService(ctx, agentmail_client=AgentMailClient(
+            base_url=settings.agentmail.base_url,
+            api_key=settings.agentmail.api_key,
+        ))
+        await delivery_service._persist_sent_message(
+            inbox=inbox,
+            agentmail_response=result,
+            agentmail_thread_id=agentmail_thread_id,
+            text=payload.text,
+            html=payload.html,
+            has_attachments=bool(payload.attachments),
+        )
+
     return result
 
 
@@ -393,9 +378,9 @@ async def list_messages(
     limit: int = Query(default=25, ge=1, le=100),
     page_token: str | None = Query(default=None),
     database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """List messages in an inbox (proxied to AgentMail)."""
-    from cyborg_server.config import Settings
     from cyborg_server.services.agentmail_client import AgentMailClient
 
     inbox = await database.fetch_one(
@@ -404,10 +389,6 @@ async def list_messages(
     )
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
-
-    settings = getattr(database, "settings", None)
-    if not isinstance(settings, Settings):
-        settings = Settings.from_env()
 
     async with AgentMailClient(
         base_url=settings.agentmail.base_url,
@@ -431,9 +412,9 @@ async def download_attachment(
     message_id: str,
     attachment_id: str,
     database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     """Download an email attachment from AgentMail."""
-    from cyborg_server.config import Settings
     from cyborg_server.services.agentmail_client import AgentMailClient
 
     inbox = await database.fetch_one(
@@ -442,10 +423,6 @@ async def download_attachment(
     )
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
-
-    settings = getattr(database, "settings", None)
-    if not isinstance(settings, Settings):
-        settings = Settings.from_env()
 
     async with AgentMailClient(
         base_url=settings.agentmail.base_url,
@@ -500,3 +477,53 @@ async def get_thread(
     if row is None:
         raise HTTPException(status_code=404, detail="Thread not found")
     return _row_to_thread(row)
+
+
+@router.patch("/threads/{thread_id}/agenda", response_model=EmailThreadResponse)
+async def update_thread_agenda(
+    thread_id: UUID,
+    payload: dict[str, str],
+    database: Database = Depends(get_database),
+) -> EmailThreadResponse:
+    """Update the agenda for an email thread."""
+    agenda = payload.get("agenda", "").strip()
+    if not agenda:
+        raise HTTPException(status_code=422, detail="agenda must not be empty")
+    now_iso = utcnow().isoformat()
+    await database.execute(
+        "UPDATE email_threads SET agenda = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+        (agenda, now_iso, str(thread_id)),
+    )
+    row = await database.fetch_one(
+        "SELECT * FROM email_threads WHERE id = ?",
+        (str(thread_id),),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return _row_to_thread(row)
+
+
+@router.post("/sync")
+async def sync_emails(
+    database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+    ctx: AppContext = Depends(get_app_context),
+) -> dict[str, Any]:
+    """Sync all inboxes — fetch missing messages from AgentMail and persist locally."""
+    from cyborg_server.services.email_polling_service import EmailPollingService
+
+    if not settings.agentmail.enabled:
+        raise HTTPException(status_code=400, detail="AgentMail is not configured")
+
+    from cyborg_server.services.agentmail_client import AgentMailClient
+
+    client = AgentMailClient(
+        base_url=settings.agentmail.base_url,
+        api_key=settings.agentmail.api_key,
+    )
+    try:
+        service = EmailPollingService(ctx, agentmail_client=client)
+        count = await service.sync_all_inboxes()
+        return {"synced": count}
+    finally:
+        await client.close()

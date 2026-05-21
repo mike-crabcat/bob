@@ -9,6 +9,8 @@ import os
 import shutil
 import shlex
 import subprocess
+import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -16,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+import qrcode
 import typer
 import uvicorn
 
@@ -41,6 +44,9 @@ openclaw_app = typer.Typer(help="OpenClaw integration operations")
 planning_app = typer.Typer(help="AI-powered project planning")
 health_app = typer.Typer(help="Project health monitoring")
 learning_app = typer.Typer(help="Project insights and learning")
+phone_app = typer.Typer(help="Phone call operations")
+openai_app = typer.Typer(help="OpenAI LLM evaluation commands")
+eval_app = typer.Typer(help="LLM eval framework")
 
 app.add_typer(task_app, name="task")
 task_app.add_typer(plan_app, name="plan")
@@ -57,6 +63,9 @@ app.add_typer(openclaw_app, name="openclaw")
 app.add_typer(planning_app, name="planning")
 app.add_typer(health_app, name="health")
 app.add_typer(learning_app, name="learning")
+app.add_typer(phone_app, name="call")
+app.add_typer(openai_app, name="openai")
+app.add_typer(eval_app, name="eval")
 
 
 def _service_file_path() -> Path:
@@ -192,6 +201,25 @@ def _query_string(**params: Any) -> str:
     if not filtered:
         return ""
     return f"?{urlencode(filtered, doseq=True)}"
+
+
+def _resolve_inbox_id(inbox_id: Optional[str]) -> str:
+    """Resolve inbox_id: explicit value → config default → sole active inbox."""
+    if inbox_id:
+        return inbox_id
+    settings = Settings.from_env()
+    if settings.agentmail.default_inbox_id:
+        return settings.agentmail.default_inbox_id
+    result = _api_call("GET", "/api/v1/email/inboxes?active_only=true")
+    inboxes = result.get("data", [])
+    if len(inboxes) == 1:
+        return str(inboxes[0]["id"])
+    if not inboxes:
+        raise typer.BadParameter("No active email inboxes found. Register one with `cyborg email-inbox register`.")
+    raise typer.BadParameter(
+        "Multiple inboxes found. Specify --inbox with one of:\n"
+        + "\n".join(f"  {ib['id']}  ({ib.get('email_address', ib.get('display_name', ''))})" for ib in inboxes)
+    )
 
 
 def _parse_json_option(value: str, label: str, expected_type: type[Any]) -> Any:
@@ -729,6 +757,14 @@ def serve(
         projects_base_dir=env_settings.projects_base_dir,
         public_url=env_settings.public_url,
         dashboard_secret=env_settings.dashboard_secret,
+        voice=env_settings.voice,
+        phone=env_settings.phone,
+        dispatch_shutdown_timeout_seconds=env_settings.dispatch_shutdown_timeout_seconds,
+        dispatch_stuck_timeout_minutes=env_settings.dispatch_stuck_timeout_minutes,
+        dispatch_concurrency_limit=env_settings.dispatch_concurrency_limit,
+        openai=env_settings.openai,
+        harness=env_settings.harness,
+        whatsapp_bridge=env_settings.whatsapp_bridge,
     )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
 
@@ -3031,22 +3067,21 @@ def email_inbox_remove(
 
 @email_app.command("send")
 def email_send(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID to send from")],
     to: Annotated[str, typer.Option("--to", help="Recipient email address")],
     subject: Annotated[str, typer.Option("--subject", help="Email subject")],
     text: Annotated[str, typer.Option("--text", help="Email body text")],
+    agenda: Annotated[str, typer.Option("--agenda", help="Purpose and handling instructions for this email thread (required)")],
     cc: Annotated[Optional[list[str]], typer.Option("--cc", help="CC recipients")] = None,
-    agenda: Annotated[Optional[str], typer.Option("--agenda", help="Agenda for the OpenClaw session")] = None,
     html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
     attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
     inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """Send a new email from a registered inbox."""
-    payload: dict[str, Any] = {"to": to, "subject": subject, "text": text}
+    resolved_inbox = _resolve_inbox_id(inbox_id)
+    payload: dict[str, Any] = {"to": to, "subject": subject, "text": text, "agenda": agenda}
     if cc:
         payload["cc"] = cc
-    if agenda:
-        payload["agenda"] = agenda
     if html:
         payload["html"] = html
     attachments: list[dict[str, Any]] = []
@@ -3058,21 +3093,22 @@ def email_send(
             attachments.append(_read_file_as_attachment(fp, inline=True))
     if attachments:
         payload["attachments"] = attachments
-    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/send", payload)
+    result = _api_call("POST", f"/api/v1/email/inboxes/{resolved_inbox}/send", payload)
     _echo_json(result.get("data", result))
 
 
 @email_app.command("reply")
 def email_reply(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
     message_id: Annotated[str, typer.Option("--message-id", help="Message ID to reply to")],
     text: Annotated[str, typer.Option("--text", help="Reply body text")],
     reply_all: Annotated[bool, typer.Option("--reply-all", help="Reply to all recipients")] = False,
     html: Annotated[Optional[str], typer.Option("--html", help="HTML body (use cid: references for inline images)")] = None,
     attach: Annotated[Optional[list[str]], typer.Option("--attach", help="File path to attach (repeatable)")] = None,
     inline_image: Annotated[Optional[list[str]], typer.Option("--inline-image", help="Inline image file path (repeatable)")] = None,
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """Reply to an email message."""
+    resolved_inbox = _resolve_inbox_id(inbox_id)
     payload: dict[str, Any] = {"message_id": message_id, "text": text, "reply_all": reply_all}
     if html:
         payload["html"] = html
@@ -3085,31 +3121,33 @@ def email_reply(
             attachments.append(_read_file_as_attachment(fp, inline=True))
     if attachments:
         payload["attachments"] = attachments
-    result = _api_call("POST", f"/api/v1/email/inboxes/{inbox_id}/reply", payload)
+    result = _api_call("POST", f"/api/v1/email/inboxes/{resolved_inbox}/reply", payload)
     _echo_json(result.get("data", result))
 
 
 @email_app.command("messages")
 def email_messages(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
     limit: Annotated[int, typer.Option("--limit", help="Max messages")] = 25,
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """List messages in an inbox."""
-    result = _api_call("GET", f"/api/v1/email/inboxes/{inbox_id}/messages?limit={limit}")
+    resolved_inbox = _resolve_inbox_id(inbox_id)
+    result = _api_call("GET", f"/api/v1/email/inboxes/{resolved_inbox}/messages?limit={limit}")
     _echo_json(result.get("data", result))
 
 
 @email_app.command("download-attachment")
 def email_download_attachment(
-    inbox_id: Annotated[str, typer.Option("--inbox", help="Inbox ID")],
     message_id: Annotated[str, typer.Option("--message-id", help="AgentMail message ID")],
     attachment_id: Annotated[str, typer.Option("--attachment-id", help="Attachment ID")],
     output: Annotated[str, typer.Option("--output", "-o", help="Output file path")] = "",
+    inbox_id: Annotated[Optional[str], typer.Option("--inbox", help="Inbox ID (default: auto-resolve)")] = None,
 ) -> None:
     """Download an email attachment to disk."""
+    resolved_inbox = _resolve_inbox_id(inbox_id)
     settings = Settings.from_env()
     encoded_msg = quote(message_id, safe="")
-    url = f"http://{settings.host}:{settings.port}/api/v1/email/inboxes/{inbox_id}/messages/{encoded_msg}/attachments/{attachment_id}"
+    url = f"http://{settings.host}:{settings.port}/api/v1/email/inboxes/{resolved_inbox}/messages/{encoded_msg}/attachments/{attachment_id}"
     req = Request(url, method="GET")
 
     try:
@@ -3145,6 +3183,323 @@ def email_thread_get(
     """Get a tracked email thread."""
     result = _api_call("GET", f"/api/v1/email/threads/{thread_id}")
     _echo_json(result["data"])
+
+
+@email_app.command("update-agenda")
+def email_thread_update_agenda(
+    thread_id: Annotated[str, typer.Argument(help="Thread ID")],
+    agenda: Annotated[str, typer.Option("--agenda", help="New agenda text for the thread")],
+) -> None:
+    """Update the agenda for an email thread."""
+    result = _api_call("PATCH", f"/api/v1/email/threads/{thread_id}/agenda", {"agenda": agenda})
+    _echo_json(result.get("data", result))
+
+
+@email_app.command("sync")
+def email_sync() -> None:
+    """Sync all inboxes — fetch missing messages from AgentMail and persist locally."""
+    result = _api_call("POST", "/api/v1/email/sync")
+    data = result.get("data", result)
+    count = data.get("synced", 0)
+    typer.echo(f"Synced {count} message(s) from AgentMail")
+
+
+@phone_app.command("call")
+def phone_call(
+    to: Annotated[str, typer.Argument(help="Phone number to call (E.164 format, e.g. +1234567890)")],
+    agenda: Annotated[str, typer.Option("--agenda", help="Purpose and handling instructions for the call")],
+) -> None:
+    """Initiate an outbound phone call with an agenda for the voice assistant."""
+    result = _api_call("POST", "/phone/call", {"to": to, "agenda": agenda})
+    _echo_json(result.get("data", result))
+
+
+@phone_app.command("list")
+def phone_list(
+    limit: Annotated[int, typer.Option("--limit", help="Max calls to return")] = 20,
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (table, json)")] = "table",
+) -> None:
+    """List recent phone calls."""
+    result = _api_call("GET", "/phone/calls")
+    calls = result.get("data", result).get("calls", [])
+    if format == "json":
+        _echo_json(calls)
+        return
+    if not calls:
+        typer.echo("No calls found.")
+        return
+    for c in calls:
+        sid = c.get("call_sid", "")[:12]
+        status = c.get("status", "")
+        started = c.get("started_at", "")
+        exchanges = c.get("exchange_count", 0)
+        duration = c.get("duration_seconds")
+        dur_str = f"{duration:.0f}s" if duration else "—"
+        has_recording = "Y" if c.get("recording_path") else "—"
+        typer.echo(f"{sid}  {status:<10}  {started}  {exchanges} exchanges  {dur_str}  rec:{has_recording}")
+
+
+@phone_app.command("status")
+def phone_status(
+    call_id: Annotated[str, typer.Argument(help="Call SID or internal ID")],
+    format: Annotated[str, typer.Option("--format", "-f", help="Output format (text, json)")] = "text",
+) -> None:
+    """Get call status, transcript, and latency details."""
+    result = _api_call("GET", f"/phone/calls/{call_id}")
+    data = result.get("data", result)
+    if "error" in data:
+        typer.echo(f"Error: {data['error']}", err=True)
+        raise typer.Exit(code=1)
+
+    if format == "json":
+        _echo_json(data)
+        return
+
+    call = data.get("call", {})
+    exchanges = data.get("exchanges", [])
+
+    typer.echo(f"Status:    {call.get('status')}")
+    typer.echo(f"Started:   {call.get('started_at')}")
+    typer.echo(f"Completed: {call.get('completed_at') or '—'}")
+    typer.echo(f"Duration:  {'%.0fs' % call['duration_seconds'] if call.get('duration_seconds') else '—'}")
+    typer.echo(f"Exchanges: {call.get('exchange_count', 0)}")
+    typer.echo(f"Recording: {'Yes' if call.get('recording_path') else 'No'}")
+    if call.get("agenda"):
+        typer.echo(f"Agenda:    {call['agenda'][:120]}{'...' if len(call['agenda']) > 120 else ''}")
+    typer.echo()
+
+    if not exchanges:
+        typer.echo("No exchanges yet.")
+        return
+
+    for ex in exchanges:
+        idx = ex.get("exchange_index", 0)
+        user = ex.get("user_transcript", "")
+        assistant = ex.get("assistant_transcript", "")
+        e2e = ex.get("e2e_ms")
+        typer.echo(f"--- Exchange #{idx + 1} ---")
+        typer.echo(f"  User:      {user or '—'}")
+        typer.echo(f"  Assistant: {assistant or '(no response)'}")
+        if e2e:
+            typer.echo(f"  Latency:   STT {ex.get('stt_ms', '—')}ms | LLM {ex.get('openclaw_ms', '—')}ms | TTFP {ex.get('tts_first_chunk_ms', '—')}ms | E2E {e2e}ms")
+        typer.echo()
+
+
+@openai_app.command("prompt")
+def openai_prompt(
+    prompt: Annotated[str, typer.Argument(help="Prompt text to send")],
+    model: Annotated[Optional[str], typer.Option("--model", "-m", help="Model name")] = None,
+    temperature: Annotated[float, typer.Option("--temperature", "-t", help="Sampling temperature")] = 0.7,
+) -> None:
+    """Send a prompt to OpenAI and print the response."""
+    data: dict[str, Any] = {"prompt": prompt, "temperature": temperature}
+    if model:
+        data["model"] = model
+    result = _api_call("POST", "/api/v1/openai/prompt", data)
+    typer.echo(result["data"]["content"])
+
+
+# ── Eval framework ──────────────────────────────────────────────────
+
+
+@eval_app.command("list")
+def eval_list(
+    category: Annotated[Optional[str], typer.Option("--category", "-c")] = None,
+) -> None:
+    """List available eval cases."""
+    import asyncio
+    asyncio.run(_eval_list(category))
+
+
+async def _eval_list(category: str | None) -> None:
+    from cyborg_server.evals.registry import get_all_cases, get_cases_by_category
+    cases = get_cases_by_category(category) if category else get_all_cases()
+    if not cases:
+        typer.echo("No eval cases found.")
+        return
+    typer.echo(f"{'ID':<40} {'Category':<20} Description")
+    typer.echo("-" * 90)
+    for c in cases:
+        typer.echo(f"{c.id:<40} {c.category:<20} {c.description}")
+
+
+@eval_app.command("run")
+def eval_run(
+    category: Annotated[Optional[str], typer.Option("--category", "-c")] = None,
+    case_id: Annotated[Optional[str], typer.Option("--case")] = None,
+    threshold: Annotated[float, typer.Option("--threshold", "-t")] = 0.7,
+    skip_judge: Annotated[bool, typer.Option("--skip-judge")] = False,
+) -> None:
+    """Run eval cases against live LLM APIs."""
+    import asyncio
+    asyncio.run(_eval_run(category, case_id, threshold, skip_judge))
+
+
+async def _eval_run(
+    category: str | None,
+    case_id: str | None,
+    threshold: float,
+    skip_judge: bool,
+) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.evals.runner import EvalRunner
+        runner = EvalRunner(ctx)
+        results = await runner.run_all(
+            category=category,
+            case_id=case_id,
+            judge_threshold=threshold,
+            skip_judge=skip_judge,
+        )
+
+        if not results:
+            typer.echo("No eval cases matched.")
+            return
+
+        typer.echo(f"\n{'ID':<35} {'PASS':<6} {'Struct':<8} {'Judge':<8} Latency")
+        typer.echo("-" * 75)
+        for r in results:
+            struct_pass = sum(1 for s in r.structural_results if s.passed)
+            struct_total = len(r.structural_results)
+            judge_str = f"{r.judge_result.overall:.1f}" if r.judge_result else "skip"
+            status = "PASS" if r.passed else "FAIL"
+            typer.echo(
+                f"{r.case_id:<35} {status:<6} "
+                f"{struct_pass}/{struct_total:<6} {judge_str:<8} "
+                f"{r.llm_latency_seconds:.1f}s"
+            )
+            if r.error_message:
+                typer.echo(f"  Error: {r.error_message}")
+
+        passed = sum(1 for r in results if r.passed)
+        typer.echo(f"\n{passed}/{len(results)} passed")
+
+        if passed < len(results):
+            raise SystemExit(1)
+    finally:
+        await db.close()
+
+
+@eval_app.command("history")
+def eval_history(
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
+) -> None:
+    """Show historical eval run results."""
+    import asyncio
+    asyncio.run(_eval_history(limit))
+
+
+async def _eval_history(limit: int) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    try:
+        rows = await db.fetch_all(
+            "SELECT * FROM eval_runs WHERE status='completed' "
+            "ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        )
+        if not rows:
+            typer.echo("No eval runs found.")
+            return
+        typer.echo(f"{'Run ID':<38} {'Started':<22} {'Cat':<15} {'Pass':>5}/{'<5'} Rate")
+        typer.echo("-" * 95)
+        for r in rows:
+            ts = r["started_at"][:19].replace("T", " ")
+            cat = r.get("category") or "all"
+            rate = f"{r['overall_pass_rate']:.0%}" if r["overall_pass_rate"] else "N/A"
+            typer.echo(
+                f"{r['id']:<38} {ts:<22} {cat:<15} "
+                f"{r['passed_cases']:>5}/{r['total_cases']:<5} {rate}"
+            )
+    finally:
+        await db.close()
+
+
+# ============================================================================
+# WhatsApp commands
+# ============================================================================
+
+whatsapp_app = typer.Typer(help="WhatsApp bridge operations")
+
+
+@whatsapp_app.command("status")
+def whatsapp_status() -> None:
+    """Show WhatsApp bridge connection status."""
+    result = _api_call("GET", "/whatsapp/status")
+    _echo_json(result)
+
+
+@whatsapp_app.command("pair")
+def whatsapp_pair(
+    method: Annotated[str, typer.Option("--method", help="Pairing method: 'qr' or 'phone-code'")] = "qr",
+    phone_number: Annotated[Optional[str], typer.Option("--phone-number", help="Phone number for phone-code pairing (E.164 format)")] = None,
+) -> None:
+    """Request WhatsApp device pairing via QR code or phone number code."""
+    if method == "phone-code" and not phone_number:
+        raise typer.BadParameter("--phone-number is required for phone-code pairing")
+    payload = {"method": method}
+    if phone_number:
+        payload["phone_number"] = phone_number
+    result = _api_call("POST", "/whatsapp/pair", payload)
+
+    # Poll for the QR/pairing code
+    typer.echo("Waiting for pairing info...")
+    for _ in range(10):
+        time.sleep(1)
+        status = _api_call("GET", "/whatsapp/bridge-status").get("data", {})
+        if method == "qr" and status.get("last_qr_code"):
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(status["last_qr_code"])
+            qr.make(fit=True)
+            qr.print_ascii(sys.stdout)
+            typer.echo("Scan this QR code with WhatsApp (Settings > Linked Devices > Link a device)")
+            return
+        if method == "phone-code" and status.get("last_pairing_code"):
+            typer.echo(f"Pairing code: {status['last_pairing_code']}")
+            typer.echo("Enter this code on your phone (Settings > Linked Devices > Link with phone number)")
+            return
+
+    typer.echo("Timed out waiting for pairing info. Try 'cyborg whatsapp bridge-status' to check.")
+
+
+@whatsapp_app.command("send")
+def whatsapp_send(
+    chat_id: Annotated[str, typer.Option("--chat-id", help="WhatsApp chat JID (e.g., 1234567890@s.whatsapp.net)")],
+    text: Annotated[str, typer.Option("--text", help="Message text to send")],
+    reply_to: Annotated[Optional[str], typer.Option("--reply-to", help="WhatsApp message ID to reply to")] = None,
+) -> None:
+    """Send a WhatsApp message."""
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+    result = _api_call("POST", "/whatsapp/send", payload)
+    _echo_json(result)
+
+
+@whatsapp_app.command("bridge-status")
+def whatsapp_bridge_status() -> None:
+    """Show internal bridge status including queue sizes and uptime."""
+    result = _api_call("GET", "/whatsapp/bridge-status")
+    _echo_json(result)
+
+
+app.add_typer(whatsapp_app, name="whatsapp")
 
 
 def main() -> int:

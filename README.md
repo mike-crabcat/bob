@@ -388,6 +388,35 @@ uv run cyborg serve
 | `CYBORG_WEBHOOK_{NAME}_SECRET` | Secret for webhook named `{NAME}` |
 | `CYBORG_WEBHOOK_{NAME}_EVENTS` | Comma-separated events for webhook named `{NAME}` |
 
+**Skill environment variables:**
+
+Skills run as subprocesses and need API keys in standard env var names (e.g. `OPENAI_API_KEY`). Since Cyborg runs as a systemd user service, it does not inherit your shell environment — it reads `~/.config/cyborg/.env` at startup. To make an API key available to skills:
+
+1. Add the key to `~/.config/cyborg/.env` with the `CYBORG_` prefix:
+
+```bash
+echo 'CYBORG_GOOGLE_PLACES_API_KEY=AIza...' >> ~/.config/cyborg/.env
+```
+
+2. Register the mapping in `packages/cyborg-server/cyborg_server/services/skill_env.py` so the subprocess sees the standard name:
+
+```python
+ENV_MAPPINGS: dict[str, str] = {
+    "CYBORG_OPENAI_API_KEY": "OPENAI_API_KEY",
+    "CYBORG_OPENAI_BASE_URL": "OPENAI_BASE_URL",
+    "CYBORG_AGENTMAIL_API_KEY": "AGENTMAIL_API_KEY",
+    "CYBORG_GOOGLE_PLACES_API_KEY": "GOOGLE_PLACES_API_KEY",
+}
+```
+
+3. Restart the service:
+
+```bash
+uv run cyborg restart
+```
+
+Skills can then use `os.environ.get("GOOGLE_PLACES_API_KEY")` or rely on SDK auto-detection.
+
 ## CLI
 
 ```bash

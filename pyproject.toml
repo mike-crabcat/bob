@@ -11,6 +11,9 @@ dependencies = [
 dev = [
   "pytest>=8.3.0",
 ]
+voice = [
+  "cyborg-server[voice]",
+]
 
 [tool.uv.sources]
 cyborg-server = { path = "packages/cyborg-server", editable = true }

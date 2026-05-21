@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from cyborg_server.database import Database
-from cyborg_server.dependencies import get_database
-from cyborg_server.models import JournalEntryType
+from cyborg_server.context import AppContext
+from cyborg_server.dependencies import get_app_context
 from cyborg_server.services.base import utcnow
 from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
 from cyborg_server.services.project_service import ProjectService
@@ -108,10 +106,10 @@ class ProjectInfoResponse(BaseModel):
 # ============================================================================
 
 
-def _get_reasoning_service(db: Database) -> OpenClawReasoningService:
+def _get_reasoning_service(ctx: AppContext) -> OpenClawReasoningService:
     """Get or create the reasoning service instance."""
     # Create service without routing_service for internal use
-    return OpenClawReasoningService(db)
+    return OpenClawReasoningService(ctx)
 
 
 async def _get_project_for_refinement(
@@ -142,7 +140,7 @@ async def _get_project_for_refinement(
 async def generate_project_plan(
     request: PlanGenerationRequest,
     http_request: Request,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> PlanGenerationResponse:
     """
     Generate a project plan using OpenClaw reasoning.
@@ -150,7 +148,7 @@ async def generate_project_plan(
     This endpoint analyzes the project aim and method to generate
     a structured execution plan with steps and success criteria.
     """
-    reasoning_service = _get_reasoning_service(db)
+    reasoning_service = _get_reasoning_service(ctx)
 
     try:
         # Generate plan using OpenClaw reasoning
@@ -190,7 +188,7 @@ async def refine_project_strategy(
     project_id: str,
     request: StrategyRefinementRequest,
     background_tasks: BackgroundTasks,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> StrategyRefinementResponse:
     """
     Trigger strategy refinement analysis for a project.
@@ -199,8 +197,8 @@ async def refine_project_strategy(
     strategic adjustments. If should_refine is true,
     applies the refinements automatically.
     """
-    reasoning_service = _get_reasoning_service(db)
-    project_service = ProjectService(db)
+    reasoning_service = _get_reasoning_service(ctx)
+    project_service = ProjectService(ctx)
 
     # Get and validate project
     project = await _get_project_for_refinement(project_id, project_service)
@@ -253,10 +251,10 @@ async def refine_project_strategy(
 @router.get("/projects/{project_id}/status", response_model=ProjectInfoResponse)
 async def get_project_status(
     project_id: str,
-    db: Database = Depends(get_database),
+    ctx: AppContext = Depends(get_app_context),
 ) -> ProjectInfoResponse:
     """Get current project status for planning decisions."""
-    project_service = ProjectService(db)
+    project_service = ProjectService(ctx)
 
     try:
         project = await project_service.get_project(project_id)

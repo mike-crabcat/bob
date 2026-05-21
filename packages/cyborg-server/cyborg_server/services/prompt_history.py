@@ -28,6 +28,8 @@ PROMPT_CATEGORIES = frozenset({
     "source_discovery",
     "email_agenda",
     "email_context",
+    "email_incoming",
+    "email_outgoing",
 })
 
 

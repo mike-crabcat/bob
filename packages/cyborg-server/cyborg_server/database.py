@@ -6,7 +6,10 @@ from contextlib import asynccontextmanager
 import asyncio
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cyborg_server.config import Settings
 
 import aiosqlite
 
@@ -21,7 +24,7 @@ class Database:
         self.db_path = db_path
         self.schema_dir = schema_dir
         self.pool_size = max(pool_size, 1)
-        self.settings: Any | None = None
+        self.settings: Settings | None = None
         self._queue: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue()
         self._connections: list[aiosqlite.Connection] = []
         self._write_lock = asyncio.Lock()
@@ -156,6 +159,14 @@ class Database:
 
         row = await self.fetch_one("SELECT 1 AS ok")
         return bool(row and row["ok"] == 1)
+
+    def get_settings(self) -> "Settings":
+        """Return cached settings, falling back to env."""
+        from cyborg_server.config import Settings
+
+        if isinstance(self.settings, Settings):
+            return self.settings
+        return Settings.from_env()
 
 
 def _migration_sort_key(path: Path) -> tuple[int, str]:

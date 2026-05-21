@@ -7,15 +7,17 @@ No periodic scanning or repeat logic - all notifications fire once.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from aiosqlite import Connection
 
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import NotFoundError
 from cyborg_server.models import (
+    DispatchCategory,
     NotificationAcknowledgeRequest,
     NotificationDeliveryStatus,
     NotificationEntityType,
@@ -28,6 +30,73 @@ from cyborg_server.services.base import BaseService, json_dumps, json_loads, utc
 from cyborg_server.services.openclaw_hook_service import OpenClawHookService
 
 
+# ── Shared dispatch metadata helpers ────────────────────────────
+
+
+async def build_task_dispatch_context(db: Database, task_id: str) -> dict[str, Any] | None:
+    """Build the common metadata dict for a task dispatch.
+
+    Returns None if the task has no delivery route (nothing to dispatch to).
+    """
+    row = await db.fetch_one(
+        "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
+        (task_id,),
+    )
+    if row is None:
+        return None
+
+    task_metadata = json_loads(row.get("metadata"), {})
+    target_session = task_metadata.get("target_session")
+    has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
+    delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
+
+    if delivery_route is None:
+        return None
+
+    parent_project = await _get_parent_project(db, task_id)
+
+    output_directory = None
+    if parent_project is not None:
+        try:
+            from cyborg_server.context import AppContext
+            from cyborg_server.services.project_service import ProjectService
+
+            ctx = AppContext(db=db, settings=db.get_settings())
+            project_service = ProjectService(ctx)
+            project_path = await project_service.get_project_path(parent_project["id"])
+            short_id = row["id"].replace("-", "")[:8]
+            output_directory = str(project_path / "tasks" / short_id)
+        except Exception:
+            pass
+
+    return {
+        "task_row": dict(row),
+        "task_metadata": {
+            **task_metadata,
+            "task_id": row["id"],
+            "task_status": row["status"],
+            "parent_project_id": parent_project["id"] if parent_project else None,
+            "parent_project_title": parent_project["title"] if parent_project else None,
+            "delivery_route": delivery_route,
+            "output_directory": output_directory,
+        },
+    }
+
+
+async def _get_parent_project(db: Database, task_id: str) -> dict[str, Any] | None:
+    return await db.fetch_one(
+        """
+        SELECT p.id, p.title
+        FROM project_tasks AS pt
+        INNER JOIN projects AS p ON p.id = pt.project_id
+        WHERE pt.task_id = ? AND p.deleted_at IS NULL
+        ORDER BY p.created_at ASC, p.id ASC
+        LIMIT 1
+        """,
+        (task_id,),
+    )
+
+
 class NotificationService(BaseService):
     """Create, acknowledge, resolve, and dispatch persisted notifications.
 
@@ -38,18 +107,14 @@ class NotificationService(BaseService):
     Both fire exactly once. No repeat logic or periodic scanning.
     """
 
-    def __init__(self, db: Database, openclaw_service: OpenClawHookService | None = None) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext, openclaw_service: OpenClawHookService | None = None) -> None:
+        super().__init__(ctx)
         self._openclaw_service = openclaw_service
 
     def _get_openclaw_service(self) -> OpenClawHookService:
         if self._openclaw_service is None:
-            from cyborg_server.config import Settings
-            settings = getattr(self.db, "settings", None)
-            public_url = ""
-            if isinstance(settings, Settings):
-                public_url = settings.resolved_public_url
-            self._openclaw_service = OpenClawHookService(self.db, cyborg_service_url=public_url)
+            settings = self._get_settings()
+            self._openclaw_service = OpenClawHookService(self.ctx, cyborg_service_url=settings.resolved_public_url)
         return self._openclaw_service
 
     # ── Public API ──────────────────────────────────────────────
@@ -190,7 +255,7 @@ class NotificationService(BaseService):
             source_updated_at=row.get("closed_at") or row.get("updated_at"),
         )
 
-    # ── Task assignment (reasoning prompt dispatch) ─────────────
+    # ── Task assignment (dispatches through dispatch system) ─────
 
     async def create_task_assignment_notification(
         self,
@@ -198,74 +263,22 @@ class NotificationService(BaseService):
         *,
         now: datetime | None = None,
     ) -> None:
-        """Create a TASK_ASSIGNMENT notification for a newly created task.
-
-        This dispatches as a reasoning prompt (agent RPC) to OpenClaw.
-        Called directly from task_service at task creation time.
-        """
-        row = await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
-            (task_id,),
-        )
-        if row is None:
+        """Dispatch a TASK_ASSIGNMENT prompt to OpenClaw via the dispatch system."""
+        ctx = await build_task_dispatch_context(self.db, task_id)
+        if ctx is None:
             return
-
-        task_metadata = json_loads(row.get("metadata"), {})
-        target_session = task_metadata.get("target_session")
-        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
-
-        if delivery_route is None:
-            return
-
-        source_updated_at = row.get("updated_at")
-        parent_project = await self._get_parent_project(task_id)
-
-        title = f"Task to action: {row['title']}"
-        message_parts = []
-        if row.get("description"):
-            message_parts.append(row["description"])
-
-        if row.get("requested_by"):
-            message_parts.append(f"Requested by: {row['requested_by']}")
-        if parent_project is not None:
-            message_parts.append(f"Project: {parent_project['title']} ({parent_project['id']})")
-        message = "\n\n".join(part for part in message_parts if part) or "A task is ready to action."
-
-        # Compute output directory for the task
-        output_directory = None
-        if parent_project is not None:
-            try:
-                from cyborg_server.services.project_service import ProjectService
-
-                project_service = ProjectService(self.db)
-                project_path = await project_service.get_project_path(parent_project["id"])
-                short_id = row["id"].replace("-", "")[:8]
-                output_directory = str(project_path / "tasks" / short_id)
-            except Exception:
-                pass
-
-        metadata = {
-            **task_metadata,
-            "task_id": row["id"],
-            "task_status": row["status"],
-            "parent_project_id": parent_project["id"] if parent_project else None,
-            "parent_project_title": parent_project["title"] if parent_project else None,
-            "delivery_route": delivery_route,
-            "output_directory": output_directory,
-        }
-        await self._create_entity_notification(
-            entity_type=NotificationEntityType.TASK,
-            entity_id=row["id"],
-            notification_type=NotificationType.TASK_ASSIGNMENT,
-            title=title,
-            message=message,
+        metadata = ctx["task_metadata"]
+        await self._dispatch_agent_via_dispatch(
+            category=DispatchCategory.TASK_ASSIGNMENT,
+            title=f"Task to action: {ctx['task_row']['title']}",
+            message=self._build_task_assignment_message(ctx),
             metadata=metadata,
-            now=now or utcnow(),
-            source_updated_at=source_updated_at,
+            entity_id=task_id,
+            task_id=task_id,
+            project_id=metadata.get("parent_project_id"),
         )
 
-    # ── Task retry (submission rejected) ──────────────────────────
+    # ── Task retry (dispatches through dispatch system) ──────────
 
     async def create_task_retry_notification(
         self,
@@ -274,86 +287,30 @@ class NotificationService(BaseService):
         *,
         now: datetime | None = None,
     ) -> None:
-        """Create a TASK_RETRY notification when a submission is rejected by review.
-
-        Dispatches to the same session as the original task assignment so
-        the agent can retry in context.
-        """
-        row = await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
-            (task_id,),
-        )
-        if row is None:
+        """Dispatch a TASK_RETRY prompt to OpenClaw via the dispatch system."""
+        ctx = await build_task_dispatch_context(self.db, task_id)
+        if ctx is None:
             return
-
-        task_metadata = json_loads(row.get("metadata"), {})
-        target_session = task_metadata.get("target_session")
-        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
-
-        if delivery_route is None:
-            return
-
-        source_updated_at = row.get("updated_at")
-        parent_project = await self._get_parent_project(task_id)
-
+        metadata = {**ctx["task_metadata"], "review_feedback": review_feedback}
         issues = review_feedback.get("issues", [])
         suggestions = review_feedback.get("suggestions", [])
         reasoning = review_feedback.get("reasoning", "")
-
-        message_parts = [
-            f"Task submission rejected: {row['title']}",
-            "",
-            f"Reason: {reasoning}",
-        ]
+        message_parts = [f"Task submission rejected: {ctx['task_row']['title']}", "", f"Reason: {reasoning}"]
         if issues:
-            message_parts.append("")
-            message_parts.append("Issues:")
-            for issue in issues:
-                message_parts.append(f"  - {issue}")
+            message_parts += ["", "Issues:"] + [f"  - {i}" for i in issues]
         if suggestions:
-            message_parts.append("")
-            message_parts.append("Suggestions:")
-            for suggestion in suggestions:
-                message_parts.append(f"  - {suggestion}")
-
-        message = "\n".join(message_parts)
-
-        output_directory = None
-        if parent_project is not None:
-            try:
-                from cyborg_server.services.project_service import ProjectService
-
-                project_service = ProjectService(self.db)
-                project_path = await project_service.get_project_path(parent_project["id"])
-                short_id = row["id"].replace("-", "")[:8]
-                output_directory = str(project_path / "tasks" / short_id)
-            except Exception:
-                pass
-
-        metadata = {
-            **task_metadata,
-            "task_id": row["id"],
-            "task_status": "active",
-            "parent_project_id": parent_project["id"] if parent_project else None,
-            "parent_project_title": parent_project["title"] if parent_project else None,
-            "delivery_route": delivery_route,
-            "output_directory": output_directory,
-            "review_feedback": review_feedback,
-        }
-
-        await self._create_entity_notification(
-            entity_type=NotificationEntityType.TASK,
-            entity_id=row["id"],
-            notification_type=NotificationType.TASK_RETRY,
-            title=f"Task retry: {row['title']}",
-            message=message,
+            message_parts += ["", "Suggestions:"] + [f"  - {s}" for s in suggestions]
+        await self._dispatch_agent_via_dispatch(
+            category=DispatchCategory.TASK_RETRY,
+            title=f"Task retry: {ctx['task_row']['title']}",
+            message="\n".join(message_parts),
             metadata=metadata,
-            now=now or utcnow(),
-            source_updated_at=source_updated_at,
+            entity_id=task_id,
+            task_id=task_id,
+            project_id=ctx["task_metadata"].get("parent_project_id"),
         )
 
-    # ── Task input response (user answered a task input request) ───
+    # ── Task input response (dispatches through dispatch system) ─
 
     async def create_task_input_response_notification(
         self,
@@ -364,70 +321,20 @@ class NotificationService(BaseService):
         *,
         now: datetime | None = None,
     ) -> None:
-        """Create a TASK_INPUT_RESPONSE notification when the user answers a task input request.
-
-        Dispatches to the same session as the original task assignment so
-        the agent can resume work with the user's input.
-        """
-        row = await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
-            (task_id,),
-        )
-        if row is None:
+        """Dispatch a TASK_INPUT_RESPONSE prompt to OpenClaw via the dispatch system."""
+        ctx = await build_task_dispatch_context(self.db, task_id)
+        if ctx is None:
             return
-
-        task_metadata = json_loads(row.get("metadata"), {})
-        target_session = task_metadata.get("target_session")
-        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
-
-        if delivery_route is None:
-            return
-
-        source_updated_at = row.get("updated_at")
-        parent_project = await self._get_parent_project(task_id)
-
-        if isinstance(input_response, list):
-            response_text = ", ".join(input_response)
-        else:
-            response_text = input_response
-
-        message = f"Question: {input_prompt}\n\nUser response: {response_text}"
-
-        output_directory = None
-        if parent_project is not None:
-            try:
-                from cyborg_server.services.project_service import ProjectService
-
-                project_service = ProjectService(self.db)
-                project_path = await project_service.get_project_path(parent_project["id"])
-                short_id = row["id"].replace("-", "")[:8]
-                output_directory = str(project_path / "tasks" / short_id)
-            except Exception:
-                pass
-
-        metadata = {
-            **task_metadata,
-            "task_id": row["id"],
-            "task_status": "active",
-            "parent_project_id": parent_project["id"] if parent_project else None,
-            "parent_project_title": parent_project["title"] if parent_project else None,
-            "delivery_route": delivery_route,
-            "output_directory": output_directory,
-            "input_response": input_response,
-            "input_prompt": input_prompt,
-            "approval_id": approval_id,
-        }
-
-        await self._create_entity_notification(
-            entity_type=NotificationEntityType.TASK,
-            entity_id=row["id"],
-            notification_type=NotificationType.TASK_INPUT_RESPONSE,
-            title=f"Task input received: {row['title']}",
-            message=message,
+        response_text = ", ".join(input_response) if isinstance(input_response, list) else input_response
+        metadata = {**ctx["task_metadata"], "input_response": input_response, "input_prompt": input_prompt, "approval_id": approval_id}
+        await self._dispatch_agent_via_dispatch(
+            category=DispatchCategory.TASK_INPUT_RESPONSE,
+            title=f"Task input received: {ctx['task_row']['title']}",
+            message=f"Question: {input_prompt}\n\nUser response: {response_text}",
             metadata=metadata,
-            now=now or utcnow(),
-            source_updated_at=source_updated_at,
+            entity_id=task_id,
+            task_id=task_id,
+            project_id=ctx["task_metadata"].get("parent_project_id"),
         )
 
     # ── Task tap (operator nudge) ───────────────────────────────────
@@ -438,85 +345,23 @@ class NotificationService(BaseService):
         *,
         now: datetime | None = None,
     ) -> str | None:
-        """Create a TASK_TAP notification to nudge an agent on an active task.
-
-        Returns the notification ID on success, or None if the task has no
-        delivery route.
-        """
-        row = await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
-            (task_id,),
+        """Dispatch a TASK_TAP prompt to OpenClaw via the dispatch system."""
+        ctx = await build_task_dispatch_context(self.db, task_id)
+        if ctx is None:
+            return None
+        metadata = ctx["task_metadata"]
+        title = f"Task tap: {ctx['task_row']['title']}"
+        message = f"Status check on active task: {ctx['task_row']['title']}"
+        await self._dispatch_agent_via_dispatch(
+            category=DispatchCategory.TASK_TAP,
+            title=title,
+            message=message,
+            metadata=metadata,
+            entity_id=task_id,
+            task_id=task_id,
+            project_id=metadata.get("parent_project_id"),
         )
-        if row is None:
-            return None
-
-        task_metadata = json_loads(row.get("metadata"), {})
-        target_session = task_metadata.get("target_session")
-        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
-
-        if delivery_route is None:
-            return None
-
-        source_updated_at = row.get("updated_at")
-        parent_project = await self._get_parent_project(task_id)
-
-        output_directory = None
-        if parent_project is not None:
-            try:
-                from cyborg_server.services.project_service import ProjectService
-
-                project_service = ProjectService(self.db)
-                project_path = await project_service.get_project_path(parent_project["id"])
-                short_id = row["id"].replace("-", "")[:8]
-                output_directory = str(project_path / "tasks" / short_id)
-            except Exception:
-                pass
-
-        metadata = {
-            **task_metadata,
-            "task_id": row["id"],
-            "task_status": row["status"],
-            "parent_project_id": parent_project["id"] if parent_project else None,
-            "parent_project_title": parent_project["title"] if parent_project else None,
-            "delivery_route": delivery_route,
-            "output_directory": output_directory,
-        }
-
-        notification_id = str(uuid4())
-        reference = now or utcnow()
-        now_iso = reference.isoformat()
-
-        async with self.db.connection(write=True) as connection:
-            await connection.execute(
-                """
-                INSERT INTO notifications (
-                    id, entity_type, entity_id, notification_type, status,
-                    delivery_status, delivery_attempt_count, last_delivery_at, last_delivery_error, next_delivery_at,
-                    title, message, metadata, sequence_number,
-                    created_at, updated_at, acknowledged_at, acknowledged_by, resolved_at, source_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
-                """,
-                (
-                    notification_id,
-                    NotificationEntityType.TASK.value,
-                    row["id"],
-                    NotificationType.TASK_TAP.value,
-                    NotificationStatus.PENDING.value,
-                    NotificationDeliveryStatus.PENDING.value,
-                    now_iso,
-                    f"Task tap: {row['title']}",
-                    f"Status check on active task: {row['title']}",
-                    json_dumps(metadata),
-                    None,
-                    now_iso,
-                    now_iso,
-                    source_updated_at,
-                ),
-            )
-
-        await self._attempt_dispatch_notification(notification_id, now=reference)
-        return notification_id
+        return None
 
     # ── Submission review ─────────────────────────────────────────
 
@@ -527,67 +372,27 @@ class NotificationService(BaseService):
         *,
         now: datetime | None = None,
     ) -> str | None:
-        """Create a SUBMISSION_REVIEW notification to ask the agent to verify a task.
-
-        Returns the notification ID on success, or None if the task has no
-        delivery route.
-        """
-        row = await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL",
-            (task_id,),
-        )
-        if row is None:
+        """Dispatch a SUBMISSION_REVIEW prompt to OpenClaw via the dispatch system."""
+        ctx = await build_task_dispatch_context(self.db, task_id)
+        if ctx is None:
             return None
-
-        task_metadata = json_loads(row.get("metadata"), {})
-        target_session = task_metadata.get("target_session")
-        has_source_route = any(task_metadata.get(field) for field in ("session_key", "chat_id", "channel"))
-        delivery_route = "target" if isinstance(target_session, dict) else ("source" if has_source_route else None)
-
-        if delivery_route is None:
-            return None
-
-        source_updated_at = row.get("updated_at")
-        parent_project = await self._get_parent_project(task_id)
-
-        output_directory = None
-        if parent_project is not None:
-            try:
-                from cyborg_server.services.project_service import ProjectService
-
-                project_service = ProjectService(self.db)
-                project_path = await project_service.get_project_path(parent_project["id"])
-                short_id = row["id"].replace("-", "")[:8]
-                output_directory = str(project_path / "tasks" / short_id)
-            except Exception:
-                pass
-
         metadata = {
-            **task_metadata,
-            "task_id": row["id"],
-            "task_status": row["status"],
-            "parent_project_id": parent_project["id"] if parent_project else None,
-            "parent_project_title": parent_project["title"] if parent_project else None,
-            "delivery_route": delivery_route,
-            "output_directory": output_directory,
+            **ctx["task_metadata"],
             "submission_review_otp": otp,
-            "result_summary": row.get("result"),
+            "result_summary": ctx["task_row"].get("result"),
         }
-
-        reference = now or utcnow()
-        await self._create_entity_notification(
-            entity_type=NotificationEntityType.TASK,
-            entity_id=row["id"],
-            notification_type=NotificationType.SUBMISSION_REVIEW,
-            title=f"Review submission: {row['title']}",
-            message=f"Task submitted for review: {row['title']}",
+        await self._dispatch_agent_via_dispatch(
+            category=DispatchCategory.SUBMISSION_REVIEW,
+            title=f"Review submission: {ctx['task_row']['title']}",
+            message=f"Task submitted for review: {ctx['task_row']['title']}",
             metadata=metadata,
-            now=reference,
-            source_updated_at=source_updated_at,
+            entity_id=task_id,
+            task_id=task_id,
+            project_id=ctx["task_metadata"].get("parent_project_id"),
         )
         return None
 
-    # ── Next action (async reasoning) ───────────────────────────
+    # ── Next action (dispatches through dispatch system) ─────────
 
     async def create_next_action_notification(
         self,
@@ -598,10 +403,7 @@ class NotificationService(BaseService):
         *,
         now: datetime | None = None,
     ) -> None:
-        """Create a NEXT_ACTION notification to dispatch the next-action prompt to OpenClaw.
-
-        This is fire-and-forget — the agent responds via `cyborg project decide-next` CLI.
-        """
+        """Dispatch a NEXT_ACTION prompt to OpenClaw via the dispatch system."""
         project = await self.db.fetch_one(
             "SELECT id, title, metadata, updated_at, subagent_session_key FROM projects WHERE id = ? AND deleted_at IS NULL",
             (project_id,),
@@ -620,16 +422,13 @@ class NotificationService(BaseService):
             "subagent_session_key": project.get("subagent_session_key"),
         }
 
-        reference = now or utcnow()
-        await self._create_entity_notification(
-            entity_type=NotificationEntityType.PROJECT,
-            entity_id=project_id,
-            notification_type=NotificationType.NEXT_ACTION,
+        await self._dispatch_agent_via_dispatch(
+            category=DispatchCategory.NEXT_ACTION,
             title=f"Decide next action: {project['title']}",
             message=prompt,
             metadata=metadata,
-            now=reference,
-            source_updated_at=project.get("updated_at"),
+            entity_id=project_id,
+            project_id=project_id,
         )
 
     # ── Backward-compat shim for process_due_notifications ──────
@@ -809,7 +608,109 @@ class NotificationService(BaseService):
             failed_params.extend(notification_type.value for notification_type in sorted(notification_types, key=lambda value: value.value))
         await self.db.execute(failed_query, tuple(failed_params))
 
-    # ── Internal: dispatch ──────────────────────────────────────
+    # ── Internal: agent dispatch via dispatch system ─────────────
+
+    async def _dispatch_agent_via_dispatch(
+        self,
+        *,
+        category: DispatchCategory,
+        title: str,
+        message: str,
+        metadata: dict[str, Any],
+        entity_id: str,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> None:
+        """Send an agent dispatch through the dispatch system with track().
+
+        Skips the notifications table entirely. Records a dispatch, builds
+        the prompt via openclaw_hook_service, and tracks completion.
+        """
+        from cyborg_server.services.dispatch_service import DispatchService
+
+        openclaw_service = self._get_openclaw_service()
+        if not openclaw_service.is_configured():
+            return
+
+        notification_dict = {
+            "id": str(uuid4()),
+            "entity_type": "task" if task_id else "project",
+            "entity_id": entity_id,
+            "notification_type": category.value,
+            "title": title,
+            "message": message,
+            "metadata": metadata,
+        }
+
+        session_key = await self._resolve_agent_session_key(openclaw_service, notification_dict, metadata)
+        if not session_key:
+            return
+
+        from cyborg_server.services.prompt_history import log_prompt
+        await log_prompt(
+            self.db,
+            category=category.value,
+            prompt_text=message,
+            project_id=project_id,
+            task_id=task_id,
+            session_key=session_key,
+        )
+
+        dispatch_id = await DispatchService(self.ctx).record_dispatch(
+            notification_type=category.value,
+            session_key=session_key,
+            task_id=task_id,
+            project_id=project_id,
+        )
+
+        coro = await openclaw_service.prepare_agent_dispatch(
+            message=message,
+            session_key=session_key,
+            idempotency_key=notification_dict["id"],
+        )
+        DispatchService(self.ctx).track(dispatch_id, coro)
+
+    async def _resolve_agent_session_key(
+        self,
+        openclaw_service: OpenClawHookService,
+        notification_dict: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> str | None:
+        """Resolve the session key for an agent dispatch."""
+        session_key = metadata.get("subagent_session_key")
+        if session_key:
+            return session_key
+
+        session_key = await openclaw_service.resolve_project_session_key(
+            metadata.get("parent_project_id") or metadata.get("project_id", "")
+        )
+        if session_key:
+            return session_key
+
+        route = await openclaw_service.routing_service.resolve_notification_route(metadata)
+        if route:
+            route_data = route.model_dump(mode="json")
+            sk = route_data.get("session_key")
+            if sk:
+                return sk
+
+        return None
+
+    @staticmethod
+    def _build_task_assignment_message(ctx: dict[str, Any]) -> str:
+        row = ctx["task_row"]
+        message_parts = []
+        if row.get("description"):
+            message_parts.append(row["description"])
+        if row.get("requested_by"):
+            message_parts.append(f"Requested by: {row['requested_by']}")
+        parent_project_id = ctx["task_metadata"].get("parent_project_id")
+        parent_project_title = ctx["task_metadata"].get("parent_project_title")
+        if parent_project_id:
+            message_parts.append(f"Project: {parent_project_title} ({parent_project_id})")
+        return "\n\n".join(part for part in message_parts if part) or "A task is ready to action."
+
+    # ── Internal: notification dispatch ──────────────────────────
 
     async def _dispatch_due_notifications(self, now: datetime) -> int:
         openclaw_service = self._get_openclaw_service()
@@ -847,8 +748,9 @@ class NotificationService(BaseService):
             return False
 
         decoded = self._decode_notification_row(row)
+        session_key: str | None = None
         try:
-            await openclaw_service.dispatch_notification(decoded)
+            session_key = await openclaw_service.dispatch_notification(decoded)
         except Exception as exc:
             await openclaw_service.mark_delivery_failure(
                 notification_id,
@@ -859,7 +761,18 @@ class NotificationService(BaseService):
             )
             return False
 
+        if session_key is None:
+            # No delivery route (e.g. API-created project with no channel).
+            # Resolve the notification so it won't be retried.
+            await self._resolve_pending_notifications(
+                NotificationEntityType(decoded.get("entity_type", "project")),
+                decoded.get("entity_id", ""),
+                now=now,
+            )
+            return True
+
         await openclaw_service.mark_delivery_success(notification_id, timestamp=now.isoformat())
+
         return True
 
     async def _lease_notification_for_delivery(self, notification_id: str, *, now: datetime) -> dict[str, Any] | None:
@@ -887,17 +800,7 @@ class NotificationService(BaseService):
     # ── Internal: helpers ───────────────────────────────────────
 
     async def _get_parent_project(self, task_id: str) -> dict[str, Any] | None:
-        return await self.db.fetch_one(
-            """
-            SELECT p.id, p.title
-            FROM project_tasks AS pt
-            INNER JOIN projects AS p ON p.id = pt.project_id
-            WHERE pt.task_id = ? AND p.deleted_at IS NULL
-            ORDER BY p.created_at ASC, p.id ASC
-            LIMIT 1
-            """,
-            (task_id,),
-        )
+        return await _get_parent_project(self.db, task_id)
 
     async def _is_project_muted(self, project_id: str) -> bool:
         row = await self.db.fetch_one(

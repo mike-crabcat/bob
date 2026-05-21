@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from cyborg_server.config import Settings
+from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ConflictError, NotFoundError
 from cyborg_server.models import (
@@ -62,15 +63,12 @@ class SessionRouteService(BaseService):
 
     logger = logging.getLogger(__name__)
 
-    def __init__(self, db: Database) -> None:
-        super().__init__(db)
+    def __init__(self, ctx: AppContext) -> None:
+        super().__init__(ctx)
 
     @property
     def settings(self) -> Settings:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings):
-            return current
-        return Settings.from_env()
+        return self._get_settings()
 
     async def create_route(self, payload: SessionRouteCreate) -> SessionRouteResponse:
         now = utcnow().isoformat()
@@ -627,9 +625,9 @@ class SessionRouteService(BaseService):
         return f"{self._resolve_agent_prefix()}email:thread:{thread_id}"
 
     def _resolve_agent_prefix(self) -> str:
-        current = getattr(self.db, "settings", None)
-        if isinstance(current, Settings) and current.openclaw.agent_id:
-            return f"agent:{current.openclaw.agent_id}:"
+        settings = self._get_settings()
+        if settings.openclaw.agent_id:
+            return f"agent:{settings.openclaw.agent_id}:"
         return "agent:main:"
 
     def _resolve_whatsapp_agent_prefix(self, source_session_key: str | None) -> str:

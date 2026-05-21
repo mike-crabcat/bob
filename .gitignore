@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 *.pyc
 scripts/publish.sh
+scripts/rollout.sh
+.claude/
+services/whatsappbridge/bin

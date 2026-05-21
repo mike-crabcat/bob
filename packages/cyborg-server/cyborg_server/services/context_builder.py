@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
-from cyborg_server.database import Database
-from cyborg_server.services.base import BaseService, json_dumps, json_loads, utcnow
+from cyborg_server.context import AppContext
+from cyborg_server.services.base import BaseService, json_loads, utcnow
 
 
 class ContextScope(StrEnum):
@@ -491,7 +491,7 @@ class ContextBuilder(BaseService):
         """Source project outputs for derived projects."""
         try:
             from cyborg_server.services.source_discovery_service import SourceDiscoveryService
-            discovery = SourceDiscoveryService(self.db)
+            discovery = SourceDiscoveryService(self.ctx)
             sources = await discovery.get_sources(project_id)
             if not sources:
                 return {}
@@ -583,7 +583,7 @@ class ContextBuilder(BaseService):
             if isinstance(data, list):
                 return data
         except Exception:
-            pass
+            logger.exception("Failed to parse JSON value, returning empty list")
 
         return []
 

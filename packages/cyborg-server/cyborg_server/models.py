@@ -10,62 +10,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cyborg_server.cron import validate_cron_expression
+
 
 MetadataDict = dict[str, Any]
 COLOR_PATTERN = re.compile(r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
-
-
-def validate_cron_expression(expression: str) -> str:
-    """Validate a simple five-field cron expression."""
-
-    fields = expression.split()
-    if len(fields) != 5:
-        raise ValueError("Cron expressions must contain exactly five fields")
-
-    ranges = (
-        (0, 59),
-        (0, 23),
-        (1, 31),
-        (1, 12),
-        (0, 7),
-    )
-    for part, (lower, upper) in zip(fields, ranges, strict=True):
-        for token in part.split(","):
-            _validate_cron_token(token, lower, upper)
-    return expression
-
-
-def _validate_cron_token(token: str, lower: int, upper: int) -> None:
-    if token == "*":
-        return
-    if "/" in token:
-        base, step = token.split("/", 1)
-        if not step.isdigit() or int(step) <= 0:
-            raise ValueError("Cron step values must be positive integers")
-        _validate_cron_token(base, lower, upper)
-        return
-    if token.startswith("*/"):
-        step = token[2:]
-        if not step.isdigit() or int(step) <= 0:
-            raise ValueError("Cron step values must be positive integers")
-        return
-    if "-" in token:
-        start, end = token.split("-", 1)
-        if not (start.isdigit() and end.isdigit()):
-            raise ValueError("Cron ranges must use integers")
-        start_value = int(start)
-        end_value = int(end)
-        if not (lower <= start_value <= upper and lower <= end_value <= upper):
-            raise ValueError("Cron values are out of range")
-        if start_value > end_value:
-            raise ValueError("Cron range start must be <= range end")
-        return
-    if token.isdigit():
-        value = int(token)
-        if not lower <= value <= upper:
-            raise ValueError("Cron values are out of range")
-        return
-    raise ValueError(f"Unsupported cron token: {token}")
 
 
 class CyborgModel(BaseModel):
@@ -191,16 +140,24 @@ class NotificationEntityType(StrEnum):
 
 
 class NotificationType(StrEnum):
+    """Persisted user-facing notification types stored in the notifications table."""
     NEEDS_INPUT = "needs_input"
-    EVENT_REMINDER = "event_reminder"
-    TASK_ASSIGNMENT = "task_assignment"
-    TASK_RESULT = "task_result"
     PROJECT_RESULT = "project_result"
+
+
+class DispatchCategory(StrEnum):
+    """Agent dispatch categories — labels for the dispatches table.
+
+    These are agent prompts sent through the dispatch system. They bypass the
+    notifications table entirely and are tracked via DispatchService.
+    """
+    TASK_ASSIGNMENT = "task_assignment"
     TASK_RETRY = "task_retry"
     TASK_INPUT_RESPONSE = "task_input_response"
     TASK_TAP = "task_tap"
     SUBMISSION_REVIEW = "submission_review"
     NEXT_ACTION = "next_action"
+    VOICE_CHAT = "voice_chat"
 
 
 class NotificationStatus(StrEnum):
@@ -214,6 +171,14 @@ class NotificationDeliveryStatus(StrEnum):
     SENDING = "sending"
     DELIVERED = "delivered"
     FAILED = "failed"
+
+
+class DispatchStatus(StrEnum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
 
 
 class RecipientType(StrEnum):
@@ -1142,6 +1107,7 @@ class ContactUpdate(CyborgModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     phone_number: str | None = Field(default=None, min_length=1, max_length=50)
     email: str | None = Field(default=None, max_length=255)
+    is_trusted: bool | None = None
     whatsapp_groups: list[str] | None = None
     metadata: MetadataDict | None = None
 
@@ -1169,6 +1135,7 @@ class ContactUpdate(CyborgModel):
 class ContactResponse(ContactFields, EntityRef, SoftDeleteFields):
     created_at: datetime
     updated_at: datetime
+    is_trusted: bool = False
 
 
 class SessionRouteFields(CyborgModel):
@@ -1300,7 +1267,7 @@ class EmailSendRequest(CyborgModel):
     text: str = Field(min_length=1)
     html: str | None = None
     cc: list[str] | None = None
-    agenda: str | None = None
+    agenda: str = Field(min_length=1, description="Purpose and handling instructions for this email thread")
     attachments: list[EmailAttachment] | None = None
 
 
@@ -1319,6 +1286,7 @@ class EmailThreadResponse(CyborgModel, EntityRef):
     contact_id: UUID | None = None
     project_id: UUID | None = None
     session_key: str
+    agenda: str | None = None
     message_count: int = 0
     last_message_at: datetime | None = None
     is_active: bool = True
@@ -1360,6 +1328,26 @@ class NotificationAcknowledgeRequest(CyborgModel):
         if not stripped:
             raise ValueError("acknowledged_by must not be blank")
         return stripped
+
+
+class DispatchResponse(CyborgModel, EntityRef):
+    notification_id: UUID | None = None
+    notification_type: str
+    session_key: str
+    task_id: UUID | None = None
+    project_id: UUID | None = None
+    status: DispatchStatus
+    dispatched_at: datetime
+    completed_at: datetime | None = None
+    last_tapped_at: datetime | None = None
+    tap_count: int = 0
+    max_auto_taps: int = 0
+    duration_seconds: float | None = None
+    metadata: MetadataDict = Field(default_factory=dict)
+    task_title: str | None = None
+    project_title: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class HealthResponse(CyborgModel):
