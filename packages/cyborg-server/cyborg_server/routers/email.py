@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -261,7 +263,6 @@ async def send_email(
     if settings.openai.enabled:
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         from cyborg_server.services.session_service import SessionService
-        from cyborg_server.services.dispatch_service import DispatchService
 
         send_parts: list[str] = []
 
@@ -294,10 +295,7 @@ async def send_email(
             {"role": "user", "content": send_content},
         ]
 
-        dispatch_id = await DispatchService(ctx).record_dispatch(
-            notification_type="email_outgoing",
-            session_key=session_key,
-        )
+        dispatch_id = str(uuid4())
 
         async def _run_send_dispatch() -> str:
             result = await LLMDispatchService(ctx).chat_with_tools(
@@ -310,7 +308,7 @@ async def send_email(
             await session_svc.add_message(session_key, "assistant", payload.text, channel="email")
             return result
 
-        DispatchService(ctx).track(dispatch_id, _run_send_dispatch())
+        asyncio.create_task(_run_send_dispatch())
         logger.info("Send dispatch tracking for thread %s (dispatch=%s)", thread["id"], dispatch_id)
 
     return result

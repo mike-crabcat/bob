@@ -18,17 +18,14 @@ from cyborg_server.context import AppContext
 from cyborg_server.database import Database
 from cyborg_server.exceptions import ServiceError
 from cyborg_server.heartbeat import (
-    BlockedProjectCheckTask,
     CallCleanupTask,
     EmailPollingTask,
     EmailSyncTask,
     HeartbeatRunner,
-    NotificationDispatchTask,
     SessionIdleSummaryTask,
-    StuckDispatchCheckTask,
 )
 from cyborg_server.models import HealthResponse
-from cyborg_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, dispatches, email, learning, notifications, openclaw, planning, project_specs, projects, session_routes, tasks, webhooks, whatsapp
+from cyborg_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, session_routes, webhooks, whatsapp
 from cyborg_server.services.event_bus import EventBus
 from cyborg_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
@@ -96,10 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         stop_event = asyncio.Event()
         runner = HeartbeatRunner(app_ctx, interval_seconds=resolved_settings.heartbeat_interval_seconds)
-        runner.register(NotificationDispatchTask())
-        runner.register(BlockedProjectCheckTask())
         runner.register(EmailPollingTask())
-        runner.register(StuckDispatchCheckTask())
         runner.register(EmailSyncTask())
         runner.register(CallCleanupTask())
         runner.register(SessionIdleSummaryTask())
@@ -108,25 +102,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             stop_event.set()
-
-            # Wait for active dispatches to complete before shutting down
-            try:
-                from cyborg_server.services.dispatch_service import DispatchService
-                dispatch_service = DispatchService(app_ctx)
-                active = await dispatch_service.count_active_dispatches()
-                if active:
-                    print(f"Waiting for {active} active dispatch(es) to complete...")
-                    await dispatch_service.wait_for_active_dispatches(
-                        timeout_seconds=resolved_settings.dispatch_shutdown_timeout_seconds,
-                        poll_interval=2.0,
-                    )
-                    remaining = await dispatch_service.count_active_dispatches()
-                    if remaining:
-                        print(f"Shutdown timed out — cancelled {remaining} dispatch(es).")
-                    else:
-                        print("All dispatches completed. Shutting down.")
-            except Exception:
-                logger.warning("Error during dispatch drain", exc_info=True)
 
             heartbeat_worker.cancel()
             try:
@@ -172,20 +147,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise RuntimeError("Database health check failed")
         return HealthResponse(status="ok", database="ok")
 
-    app.include_router(tasks.router)
-    app.include_router(projects.router)
-    app.include_router(project_specs.router)
     app.include_router(calendars.router)
     app.include_router(context.router)
-    app.include_router(notifications.router)
-    app.include_router(openclaw.router)
-    app.include_router(planning.router)
-    app.include_router(learning.router)
     app.include_router(session_routes.router)
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
     app.include_router(email.router)
-    app.include_router(dispatches.router)
 
     # Dashboard API (HTTP) + WebSocket (live events)
     app.include_router(dashboard_api.router, prefix="/dashboard")

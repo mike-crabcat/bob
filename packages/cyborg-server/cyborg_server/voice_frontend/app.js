@@ -15,7 +15,7 @@
  *     {"type": "status", "state": "recording|transcribing|thinking|speaking|idle"}
  *     {"type": "transcript", "text": "...", "language": "en", "latency_ms": ...}
  *     {"type": "response_text", "text": "..."}
- *     {"type": "latency", "stt_ms": ..., "openclaw_total_ms": ..., "e2e_ms": ...}
+ *     {"type": "latency", "stt_ms": ..., "llm_total_ms": ..., "e2e_ms": ...}
  *     {"type": "audio_done"}
  *     {"type": "error", "message": "..."}
  *
@@ -665,7 +665,7 @@ const app = {
     handleLatency(msg) {
         const parts = [];
         if (msg.stt_ms) parts.push(`STT: ${(msg.stt_ms / 1000).toFixed(1)}s`);
-        if (msg.openclaw_total_ms) parts.push(`LLM: ${(msg.openclaw_total_ms / 1000).toFixed(1)}s`);
+        if (msg.llm_total_ms) parts.push(`LLM: ${(msg.llm_total_ms / 1000).toFixed(1)}s`);
         if (msg.tts_first_chunk_ms) parts.push(`TTS: ${(msg.tts_first_chunk_ms / 1000).toFixed(1)}s`);
         if (msg.e2e_ms) parts.push(`Total: ${(msg.e2e_ms / 1000).toFixed(1)}s`);
 

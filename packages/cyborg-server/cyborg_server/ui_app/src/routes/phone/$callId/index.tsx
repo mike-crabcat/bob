@@ -23,7 +23,7 @@ interface Exchange {
   user_transcript: string;
   assistant_transcript: string;
   stt_ms: number | null;
-  openclaw_ms: number | null;
+  llm_total_ms: number | null;
   tts_first_chunk_ms: number | null;
   e2e_ms: number | null;
   started_at: string | null;
@@ -170,10 +170,10 @@ function CallDetailPage() {
                     {ex.assistant_transcript}
                   </div>
                 )}
-                {(ex.stt_ms != null || ex.openclaw_ms != null || ex.tts_first_chunk_ms != null) && (
+                {(ex.stt_ms != null || ex.llm_total_ms != null || ex.tts_first_chunk_ms != null) && (
                   <div className="text-[9px] text-muted mt-0.5">
                     {ex.stt_ms != null && <span>stt {ex.stt_ms}ms </span>}
-                    {ex.openclaw_ms != null && <span>llm {ex.openclaw_ms}ms </span>}
+                    {ex.llm_total_ms != null && <span>llm {ex.llm_total_ms}ms </span>}
                     {ex.tts_first_chunk_ms != null && <span>tts {ex.tts_first_chunk_ms}ms</span>}
                   </div>
                 )}

@@ -66,7 +66,7 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
 
 
 async def build_chat_messages(
-    user_message: str,
+    user_message: str | None = None,
     session_key: str = "",
     *,
     db: Any = None,
@@ -74,7 +74,7 @@ async def build_chat_messages(
     voice_instructions: str = "",
     max_history: int = 20,
 ) -> list[dict[str, str]]:
-    """Build a messages array: system prompt + session history + user message."""
+    """Build a messages array: system prompt + session history + optional user message."""
     system_parts: list[str] = []
     if system_content:
         system_parts.append(system_content)
@@ -100,5 +100,6 @@ async def build_chat_messages(
             if row["content"]:
                 messages.append({"role": row["role"], "content": row["content"]})
 
-    messages.append({"role": "user", "content": user_message})
+    if user_message is not None:
+        messages.append({"role": "user", "content": user_message})
     return messages

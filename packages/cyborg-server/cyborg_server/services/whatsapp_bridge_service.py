@@ -351,7 +351,6 @@ class WhatsAppBridgeService(BaseService):
         else:
             logger.info("no contact found for phone %s", phone_number)
             # Auto-seed an untrusted contact for unknown WhatsApp senders
-            from uuid import uuid4
             new_id = str(uuid4())
             now_iso = utcnow().isoformat()
             await self.db.execute(
@@ -445,8 +444,7 @@ class WhatsAppBridgeService(BaseService):
                         (normalized_phone,),
                     )
                     if not existing:
-                        from uuid import uuid4 as _uuid4
-                        new_cid = str(_uuid4())
+                        new_cid = str(uuid4())
                         await self.db.execute(
                             """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
                                VALUES (?, ?, ?, 0, ?, ?)""",
@@ -468,6 +466,14 @@ class WhatsAppBridgeService(BaseService):
         ])
         if contacts_block:
             user_content += "\n\n" + contacts_block
+
+        # Store user message immediately so queued messages are visible
+        # to the next dispatch that acquires the session lock.
+        from cyborg_server.services.session_service import SessionService
+        await SessionService(self.ctx).add_message(
+            session_key, "user", text,
+            channel="whatsapp", sender_id=contact_id, dispatched=0,
+        )
 
         # Check for active outreach request and inject into system prompt
         outreach_prompt = ""
@@ -491,19 +497,12 @@ class WhatsAppBridgeService(BaseService):
                     "When you have the information needed, call the finish_outreach tool to relay the result back."
                 )
 
-        messages = await build_chat_messages(
-            user_content,
-            session_key,
-            db=self.db,
-            system_content="\n\n".join(
-                p for p in (workspace_prompt, agenda, participants_prompt, outreach_prompt) if p
-            ),
-            max_history=20,
+        system_content = "\n\n".join(
+            p for p in (workspace_prompt, agenda, participants_prompt, outreach_prompt) if p
         )
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
 
-        from cyborg_server.services.dispatch_service import DispatchService
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         from cyborg_server.services.tools import Tool
         from cyborg_server.services.workspace_tools import make_workspace_tools
@@ -606,44 +605,54 @@ class WhatsAppBridgeService(BaseService):
             handler=_send_whatsapp_media,
         ))
 
-        dispatch_id = await DispatchService(self.ctx).record_dispatch(
-            notification_type="whatsapp_incoming",
-            session_key=session_key,
-        )
+        dispatch_id = str(uuid4())
 
         async def _run_dispatch() -> str:
             from cyborg_server.services.session_service import SessionService
-            result = await LLMDispatchService(self.ctx).chat_with_tools(
-                messages, tools,
-                call_category="whatsapp_incoming",
-                session_key=session_key,
-                dispatch_id=dispatch_id,
-                contact_id=contact_id,
-            )
-            # Auto-send fallback: if LLM produced text but never called send_whatsapp_message,
-            # deliver it anyway — the LLM likely intended it as the reply.
-            if not message_was_sent[0] and result.strip():
-                logger.warning(
-                    "LLM did not use send_whatsapp_message, auto-sending text output (%d chars)",
-                    len(result),
-                )
-                try:
-                    await wa_service.send_message(chat_id, result)
-                except Exception:
-                    logger.exception("Auto-send fallback failed for chat %s", chat_id)
-            # Record to unified session history — combine LLM text output + all sent messages
-            parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
-            assistant_text = "\n\n".join(parts) if parts else result
-            session_svc = SessionService(self.ctx)
-            await session_svc.add_message(session_key, "user", text, channel="whatsapp", sender_id=contact_id)
-            await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
-            if self.ctx.event_bus:
-                await self.ctx.event_bus.publish("whatsapp.message.received", {
-                    "session_key": session_key,
-                    "sender_name": sender_name,
-                    "chat_kind": chat_kind,
-                    "text_preview": text[:100],
-                })
-            return result
+            from cyborg_server.services.session_dispatch_gate import SessionDispatchGate
 
-        DispatchService(self.ctx).track(dispatch_id, _run_dispatch())
+            session_svc = SessionService(self.ctx)
+            async with SessionDispatchGate.get_lock(session_key):
+                claimed = await session_svc.mark_dispatched(session_key)
+                if claimed == 0:
+                    return ""
+
+                messages = await build_chat_messages(
+                    None, session_key,
+                    db=self.db,
+                    system_content=system_content,
+                    max_history=20,
+                )
+
+                result = await LLMDispatchService(self.ctx).chat_with_tools(
+                    messages, tools,
+                    call_category="whatsapp_incoming",
+                    session_key=session_key,
+                    dispatch_id=dispatch_id,
+                    contact_id=contact_id,
+                )
+                # Auto-send fallback: if LLM produced text but never called send_whatsapp_message,
+                # deliver it anyway — the LLM likely intended it as the reply.
+                if not message_was_sent[0] and result.strip():
+                    logger.warning(
+                        "LLM did not use send_whatsapp_message, auto-sending text output (%d chars)",
+                        len(result),
+                    )
+                    try:
+                        await wa_service.send_message(chat_id, result)
+                    except Exception:
+                        logger.exception("Auto-send fallback failed for chat %s", chat_id)
+                # Record to unified session history — combine LLM text output + all sent messages
+                parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
+                assistant_text = "\n\n".join(parts) if parts else result
+                await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+                if self.ctx.event_bus:
+                    await self.ctx.event_bus.publish("whatsapp.message.received", {
+                        "session_key": session_key,
+                        "sender_name": sender_name,
+                        "chat_kind": chat_kind,
+                        "text_preview": text[:100],
+                    })
+                return result
+
+        asyncio.create_task(_run_dispatch())

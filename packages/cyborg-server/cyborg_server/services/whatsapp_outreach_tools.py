@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from cyborg_server.services.tools import tool
 
@@ -270,7 +272,6 @@ def make_outreach_reply_tools(
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
         from cyborg_server.services.workspace_tools import make_workspace_tools
         from cyborg_server.services.tools import Tool
-        from cyborg_server.services.dispatch_service import DispatchService
         from cyborg_server.services.session_agenda_service import SessionAgendaService
 
         db = ctx.db
@@ -377,10 +378,7 @@ def make_outreach_reply_tools(
             handler=_send_reply,
         ))
 
-        dispatch_id = await DispatchService(ctx).record_dispatch(
-            notification_type="outreach_result",
-            session_key=origin_session_key,
-        )
+        dispatch_id = str(uuid4())
 
         async def _run_dispatch() -> str:
             llm_result = await LLMDispatchService(ctx).chat_with_tools(
@@ -409,7 +407,7 @@ def make_outreach_reply_tools(
 
             return llm_result
 
-        DispatchService(ctx).track(dispatch_id, _run_dispatch())
+        asyncio.create_task(_run_dispatch())
 
         logger.info(
             "Outreach finished from %s to %s, dispatching result to source session",

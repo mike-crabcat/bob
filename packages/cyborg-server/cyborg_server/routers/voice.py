@@ -60,7 +60,7 @@ def _get_engines(websocket: WebSocket) -> Any | None:
 
 
 def _get_session_key(user_id: str, session_mode: str) -> str:
-    return f"bobvoice:{session_mode}:{user_id}"
+    return f"agent:main:voice:session:{user_id}:{session_mode}"
 
 
 @router.websocket("/ws")
@@ -124,24 +124,26 @@ async def voice_websocket(websocket: WebSocket) -> None:
                         language = parsed.language
 
                     case parsed if parsed.type == "session_history":
-                        from cyborg_server.services.voice_session_store import VoiceSessionStore
+                        from cyborg_server.services.session_service import SessionService
 
-                        store = VoiceSessionStore(ctx)
+                        svc = SessionService(ctx)
                         key = _get_session_key(parsed.userId, parsed.sessionMode)
-                        messages = await store.get_messages(key)
+                        msgs = await svc.get_messages(key, limit=200)
                         await websocket.send_text(
                             HistoryMessage(
-                                messages=[HistoryEntry(role=e["role"], text=e["text"], language=e.get("language")) for e in messages]
+                                messages=[HistoryEntry(role=m.role, text=m.content, language=m.metadata.get("language")) for m in msgs]
                             ).model_dump_json()
                         )
 
                     case parsed if parsed.type == "clear_history":
-                        from cyborg_server.services.voice_session_store import VoiceSessionStore
+                        from cyborg_server.services.session_service import SessionService
+                        from cyborg_server.services.lesson_progress_service import LessonProgressService
 
-                        store = VoiceSessionStore(ctx)
+                        svc = SessionService(ctx)
                         key = _get_session_key(parsed.userId, parsed.sessionMode)
-                        await store.delete_session(key)
-                        await store.reset_all_lessons(parsed.userId, parsed.sessionMode)
+                        await svc.delete_session(key)
+                        lesson_store = LessonProgressService(ctx)
+                        await lesson_store.reset_all_lessons(parsed.userId, parsed.sessionMode)
 
                     case parsed if parsed.type == "replay_tts":
                         service = VoiceService(ctx, engines)

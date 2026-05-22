@@ -40,12 +40,14 @@ def _utc_now() -> str:
 
 
 def _parse_channel(session_key: str) -> str:
-    if session_key.startswith("bobvoice:"):
+    if ":voice:" in session_key or session_key.startswith("bobvoice:"):
         return "voice"
     if ":whatsapp:" in session_key:
         return "whatsapp"
     if ":email:" in session_key:
         return "email"
+    if ":phone:" in session_key:
+        return "phone"
     return "other"
 
 
@@ -193,95 +195,14 @@ async def get_home(request: Request) -> dict[str, Any]:
                 "created_at": _utc(row["created_at"]),
             })
 
-    # Active dispatches
-    active_dispatches: list[dict[str, Any]] = []
-    dispatch_rows = await db.fetch_all(
-        """SELECT d.id, d.notification_type, d.session_key, d.task_id, d.project_id,
-                  d.status, d.dispatched_at, d.tap_count,
-                  t.title AS task_title, p.title AS project_title
-           FROM dispatches d
-           LEFT JOIN tasks t ON t.id = d.task_id AND t.deleted_at IS NULL
-           LEFT JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
-           WHERE d.status = 'active'
-           ORDER BY d.dispatched_at ASC
-           LIMIT 20"""
-    )
-    for row in dispatch_rows:
-        active_dispatches.append({
-            "id": row["id"],
-            "notification_type": row["notification_type"],
-            "session_key": row["session_key"],
-            "task_id": row["task_id"],
-            "task_title": row["task_title"],
-            "project_title": row["project_title"],
-            "dispatched_at": row["dispatched_at"],
-            "tap_count": row["tap_count"],
-        })
-
-    # Project/task stats
-    project_stats = {}
-    ps = await db.fetch_one(
-        """SELECT COUNT(*) as total,
-                  SUM(CASE WHEN state='planning' THEN 1 ELSE 0 END) as planning,
-                  SUM(CASE WHEN state='active' THEN 1 ELSE 0 END) as active,
-                  SUM(CASE WHEN state='paused' THEN 1 ELSE 0 END) as paused,
-                  SUM(CASE WHEN state='closed' THEN 1 ELSE 0 END) as closed
-           FROM projects WHERE deleted_at IS NULL"""
-    )
-    if ps:
-        project_stats = {
-            "planning": int(ps["planning"] or 0),
-            "active": int(ps["active"] or 0),
-            "paused": int(ps["paused"] or 0),
-            "closed": int(ps["closed"] or 0),
-        }
-
-    task_rows = await db.fetch_all(
-        "SELECT status, COUNT(*) as count FROM tasks WHERE deleted_at IS NULL GROUP BY status"
-    )
-    task_stats = {row["status"]: row["count"] for row in task_rows}
-
     # Recent activity
     recent_activities: list[dict[str, Any]] = []
-    journal_rows = await db.fetch_all(
-        """SELECT project_id, entry_type, content, created_at
-           FROM project_journal_entries
-           ORDER BY created_at DESC LIMIT 8"""
-    )
-    for row in journal_rows:
-        content = row["content"] or ""
-        recent_activities.append({
-            "type": "journal",
-            "label": row["entry_type"].replace("_", " ").title(),
-            "summary": content[:140] + "..." if len(content) > 140 else content,
-            "created_at": _utc(row["created_at"]),
-            "project_id": row["project_id"],
-        })
-
-    notif_rows = await db.fetch_all(
-        """SELECT title, message, notification_type, created_at
-           FROM notifications ORDER BY created_at DESC LIMIT 8"""
-    )
-    for row in notif_rows:
-        message = row["message"] or ""
-        recent_activities.append({
-            "type": "notification",
-            "label": row["notification_type"].replace("_", " ").title(),
-            "summary": message[:140] + "..." if len(message) > 140 else message,
-            "created_at": _utc(row["created_at"]),
-            "title": row["title"],
-        })
-
-    recent_activities.sort(key=lambda a: a.get("created_at") or "", reverse=True)
 
     return {
         "active_sessions": active_sessions,
         "chart_buckets": chart_buckets,
         "chart_categories": chart_categories,
         "recent_summaries": recent_summaries,
-        "active_dispatches": active_dispatches,
-        "project_stats": project_stats,
-        "task_stats": task_stats,
         "recent_activities": recent_activities[:15],
     }
 
@@ -984,7 +905,7 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
         return {"error": "Call not found"}
     exchanges = await db.fetch_all(
         """SELECT exchange_index, user_transcript, assistant_transcript,
-                  stt_ms, openclaw_ms, tts_first_chunk_ms, e2e_ms,
+                  stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
                   started_at, created_at
            FROM phone_call_exchanges
            WHERE call_id = ?

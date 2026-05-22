@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 from typing import Any
-from urllib.parse import urlparse, urlunparse
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -134,44 +133,6 @@ class AgentMailSettings:
 
 
 @dataclass(slots=True)
-class OpenClawHookSettings:
-    """Configuration for direct OpenClaw notification delivery."""
-
-    base_url: str = ""
-    token: str = ""
-    gateway_url: str = ""
-    gateway_token: str = ""
-    agent_id: str | None = None
-    voice_model: str | None = None
-    timeout_seconds: float = 120.0
-
-    @property
-    def hooks_enabled(self) -> bool:
-        return bool(self.base_url and self.token)
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.hooks_enabled or self.resolved_gateway_url)
-
-    @property
-    def resolved_gateway_url(self) -> str:
-        candidate = (self.gateway_url or self.base_url).strip()
-        if not candidate:
-            return ""
-        parsed = urlparse(candidate)
-        if parsed.scheme in {"http", "https"}:
-            scheme = "wss" if parsed.scheme == "https" else "ws"
-            parsed = parsed._replace(scheme=scheme)
-        elif not parsed.scheme:
-            parsed = urlparse(f"ws://{candidate}")
-        return urlunparse(parsed._replace(params="", query="", fragment=""))
-
-    @property
-    def resolved_gateway_token(self) -> str:
-        return (self.gateway_token or self.token).strip()
-
-
-@dataclass(slots=True)
 class VoiceSettings:
     """Configuration for the voice chat subsystem."""
 
@@ -199,7 +160,6 @@ class PhoneSettings:
     silence_duration: float = 1.5
     call_recording_enabled: bool = True
     call_recording_max_age_days: int = 30
-    openclaw_agent_id: str = ""
 
 
 @dataclass(slots=True)
@@ -219,7 +179,7 @@ class OpenAISettings:
 
 @dataclass(slots=True)
 class HarnessSettings:
-    """Configuration for the local LLM harness (replaces OpenClaw for voice/phone)."""
+    """Configuration for the local LLM harness for voice/phone."""
 
     enabled: bool = False
     workspace_dir: Path = Path("~/.config/cyborg/harness")
@@ -256,7 +216,6 @@ class Settings:
     version: str = "0.2.0"  # Application version
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
-    openclaw: OpenClawHookSettings = field(default_factory=OpenClawHookSettings)
     agentmail: AgentMailSettings = field(default_factory=AgentMailSettings)
     email_polling_enabled: bool = True
     voice: VoiceSettings = field(default_factory=VoiceSettings)
@@ -265,12 +224,8 @@ class Settings:
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     heartbeat_interval_seconds: float = 60.0
-    projects_base_dir: Path = Path("~/.openclaw/workspace/projects")
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
-    dispatch_shutdown_timeout_seconds: float = 30.0
-    dispatch_stuck_timeout_minutes: float = 60.0
-    dispatch_concurrency_limit: int = 10
     session_summary_idle_minutes: float = 5.0
 
     @property
@@ -280,7 +235,6 @@ class Settings:
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.expanduser()
         self.config_dir = self.config_dir.expanduser()
-        self.projects_base_dir = self.projects_base_dir.expanduser()
         if self.db_path is None:
             self.db_path = self.data_dir / "cyborg.db"
         else:
@@ -308,10 +262,8 @@ class Settings:
         port = int(os.getenv("CYBORG_PORT", str(DEFAULT_PORT)))
         pool_size = int(os.getenv("CYBORG_DB_POOL_SIZE", str(DEFAULT_POOL_SIZE)))
         log_level = os.getenv("CYBORG_LOG_LEVEL", "info")
-        # Backward compat: read old env var if new one not set
-        _old_interval = os.getenv("CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS", "")
         heartbeat_interval_seconds = float(
-            os.getenv("CYBORG_HEARTBEAT_INTERVAL_SECONDS", _old_interval or "60")
+            os.getenv("CYBORG_HEARTBEAT_INTERVAL_SECONDS", "60")
         )
 
         # Logging settings
@@ -322,9 +274,9 @@ class Settings:
         # Parse webhook configuration from environment
         webhooks: dict[str, WebhookConfig] = {}
         
-        # CYBORG_WEBHOOK_OPENCLAW_URL=http://127.0.0.1:8080/webhook/cyborg
-        # CYBORG_WEBHOOK_OPENCLAW_SECRET=secret
-        # CYBORG_WEBHOOK_OPENCLAW_EVENTS=task.completed,task.failed,project.blocked
+        # CYBORG_WEBHOOK_EXAMPLE_URL=http://127.0.0.1:8080/webhook/cyborg
+        # CYBORG_WEBHOOK_EXAMPLE_SECRET=secret
+        # CYBORG_WEBHOOK_EXAMPLE_EVENTS=message.created,message.failed
         webhook_prefix = "CYBORG_WEBHOOK_"
         webhook_configs: dict[str, dict[str, Any]] = {}
         
@@ -349,18 +301,8 @@ class Settings:
                 retry_count=int(config_data.get("retry_count", "3")),
             )
 
-        openclaw = OpenClawHookSettings(
-            base_url=os.getenv("CYBORG_OPENCLAW_BASE_URL", "").rstrip("/"),
-            token=os.getenv("CYBORG_OPENCLAW_TOKEN", ""),
-            gateway_url=os.getenv("CYBORG_OPENCLAW_GATEWAY_URL", "").rstrip("/"),
-            gateway_token=os.getenv("CYBORG_OPENCLAW_GATEWAY_TOKEN", ""),
-            agent_id=os.getenv("CYBORG_OPENCLAW_AGENT_ID") or None,
-            voice_model=os.getenv("CYBORG_OPENCLAW_VOICE_MODEL") or None,
-            timeout_seconds=float(os.getenv("CYBORG_OPENCLAW_TIMEOUT_SECONDS", "120")),
-        )
         public_url = os.getenv("CYBORG_PUBLIC_URL", "")
         dashboard_secret = os.getenv("CYBORG_DASHBOARD_SECRET", "")
-        projects_base_dir = _env_path("CYBORG_PROJECTS_BASE_DIR", Path("~/.openclaw/workspace/projects"))
 
         agentmail = AgentMailSettings(
             base_url=os.getenv("CYBORG_AGENTMAIL_BASE_URL", "https://api.agentmail.to").rstrip("/"),
@@ -376,21 +318,12 @@ class Settings:
             stt_device=os.getenv("CYBORG_VOICE_STT_DEVICE", "cuda"),
             stt_compute_type=os.getenv("CYBORG_VOICE_STT_COMPUTE_TYPE", "int8"),
             tts_num_steps=int(os.getenv("CYBORG_VOICE_TTS_NUM_STEPS", "16")),
-            voices_dir=_env_path("CYBORG_VOICE_VOICES_DIR", Path.home() / ".openclaw" / "bobvoice-voices"),
+            voices_dir=_env_path("CYBORG_VOICE_VOICES_DIR", Path.home() / ".cyborg" / "voices"),
             lessons_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_LESSONS_DIR")) else None,
             frontend_dir=Path(v).expanduser() if (v := os.getenv("CYBORG_VOICE_FRONTEND_DIR")) else None,
             session_max_age_days=int(os.getenv("CYBORG_VOICE_SESSION_MAX_AGE_DAYS", "30")),
         )
 
-        dispatch_shutdown_timeout_seconds = float(
-            os.getenv("CYBORG_DISPATCH_SHUTDOWN_TIMEOUT_SECONDS", "30")
-        )
-        dispatch_stuck_timeout_minutes = float(
-            os.getenv("CYBORG_DISPATCH_STUCK_TIMEOUT_MINUTES", "60")
-        )
-        dispatch_concurrency_limit = int(
-            os.getenv("CYBORG_DISPATCH_CONCURRENCY_LIMIT", "10")
-        )
         session_summary_idle_minutes = float(
             os.getenv("CYBORG_SESSION_SUMMARY_IDLE_MINUTES", "5.0")
         )
@@ -444,17 +377,12 @@ class Settings:
             debug=debug,
             pool_size=pool_size,
             webhooks=webhooks,
-            openclaw=openclaw,
             agentmail=agentmail,
             email_polling_enabled=email_polling_enabled,
             voice=voice,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
-            projects_base_dir=projects_base_dir,
             public_url=public_url,
             dashboard_secret=dashboard_secret,
-            dispatch_shutdown_timeout_seconds=dispatch_shutdown_timeout_seconds,
-            dispatch_stuck_timeout_minutes=dispatch_stuck_timeout_minutes,
-            dispatch_concurrency_limit=dispatch_concurrency_limit,
             session_summary_idle_minutes=session_summary_idle_minutes,
             phone=phone,
             openai=openai_llm,

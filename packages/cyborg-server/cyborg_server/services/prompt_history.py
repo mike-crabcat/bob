@@ -1,4 +1,4 @@
-"""Shared helpers for logging prompts sent to OpenClaw sessions."""
+"""Shared helpers for logging prompts sent to LLM sessions."""
 
 from __future__ import annotations
 

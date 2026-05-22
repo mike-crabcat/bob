@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
-  { name = "OpenClaw" },
+  { name = "Mike Cleaver" },
 ]
 dependencies = [
   "aiosqlite>=0.20.0",

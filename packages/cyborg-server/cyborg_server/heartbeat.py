@@ -59,36 +59,6 @@ class HeartbeatRunner:
                 continue
 
 
-class NotificationDispatchTask:
-    """Dispatch pending notifications on each heartbeat cycle."""
-
-    name = "notification_dispatch"
-
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.services.notification_service import NotificationService
-
-        await NotificationService(ctx).dispatch_pending()
-
-
-class BlockedProjectCheckTask:
-    """Find blocked projects missing notifications and raise one."""
-
-    name = "blocked_project_check"
-
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.models import ProjectState
-        from cyborg_server.services.notification_service import NotificationService
-
-        blocked = await ctx.db.fetch_all(
-            """SELECT id FROM projects
-               WHERE deleted_at IS NULL AND state = ? AND blocked_reason IS NOT NULL""",
-            (ProjectState.PAUSED.value,),
-        )
-        notification_service = NotificationService(ctx)
-        for project in blocked:
-            await notification_service.sync_project_state(project["id"])
-
-
 class EmailPollingTask:
     """Poll AgentMail inboxes for new email messages."""
 
@@ -113,25 +83,6 @@ class EmailPollingTask:
                 logger.info("Email polling processed %d new message(s)", count)
         finally:
             await client.close()
-
-
-class StuckDispatchCheckTask:
-    """Log stuck dispatches that have been active beyond the timeout threshold."""
-
-    name = "stuck_dispatch_check"
-
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.services.dispatch_service import DispatchService
-
-        dispatch_service = DispatchService(ctx)
-        stuck = await dispatch_service.get_stuck_dispatches(
-            timeout_minutes=ctx.settings.dispatch_stuck_timeout_minutes,
-        )
-        if stuck:
-            logger.warning(
-                "Found %d stuck dispatch(es) older than %.0f minutes",
-                len(stuck), ctx.settings.dispatch_stuck_timeout_minutes,
-            )
 
 
 class EmailSyncTask:

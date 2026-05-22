@@ -1,162 +1,63 @@
 # Cyborg
 
-Cyborg autonomously executes projects. A human describes an aim and success criteria, Cyborg plans the work into tasks, and the system iterates until the criteria are met. OpenClaw is the brain — it reasons, plans, evaluates, and decides. Cyborg is the body — it stores state, enforces workflows, tracks progress, and drives the execution loop.
+Cyborg is a fully autonomous AI agent that replaces OpenClaw. It reasons, plans, communicates, and acts independently across WhatsApp, email, voice chat, and phone calls. A human describes an aim and success criteria, and Cyborg plans the work into tasks, executes them, and iterates until the criteria are met. It maintains its own memory, manages contacts and calendars, and can reach out to people on your behalf through any supported channel.
 
-## How it works
+## Feature Areas
 
-1. **Define an aim.** You create a project with a goal, a method, and measurable success criteria.
-2. **Generate a plan.** OpenClaw breaks the aim into ordered plan steps, each with its own completion criteria.
-3. **Execute autonomously.** Cyborg creates tasks for each plan step, drives them through to completion, and moves to the next step automatically.
-4. **Evaluate and adapt.** After each task, OpenClaw evaluates whether success criteria are met, refines strategy if needed, and generates follow-up tasks for anything still outstanding.
-5. **Finish.** When all criteria are satisfied, the project closes. OpenClaw extracts learnings for future projects.
+### Autonomous Projects and Tasks
 
-You intervene only at approval points or when a task blocks for your input. Otherwise the loop runs on its own.
+Cyborg's core execution engine manages projects with aims, methods, plans, and measurable success criteria. Projects break into tasks, tasks break into steps, and the system drives through them automatically. Each task follows a state machine (`planning` -> `pending` -> `active` -> `completed`/`failed`, with `paused` and `blocked` states). Tasks can be retried, escalated, or decomposed into subtasks. After each task completes, Cyborg evaluates whether success criteria are met, refines strategy if needed, and generates follow-up tasks for remaining gaps. Projects can auto-execute, progressing through plan steps without human intervention. A journal captures milestones, decisions, blockers, and results. Learning extraction produces reusable insights from completed projects.
 
-## Cyborg and OpenClaw: the split
+### WhatsApp Messaging
 
-**OpenClaw** is an agent runtime. It has sessions, transcripts, memory, tools, and webhooks. It can reason and act within a conversation, but it has no durable project state and no workflow engine.
+Cyborg connects to WhatsApp through a Go companion service (the WhatsApp Bridge) that links to WhatsApp Web via the `whatsmeow` library. It handles both direct messages and group chats, with support for text, images, and documents. Messages flow through a persistent SQLite queue with guaranteed delivery and automatic retries. Contacts are auto-seeded from shared contact cards. Proactive outreach tools let Cyborg initiate conversations with trusted contacts. A pairing system supports both QR code and phone number methods.
 
-**Cyborg** is the structured system-of-record and execution engine that sits alongside OpenClaw. It provides what OpenClaw alone cannot:
+### Voice Chat
 
-| Responsibility | Owned by |
-|---|---|
-| Reasoning, planning, evaluation, learning | OpenClaw |
-| Storing projects, tasks, plans, journal entries | Cyborg |
-| Driving the execution loop (create task → complete → next step) | Cyborg |
-| Enforcing state machines and approval gates | Cyborg |
-| Building context for reasoning prompts | Cyborg |
-| Routing notifications and task assignments across sessions | Cyborg |
-| Deciding *what* to do next and *whether* criteria are met | OpenClaw |
-| Tracking dependencies and auto-releasing blocked tasks | Cyborg |
-| Persisting insights and learnings from completed work | Cyborg |
+Real-time voice conversations run over WebSockets with a full STT/TTS pipeline. Cyborg uses Faster Whisper for speech-to-text (with CUDA acceleration) and Omnivoice for text-to-speech. The system supports barge-in detection, silence detection, multi-language conversations with language tagging, and session-based conversation tracking. Voice sessions are stored as unified session messages alongside text and email interactions.
 
-In short: OpenClaw decides, Cyborg remembers and drives.
+### Phone Calls
 
-## Reasoning types
+Phone integration uses Twilio Media Streams for real-time bidirectional audio during voice calls. Cyborg can initiate outbound calls to contacts and handle inbound calls, with automatic contact resolution from caller ID. Calls are recorded and each exchange is logged with detailed timing metrics (STT latency, LLM latency, TTS latency, end-to-end latency). The `make_phone_call` tool lets the LLM dial contacts directly, and `get_call_status` tracks call progress.
 
-All reasoning is performed by OpenClaw. Cyborg builds the context, calls the reasoning service, and acts on the result. There are seven reasoning types:
+### Email
 
-### Plan generation
+Cyborg reads and sends email through AgentMail. A polling service checks inboxes for new messages, resolves contacts from sender addresses, and dispatches the LLM with email context and reply tools. The system supports multiple inboxes, thread management, attachment handling (downloaded from trusted senders), and trust-based handling policies. Replies are sent back through the AgentMail API.
 
-Generates a structured execution plan from a project aim and method. Returns an ordered list of plan steps, each with a title, description, and completion criteria. Used when a new project is created or when a plan needs to be regenerated from scratch.
+### Dispatch System
 
-### Criteria evaluation
+Every agent interaction is tracked as a dispatch, whether it is a task assignment, a WhatsApp message response, an email reply, a voice conversation, or a phone call. Dispatches have their own lifecycle (active, completed, failed, timed_out, cancelled) with concurrency limits, stuck detection, and automatic tapping. This gives Cyborg a unified view of everything the agent is doing across all channels.
 
-Semantically evaluates whether a project's success criteria have been met. Takes the full project context — all tasks, journal entries, outputs — and reasons about whether each criterion is satisfied. Returns which criteria are met, which are unmet, and the reasoning behind each judgment. Falls back to rule-based evaluation (numeric comparisons) if OpenClaw is unavailable.
+### Session Management
 
-### Strategy refinement
+Every conversation is a session, identified by a session key that encodes the channel and peer (e.g. `agent:main:whatsapp:direct:+61400111222`). Sessions have agendas (purpose and handling instructions), participants (with trust levels), and periodic summaries. Session routes map logical keys to physical channels for cross-session routing. The unified `session_messages` table stores all conversation history across voice, phone, email, and WhatsApp.
 
-Analyzes a project's progress after each task completion. Determines whether the current approach is working or needs adjustment. Can suggest reprioritizing tasks, adding new tasks, changing the method, or flagging risks. Refinements are auto-applied — new tasks are created and priorities updated without human approval.
+### Reflection
 
-### Follow-up generation
+The reflection service lets users ask questions about any session's history. It builds a transcript from the session's messages and LLM call log, then dispatches an LLM call to analyze the conversation, trace tool invocations, explain agent decisions, and identify errors or missed opportunities. This is useful for debugging agent behavior and understanding what happened during an autonomous session.
 
-When a project's success criteria are not all met, this generates concrete follow-up tasks to address the gaps. Each suggested task includes a title, description, execution plan, and priority. Takes the list of unmet criteria and the current project context to produce targeted next actions.
+### Dashboard
 
-### Task planning
+A React-based web dashboard provides real-time monitoring and management. It shows active sessions across all channels, LLM call statistics and latency metrics, contact management, workspace file browsing, phone call recordings with transcripts, and active dispatch monitoring. A WebSocket connection provides live updates.
 
-Generates an execution plan for a single task. Considers the project context, the task's dependencies and output files, and produces a concise set of steps the agent should follow. Used when a task is started and needs a concrete action plan.
+### Reasoning and Planning
 
-### Health analysis
+The project system uses LLM-powered reasoning to generate plans from aims, evaluate success criteria, refine strategy after task completions, generate follow-up tasks for gaps, produce health assessments, and extract learnings from completed projects.
 
-Assesses the overall health of a project. Considers task completion rates, blockers, timeline, and any risks or issues. Returns a health score (0–1), risk level (low/medium/high/critical), identified blockers, and recommendations. Used for monitoring and to flag projects that need attention.
+### Calendars and Events
 
-### Learning extraction
+Calendars support color-coded entries with events, recurring schedules, and recipient tracking. Events link to contacts and sessions for cross-channel reminders and notifications.
 
-Extracts insights from a completed project. Identifies patterns in planning, execution, estimation, communication, technical approach, and coordination. Returns categorized insights with applicability patterns and impact assessments. These learnings are stored and reused when planning future projects with similar aims.
+### Notifications and Webhooks
 
-## Context building
+Persisted notifications with acknowledgement, delivery state, and repeat throttling. Webhook delivery with retry tracking for external integrations. Cross-session routing for source and target session resolution.
 
-Each reasoning call needs project context, and different reasoning types need different amounts. The context builder produces four scopes:
-
-| Scope | Size | Includes |
-|---|---|---|
-| Minimal | 1–2k tokens | Current state, recent milestones and blockers |
-| Standard | 5–10k tokens | Recent activity, key items, important journal entries |
-| Comprehensive | 20–30k tokens | Everything relevant, summarized where needed |
-| Full | 30k+ tokens | All context (rare, for deep analysis) |
-
-The builder assembles project metadata, objectives, plan summary, success criteria, filtered tasks with output files, journal narrative, temporal context, and dependency information into a structured prompt for each reasoning type.
-
-## Architecture
-
-Cyborg is a FastAPI service backed by SQLite, with a Typer CLI for local and systemd-managed operation.
-
-```text
-cyborg/
-├── cyborg/
-│   ├── cli.py                # Typer CLI
-│   ├── config.py             # Configuration management
-│   ├── database.py           # Database connection and migrations
-│   ├── main.py               # FastAPI application
-│   ├── models.py             # Pydantic models
-│   ├── exceptions.py         # Custom exceptions
-│   ├── dependencies.py       # FastAPI dependency injection
-│   ├── structured_logging.py # Correlation-aware logging
-│   ├── routers/              # API route handlers
-│   ├── services/             # Business logic
-│   └── schemas/              # SQLite migrations
-├── openclaw-plugin/          # OpenClaw context injection plugin
-├── assets/                   # Static assets
-├── tests/
-├── docs/
-└── pyproject.toml
-```
-
-## Features
-
-### Task Management
-
-- Hierarchical tasks with subtasks, retry policies, recurring schedules, steps, and audit history
-- State machine: `planning` → `pending` → `active` → `completed` / `failed`, with `paused` and `blocked` states
-- Blocked task state with full resume instructions for lossless context recovery
-- Versioned plans with approval workflow (draft → pending_approval → approved / rejected)
-- Retry policies: retry, retry_from_step, escalate, or abort on failure
-
-### Project Management
-
-- Projects with aims, methods, plans, and success criteria
-- Project specs with versioned approval workflow — projects cannot start until a spec is approved
-- Auto-executing projects that progress through plan steps autonomously
-- Dependency-driven task release — completing a task automatically unblocks dependent tasks
-- Strategy refinement after task completion for continuous improvement
-- Journal entries (note, milestone, decision, blocker, result) with automatic result entries on task completion
-
-### Health Monitoring
-
-- Project health scores (0–1) with risk levels (low, medium, high, critical)
-- Automated health scans with anomaly detection
-- Recommendations for projects needing attention
-
-### Learning
-
-- Insight extraction from completed projects (planning, execution, estimation, communication, technical, coordination)
-- Similar project discovery for reuse
-- Success criteria suggestions based on historical patterns
-
-### Notifications and Routing
-
-- Persisted notifications with acknowledgement, delivery state, and repeat throttling
-- Cross-session routing — source session for planning prompts, target session for task assignment
-- Direct OpenClaw delivery via gateway websocket
-- Default contact fallback for unroutable notifications
-
-### Other
-
-- Calendars, events, and recipient tracking
-- Webhook delivery with retry tracking
-- Session route registry for resolving logical session keys
-- Context API producing compact summaries for constrained context windows
-- Web dashboard for project management, approvals, and log viewing
-- OpenClaw context plugin for automatic context injection
-- Structured logging with correlation IDs and database-backed log storage
-- Prompt history tracking for audit and analysis
-- Soft deletes across primary entities
-- SQLite migrations loaded automatically from `cyborg/schemas/`
-
-## Schema
+## Data Model
 
 ```text
 Legend: 1 --< many, >--< many-to-many, self = self-reference
+
+=== Tasks and Projects ===
 
 +------------------------+      +------------------------+
 | tasks                  |1 --< | task_steps             |
@@ -164,12 +65,12 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | FK parent_id -> tasks  |      | FK task_id -> tasks.id |
 | FK current_plan_id     |      +------------------------+
 |    -> plans.id         |
-| plan, result,          |
-| retry_config,          |1 --< +------------------------+
-| metadata, blocked_*,   +------ | task_history           |
-| notification_*,        |       | PK id                  |
-| target_*               |       | FK task_id -> tasks.id |
-+------------------------+       +------------------------+
+| plan, result,          |1 --< +------------------------+
+| retry_config,          +------ | task_history           |
+| metadata, blocked_*,   |       | PK id                  |
+| notification_*,        |       | FK task_id -> tasks.id |
+| target_*, files        |       +------------------------+
++------------------------+
           |
           | 1 --< +------------------------+
           +------ | plans                  |
@@ -184,49 +85,108 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | projects               |1 --< | project_journal_entries|
 | PK id                  |      | PK id                  |
 | FK current_spec_id     |      | FK project_id          |
-|    -> project_specs.id |      | metadata               |
-| method, plan,          |      +------------------------+
-| success_criteria,      |
-| subagent_session_key,  |
-| metadata, blocked_*,   |
-| notification_*,        |
-| updated_at             |
-+------------------------+
-          | 1 --< +------------------------+
-          +------ | project_specs          |
-          |       | PK id                  |
-          |       | FK project_id          |
-          |       | version_number, aim,   |
-          |       | method, plan,          |
-          |       | success_criteria,      |
-          |       | status, is_current     |
-          |       +------------------------+
-          |
+|    -> project_specs.id |      +------------------------+
+| method, plan,          |
+| success_criteria,      |1 --< +------------------------+
+| subagent_session_key,  +------ | project_specs          |
+| metadata, blocked_*,   |       | PK id, FK project_id   |
+| notification_*,        |       | version_number, aim,   |
+| updated_at             |       | method, plan, criteria,|
++------------------------+       | status, is_current     |
+          |                      +------------------------+
           | 1 --< +------------------------+
           +------ | project_insights       |
-          |       | PK id                  |
-          |       | FK project_id          |
-          |       | outcome_type,          |
-          |       | insight_category,      |
-          |       | insight_data,          |
-          |       | applicability_pattern  |
+          |       | PK id, FK project_id   |
+          |       | outcome_type, category,|
+          |       | insight_data           |
           |       +------------------------+
           |
           | 1 --< +------------------------+
           +------ | project_health_checks  |
-          |       | PK id                  |
-          |       | FK project_id          |
-          |       | check_type,            |
-          |       | health_score,          |
-          |       | risk_level, indicators |
-          |       +------------------------+
+                  | PK id, FK project_id   |
+                  | health_score,          |
+                  | risk_level, indicators |
+                  +------------------------+
 
 +------------------------+ >--< +------------------------+ >--1 +------------------------+
 | projects               |      | project_tasks          |      | tasks                  |
 | PK id                  |      | PK (project_id,task_id)|      | PK id                  |
-+------------------------+      | FK project_id          |      +------------------------+
-                                | FK task_id             |
++------------------------+      +------------------------+      +------------------------+
+
+=== Sessions and Messaging ===
+
++------------------------+      +------------------------+
+| session_routes         | >--1 | contacts               |
+| PK id                  |      | PK id                  |
+| session_key, channel,  |      | is_default, phone,     |
+| kind, chat_id,         |      | email, whatsapp_groups,|
+| FK contact_id          |      | trust_level, metadata  |
++------------------------+      +------------------------+
+
++------------------------+
+| session_messages       |
+| PK id                  |
+| session_key, role,     |
+| content, metadata      |
++------------------------+
+
++------------------------+      +------------------------+
+| session_agendas        |      | session_participants   |
+| PK id                  |      | PK id                  |
+| session_key, purpose,  |      | session_key,           |
+| handling_instructions  |      | contact_id, trust,     |
++------------------------+      | last_active            |
                                 +------------------------+
+
++------------------------+
+| session_summaries      |
+| PK id                  |
+| session_key, summary,  |
+| topics, participants   |
++------------------------+
+
+=== Dispatches ===
+
++------------------------+
+| dispatches             |
+| PK id                  |
+| session_key, category, |
+| status, task_id,       |
+| tap_count, duration,   |
+| metadata               |
++------------------------+
+
+=== Phone Calls ===
+
++------------------------+1 --< +----------------------------+
+| phone_calls            |      | phone_call_exchanges       |
+| PK id                  |      | PK id                      |
+| call_sid, direction,   |      | FK phone_call_id           |
+| status, duration,      |      | transcript, timing metrics |
+| recording_path,        |      | (STT, LLM, TTS, e2e)       |
+| contact_id, agenda     |      +----------------------------+
++------------------------+
+
+=== Email ===
+
++------------------------+1 --< +------------------------+
+| email_inboxes          |      | email_messages          |
+| PK id                  |      | PK id                   |
+| inbox_id, status,      |      | FK inbox_id             |
+| metadata               |      | message_id, thread_id,  |
++------------------------+      | from/to/subject/body,   |
+                                | attachments (JSON)      |
+                                +------------------------+
+
++------------------------+
+| email_threads          |
+| PK id                  |
+| thread_id, session_key,|
+| contact_id, project_id,|
+| agenda                 |
++------------------------+
+
+=== Calendars ===
 
 +------------------------+1 --< +------------------------+1 --< +------------------------+
 | calendars              |      | events                 |      | event_recipients       |
@@ -234,28 +194,13 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | metadata               |      | FK calendar_id         |      | FK event_id            |
 +------------------------+      +------------------------+      +------------------------+
 
+=== Other ===
+
 +------------------------+1 --< +------------------------+
 | webhook_configs        |      | webhook_deliveries     |
 | PK id                  |      | PK id                  |
 | events                 |      | FK webhook_id          |
 +------------------------+      +------------------------+
-
-+------------------------+
-| contacts               |
-| PK id                  |
-| is_default,            |
-| phone_number, email,   |
-| whatsapp_groups,       |
-| metadata               |
-+------------------------+
-
-+------------------------+      +------------------------+
-| session_routes         |      | contacts               |
-| PK id                  | >--1 | PK id                  |
-| session_key, channel,  |      +------------------------+
-| kind, chat_id,         |
-| FK contact_id          |
-+------------------------+
 
 +------------------------+
 | notifications          |
@@ -266,11 +211,6 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | status, delivery_*,    |
 | metadata               |
 +------------------------+
-      ^          ^          ^
-      |          |          |
-      |          |          +---- events
-      |          +--------------- projects
-      +-------------------------- tasks
 
 +------------------------+
 | approvals              |
@@ -298,30 +238,67 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | session_key,           |
 | token_count_estimate   |
 +------------------------+
+
++------------------------+
+| skill_delegations      |
+| PK id                  |
+| dispatch_id, skill,    |
+| status, result         |
++------------------------+
 ```
 
-Most rich fields such as `metadata`, task/project `plan`, `success_criteria`, webhook `events`, delivery `payload`, and notification metadata are stored as JSON in `TEXT` columns.
+## System Architecture
 
-## Install
+```text
+                         +-----------------+
+                         |   Web Dashboard |
+                         |   (React SPA)   |
+                         +--------+--------+
+                                  |
+                          HTTP/WS | :8420
+                                  |
++--------+   +--------+   +------+-------+   +-----------+   +-----------+
+| WhatsApp|   |  Email |   |              |   |  Voice    |   |   Phone   |
+| Bridge  |   | (Agent |   |  Cyborg      |   |  Chat     |   |  (Twilio) |
+| (Go)    |   |  Mail) |   |  Server      |   |  (WS/STT/ |   |  (Media   |
+|         |   |        |   |  (FastAPI)   |   |   TTS)    |   |  Streams) |
++----+----+   +----+---+   +------+-------+   +-----+-----+   +-----+-----+
+     |             |               |                 |               |
+     | WS :8430    |  Polling      |                 | WS            | WS
+     |             |               |                 |               |
++----+----+        |        +------+--------+        |               |
+| WhatsApp|        |        |               |        |               |
+|  Web    |        +------->|    SQLite     |<-------+               |
+| (whats- |                 |   Database    |                        |
+|  meow)  |                 |               |                        |
++---------+                 +---------------+                        |
+                                                                     |
+                               +-------------------+                 |
+                               |      Twilio       |<----------------+
+                               |   (PSTN/Mobile)   |
+                               +-------------------+
+```
+
+## Setup
+
+### Prerequisites
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) package manager
+- Go 1.22+ (for WhatsApp bridge)
+- CUDA GPU (recommended for voice STT)
+- A Twilio account (for phone calls)
+- An AgentMail account (for email)
+
+### Install Cyborg Server
 
 ```bash
+git clone <repo-url> cyborg
+cd cyborg
 uv sync --extra dev
 ```
 
-## Run
-
-```bash
-uv run cyborg serve
-```
-
-The service listens on `127.0.0.1:8420` by default.
-
-- Swagger UI: `http://localhost:8420/docs`
-- ReDoc: `http://localhost:8420/redoc`
-- Health: `http://localhost:8420/health`
-- Dashboard: `http://localhost:8420/dashboard`
-
-## Configuration
+### Configure Environment
 
 Cyborg reads `CYBORG_*` settings from the process environment and auto-loads `.env` files.
 
@@ -332,90 +309,91 @@ Load order:
 3. `.env` in the current working directory
 4. `.env` in the resolved config directory, usually `~/.config/cyborg/.env`
 
-Examples:
+Create the config directory and env file:
 
 ```bash
-cat > .env <<'EOF'
+mkdir -p ~/.config/cyborg
+cat > ~/.config/cyborg/.env <<'EOF'
+# Core
 CYBORG_PORT=8420
+CYBORG_DASHBOARD_SECRET=your-dashboard-secret
+
+# LLM (pick one or both)
+CYBORG_OPENAI_API_KEY=sk-...
 CYBORG_OPENCLAW_BASE_URL=https://openclaw.example
 CYBORG_OPENCLAW_TOKEN=secret
+
+# WhatsApp Bridge
+CYBORG_WHATSAPP_BRIDGE_ENABLED=true
+CYBORG_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:8430/ws
+CYBORG_WHATSAPP_BRIDGE_TOKEN=your-bridge-token
+
+# Email (optional)
+CYBORG_AGENTMAIL_API_KEY=...
+
+# Phone (optional)
+CYBORG_PHONE_ENABLED=true
+CYBORG_PHONE_TWILIO_ACCOUNT_SID=AC...
+CYBORG_PHONE_TWILIO_AUTH_TOKEN=...
+CYBORG_PHONE_TWILIO_PHONE_NUMBER=+1...
+CYBORG_PHONE_BASE_URL=https://your-public-url
 EOF
+```
 
+### Install and Start the WhatsApp Bridge
+
+The WhatsApp bridge is a Go companion service that connects to WhatsApp Web:
+
+```bash
+cd services/whatsappbridge
+make build
+make install   # copies binary to ~/.local/bin/whatsappbridge
+```
+
+Configure the bridge. Create `~/.local/share/cyborg/whatsappbridge/.env` or set environment variables:
+
+```bash
+export WHATSAPPBRIDGE_HOST=127.0.0.1
+export WHATSAPPBRIDGE_PORT=8430
+export WHATSAPPBRIDGE_TOKEN=your-bridge-token    # must match CYBORG_WHATSAPP_BRIDGE_TOKEN
+export WHATSAPPBRIDGE_DATA_DIR=$HOME/.local/share/cyborg/whatsappbridge
+```
+
+Start the bridge:
+
+```bash
+whatsappbridge
+```
+
+Then pair your WhatsApp account. Use the Cyborg CLI to request a pairing code:
+
+```bash
+uv run cyborg whatsapp pair --phone +61400111222
+```
+
+Or scan a QR code from the dashboard at `http://localhost:8420/dashboard`.
+
+### Start Cyborg
+
+Run directly:
+
+```bash
 uv run cyborg serve
 ```
 
-Or point at a specific file:
+Or install as a systemd user service:
 
 ```bash
-export CYBORG_ENV_FILE=~/.config/cyborg/production.env
-uv run cyborg serve
+uv run cyborg install
+uv run cyborg start
 ```
 
-### Environment Variables
+The service listens on `127.0.0.1:8420` by default.
 
-**General:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `CYBORG_HOST` | `127.0.0.1` | Bind address |
-| `CYBORG_PORT` | `8420` | Port |
-| `CYBORG_DATA_DIR` | `~/.local/share/cyborg` | Data directory |
-| `CYBORG_CONFIG_DIR` | `~/.config/cyborg` | Config directory |
-| `CYBORG_DB_PATH` | `{data_dir}/cyborg.db` | Database path |
-| `CYBORG_LOG_LEVEL` | `info` | Logging level |
-| `CYBORG_LOG_PATH` | *(none)* | Log file path |
-| `CYBORG_DB_POOL_SIZE` | `4` | Connection pool size |
-| `CYBORG_PUBLIC_URL` | *(none)* | Public URL for webhook callbacks |
-| `CYBORG_PROJECTS_BASE_DIR` | `~/.openclaw/workspace/projects` | Base directory for project workspaces |
-| `CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS` | `60` | Notification dispatch interval |
-
-**OpenClaw integration:**
-
-| Variable | Description |
-|---|---|
-| `CYBORG_OPENCLAW_BASE_URL` | OpenClaw HTTP base URL |
-| `CYBORG_OPENCLAW_TOKEN` | OpenClaw API token |
-| `CYBORG_OPENCLAW_GATEWAY_URL` | OpenClaw gateway websocket URL (defaults from base URL) |
-| `CYBORG_OPENCLAW_GATEWAY_TOKEN` | Gateway auth token (defaults to `CYBORG_OPENCLAW_TOKEN`) |
-| `CYBORG_OPENCLAW_AGENT_ID` | Agent ID for target task-assignment turns |
-| `CYBORG_OPENCLAW_TIMEOUT_SECONDS` | Request timeout |
-
-**Webhook templates:**
-
-| Variable | Description |
-|---|---|
-| `CYBORG_WEBHOOK_{NAME}_URL` | URL for webhook named `{NAME}` |
-| `CYBORG_WEBHOOK_{NAME}_SECRET` | Secret for webhook named `{NAME}` |
-| `CYBORG_WEBHOOK_{NAME}_EVENTS` | Comma-separated events for webhook named `{NAME}` |
-
-**Skill environment variables:**
-
-Skills run as subprocesses and need API keys in standard env var names (e.g. `OPENAI_API_KEY`). Since Cyborg runs as a systemd user service, it does not inherit your shell environment — it reads `~/.config/cyborg/.env` at startup. To make an API key available to skills:
-
-1. Add the key to `~/.config/cyborg/.env` with the `CYBORG_` prefix:
-
-```bash
-echo 'CYBORG_GOOGLE_PLACES_API_KEY=AIza...' >> ~/.config/cyborg/.env
-```
-
-2. Register the mapping in `packages/cyborg-server/cyborg_server/services/skill_env.py` so the subprocess sees the standard name:
-
-```python
-ENV_MAPPINGS: dict[str, str] = {
-    "CYBORG_OPENAI_API_KEY": "OPENAI_API_KEY",
-    "CYBORG_OPENAI_BASE_URL": "OPENAI_BASE_URL",
-    "CYBORG_AGENTMAIL_API_KEY": "AGENTMAIL_API_KEY",
-    "CYBORG_GOOGLE_PLACES_API_KEY": "GOOGLE_PLACES_API_KEY",
-}
-```
-
-3. Restart the service:
-
-```bash
-uv run cyborg restart
-```
-
-Skills can then use `os.environ.get("GOOGLE_PLACES_API_KEY")` or rely on SDK auto-detection.
+- Dashboard: `http://localhost:8420/dashboard`
+- Swagger UI: `http://localhost:8420/docs`
+- ReDoc: `http://localhost:8420/redoc`
+- Health: `http://localhost:8420/health`
 
 ## CLI
 
@@ -453,7 +431,9 @@ uv run cyborg uninstall    # Remove systemd service
 | `event` | `create`, `list`, `get`, `update`, `delete`, `confirm`, `cancel`, `recipients`, `recipient-add`, `recipient-update` |
 | `context` | `summary`, `tasks`, `projects`, `calendar` |
 | `webhook` | `create`, `list`, `get`, `by-name`, `update`, `delete`, `deliveries`, `delivery-get`, `delivery-retry`, `process-pending` |
-| `openclaw` | `context` |
+| `call` | `list`, `get` |
+| `openai` | `chat`, `evaluate` |
+| `eval` | `run`, `list`, `show` |
 
 ### Structured Payload Flags
 
@@ -475,6 +455,7 @@ uv run cyborg uninstall    # Remove systemd service
 | `blocked` | Task waiting for user input (with resume instructions) |
 | `completed` | Task finished successfully |
 | `failed` | Task failed (may be retryable depending on retry policy) |
+| `deprecated` | Task no longer relevant |
 
 ### Blocked Tasks
 
@@ -516,7 +497,7 @@ curl -X POST http://127.0.0.1:8420/api/v1/tasks/{task_id}/complete \
 1. Create a project with a title and description
 2. Submit a project spec with `aim`, `method`, `plan`, and `success_criteria`
 3. The spec must be approved before the project can be started
-4. Once approved, start the project — linked tasks become actionable
+4. Once approved, start the project -- linked tasks become actionable
 5. Tasks can be created manually or generated by AI planning
 6. Completing a task automatically: unblocks dependent tasks, generates journal entries, and may trigger strategy refinement
 7. Auto-executing projects progress through plan steps autonomously
@@ -568,8 +549,8 @@ Tasks can carry both a source session and a target session.
 - **Source session**: `--channel`, `--session-key`, `--chat-id`. This is where Cyborg sends planning prompts, approval requests, reminders, and status updates.
 - **Target session**: `--target-kind`, `--target-session-key`, `--target-chat-id`, `--target-contact-id`. This is where the task should be actioned.
 - For DM targets, look up or create the contact first, then pass its id with `--target-contact-id`.
-- For group targets, register a session route so Cyborg can resolve the concrete OpenClaw recipient.
-- Standard WhatsApp DM targets do not need a registered DM session route. Cyborg derives the real OpenClaw target session key as `agent:<agent-id>:whatsapp:direct:+<e164>` from the contact phone number.
+- For group targets, register a session route so Cyborg can resolve the concrete target session key.
+- Standard WhatsApp DM targets do not need a registered DM session route. Cyborg derives the target session key as `agent:<agent-id>:whatsapp:direct:+<e164>` from the contact phone number.
 
 ```bash
 # Register a group session route
@@ -596,7 +577,7 @@ uv run cyborg task create "Get Alice's ETA" \
 
 ## AI-Powered Planning
 
-Cyborg can use OpenClaw's reasoning capabilities to generate and refine project plans:
+Cyborg can use LLM reasoning capabilities to generate and refine project plans:
 
 ```bash
 # Generate a plan from a project aim
@@ -645,7 +626,7 @@ uv run cyborg learning suggest-criteria --aim "Build authentication system"
 
 ## Context API
 
-Compact context summaries for injecting into OpenClaw sessions:
+Compact context summaries for injecting into agent sessions:
 
 ```bash
 # Full summary
@@ -695,78 +676,142 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks \
 curl -X POST http://127.0.0.1:8420/api/v1/webhooks/process-pending
 ```
 
-## OpenClaw Integration
+## Configuration Reference
 
-### Notification Delivery
+### General
 
-Cyborg delivers notifications directly to OpenClaw via the gateway websocket. Set these environment variables on the Cyborg service:
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_HOST` | `127.0.0.1` | Bind address |
+| `CYBORG_PORT` | `8420` | Port |
+| `CYBORG_DATA_DIR` | `~/.local/share/cyborg` | Data directory |
+| `CYBORG_CONFIG_DIR` | `~/.config/cyborg` | Config directory |
+| `CYBORG_DB_PATH` | `{data_dir}/cyborg.db` | Database path |
+| `CYBORG_LOG_LEVEL` | `info` | Logging level |
+| `CYBORG_LOG_PATH` | *(none)* | Log file path |
+| `CYBORG_DB_POOL_SIZE` | `4` | Connection pool size |
+| `CYBORG_PUBLIC_URL` | *(none)* | Public URL for webhook callbacks |
+| `CYBORG_DASHBOARD_SECRET` | *(none)* | Shared secret for dashboard operations |
+| `CYBORG_PROJECTS_BASE_DIR` | `~/.openclaw/workspace/projects` | Base directory for project workspaces |
+| `CYBORG_HEARTBEAT_INTERVAL_SECONDS` | `60` | Heartbeat and notification dispatch interval |
+
+### LLM
+
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_OPENAI_API_KEY` | *(none)* | OpenAI API key |
+| `CYBORG_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL |
+| `CYBORG_OPENAI_DEFAULT_MODEL` | `gpt-5.4-mini` | Default model |
+| `CYBORG_OPENAI_TIMEOUT_SECONDS` | `120` | Request timeout |
+| `CYBORG_OPENAI_WEB_SEARCH` | `false` | Enable web search tool |
+
+### OpenClaw Integration
+
+| Variable | Description |
+|---|---|
+| `CYBORG_OPENCLAW_BASE_URL` | OpenClaw HTTP base URL |
+| `CYBORG_OPENCLAW_TOKEN` | OpenClaw API token |
+| `CYBORG_OPENCLAW_GATEWAY_URL` | OpenClaw gateway websocket URL (defaults from base URL) |
+| `CYBORG_OPENCLAW_GATEWAY_TOKEN` | Gateway auth token (defaults to `CYBORG_OPENCLAW_TOKEN`) |
+| `CYBORG_OPENCLAW_AGENT_ID` | Agent ID for target task-assignment turns |
+| `CYBORG_OPENCLAW_TIMEOUT_SECONDS` | Request timeout |
+
+### WhatsApp Bridge
+
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_WHATSAPP_BRIDGE_ENABLED` | `false` | Enable WhatsApp bridge client |
+| `CYBORG_WHATSAPP_BRIDGE_URL` | `ws://127.0.0.1:8430/ws` | Bridge WebSocket URL |
+| `CYBORG_WHATSAPP_BRIDGE_TOKEN` | *(none)* | Auth token for bridge connection |
+| `CYBORG_WHATSAPP_BRIDGE_RECONNECT_INTERVAL_SECONDS` | `10` | Reconnect interval |
+
+WhatsApp bridge (Go companion) variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `WHATSAPPBRIDGE_HOST` | `127.0.0.1` | Bridge listen host |
+| `WHATSAPPBRIDGE_PORT` | `8430` | Bridge listen port |
+| `WHATSAPPBRIDGE_TOKEN` | *(none)* | Auth token (must match Cyborg side) |
+| `WHATSAPPBRIDGE_DATA_DIR` | `~/.local/share/cyborg/whatsappbridge` | Data directory |
+| `WHATSAPPBRIDGE_LOG_LEVEL` | `info` | Log level |
+
+### Voice
+
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_VOICE_ENABLED` | `true` | Enable voice chat |
+| `CYBORG_VOICE_STT_MODEL` | `large-v3-turbo` | Faster Whisper model |
+| `CYBORG_VOICE_STT_DEVICE` | `cuda` | STT device (cuda/cpu) |
+| `CYBORG_VOICE_STT_COMPUTE_TYPE` | `int8` | STT compute type |
+| `CYBORG_VOICE_TTS_NUM_STEPS` | `16` | TTS generation steps |
+| `CYBORG_VOICE_VOICES_DIR` | `~/.openclaw/bobvoice-voices` | Voice profiles directory |
+| `CYBORG_VOICE_SESSION_MAX_AGE_DAYS` | `30` | Session data retention |
+
+### Phone
+
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_PHONE_ENABLED` | `false` | Enable phone integration |
+| `CYBORG_PHONE_TWILIO_ACCOUNT_SID` | *(none)* | Twilio Account SID |
+| `CYBORG_PHONE_TWILIO_AUTH_TOKEN` | *(none)* | Twilio Auth Token |
+| `CYBORG_PHONE_TWILIO_PHONE_NUMBER` | *(none)* | Twilio phone number |
+| `CYBORG_PHONE_BASE_URL` | *(none)* | Public URL for Twilio callbacks |
+| `CYBORG_PHONE_CALL_RECORDING_ENABLED` | `true` | Record calls |
+| `CYBORG_PHONE_CALL_RECORDING_MAX_AGE_DAYS` | `30` | Recording retention |
+
+### Email
+
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_AGENTMAIL_API_KEY` | *(none)* | AgentMail API key |
+| `CYBORG_AGENTMAIL_DEFAULT_INBOX_ID` | *(none)* | Default inbox |
+| `CYBORG_AGENTMAIL_POLL_INTERVAL_SECONDS` | `30` | Inbox poll interval |
+| `CYBORG_EMAIL_POLLING_ENABLED` | `true` | Enable email polling |
+
+### Dispatch
+
+| Variable | Default | Description |
+|---|---|---|
+| `CYBORG_DISPATCH_CONCURRENCY_LIMIT` | `10` | Max concurrent dispatches |
+| `CYBORG_DISPATCH_STUCK_TIMEOUT_MINUTES` | `60` | Timeout before dispatch is considered stuck |
+| `CYBORG_DISPATCH_SHUTDOWN_TIMEOUT_SECONDS` | `30` | Grace period on shutdown |
+
+### Webhook Templates
+
+| Variable | Description |
+|---|---|
+| `CYBORG_WEBHOOK_{NAME}_URL` | URL for webhook named `{NAME}` |
+| `CYBORG_WEBHOOK_{NAME}_SECRET` | Secret for webhook named `{NAME}` |
+| `CYBORG_WEBHOOK_{NAME}_EVENTS` | Comma-separated events for webhook named `{NAME}` |
+
+### Skill Environment Variables
+
+Skills run as subprocesses and need API keys in standard env var names (e.g. `OPENAI_API_KEY`). Since Cyborg runs as a systemd user service, it does not inherit your shell environment -- it reads `~/.config/cyborg/.env` at startup. To make an API key available to skills:
+
+1. Add the key to `~/.config/cyborg/.env` with the `CYBORG_` prefix:
 
 ```bash
-CYBORG_OPENCLAW_BASE_URL="https://openclaw.example"
-CYBORG_OPENCLAW_TOKEN="secret"
-CYBORG_OPENCLAW_GATEWAY_URL="wss://openclaw.example"   # defaults from base URL
-CYBORG_OPENCLAW_GATEWAY_TOKEN="secret"                   # defaults to CYBORG_OPENCLAW_TOKEN
-CYBORG_OPENCLAW_AGENT_ID="<optional-agent-id>"
+echo 'CYBORG_GOOGLE_PLACES_API_KEY=AIza...' >> ~/.config/cyborg/.env
 ```
 
-- Visible notification delivery goes through the OpenClaw gateway websocket `send` RPC with the resolved `channel`, `to`, and `sessionKey`.
-- For target task assignment, Cyborg uses one OpenClaw `agent` turn in the real target session. The prompt carries the hidden task context, and the assistant's first reply is the visible outbound message.
-- The background worker processes due notifications automatically while the service is running.
-- Task/project input notifications are raised immediately on state change, then daily for a limited number of repeats.
+2. Register the mapping in `packages/cyborg-server/cyborg_server/services/skill_env.py` so the subprocess sees the standard name:
 
-Recommended OpenClaw config:
-
-```json5
-{
-  gateway: {
-    auth: {
-      token: "shared-secret"
-    }
-  },
-  session: {
-    dmScope: "per-channel-peer"
-  }
+```python
+ENV_MAPPINGS: dict[str, str] = {
+    "CYBORG_OPENAI_API_KEY": "OPENAI_API_KEY",
+    "CYBORG_OPENAI_BASE_URL": "OPENAI_BASE_URL",
+    "CYBORG_AGENTMAIL_API_KEY": "AGENTMAIL_API_KEY",
+    "CYBORG_GOOGLE_PLACES_API_KEY": "GOOGLE_PLACES_API_KEY",
 }
 ```
 
-`session.dmScope: "per-channel-peer"` is the important setting for WhatsApp DM task assignment. It keeps each DM on its own OpenClaw session key, for example `agent:main:whatsapp:direct:+61400111222`.
-
-### Context Plugin
-
-For automatic context injection into every OpenClaw session, use the OpenClaw Context Plugin:
+3. Restart the service:
 
 ```bash
-cp -r openclaw-plugin ~/.openclaw/extensions/cyborg-context
-systemctl --user restart openclaw-gateway.service
+uv run cyborg restart
 ```
 
-Optional plugin configuration in `~/.config/openclaw/openclaw.json5`:
-
-```json5
-{
-  plugins: {
-    cyborgContext: {
-      enabled: true,
-      cyborgUrl: "http://127.0.0.1:8420",
-      includeProjects: true,
-      includeTasks: true,
-      includeEvents: true,
-      cacheTtlSeconds: 300,
-      maxTokens: 2000
-    }
-  }
-}
-```
-
-### Manual Context API
-
-```bash
-# Plain text
-curl http://127.0.0.1:8420/openclaw/context.txt
-
-# JSON
-curl http://127.0.0.1:8420/openclaw/context.json
-```
+Skills can then use `os.environ.get("GOOGLE_PLACES_API_KEY")` or rely on SDK auto-detection.
 
 ## Testing
 
@@ -799,4 +844,6 @@ Failures write artifacts under `.pytest_cache/openclaw_acceptance/` for prompt, 
 
 - Database: `~/.local/share/cyborg/cyborg.db`
 - Config: `~/.config/cyborg/`
+- Phone recordings: `~/.local/share/cyborg/calls/`
+- WhatsApp bridge data: `~/.local/share/cyborg/whatsappbridge/`
 - Service: systemd user service (`cyborg.service`)
