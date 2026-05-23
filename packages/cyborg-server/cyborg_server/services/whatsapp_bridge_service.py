@@ -537,6 +537,14 @@ class WhatsAppBridgeService(BaseService):
         from cyborg_server.services.docs_tools import make_docs_tools
         tools.extend(make_docs_tools(self.ctx, session_key=session_key))
 
+        # Changelog tool
+        from cyborg_server.services.changelog_tools import make_changelog_tools
+        tools.extend(make_changelog_tools(self.ctx, session_key=session_key))
+
+        # Email send tool (available in all sessions)
+        from cyborg_server.services.email_tools import make_email_send_tools
+        tools.extend(make_email_send_tools(self.ctx))
+
         wa_service = self
 
         # Add outreach tools for trusted contacts (DM or group)

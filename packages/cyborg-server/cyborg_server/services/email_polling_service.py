@@ -656,6 +656,14 @@ class EmailPollingService(BaseService):
         from cyborg_server.services.docs_tools import make_docs_tools
         tools.extend(make_docs_tools(self.ctx, session_key=session_key))
 
+        # Changelog tool
+        from cyborg_server.services.changelog_tools import make_changelog_tools
+        tools.extend(make_changelog_tools(self.ctx, session_key=session_key))
+
+        # Email send tool (available in all sessions)
+        from cyborg_server.services.email_tools import make_email_send_tools
+        tools.extend(make_email_send_tools(self.ctx))
+
         if contact_id and is_trusted:
             from cyborg_server.services.contact_tools import make_contact_tools
             from cyborg_server.services.reflection_service import make_reflection_tools

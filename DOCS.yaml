@@ -14,3 +14,25 @@
           (memory_search_log table with query, results, latency), and the dashboard memory page.
           Include high level ascii architecture diagrams showing how memory integrates into the prompt assembly and LLM dispatch flow.
           Suitable for a software developer to understand the system end-to-end.
+- path: ./docs/skills.md
+  prompt: |
+          This document must describe how skills work in Cyborg. It should start with the purpose and intent of the feature.
+          It must cover:
+          - The file requirements: each skill is a directory under the workspace skills/ directory, containing either a
+            skill.md or SKILL.md file (both are accepted). Optional files: helper Python scripts (run via run_script tool),
+            pyproject.toml for dependency management, README.md for documentation.
+          - The frontmatter format in skill.md: YAML-like key:value pairs between --- delimiters. Supported keys are
+            "name" (skill identifier), "description" (one-line summary shown in index), and "trigger" (natural language
+            description of when the LLM should activate this skill).
+          - The body of skill.md: markdown instructions that are loaded on-demand when the LLM calls the use_skill tool.
+            These instructions tell the LLM how to execute the skill, including what scripts to run and how to use the results.
+          - How skills are discovered: skill_loader.py scans the skills/ directory, builds an mtime-based cache, and generates
+            a lightweight index (name + description + trigger) that is injected into every LLM system prompt via prompt_assembler.
+          - How skills are activated: the LLM reads the trigger from the system prompt index, then calls the use_skill tool
+            to load the full instructions. If the skill has Python scripts, the LLM calls run_script which executes via
+            `uv run` with a sandboxed environment (skill_env.py maps CYBORG_ prefixed secrets to standard env vars).
+          - The caching mechanism: module-level caches keyed by mtime hash detect file changes automatically — no server
+            restart required to add or modify skills.
+          - The dashboard integration: the /api/skills/installed endpoint lists all skills for the UI.
+          Include high level ascii architecture diagrams showing the skill discovery, index injection, and on-demand loading flow.
+          Suitable for a software developer to understand the system end-to-end.

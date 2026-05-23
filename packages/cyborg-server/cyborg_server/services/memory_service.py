@@ -355,6 +355,50 @@ class MemoryService(BaseService):
             })
         return entries
 
+    def list_recent_entries(
+        self, workspace_dir: Path, wiki_names: list[str], limit: int = 50
+    ) -> dict[str, Any]:
+        """Return recent memory entries and aggregate stats."""
+        memory_dir = self._memory_dir(workspace_dir)
+        all_entries: list[dict[str, Any]] = []
+        stats: dict[str, Any] = {"total_entries": 0, "wikis": {}}
+
+        for wiki_name in wiki_names:
+            wiki_dir = memory_dir / wiki_name
+            if not wiki_dir.is_dir():
+                continue
+            wiki_stats: dict[str, Any] = {"entries": 0, "categories": {}}
+            for md_file in wiki_dir.rglob("*.md"):
+                if md_file.name.startswith("_"):
+                    continue
+                rel = md_file.relative_to(memory_dir)
+                parts = rel.parts
+                category = parts[1] if len(parts) > 2 else ""
+                slug = md_file.stem
+                text = md_file.read_text(encoding="utf-8")
+                title, summary = _parse_entry_summary(text)
+                mtime = md_file.stat().st_mtime
+
+                wiki_stats["entries"] += 1
+                wiki_stats["categories"][category] = wiki_stats["categories"].get(category, 0) + 1
+
+                all_entries.append({
+                    "path": f"memory/{wiki_name}/{category}/{slug}.md",
+                    "wiki": wiki_name,
+                    "category": category,
+                    "slug": slug,
+                    "title": title,
+                    "summary": summary,
+                    "modified": mtime,
+                })
+
+            if wiki_stats["entries"]:
+                stats["wikis"][wiki_name] = wiki_stats
+
+        stats["total_entries"] = len(all_entries)
+        all_entries.sort(key=lambda e: e["modified"], reverse=True)
+        return {"stats": stats, "recent": all_entries[:limit]}
+
     # ── Reflection ──────────────────────────────────────────────
 
     async def reflect_and_update(

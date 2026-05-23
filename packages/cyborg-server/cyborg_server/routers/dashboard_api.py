@@ -691,6 +691,24 @@ async def write_workspace_file(request: Request, path: str = "") -> dict[str, An
 # ── Memory ──────────────────────────────────────────────────────────────────
 
 
+@router.get("/api/memory/stats")
+async def get_memory_stats(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    config = svc.load_access_config(workspace)
+    wiki_names = list(config.get("wikis", {}).keys())
+
+    return svc.list_recent_entries(workspace, wiki_names)
+
+
 @router.get("/api/memory/searches")
 async def get_memory_searches(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
@@ -785,8 +803,12 @@ async def get_installed_skills(request: Request) -> dict[str, Any]:
 
     skills: list[dict[str, Any]] = []
     for child in sorted(skills_dir.iterdir()):
+        if not child.is_dir():
+            continue
         md = child / "skill.md"
-        if not child.is_dir() or not md.is_file():
+        if not md.is_file():
+            md = child / "SKILL.md"
+        if not md.is_file():
             continue
         content = md.read_text(encoding="utf-8").strip()
         fm = _parse_frontmatter(content)
