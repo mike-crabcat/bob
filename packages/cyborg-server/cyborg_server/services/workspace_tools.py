@@ -109,7 +109,12 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         if len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
             return f"Error: content exceeds {_MAX_WRITE_BYTES} bytes"
 
+        workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
         resolved = _resolve_path(ctx, path)
+
+        # Guard memory directory — use memory_write tool instead to keep indexes in sync
+        if str(resolved).startswith(str(workspace / "memory")):
+            return "Error: Use the memory_write tool to modify memory entries (ensures the index stays in sync)"
         if resolved.exists() and resolved.is_dir():
             return f"Error: '{path}' is a directory"
 

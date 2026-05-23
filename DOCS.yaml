@@ -1,4 +1,16 @@
 - path: ./docs/outreach.md
-  prompt: | 
+  prompt: |
           This document must describe the outreach process.  It should include any high level ascii architecture diagrams to aid a coherent
           description suitable for a software developer to understand the system and how it works. It should also start with the purpose and intent of the feature.
+- path: ./docs/memory.md
+  prompt: |
+          This document must describe the memory wiki system. It should start with the purpose and intent of the feature.
+          It must cover: the file-based storage architecture (memory/ directory structure, access.yml config, per-wiki indexes),
+          how memory entries are authored (real-time via memory_write tool during conversations, and post-session reflection
+          triggered by heartbeat after summaries), how retrieval works (lightweight index always loaded into prompt via
+          prompt_assembler, on-demand semantic search via memory_search tool using an LLM, memory_read for full documents),
+          access control (always/trusted/never levels per wiki, trust derived from session_participants.is_trusted),
+          the CLI seed command (cyborg memory seed for bulk processing historical summaries), the search logging
+          (memory_search_log table with query, results, latency), and the dashboard memory page.
+          Include high level ascii architecture diagrams showing how memory integrates into the prompt assembly and LLM dispatch flow.
+          Suitable for a software developer to understand the system end-to-end.

@@ -619,7 +619,26 @@ class EmailPollingService(BaseService):
 
         workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
         participants_prompt = await self._build_participants_prompt(session_key)
-        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.") if p)
+
+        # Load trusted-only memory index for trusted sessions
+        memory_prompt = ""
+        if is_trusted:
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            trusted_wikis = await mem_svc.resolve_accessible_wikis(
+                settings.harness.workspace_dir, session_key
+            )
+            config = mem_svc.load_access_config(settings.harness.workspace_dir)
+            trusted_only = [
+                w for w in trusted_wikis
+                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
+            ]
+            if trusted_only:
+                memory_prompt = mem_svc.build_memory_index(
+                    settings.harness.workspace_dir, trusted_only
+                )
+
+        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.", memory_prompt) if p)
 
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
@@ -628,6 +647,14 @@ class EmailPollingService(BaseService):
         )
 
         tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"]) + make_workspace_tools(self.ctx, session_key=session_key)
+
+        # Memory tools available to all sessions (access control enforced per-tool)
+        from cyborg_server.services.memory_tools import make_memory_tools
+        tools.extend(make_memory_tools(self.ctx, session_key=session_key))
+
+        # Docs search tool
+        from cyborg_server.services.docs_tools import make_docs_tools
+        tools.extend(make_docs_tools(self.ctx, session_key=session_key))
 
         if contact_id and is_trusted:
             from cyborg_server.services.contact_tools import make_contact_tools

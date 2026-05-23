@@ -30,6 +30,7 @@ SERVICE_NAME = "cyborg.service"
 app = typer.Typer(help="Cyborg - Bob's memory and communication service.")
 
 contact_app = typer.Typer(help="Contact operations")
+memory_app = typer.Typer(help="Memory wiki operations")
 session_route_app = typer.Typer(help="Session route registry operations")
 calendar_app = typer.Typer(help="Calendar operations")
 event_app = typer.Typer(help="Event operations")
@@ -40,6 +41,7 @@ openai_app = typer.Typer(help="OpenAI LLM evaluation commands")
 eval_app = typer.Typer(help="LLM eval framework")
 
 app.add_typer(contact_app, name="contact")
+app.add_typer(memory_app, name="memory")
 app.add_typer(session_route_app, name="session-route")
 app.add_typer(calendar_app, name="calendar")
 app.add_typer(event_app, name="event")
@@ -1787,6 +1789,108 @@ def whatsapp_bridge_status() -> None:
 
 
 app.add_typer(whatsapp_app, name="whatsapp")
+
+
+# ── Memory commands ─────────────────────────────────────────────
+
+
+@memory_app.command("seed")
+def memory_seed(
+    batch_size: Annotated[int, typer.Option("--batch-size", help="Summaries per LLM call")] = 10,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without calling LLM")] = False,
+) -> None:
+    """Bulk-process session summaries to seed the memory wiki."""
+    import asyncio
+    asyncio.run(_memory_seed(batch_size, dry_run))
+
+
+async def _memory_seed(batch_size: int, dry_run: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory_service import MemoryService
+
+        workspace = settings.harness.workspace_dir
+        MemoryService.ensure_memory_structure(workspace)
+
+        rows = await db.fetch_all(
+            "SELECT id, session_key, summary_text, memory_prompts "
+            "FROM session_summaries "
+            "WHERE memory_prompts IS NOT NULL AND memory_prompts != '[]' "
+            "ORDER BY created_at ASC"
+        )
+        if not rows:
+            typer.echo("No summaries with memory_prompts found.")
+            return
+
+        typer.echo(f"Found {len(rows)} summaries to process.")
+
+        # Batch summaries — group by session_key to maintain context
+        batches: list[list[dict]] = []
+        current_batch: list[dict] = []
+        for row in rows:
+            current_batch.append(dict(row))
+            if len(current_batch) >= batch_size:
+                batches.append(current_batch)
+                current_batch = []
+        if current_batch:
+            batches.append(current_batch)
+
+        typer.echo(f"Processing in {len(batches)} batch(es) of up to {batch_size}.")
+
+        svc = MemoryService(ctx)
+        total_written = 0
+
+        for i, batch in enumerate(batches):
+            all_prompts: list[str] = []
+            combined_summary_parts: list[str] = []
+            for r in batch:
+                prompts = json.loads(r["memory_prompts"]) if r["memory_prompts"] else []
+                all_prompts.extend(prompts)
+                combined_summary_parts.append(f"[{r['session_key'][:40]}] {r['summary_text']}")
+
+            if not all_prompts:
+                continue
+
+            combined_summary = "\n".join(combined_summary_parts[:5])
+
+            if dry_run:
+                typer.echo(f"\nBatch {i+1}/{len(batches)}: {len(all_prompts)} prompts from {len(batch)} summaries")
+                for p in all_prompts:
+                    typer.echo(f"  - {p[:120]}")
+                continue
+
+            typer.echo(f"Processing batch {i+1}/{len(batches)} ({len(all_prompts)} prompts)...")
+
+            try:
+                # Use a synthetic session key for bulk processing (treat as trusted)
+                await svc.reflect_and_update(
+                    workspace, "bulk_seed", combined_summary, all_prompts
+                )
+                total_written += len(all_prompts)
+            except Exception as exc:
+                typer.echo(f"  Error: {exc}", err=True)
+
+        if dry_run:
+            typer.echo(f"\nDry run: {len(rows)} summaries, {sum(len(json.loads(r['memory_prompts'])) for r in rows)} total prompts")
+        else:
+            typer.echo(f"\nDone. Processed {total_written} prompts across {len(batches)} batches.")
+
+            # Show what was written
+            idx = MemoryService._build_memory_index_static(workspace, ["core"])
+            if idx:
+                typer.echo(f"\nCurrent memory index:\n{idx}")
+    finally:
+        await db.close()
 
 
 def main() -> int:

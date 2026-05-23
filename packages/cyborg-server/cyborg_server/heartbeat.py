@@ -165,6 +165,23 @@ class SessionIdleSummaryTask:
                     message_count=session["message_count"],
                     model_used=ctx.settings.openai.default_model,
                 )
+
+                # Trigger memory reflection from conversation summary
+                if result.get("memory_prompts"):
+                    try:
+                        from cyborg_server.services.memory_service import MemoryService
+                        mem_svc = MemoryService(ctx)
+                        await mem_svc.reflect_and_update(
+                            ctx.settings.harness.workspace_dir,
+                            session["session_key"],
+                            result["summary_text"],
+                            result["memory_prompts"],
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Memory reflection failed for session %s",
+                            session["session_key"],
+                        )
                 logger.info(
                     "Session summary generated for %s (%d messages)",
                     session["session_key"], session["message_count"],

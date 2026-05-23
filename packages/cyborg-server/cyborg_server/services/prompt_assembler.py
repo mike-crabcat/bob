@@ -43,6 +43,21 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
 
+    # Load memory index for always-accessible wikis
+    from cyborg_server.services.memory_service import MemoryService
+    MemoryService.ensure_memory_structure(workspace_dir)
+    memory_dir = workspace_dir / "memory"
+    if memory_dir.is_dir():
+        config = MemoryService.load_access_config(workspace_dir)
+        always_wikis = [
+            name for name, conf in config.get("wikis", {}).items()
+            if conf.get("access") == "always"
+        ]
+        if always_wikis:
+            mem_index = MemoryService._build_memory_index_static(workspace_dir, always_wikis)
+            if mem_index:
+                parts.append("## Memory\n\n" + mem_index)
+
     # Append grounding rules to reduce hallucinated tool claims
     parts.append(
         "## Grounding Rules\n"

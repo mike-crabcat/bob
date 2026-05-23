@@ -688,6 +688,86 @@ async def write_workspace_file(request: Request, path: str = "") -> dict[str, An
     return {"ok": True}
 
 
+# ── Memory ──────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/memory/searches")
+async def get_memory_searches(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    searches: list[dict[str, Any]] = []
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_search_log'"
+    )
+    if table_exists:
+        rows = await db.fetch_all(
+            "SELECT id, query, results_json, session_key, result_count, latency_seconds, created_at "
+            "FROM memory_search_log ORDER BY created_at DESC LIMIT 100"
+        )
+        for row in rows:
+            results = []
+            abstract = ""
+            try:
+                parsed = json.loads(row["results_json"]) if row["results_json"] else {}
+                if isinstance(parsed, dict):
+                    results = parsed.get("results", [])
+                    abstract = parsed.get("abstract", "")
+                elif isinstance(parsed, list):
+                    results = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+            searches.append({
+                "id": row["id"],
+                "query": row["query"],
+                "abstract": abstract,
+                "results": results,
+                "session_key": row["session_key"],
+                "result_count": row["result_count"],
+                "latency_seconds": row["latency_seconds"],
+                "created_at": _utc(row["created_at"]),
+            })
+    return {"searches": searches}
+
+
+@router.get("/api/memory/search")
+async def run_memory_search(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    query = request.query_params.get("q", "").strip()
+    if not query:
+        return {"error": "missing query parameter 'q'"}
+
+    db = _db(request)
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=db)
+    svc = MemoryService(ctx)
+
+    import time
+    start = time.monotonic()
+    result = await svc.search_entries(workspace, ["core"], query)
+    latency = time.monotonic() - start
+
+    # Log it
+    from uuid import uuid4
+    try:
+        await db.execute(
+            "INSERT INTO memory_search_log (id, query, results_json, session_key, result_count, latency_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid4()), query, json.dumps(result), None, len(result.get("results", [])), latency),
+        )
+    except Exception:
+        pass
+
+    result["latency_seconds"] = latency
+    return result
+
+
 # ── Skills ──────────────────────────────────────────────────────────────────
 
 

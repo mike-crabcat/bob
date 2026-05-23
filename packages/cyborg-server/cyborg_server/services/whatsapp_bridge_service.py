@@ -497,8 +497,27 @@ class WhatsAppBridgeService(BaseService):
                     "When you have the information needed, call the finish_outreach tool to relay the result back."
                 )
 
+        # Load trusted-only memory index for trusted sessions
+        memory_prompt = ""
+        if is_trusted:
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            trusted_wikis = await mem_svc.resolve_accessible_wikis(
+                settings.harness.workspace_dir, session_key
+            )
+            # Filter to only trusted-access wikis (always-access ones are already in workspace_prompt)
+            config = mem_svc.load_access_config(settings.harness.workspace_dir)
+            trusted_only = [
+                w for w in trusted_wikis
+                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
+            ]
+            if trusted_only:
+                memory_prompt = mem_svc.build_memory_index(
+                    settings.harness.workspace_dir, trusted_only
+                )
+
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, agenda, participants_prompt, outreach_prompt) if p
+            p for p in (workspace_prompt, agenda, participants_prompt, outreach_prompt, memory_prompt) if p
         )
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
@@ -509,6 +528,15 @@ class WhatsAppBridgeService(BaseService):
 
         # Build tools: workspace file access + whatsapp reply
         tools = make_workspace_tools(self.ctx, session_key=session_key)
+
+        # Memory tools available to all sessions (access control enforced per-tool)
+        from cyborg_server.services.memory_tools import make_memory_tools
+        tools.extend(make_memory_tools(self.ctx, session_key=session_key))
+
+        # Docs search tool
+        from cyborg_server.services.docs_tools import make_docs_tools
+        tools.extend(make_docs_tools(self.ctx, session_key=session_key))
+
         wa_service = self
 
         # Add outreach tools for trusted contacts (DM or group)
