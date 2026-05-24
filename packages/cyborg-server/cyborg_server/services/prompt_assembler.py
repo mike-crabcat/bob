@@ -65,7 +65,10 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
         "- If you did not call a tool, the action did not happen — do not claim it did.\n"
         "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
         "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
-        "- CRITICAL: To reply, you MUST call the send_whatsapp_message (WhatsApp) or email_reply (email) tool. Your text output is NOT delivered — it is discarded. If you write a response without calling the tool, the user will NOT receive it."
+        "- Your text output is NOT delivered to the user. Only tool calls have effect. "
+        "Use as many tools as you need before replying — memory, files, docs, contacts, scripts. "
+        "When ready to respond, you MUST call the channel send tool (send_whatsapp_message or email_reply) "
+        "with your response. Without that call, nothing is sent."
     )
 
     combined = "\n\n".join(parts)

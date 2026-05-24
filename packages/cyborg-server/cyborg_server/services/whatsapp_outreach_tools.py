@@ -388,16 +388,17 @@ def make_outreach_reply_tools(
                 dispatch_id=dispatch_id,
             )
 
-            # Auto-send fallback
-            if not message_was_sent[0] and llm_result.strip() and origin_chat_id and wa_service.connected:
-                logger.warning(
-                    "Outreach result dispatch: LLM did not use send_whatsapp_message, auto-sending (%d chars)",
-                    len(llm_result),
+            # Tap: if LLM didn't use send_whatsapp_message, give it a second chance.
+            if not message_was_sent[0] and llm_result.strip():
+                from cyborg_server.services.tap import tap_dispatch
+                llm_result = await tap_dispatch(
+                    ctx, messages=messages, tools=origin_tools,
+                    session_key=origin_session_key,
+                    send_tool_name="send_whatsapp_message",
+                    first_result=llm_result,
+                    call_category="outreach_result",
+                    dispatch_id=dispatch_id,
                 )
-                try:
-                    await wa_service.send_message(origin_chat_id, llm_result)
-                except Exception:
-                    logger.exception("Auto-send fallback failed for outreach result")
 
             # Record in source session history
             await session_svc.add_message(

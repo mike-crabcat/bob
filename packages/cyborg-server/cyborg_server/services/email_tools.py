@@ -11,8 +11,12 @@ from cyborg_server.services.tools import Tool, tool
 logger = logging.getLogger(__name__)
 
 
-def make_email_tools(ctx: AppContext, thread_id: str, inbox_id: str):
-    """Create email reply/skip tools bound to the given thread."""
+def make_email_tools(ctx: AppContext, thread_id: str, inbox_id: str, *, reply_tracker: list | None = None):
+    """Create email reply/skip tools bound to the given thread.
+
+    If reply_tracker is provided, email_reply sets tracker[0] = True
+    so callers can detect whether a reply was sent.
+    """
 
     @tool
     async def email_reply(body: str) -> str:
@@ -22,6 +26,8 @@ def make_email_tools(ctx: AppContext, thread_id: str, inbox_id: str):
         svc = EmailDeliveryService(ctx)
         try:
             result = await svc.send_reply(inbox_id=inbox_id, thread_id=thread_id, text=body)
+            if reply_tracker is not None:
+                reply_tracker[0] = True
             return json.dumps({"ok": True, "thread_id": thread_id})
         except Exception as e:
             logger.warning("email_reply failed: %s", e)

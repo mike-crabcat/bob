@@ -524,52 +524,19 @@ class WhatsAppBridgeService(BaseService):
 
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         from cyborg_server.services.tools import Tool
-        from cyborg_server.services.workspace_tools import make_workspace_tools
-
-        # Build tools: workspace file access + whatsapp reply
-        tools = make_workspace_tools(self.ctx, session_key=session_key)
-
-        # Memory tools available to all sessions (access control enforced per-tool)
-        from cyborg_server.services.memory_tools import make_memory_tools
-        tools.extend(make_memory_tools(self.ctx, session_key=session_key))
-
-        # Docs search tool
-        from cyborg_server.services.docs_tools import make_docs_tools
-        tools.extend(make_docs_tools(self.ctx, session_key=session_key))
-
-        # Changelog tool
-        from cyborg_server.services.changelog_tools import make_changelog_tools
-        tools.extend(make_changelog_tools(self.ctx, session_key=session_key))
-
-        # Email send tool (available in all sessions)
-        from cyborg_server.services.email_tools import make_email_send_tools
-        tools.extend(make_email_send_tools(self.ctx))
+        from cyborg_server.services.tool_registry import build_common_tools
 
         wa_service = self
 
-        # Add outreach tools for trusted contacts (DM or group)
+        # Core tools (workspace, memory, docs, changelog, email_send, contact, phone, reflection, delegation)
+        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+
+        # WhatsApp-specific: outreach tools for trusted contacts
         if contact_id and is_trusted:
-            from cyborg_server.services.contact_tools import make_contact_tools
             from cyborg_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
-            tools.extend(make_contact_tools(self.ctx))
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
-            from cyborg_server.services.reflection_service import make_reflection_tools
-            tools.extend(make_reflection_tools(self.ctx, session_key))
-            if settings.harness.skill_dev_enabled:
-                from cyborg_server.services.delegation_tools import make_delegation_tools
-                tools.extend(make_delegation_tools(self.ctx, session_key))
 
-        # Add phone call tools when phone subsystem is enabled
-        if settings.phone.enabled:
-            from cyborg_server.services.contact_tools import make_contact_tools
-            from cyborg_server.services.phone_tools import make_phone_tools
-            existing_names = {t.name for t in tools}
-            contact_tools = make_contact_tools(self.ctx)
-            tools.extend(t for t in contact_tools if t.name not in existing_names)
-            phone_tools = make_phone_tools(self.ctx)
-            tools.extend(t for t in phone_tools if t.name not in existing_names)
-
-        # Add outreach reply tool if this session is an active outreach target
+        # Outreach reply tool for active outreach targets
         route = await self.db.fetch_one(
             "SELECT metadata FROM session_routes WHERE session_key = ?",
             (session_key,),
@@ -667,17 +634,19 @@ class WhatsAppBridgeService(BaseService):
                     dispatch_id=dispatch_id,
                     contact_id=contact_id,
                 )
-                # Auto-send fallback: if LLM produced text but never called send_whatsapp_message,
-                # deliver it anyway — the LLM likely intended it as the reply.
+                # Tap: if LLM produced text but didn't use send_whatsapp_message,
+                # give it a second chance with a reminder.
                 if not message_was_sent[0] and result.strip():
-                    logger.warning(
-                        "LLM did not use send_whatsapp_message, auto-sending text output (%d chars)",
-                        len(result),
+                    from cyborg_server.services.tap import tap_dispatch
+                    result = await tap_dispatch(
+                        self.ctx, messages=messages, tools=tools,
+                        session_key=session_key,
+                        send_tool_name="send_whatsapp_message",
+                        first_result=result,
+                        call_category="whatsapp_incoming",
+                        dispatch_id=dispatch_id,
+                        contact_id=contact_id,
                     )
-                    try:
-                        await wa_service.send_message(chat_id, result)
-                    except Exception:
-                        logger.exception("Auto-send fallback failed for chat %s", chat_id)
                 # Record to unified session history — combine LLM text output + all sent messages
                 parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
                 assistant_text = "\n\n".join(parts) if parts else result

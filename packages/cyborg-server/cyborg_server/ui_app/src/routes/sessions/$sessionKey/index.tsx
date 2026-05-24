@@ -68,6 +68,23 @@ function buildTimeline(detail: SessionDetail): TimelineEntry[] {
   return items.sort((a, b) => b.time - a.time);
 }
 
+function TapCard({ call }: { call: CallItem }) {
+  const category = call.call_category.replace(/_tap$/, "");
+  return (
+    <div className="bg-muted/5 border-l-2 border-muted/30 p-2 mb-px">
+      <div className="text-[10px] text-muted/70">follow-up · {category}</div>
+      {call.response_preview && (
+        <div className="text-xs text-muted mt-0.5 whitespace-pre-wrap line-clamp-4">
+          <span className="text-accent">cyborg:</span> {call.response_preview}
+        </div>
+      )}
+      {call.error_message && (
+        <div className="text-xs text-error mt-0.5">{call.error_message}</div>
+      )}
+    </div>
+  );
+}
+
 function ReflectionCard({ call }: { call: CallItem }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -264,6 +281,8 @@ function SessionDetailPage() {
                 <div className="text-[10px] text-muted mt-1">{entry.data.topics.map((t, i) => <RichText key={i} text={t} />).reduce<React.ReactNode[]>((acc, el, i) => i === 0 ? [el] : [...acc, ", ", el], [])}</div>
               )}
             </div>
+          ) : entry.data.call_category.endsWith("_tap") ? (
+            <TapCard key={`c-${entry.data.id}`} call={entry.data} />
           ) : entry.data.call_category === "reflection" ? (
             <ReflectionCard key={`c-${entry.data.id}`} call={entry.data} />
           ) : (

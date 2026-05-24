@@ -613,7 +613,7 @@ class EmailPollingService(BaseService):
 
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         from cyborg_server.services.email_tools import make_email_tools
-        from cyborg_server.services.workspace_tools import make_workspace_tools
+        from cyborg_server.services.tool_registry import build_common_tools
         from cyborg_server.services.session_service import SessionService
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
@@ -646,39 +646,10 @@ class EmailPollingService(BaseService):
             session_key, "user", body, channel="email", dispatched=0,
         )
 
-        tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"]) + make_workspace_tools(self.ctx, session_key=session_key)
-
-        # Memory tools available to all sessions (access control enforced per-tool)
-        from cyborg_server.services.memory_tools import make_memory_tools
-        tools.extend(make_memory_tools(self.ctx, session_key=session_key))
-
-        # Docs search tool
-        from cyborg_server.services.docs_tools import make_docs_tools
-        tools.extend(make_docs_tools(self.ctx, session_key=session_key))
-
-        # Changelog tool
-        from cyborg_server.services.changelog_tools import make_changelog_tools
-        tools.extend(make_changelog_tools(self.ctx, session_key=session_key))
-
-        # Email send tool (available in all sessions)
-        from cyborg_server.services.email_tools import make_email_send_tools
-        tools.extend(make_email_send_tools(self.ctx))
-
-        if contact_id and is_trusted:
-            from cyborg_server.services.contact_tools import make_contact_tools
-            from cyborg_server.services.reflection_service import make_reflection_tools
-            tools.extend(make_contact_tools(self.ctx))
-            tools.extend(make_reflection_tools(self.ctx, session_key))
-
-        # Add phone call tools when phone subsystem is enabled
-        if self.ctx.settings.phone.enabled:
-            from cyborg_server.services.contact_tools import make_contact_tools
-            from cyborg_server.services.phone_tools import make_phone_tools
-            existing_names = {t.name for t in tools}
-            contact_tools = make_contact_tools(self.ctx)
-            tools.extend(t for t in contact_tools if t.name not in existing_names)
-            phone_tools = make_phone_tools(self.ctx)
-            tools.extend(t for t in phone_tools if t.name not in existing_names)
+        # Email-specific tools (reply/skip) + common tool set
+        reply_sent = [False]
+        tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"], reply_tracker=reply_sent)
+        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted))
 
         dispatch_id = str(uuid4())
 
@@ -705,6 +676,18 @@ class EmailPollingService(BaseService):
                     dispatch_id=dispatch_id,
                     contact_id=contact_id,
                 )
+                # Tap: if LLM didn't use email_reply, give it a second chance.
+                if not reply_sent[0] and result.strip():
+                    from cyborg_server.services.tap import tap_dispatch
+                    result = await tap_dispatch(
+                        self.ctx, messages=messages, tools=tools,
+                        session_key=session_key,
+                        send_tool_name="email_reply",
+                        first_result=result,
+                        call_category="email_incoming",
+                        dispatch_id=dispatch_id,
+                        contact_id=contact_id,
+                    )
                 await session_svc.add_message(session_key, "assistant", result, channel="email")
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("email.message.received", {

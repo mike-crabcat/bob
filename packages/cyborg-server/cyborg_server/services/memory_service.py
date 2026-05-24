@@ -426,15 +426,21 @@ class MemoryService(BaseService):
             writable_categories[wiki_name] = wiki_conf.get("categories", [])
 
         system_prompt = (
-            "You are a memory update agent. Review conversation facts and update the memory wiki.\n"
+            "You are a memory update agent. Review the conversation summary and update the memory wiki.\n"
             "Return a JSON array of operations:\n"
             '[{"action": "write", "wiki": "...", "category": "...", "slug": "...", "title": "...", "content": "..."}]\n'
             "Rules:\n"
             "- Only write to wikis and categories listed below\n"
             "- Use descriptive slugs (lowercase, hyphens)\n"
             "- Content is markdown, keep it concise\n"
-            "- Only create entries for genuinely useful facts\n"
-            "- If a fact updates an existing entry, use the same slug\n"
+            "- Only create entries for genuinely useful, durable information\n"
+            "- If an entry updates an existing one, use the same slug\n"
+            "- Choose the correct category for each entry:\n"
+            "  - people: information about a specific person (preferences, relationships, personality, contact details)\n"
+            "  - events: things that happened at a specific time (appointments, milestones, incidents)\n"
+            "  - facts: general knowledge and standing facts (procedures, preferences, how-tos)\n"
+            "  - locations: places and their details\n"
+            "  - research: findings, notes, and investigation results\n"
             "\n"
             f"Writable wikis and categories:\n"
             + "\n".join(
@@ -446,7 +452,7 @@ class MemoryService(BaseService):
 
         user_prompt = (
             f"Conversation summary: {summary_text}\n\n"
-            f"Facts to remember:\n"
+            f"Items to remember:\n"
             + "\n".join(f"- {p}" for p in memory_prompts)
         )
 

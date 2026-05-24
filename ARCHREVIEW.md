@@ -97,26 +97,30 @@ This creates tight coupling: `VoiceService` knows how to construct `DispatchServ
 
 ---
 
-## 7. Tool Definitions Scattered Across Files
+## 7. ~~Tool Definitions Scattered Across Files~~ (PARTIALLY RESOLVED)
 
-LLM tools (function-calling schemas) are defined in multiple places:
+Tool modules are well-organized in dedicated `*_tools.py` files using a consistent `@tool` decorator + `make_*_tools()` factory pattern:
 
-| File | Tools |
-|------|-------|
-| `services/tools.py` | Core tools (workspace, search, etc.) |
-| `services/contact_tools.py` | Contact management |
-| `services/email_tools.py` | Email send/reply/skip |
-| `services/phone_tools.py` | Phone call tools |
-| `services/delegation_tools.py` | Claude Code delegation |
-| `services/whatsapp_outreach_tools.py` | WhatsApp outreach |
-| `services/project_tools.py` | Project management |
-| `services/workspace_tools.py` | File/workspace access |
+| File | Factory | Tools |
+|------|---------|-------|
+| `services/tools.py` | Core `@tool` decorator + `Tool` dataclass | Infrastructure only |
+| `services/tool_registry.py` | `build_common_tools(ctx, session_key, is_trusted)` | Central assembly |
+| `services/workspace_tools.py` | `make_workspace_tools(ctx, session_key)` | `list_files`, `read_file`, `write_file`, `run_script`, `use_skill`, `update_agenda` |
+| `services/memory_tools.py` | `make_memory_tools(ctx, session_key)` | `memory_write`, `memory_read`, `memory_search`, `memory_browse` |
+| `services/email_tools.py` | `make_email_tools(ctx, thread_id, inbox_id)` + `make_email_send_tools(ctx)` | `email_reply`, `email_skip`, `email_send` |
+| `services/contact_tools.py` | `make_contact_tools(ctx)` | `search_contacts` |
+| `services/phone_tools.py` | `make_phone_tools(ctx)` | `make_phone_call`, `get_call_status` |
+| `services/changelog_tools.py` | `make_changelog_tools(ctx, session_key)` | `read_changelog` |
+| `services/docs_tools.py` | `make_docs_tools(ctx, session_key)` | `docs_search` |
+| `services/delegation_tools.py` | `make_delegation_tools(ctx, session_key)` | `delegate_to_claude`, `implement_delegation`, `reject_delegation`, `list_delegations` |
+| `services/whatsapp_outreach_tools.py` | `make_whatsapp_outreach_tools(...)` + `make_outreach_reply_tools(...)` | `send_whatsapp_to_contact`, `get_contact_session_messages`, `finish_outreach` |
+| `services/reflection_service.py` | `make_reflection_tools(ctx, session_key)` | `reflect_on_session` |
 
-There's no registry or manifest. Each service's tool module is imported ad-hoc by the services that need them. Some tools (like `send_whatsapp_message`) are defined as closures inside `WhatsAppBridgeService`, not as registered tools at all.
+`tool_registry.py` centralizes the shared assembly logic that was previously duplicated across `whatsapp_bridge_service.py` (~55 lines) and `email_polling_service.py` (~33 lines). Both now call `build_common_tools()` for the standard tool set and add channel-specific tools on top.
 
-**Impact:** No way to see all available tools in one place. Tools defined as closures can't be reused or tested independently.
-
-**Recommendation:** Create a `ToolRegistry` that all tool modules register with. Each tool module exports a `register(registry)` function. The LLM dispatch layer queries the registry instead of importing tool modules directly.
+**Remaining gap:** Some tools are still defined as inline closures that can't be reused independently:
+- `send_whatsapp_message` — defined inside `WhatsAppBridgeService._dispatch()` as a closure over `chat_id` and `wa_service`
+- `finish_outreach` — creates a nested LLM dispatch inline, including its own tool assembly
 
 ---
 
@@ -178,7 +182,7 @@ Error handling is inconsistent:
 | OpenClaw → generic renaming | Medium | Medium | Ongoing refactor |
 | Repository layer introduction | Large | High | Quarterly initiative |
 | Service coupling / DI | Large | Medium | Quarterly initiative |
-| Tool registry | Medium | Medium | When tools change next |
+| ~~Tool registry~~ | ~~Medium~~ | ~~Medium~~ | **Done** — `tool_registry.py` centralizes assembly; inline closures remain |
 | File splitting (cli, models) | Medium | Low | Gradual |
 | Naming consistency | Small | Low | As touched |
 | Error handling strategy | Large | Medium | When reliability becomes a focus |
