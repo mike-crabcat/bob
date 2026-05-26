@@ -554,8 +554,7 @@ class WhatsAppBridgeService(BaseService):
         sent_texts: list[str] = []
 
         async def _send_whatsapp_message(text: str) -> str:
-            """Send a reply message to the WhatsApp chat.
-            If you do not want to reply, send "NO_REPLY" as the text."""
+            """Send a reply message to the WhatsApp chat."""
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
@@ -567,8 +566,7 @@ class WhatsAppBridgeService(BaseService):
             name="send_whatsapp_message",
             description=(
                 "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent. "
-                "Call this with 'NO_REPLY' if you do not want to respond."
+                "You MUST call this tool to deliver your response — your text output will NOT be sent."
             ),
             parameters={"text": {"type": "string", "description": "The message text to send."}},
             required=["text"],
@@ -648,9 +646,16 @@ class WhatsAppBridgeService(BaseService):
                         contact_id=contact_id,
                     )
                 # Record to unified session history — combine LLM text output + all sent messages
+                # If nothing was sent and the result is just a NO_REPLY variant, skip recording
+                # to avoid poisoning future decisions with a pattern of non-responses.
                 parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
                 assistant_text = "\n\n".join(parts) if parts else result
-                await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+                if not message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in (
+                    "NO_REPLY", "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
+                ):
+                    pass  # Don't record NO_REPLY to session history
+                else:
+                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("whatsapp.message.received", {
                         "session_key": session_key,

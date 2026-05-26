@@ -68,11 +68,20 @@ function buildTimeline(detail: SessionDetail): TimelineEntry[] {
   return items.sort((a, b) => b.time - a.time);
 }
 
-function TapCard({ call }: { call: CallItem }) {
+function TapCard({ call, sessionKey }: { call: CallItem; sessionKey: string }) {
   const category = call.call_category.replace(/_tap$/, "");
   return (
-    <div className="bg-muted/5 border-l-2 border-muted/30 p-2 mb-px">
-      <div className="text-[10px] text-muted/70">follow-up · {category}</div>
+    <Link
+      to="/sessions/$sessionKey/calls/$callId"
+      params={{ sessionKey, callId: call.id }}
+      className="block bg-muted/5 border-l-2 border-muted/30 p-2 mb-px hover:bg-surface transition-colors"
+    >
+      <div className="flex items-center gap-2 text-[10px] text-muted">
+        <span>follow-up · {category}</span>
+        <span className={call.status === "completed" ? "text-success" : "text-error"}>{call.status}</span>
+        {call.latency_seconds != null && <span>{call.latency_seconds.toFixed(2)}s</span>}
+        <span className="ml-auto text-muted">&rsaquo;</span>
+      </div>
       {call.response_preview && (
         <div className="text-xs text-muted mt-0.5 whitespace-pre-wrap line-clamp-4">
           <span className="text-accent">cyborg:</span> {call.response_preview}
@@ -81,7 +90,7 @@ function TapCard({ call }: { call: CallItem }) {
       {call.error_message && (
         <div className="text-xs text-error mt-0.5">{call.error_message}</div>
       )}
-    </div>
+    </Link>
   );
 }
 
@@ -282,7 +291,7 @@ function SessionDetailPage() {
               )}
             </div>
           ) : entry.data.call_category.endsWith("_tap") ? (
-            <TapCard key={`c-${entry.data.id}`} call={entry.data} />
+            <TapCard key={`c-${entry.data.id}`} call={entry.data} sessionKey={sessionKey} />
           ) : entry.data.call_category === "reflection" ? (
             <ReflectionCard key={`c-${entry.data.id}`} call={entry.data} />
           ) : (

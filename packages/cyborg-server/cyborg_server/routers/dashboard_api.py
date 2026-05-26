@@ -706,7 +706,34 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
     config = svc.load_access_config(workspace)
     wiki_names = list(config.get("wikis", {}).keys())
 
-    return svc.list_recent_entries(workspace, wiki_names)
+    result = svc.list_recent_entries(workspace, wiki_names)
+
+    INTERNAL_CATEGORIES = {"bulletins", "digested"}
+    stats = result["stats"]
+
+    for wiki_data in stats.get("wikis", {}).values():
+        wiki_data["internal_categories"] = {
+            k: v for k, v in wiki_data["categories"].items()
+            if k in INTERNAL_CATEGORIES
+        }
+        wiki_data["categories"] = {
+            k: v for k, v in wiki_data["categories"].items()
+            if k not in INTERNAL_CATEGORIES
+        }
+
+    result["recent"] = [e for e in result["recent"] if e["category"] not in INTERNAL_CATEGORIES]
+    stats["total_entries"] = len(result["recent"])
+
+    # Pipeline status
+    bulletins = svc.read_bulletins(workspace)
+    result["pending_bulletins"] = len(bulletins)
+
+    last_dream = await _db(request).fetch_one(
+        "SELECT created_at FROM memory_dream_log ORDER BY created_at DESC LIMIT 1"
+    )
+    result["last_dream"] = _utc(last_dream["created_at"]) if last_dream else None
+
+    return result
 
 
 @router.get("/api/memory/searches")
@@ -784,6 +811,153 @@ async def run_memory_search(request: Request) -> dict[str, Any]:
 
     result["latency_seconds"] = latency
     return result
+
+
+@router.get("/api/memory/bulletins")
+async def get_memory_bulletins(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    bulletins = svc.read_bulletins(workspace)
+    for b in bulletins:
+        b["path"] = str(b["path"])
+    return {"bulletins": bulletins}
+
+
+@router.get("/api/memory/dreams")
+async def get_memory_dreams(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    dreams: list[dict[str, Any]] = []
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_dream_log'"
+    )
+    if table_exists:
+        rows = await db.fetch_all(
+            "SELECT id, bulletins_processed, entries_created, bulletin_slugs, "
+            "operations_json, raw_response, duration_seconds, status, created_at "
+            "FROM memory_dream_log ORDER BY created_at DESC LIMIT 20"
+        )
+        for row in rows:
+            operations = []
+            try:
+                operations = json.loads(row["operations_json"]) if row["operations_json"] else []
+            except (json.JSONDecodeError, TypeError):
+                pass
+            slugs = []
+            try:
+                slugs = json.loads(row["bulletin_slugs"]) if row["bulletin_slugs"] else []
+            except (json.JSONDecodeError, TypeError):
+                pass
+            dreams.append({
+                "id": row["id"],
+                "bulletins_processed": row["bulletins_processed"],
+                "entries_created": row["entries_created"],
+                "bulletin_slugs": slugs,
+                "operations": operations,
+                "raw_response": row["raw_response"] or "",
+                "duration_seconds": row["duration_seconds"],
+                "status": row["status"],
+                "created_at": _utc(row["created_at"]),
+            })
+    return {"dreams": dreams}
+
+
+@router.get("/api/memory/category/{category}")
+async def get_memory_category(request: Request, category: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    entries = svc.browse_category(workspace, "core", category)
+    for e in entries:
+        e["path"] = f"memory/core/{category}/{e['slug']}.md"
+    return {"category": category, "entries": entries}
+
+
+@router.post("/api/memory/digested")
+async def get_digested_bulletins(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    slugs: list[str] = body.get("slugs", [])
+    if not slugs:
+        return {"bulletins": []}
+
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    digested_dir = svc._memory_dir(workspace) / "core" / "digested"
+
+    results: list[dict[str, Any]] = []
+    for slug in slugs:
+        path = digested_dir / f"{slug}.md"
+        if path.is_file():
+            results.append({"slug": slug, "content": path.read_text(encoding="utf-8")})
+    return {"bulletins": results}
+
+
+@router.post("/api/memory/redigest")
+async def redigest_bulletin(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    slug: str = body.get("slug", "")
+    if not slug:
+        return {"error": "missing slug"}
+
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+
+    digested = svc._memory_dir(workspace) / "core" / "digested" / f"{slug}.md"
+    bulletins = svc._memory_dir(workspace) / "core" / "bulletins" / f"{slug}.md"
+
+    if not digested.is_file():
+        return {"error": f"digested bulletin not found: {slug}"}
+
+    digested.rename(bulletins)
+    svc.rebuild_wiki_index(workspace, "core")
+    return {"ok": True, "slug": slug}
+
+
+@router.post("/api/memory/lint")
+async def lint_memory_entries(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    return await svc.lint_entries(workspace)
 
 
 # ── Skills ──────────────────────────────────────────────────────────────────

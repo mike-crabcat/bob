@@ -370,8 +370,7 @@ def make_outreach_reply_tools(
             name="send_whatsapp_message",
             description=(
                 "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent. "
-                "Call this with 'NO_REPLY' if you do not want to respond."
+                "You MUST call this tool to deliver your response — your text output will NOT be sent."
             ),
             parameters={"text": {"type": "string", "description": "The message text to send."}},
             required=["text"],

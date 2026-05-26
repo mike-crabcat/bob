@@ -41,8 +41,10 @@ async def tap_dispatch(
     tap_messages = messages + [
         {"role": "assistant", "content": first_result},
         {"role": "user", "content": (
-            f"You generated a response but haven't sent it. "
-            f"Use {send_tool_name} to deliver it now, or say NO_REPLY if no response is needed."
+            f"You just generated this response but did not call {send_tool_name} to send it:\n\n"
+            f"---\n{first_result}\n---\n\n"
+            f"Call {send_tool_name} now to deliver it. This is not optional — "
+            f"your response will NOT reach the user unless you call this tool."
         )},
     ]
 

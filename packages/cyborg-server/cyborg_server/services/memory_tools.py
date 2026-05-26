@@ -31,8 +31,9 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         title: str,
         content: str,
     ) -> str:
-        """Create or update a memory entry. Wiki and category must be valid per access.yml.
-        Slug is a short identifier (lowercase, hyphens, no spaces). Content is markdown."""
+        """Create a memory bulletin. Wiki and category must be valid per access.yml.
+        Slug is a short identifier (lowercase, hyphens, no spaces). Content is markdown.
+        Your write will be queued as a bulletin and curated into the right category by the dream process."""
         workspace = ctx.settings.harness.workspace_dir
 
         writable = await svc.resolve_writable_wikis(workspace, session_key)
@@ -42,8 +43,16 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         if not svc.validate_wiki_category(workspace, wiki, category):
             return json.dumps({"error": f"Invalid category '{category}' for wiki '{wiki}'"})
 
-        path = svc.write_entry(workspace, wiki, category, slug, title, content)
-        return json.dumps({"ok": True, "path": path})
+        path = await svc.write_bulletin(
+            workspace,
+            session_key=session_key,
+            source_type="manual",
+            content=content,
+            intended_category=category,
+            intended_slug=slug,
+            intended_title=title,
+        )
+        return json.dumps({"ok": True, "path": path, "queued": True})
 
     @tool
     async def memory_read(

@@ -176,6 +176,10 @@ class SessionIdleSummaryTask:
                             session["session_key"],
                             result["summary_text"],
                             result["memory_prompts"],
+                            active_from=session["active_from"],
+                            active_to=session["last_message_at"],
+                            participants=participants,
+                            contact_ids=list(contact_to_name.keys()),
                         )
                     except Exception:
                         logger.exception(
@@ -191,6 +195,29 @@ class SessionIdleSummaryTask:
                     "Failed to generate summary for session %s",
                     session["session_key"],
                 )
+
+        # After all summaries, run the memory dream to curate bulletins
+        try:
+            from cyborg_server.services.memory_service import MemoryService
+            from uuid import uuid4
+            import json as _json
+
+            mem_svc = MemoryService(ctx)
+            result = await mem_svc.run_dream(ctx.settings.harness.workspace_dir)
+            if result["status"] != "empty":
+                await ctx.db.execute(
+                    "INSERT INTO memory_dream_log "
+                    "(id, bulletins_processed, entries_created, bulletin_slugs, "
+                    "operations_json, raw_response, duration_seconds, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid4()), result["bulletins_processed"], result["entries_created"],
+                     _json.dumps(result["bulletin_slugs"]),
+                     _json.dumps(result["operations"]),
+                     result.get("raw_response"),
+                     result.get("duration_seconds"), result["status"]),
+                )
+        except Exception:
+            logger.exception("Memory dream process failed")
 
 
 class CallCleanupTask:

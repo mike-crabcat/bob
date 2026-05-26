@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from cyborg_server.services.base import BaseService
+from cyborg_server.services.base import BaseService, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,24 @@ _DEFAULT_ACCESS_YML = """\
 wikis:
   core:
     description: "General knowledge"
-    categories: [people, facts, events, locations, research]
+    categories: [people, facts, events, locations, research, bulletins, digested]
     access: always
     write: always
 """
 
 _config_cache: tuple[float, dict[str, Any]] | None = None  # (mtime, parsed config)
+
+
+class _ClassProperty:
+    """Descriptor that works like @property but at the class level."""
+    def __init__(self, fn):
+        self.fn = fn
+
+    def __get__(self, obj, objtype=None):
+        return self.fn(objtype or type(obj))
+
+
+classproperty = _ClassProperty
 
 
 def _parse_entry_summary(text: str) -> tuple[str, str]:
@@ -399,6 +411,113 @@ class MemoryService(BaseService):
         all_entries.sort(key=lambda e: e["modified"], reverse=True)
         return {"stats": stats, "recent": all_entries[:limit]}
 
+    # ── Bulletins ───────────────────────────────────────────────
+
+    async def write_bulletin(
+        self,
+        workspace_dir: Path,
+        *,
+        session_key: str,
+        source_type: str,
+        time_window_from: str = "",
+        time_window_to: str = "",
+        participants: list[str] | None = None,
+        contact_ids: list[str] | None = None,
+        content: str = "",
+        intended_category: str = "",
+        intended_slug: str = "",
+        intended_title: str = "",
+    ) -> str:
+        """Write a raw bulletin to the bulletins category."""
+        from uuid import uuid4
+
+        slug = f"blt-{uuid4().hex[:12]}"
+        title = f"Bulletin: {content[:60]}"
+
+        meta_lines = [
+            f"- source_session: {session_key}",
+            f"- source_type: {source_type}",
+        ]
+        if time_window_from and time_window_to:
+            meta_lines.append(f"- time_window: {time_window_from} to {time_window_to}")
+        if participants:
+            meta_lines.append(f"- participants: {', '.join(participants)}")
+        if contact_ids:
+            meta_lines.append(f"- contact_ids: {', '.join(contact_ids)}")
+        if intended_category:
+            meta_lines.append(f"- intended_category: {intended_category}")
+            meta_lines.append(f"- intended_slug: {intended_slug}")
+            meta_lines.append(f"- intended_title: {intended_title}")
+
+        meta_lines.append(f"- created_at: {utcnow().isoformat()}")
+
+        body = "\n".join(meta_lines) + "\n\n" + content
+        return self.write_entry(workspace_dir, "core", "bulletins", slug, title, body)
+
+    def read_bulletins(self, workspace_dir: Path) -> list[dict[str, Any]]:
+        """Read all pending bulletins from the bulletins category."""
+        bulletins_dir = self._memory_dir(workspace_dir) / "core" / "bulletins"
+        if not bulletins_dir.is_dir():
+            return []
+
+        bulletins: list[dict[str, Any]] = []
+        for md_file in sorted(bulletins_dir.glob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            text = md_file.read_text(encoding="utf-8")
+            lines = text.strip().splitlines()
+
+            meta: dict[str, str] = {}
+            content_lines: list[str] = []
+            in_content = False
+            has_meta = False
+            for line in lines:
+                if in_content:
+                    content_lines.append(line)
+                elif line.startswith("# "):
+                    continue
+                elif not line.strip():
+                    if has_meta:
+                        in_content = True
+                elif line.startswith("- "):
+                    key, _, val = line[2:].partition(": ")
+                    meta[key.strip()] = val.strip()
+                    has_meta = True
+                else:
+                    in_content = True
+                    content_lines.append(line)
+
+            bulletins.append({
+                "path": md_file,
+                "slug": md_file.stem,
+                "source_session": meta.get("source_session", ""),
+                "source_type": meta.get("source_type", ""),
+                "time_window": meta.get("time_window", ""),
+                "participants": meta.get("participants", ""),
+                "contact_ids": meta.get("contact_ids", ""),
+                "intended_category": meta.get("intended_category", ""),
+                "intended_slug": meta.get("intended_slug", ""),
+                "intended_title": meta.get("intended_title", ""),
+                "content": "\n".join(content_lines).strip(),
+                "created_at": md_file.stat().st_mtime,
+            })
+        return bulletins
+
+    def move_to_digested(self, workspace_dir: Path, bulletin_paths: list[Path]) -> None:
+        """Move processed bulletins to the digested category."""
+        if not bulletin_paths:
+            return
+
+        digested_dir = self._memory_dir(workspace_dir) / "core" / "digested"
+        digested_dir.mkdir(parents=True, exist_ok=True)
+
+        for path in bulletin_paths:
+            dest = digested_dir / path.name
+            path.rename(dest)
+            logger.info("Digested bulletin: %s", path.name)
+
+        self.rebuild_wiki_index(workspace_dir, "core")
+
     # ── Reflection ──────────────────────────────────────────────
 
     async def reflect_and_update(
@@ -407,80 +526,220 @@ class MemoryService(BaseService):
         session_key: str,
         summary_text: str,
         memory_prompts: list[str],
+        *,
+        active_from: str = "",
+        active_to: str = "",
+        participants: list[str] | None = None,
+        contact_ids: list[str] | None = None,
     ) -> None:
-        """Review conversation summary and update memory entries."""
+        """Write a bulletin from conversation summary for the dream process to curate."""
         if not memory_prompts:
             return
 
-        accessible = await self.resolve_accessible_wikis(workspace_dir, session_key)
-        writable = await self.resolve_writable_wikis(workspace_dir, session_key)
-        if not writable:
-            return
-
-        current_index = self.build_memory_index(workspace_dir, accessible)
-        config = self.load_access_config(workspace_dir)
-
-        writable_categories: dict[str, list[str]] = {}
-        for wiki_name in writable:
-            wiki_conf = config.get("wikis", {}).get(wiki_name, {})
-            writable_categories[wiki_name] = wiki_conf.get("categories", [])
-
-        system_prompt = (
-            "You are a memory update agent. Review the conversation summary and update the memory wiki.\n"
-            "Return a JSON array of operations:\n"
-            '[{"action": "write", "wiki": "...", "category": "...", "slug": "...", "title": "...", "content": "..."}]\n'
-            "Rules:\n"
-            "- Only write to wikis and categories listed below\n"
-            "- Use descriptive slugs (lowercase, hyphens)\n"
-            "- Content is markdown, keep it concise\n"
-            "- Only create entries for genuinely useful, durable information\n"
-            "- If an entry updates an existing one, use the same slug\n"
-            "- Choose the correct category for each entry:\n"
-            "  - people: information about a specific person (preferences, relationships, personality, contact details)\n"
-            "  - events: things that happened at a specific time (appointments, milestones, incidents)\n"
-            "  - facts: general knowledge and standing facts (procedures, preferences, how-tos)\n"
-            "  - locations: places and their details\n"
-            "  - research: findings, notes, and investigation results\n"
-            "\n"
-            f"Writable wikis and categories:\n"
-            + "\n".join(
-                f"- {wiki}: {', '.join(cats)}" for wiki, cats in writable_categories.items()
-            )
-            + "\n\nCurrent memory index:\n"
-            + (current_index or "(empty)")
+        content = "\n".join(f"- {p}" for p in memory_prompts)
+        await self.write_bulletin(
+            workspace_dir,
+            session_key=session_key,
+            source_type="reflect",
+            time_window_from=active_from,
+            time_window_to=active_to,
+            participants=participants or [],
+            contact_ids=contact_ids or [],
+            content=content,
         )
 
-        user_prompt = (
-            f"Conversation summary: {summary_text}\n\n"
-            f"Items to remember:\n"
-            + "\n".join(f"- {p}" for p in memory_prompts)
-        )
+    # ── Dream ───────────────────────────────────────────────────
+
+    _CURATED_CATEGORIES = ("people", "facts", "events", "locations", "research")
+
+    _CATEGORY_TEMPLATES: dict[str, dict[str, str]] = {
+        "people": {
+            "Overview": "One-line identity summary",
+            "Personality": "Character traits, communication style, humor",
+            "Interests": "Hobbies, passions, media preferences",
+            "Dietary": "Food preferences, restrictions, allergies",
+            "Work": "Job, company, role, work style preferences",
+            "Family": "Family members, relationships, household details",
+            "Preferences": "Communication preferences, scheduling, general likes/dislikes",
+            "Contact": "Phone, email, address, preferred channels",
+            "Relationships": "Key relationships to other contacts",
+        },
+        "events": {
+            "Summary": "What happened in one sentence",
+            "Date": "When it happened",
+            "Participants": "Who was involved",
+            "Location": "Where it took place",
+            "Details": "Key facts and outcomes",
+            "Follow-up": "Pending actions or consequences",
+        },
+        "facts": {
+            "Summary": "The fact in one sentence",
+            "Details": "Supporting details and context",
+            "Procedures": "Step-by-step instructions if applicable",
+        },
+        "locations": {
+            "Description": "What this place is",
+            "Address": "Physical or virtual address",
+            "Notes": "Access details, tips, associations",
+            "Related": "Connected people or events",
+        },
+        "research": {
+            "Topic": "What was investigated",
+            "Findings": "Key discoveries or results",
+            "Status": "Current state (open, resolved, abandoned)",
+            "Notes": "Additional context and links",
+        },
+    }
+
+    @classmethod
+    def _template_headers(cls, category: str) -> list[str]:
+        tmpl = cls._CATEGORY_TEMPLATES.get(category, {})
+        return list(tmpl.keys())
+
+    _DREAM_SYSTEM_BASE = (
+        "You are a memory curation agent. Review new bulletins and reconcile with existing curated entries.\n"
+        "\n"
+        "Your job is to extract factual claims from bulletins and write them to memory. You should be liberal\n"
+        "about extracting information — even if a bulletin contains hedging language like 'unverified' or\n"
+        "'test data', extract the factual claims it contains. You are NOT responsible for verifying claims;\n"
+        "you are responsible for recording them.\n"
+        "\n"
+        "For each piece of new information:\n"
+        "- CREATE a new entry in the correct category, OR\n"
+        "- UPDATE an existing entry (merge new info, resolve conflicts — newer info wins), OR\n"
+        "- IGNORE only if the bulletin contains no factual claims at all\n"
+        "\n"
+        "{templates_section}"
+        "\n"
+        "Rules for headers:\n"
+        "- Use ## (h2) headings for every section — never bare text or bold\n"
+        "- Include only sections where information exists — omit empty sections\n"
+        "- Place sections in the order shown in the template\n"
+        "- Content under each header should be concise bullet points\n"
+        "\n"
+        "## Transcript References\n"
+        "\n"
+        "When a bulletin has session metadata, include an inline transcript tag on the relevant bullet point:\n"
+        "`[[session:{{session_key}} {{window}}]]`\n"
+        "\n"
+        "The session_key and window come from the bulletin metadata. Place the tag at the end of the relevant bullet point.\n"
+        "Include transcript references whenever possible, but do not require them — some bulletins come from imported data.\n"
+        "\n"
+        "Example:\n"
+        "- Prefers morning meetings, not available before 10am [[session:whatsapp:contact:abc 2026-05-24T10:00..10:30]]\n"
+        "\n"
+        "When updating an existing entry, preserve existing [[session:...]] tags and add new ones for new information.\n"
+        "\n"
+        "## General Rules\n"
+        "- One entry per topic/person — merge multiple bulletins about the same thing\n"
+        "- Use the same slug when updating an existing entry so it overwrites\n"
+        "- Content should be succinct — bullet points, not paragraphs\n"
+        "- Include source_bulletins: [indices] in each operation\n"
+        "\n"
+        'Return a JSON array: [{{"action":"write","wiki":"core","category":"...","slug":"...","title":"...","content":"...","source_bulletins":[1,3]}}]\n'
+        "Return an empty array [] if nothing is worth remembering."
+    )
+
+    def _build_dream_system_prompt(self, workspace_dir: Path) -> str:
+        """Build the dream system prompt, injecting _template.md from each category."""
+        templates: list[str] = []
+        for cat in self._CURATED_CATEGORIES:
+            template_path = workspace_dir / "core" / cat / "_template.md"
+            if template_path.exists():
+                content = template_path.read_text().strip()
+                templates.append(f"**{cat}**:\n{content}")
+            else:
+                headers = ", ".join(self._template_headers(cat))
+                templates.append(f"**{cat}**: {headers}")
+
+        templates_section = "## Category Templates\n\n" + "\n\n".join(templates)
+        return self._DREAM_SYSTEM_BASE.format(templates_section=templates_section)
+
+    # Static fallback for evals and tests that access the prompt without a workspace dir.
+    @classproperty
+    def _DREAM_SYSTEM_PROMPT(cls) -> str:  # type: ignore[no-redef]
+        templates: list[str] = []
+        for cat in cls._CURATED_CATEGORIES:
+            headers = ", ".join(cls._template_headers(cat))
+            templates.append(f"**{cat}**: {headers}")
+        templates_section = "## Category Templates\n\n" + "\n\n".join(templates)
+        return cls._DREAM_SYSTEM_BASE.format(templates_section=templates_section)
+
+    async def run_dream(self, workspace_dir: Path) -> dict[str, Any]:
+        """Curate pending bulletins into categorized memory entries via LLM."""
+        bulletins = self.read_bulletins(workspace_dir)
+        if not bulletins:
+            return {"status": "empty", "bulletins_processed": 0, "entries_created": 0,
+                    "bulletin_slugs": [], "operations": [], "duration_seconds": 0}
+
+        logger.info("Memory dream: processing %d bulletins", len(bulletins))
+        start_time = __import__("time").monotonic()
+
+        # Build bulletin catalog
+        bulletin_lines: list[str] = []
+        for i, b in enumerate(bulletins, 1):
+            header = f"[{i}] {b['slug']}"
+            if b["source_session"]:
+                header += f" (session: {b['source_session'][:40]}"
+                if b["time_window"]:
+                    header += f", window: {b['time_window']}"
+                header += ")"
+            if b["participants"]:
+                header += f" participants: {b['participants']}"
+            bulletin_lines.append(f"{header}\n{b['content']}")
+
+        # Build existing entries catalog
+        existing_lines: list[str] = []
+        for cat in self._CURATED_CATEGORIES:
+            entries = self.browse_category(workspace_dir, "core", cat)
+            for entry in entries:
+                existing_lines.append(
+                    f"[{cat}/{entry['slug']}] {entry['title']}"
+                )
+
+        user_prompt = "## NEW BULLETINS\n\n" + "\n\n".join(bulletin_lines)
+        if existing_lines:
+            user_prompt += "\n\n## EXISTING CURATED ENTRIES\n\n" + "\n\n".join(existing_lines)
 
         from cyborg_server.services.llm_dispatch import LLMDispatchService
 
         llm = LLMDispatchService(self.ctx)
         response = await llm.chat(
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": self._build_dream_system_prompt(workspace_dir)},
                 {"role": "user", "content": user_prompt},
             ],
-            call_category="memory_reflection",
-            temperature=0.3,
-            max_tokens=1000,
+            call_category="memory_dream",
+            temperature=0.4,
+            max_tokens=2000,
         )
 
+        raw_response = response
         try:
             text = response.strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             operations = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            logger.warning("Memory reflection: failed to parse LLM response")
-            return
+            logger.warning("Memory dream: failed to parse LLM response")
+            return {"status": "failed", "bulletins_processed": len(bulletins), "entries_created": 0,
+                    "bulletin_slugs": [b["slug"] for b in bulletins], "operations": [],
+                    "duration_seconds": __import__("time").monotonic() - start_time,
+                    "raw_response": raw_response}
 
         if not isinstance(operations, list):
-            return
+            return {"status": "failed", "bulletins_processed": len(bulletins), "entries_created": 0,
+                    "bulletin_slugs": [b["slug"] for b in bulletins], "operations": [],
+                    "duration_seconds": __import__("time").monotonic() - start_time,
+                    "raw_response": raw_response}
 
+        config = self.load_access_config(workspace_dir)
+        valid_categories = set()
+        for wiki_conf in config.get("wikis", {}).values():
+            valid_categories.update(wiki_conf.get("categories", []))
+
+        wrote = 0
+        successful_ops: list[dict[str, str]] = []
         for op in operations:
             if op.get("action") != "write":
                 continue
@@ -492,13 +751,105 @@ class MemoryService(BaseService):
 
             if not all([wiki, category, slug, title, content]):
                 continue
-            if wiki not in writable:
+            if category in ("bulletins", "digested"):
                 continue
             if not self.validate_wiki_category(workspace_dir, wiki, category):
                 continue
 
             self.write_entry(workspace_dir, wiki, category, slug, title, content)
-            logger.info("Memory reflection wrote: %s/%s/%s", wiki, category, slug)
+            logger.info("Memory dream wrote: %s/%s/%s", wiki, category, slug)
+            wrote += 1
+            successful_ops.append({"category": category, "slug": slug, "title": title})
+
+        # Move all processed bulletins to digested
+        paths = [b["path"] for b in bulletins]
+        self.move_to_digested(workspace_dir, paths)
+        duration = __import__("time").monotonic() - start_time
+        logger.info("Memory dream complete: %d entries from %d bulletins", wrote, len(bulletins))
+
+        return {
+            "status": "completed",
+            "bulletins_processed": len(bulletins),
+            "entries_created": wrote,
+            "bulletin_slugs": [b["slug"] for b in bulletins],
+            "operations": successful_ops,
+            "duration_seconds": duration,
+            "raw_response": raw_response,
+        }
+
+    # ── Lint ─────────────────────────────────────────────────────
+
+    _LINT_SYSTEM_PROMPT = (
+        "You are a memory formatting agent. Restructure the following memory entry to match "
+        "the expected section headers for its category.\n"
+        "\n"
+        "Category: {category}\n"
+        "Expected headers: {headers}\n"
+        "\n"
+        "Rules:\n"
+        "- Preserve ALL existing information — do not remove or change facts\n"
+        "- Preserve all [[session:...]] transcript reference tags\n"
+        "- Reorganize content under the correct headers\n"
+        "- Use concise bullet points under each header\n"
+        "- Omit headers that have no content\n"
+        "- Place headers in the order listed above\n"
+        "- Return ONLY the content (no title header, no markdown fences)"
+    )
+
+    async def lint_entries(self, workspace_dir: Path) -> dict[str, Any]:
+        """Restructure all curated entries to match category templates."""
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        llm = LLMDispatchService(self.ctx)
+        linted = 0
+        by_category: dict[str, int] = {}
+
+        for category in self._CURATED_CATEGORIES:
+            tmpl = self._CATEGORY_TEMPLATES.get(category)
+            if not tmpl:
+                continue
+            headers = ", ".join(tmpl.keys())
+            entries = self.browse_category(workspace_dir, "core", category)
+            cat_count = 0
+
+            for entry in entries:
+                full = self.read_entry(workspace_dir, "core", category, entry["slug"])
+                if not full:
+                    continue
+
+                prompt = self._LINT_SYSTEM_PROMPT.format(
+                    category=category, headers=headers,
+                )
+                try:
+                    response = await llm.chat(
+                        messages=[
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": full},
+                        ],
+                        call_category="memory_lint",
+                        temperature=0.2,
+                        max_tokens=1000,
+                    )
+                except Exception:
+                    logger.warning("Lint failed for %s/%s", category, entry["slug"])
+                    continue
+
+                text = response.strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+                if text and text != full:
+                    self.write_entry(
+                        workspace_dir, "core", category,
+                        entry["slug"], entry["title"], text,
+                    )
+                    cat_count += 1
+
+            if cat_count:
+                by_category[category] = cat_count
+                linted += cat_count
+
+        return {"linted": linted, "categories": by_category}
 
     # ── Seed ────────────────────────────────────────────────────
 

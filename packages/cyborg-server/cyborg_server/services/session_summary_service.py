@@ -20,6 +20,10 @@ _SUMMARY_SYSTEM_PROMPT = (
     '- "topics": array of short topic strings discussed.\n'
     '- "memory_prompts": array of specific facts or action items worth remembering.\n'
     "\n"
+    "IMPORTANT: Always use actual participant names — NEVER write \"the user\" or \"a participant\".\n"
+    "The transcript labels each message with the speaker's name. Use those names in your output.\n"
+    "For example, write \"Mike's cat is Aspen\" not \"The user's cat is Aspen.\"\n"
+    "\n"
     "When referring to a person by name, use the contact reference format: {{contact:ID|Name}}\n"
     "For example, if contact ID 'abc123' has display name 'Mike', write: {{contact:abc123|Mike}}\n"
     "Use this format in summary, topics, and memory_prompts wherever a person's name appears.\n"
@@ -145,8 +149,11 @@ class SessionSummaryService(BaseService):
             if m["role"] == "assistant":
                 return "assistant"
             sender = m.get("sender_id")
-            if sender and sender in resolved:
-                return resolved[sender]
+            if sender:
+                if sender in resolved:
+                    return resolved[sender]
+                if sender in contact_map:
+                    return contact_map[sender]
             return "user"
 
         conversation_text = "\n".join(

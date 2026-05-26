@@ -2,7 +2,24 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
-## [Unreleased] - 2026-05-23
+## [Unreleased] - 2026-05-24
+
+### Added
+- Add centralized tool registry with `build_common_tools()` replacing duplicated tool assembly across WhatsApp and email dispatchers
+- Add tap dispatch system: follow-up LLM call when agent doesn't use send tool, replacing auto-send of raw text output
+- Add TapCard UI component in dashboard to visually distinguish tap follow-up dispatches from regular messages
+- Add dreaming memory system with bulletin pipeline, LLM-driven dream curation, and conflict resolution across entries
+- Add reply tracking to WhatsApp and email dispatch to detect whether agent called the send tool
+
+### Changed
+- Rewrite all session agenda templates (WhatsApp, email, phone) with prominent DELIVERY sections instructing the agent to use send tools
+- Update grounding rules to emphasize text output is invisible and only tool calls have effect
+- Convert memory writes to bulletins: both manual `memory_write` and automatic `reflect_and_update` now produce bulletins for dream curation instead of direct category writes
+- Trigger memory dream process after each heartbeat summary batch to curate bulletins into proper categories
+- Pass session metadata (time window, participants, contact IDs) through to memory reflection
+- Update ARCHREVIEW.md tool registry item to reflect centralized tool assembly
+
+## 2026-05-23
 
 ### Added
 - Add memory wiki subsystem with search, reflection from session summaries, bulk seeding CLI, dashboard search UI, and LLM function-calling tools

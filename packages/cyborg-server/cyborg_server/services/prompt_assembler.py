@@ -60,15 +60,18 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
 
     # Append grounding rules to reduce hallucinated tool claims
     parts.append(
+        "## CRITICAL: How to Respond\n"
+        "Your text output is NOT delivered to the user. Only tool calls have effect.\n"
+        "ALWAYS call send_whatsapp_message (or email_reply) as your final action — even for short replies, "
+        "even for acknowledgments, even for jokes. Without that call, nothing is sent.\n"
+        "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
+    )
+    parts.append(
         "## Grounding Rules\n"
         "- Only state that you have done something if you used a tool that confirmed success.\n"
         "- If you did not call a tool, the action did not happen — do not claim it did.\n"
         "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
         "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
-        "- Your text output is NOT delivered to the user. Only tool calls have effect. "
-        "Use as many tools as you need before replying — memory, files, docs, contacts, scripts. "
-        "When ready to respond, you MUST call the channel send tool (send_whatsapp_message or email_reply) "
-        "with your response. Without that call, nothing is sent."
     )
 
     combined = "\n\n".join(parts)
@@ -104,9 +107,22 @@ async def build_chat_messages(
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
     if session_key and db is not None:
-        # Use a lightweight approach — just query directly
+        is_group = ":group:" in session_key
+
+        # For group sessions, resolve sender_id to display names
+        sender_names: dict[str, str] = {}
+        if is_group:
+            participants = await db.fetch_all(
+                "SELECT contact_id, display_name FROM session_participants "
+                "WHERE session_key = ?",
+                (session_key,),
+            )
+            for p in participants:
+                if p["contact_id"] and p["display_name"]:
+                    sender_names[p["contact_id"]] = p["display_name"]
+
         rows = await db.fetch_all(
-            "SELECT role, content FROM session_messages "
+            "SELECT role, content, sender_id FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
             "AND rowid IN (SELECT rowid FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
@@ -115,8 +131,19 @@ async def build_chat_messages(
             (session_key, session_key, max_history),
         )
         for row in rows:
-            if row["content"]:
-                messages.append({"role": row["role"], "content": row["content"]})
+            if not row["content"]:
+                continue
+            # Skip stale NO_REPLY entries that poison future decisions
+            if row["role"] == "assistant" and row["content"].strip().upper().rstrip(".") in (
+                "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
+            ):
+                continue
+            if is_group and row["role"] == "user" and row["sender_id"]:
+                name = sender_names.get(row["sender_id"])
+                if name:
+                    messages.append({"role": "user", "content": f"[{name}] {row['content']}"})
+                    continue
+            messages.append({"role": row["role"], "content": row["content"]})
 
     if user_message is not None:
         messages.append({"role": "user", "content": user_message})
