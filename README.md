@@ -1,12 +1,8 @@
 # Cyborg
 
-Cyborg is a fully autonomous AI agent that replaces OpenClaw. It reasons, plans, communicates, and acts independently across WhatsApp, email, voice chat, and phone calls. A human describes an aim and success criteria, and Cyborg plans the work into tasks, executes them, and iterates until the criteria are met. It maintains its own memory, manages contacts and calendars, and can reach out to people on your behalf through any supported channel.
+Cyborg is an autonomous AI agent that communicates and acts across WhatsApp, email, voice chat, and phone calls. It maintains its own memory, manages contacts and calendars, and can reach out to people on your behalf through any supported channel.
 
 ## Feature Areas
-
-### Autonomous Projects and Tasks
-
-Cyborg's core execution engine manages projects with aims, methods, plans, and measurable success criteria. Projects break into tasks, tasks break into steps, and the system drives through them automatically. Each task follows a state machine (`planning` -> `pending` -> `active` -> `completed`/`failed`, with `paused` and `blocked` states). Tasks can be retried, escalated, or decomposed into subtasks. After each task completes, Cyborg evaluates whether success criteria are met, refines strategy if needed, and generates follow-up tasks for remaining gaps. Projects can auto-execute, progressing through plan steps without human intervention. A journal captures milestones, decisions, blockers, and results. Learning extraction produces reusable insights from completed projects.
 
 ### WhatsApp Messaging
 
@@ -26,7 +22,7 @@ Cyborg reads and sends email through AgentMail. A polling service checks inboxes
 
 ### Dispatch System
 
-Every agent interaction is tracked as a dispatch, whether it is a task assignment, a WhatsApp message response, an email reply, a voice conversation, or a phone call. Dispatches have their own lifecycle (active, completed, failed, timed_out, cancelled) with concurrency limits, stuck detection, and automatic tapping. This gives Cyborg a unified view of everything the agent is doing across all channels.
+Every agent interaction is tracked as a dispatch, whether it is a WhatsApp message response, an email reply, a voice conversation, or a phone call. Dispatches have their own lifecycle (active, completed, failed, timed_out, cancelled) with concurrency limits, stuck detection, and automatic tapping. This gives Cyborg a unified view of everything the agent is doing across all channels.
 
 ### Session Management
 
@@ -40,10 +36,6 @@ The reflection service lets users ask questions about any session's history. It 
 
 A React-based web dashboard provides real-time monitoring and management. It shows active sessions across all channels, LLM call statistics and latency metrics, contact management, workspace file browsing, phone call recordings with transcripts, and active dispatch monitoring. A WebSocket connection provides live updates.
 
-### Reasoning and Planning
-
-The project system uses LLM-powered reasoning to generate plans from aims, evaluate success criteria, refine strategy after task completions, generate follow-up tasks for gaps, produce health assessments, and extract learnings from completed projects.
-
 ### Calendars and Events
 
 Calendars support color-coded entries with events, recurring schedules, and recipient tracking. Events link to contacts and sessions for cross-channel reminders and notifications.
@@ -56,62 +48,6 @@ Persisted notifications with acknowledgement, delivery state, and repeat throttl
 
 ```text
 Legend: 1 --< many, >--< many-to-many, self = self-reference
-
-=== Tasks and Projects ===
-
-+------------------------+      +------------------------+
-| tasks                  |1 --< | task_steps             |
-| PK id                  |      | PK id                  |
-| FK parent_id -> tasks  |      | FK task_id -> tasks.id |
-| FK current_plan_id     |      +------------------------+
-|    -> plans.id         |
-| plan, result,          |1 --< +------------------------+
-| retry_config,          +------ | task_history           |
-| metadata, blocked_*,   |       | PK id                  |
-| notification_*,        |       | FK task_id -> tasks.id |
-| target_*, files        |       +------------------------+
-+------------------------+
-          |
-          | 1 --< +------------------------+
-          +------ | plans                  |
-          |       | PK id                  |
-          |       | FK task_id -> tasks.id |
-          |       | content, status        |
-          |       +------------------------+
-          |
-          ' self via parent_id
-
-+------------------------+      +------------------------+
-| projects               |1 --< | project_journal_entries|
-| PK id                  |      | PK id                  |
-| FK current_spec_id     |      | FK project_id          |
-|    -> project_specs.id |      +------------------------+
-| method, plan,          |
-| success_criteria,      |1 --< +------------------------+
-| subagent_session_key,  +------ | project_specs          |
-| metadata, blocked_*,   |       | PK id, FK project_id   |
-| notification_*,        |       | version_number, aim,   |
-| updated_at             |       | method, plan, criteria,|
-+------------------------+       | status, is_current     |
-          |                      +------------------------+
-          | 1 --< +------------------------+
-          +------ | project_insights       |
-          |       | PK id, FK project_id   |
-          |       | outcome_type, category,|
-          |       | insight_data           |
-          |       +------------------------+
-          |
-          | 1 --< +------------------------+
-          +------ | project_health_checks  |
-                  | PK id, FK project_id   |
-                  | health_score,          |
-                  | risk_level, indicators |
-                  +------------------------+
-
-+------------------------+ >--< +------------------------+ >--1 +------------------------+
-| projects               |      | project_tasks          |      | tasks                  |
-| PK id                  |      | PK (project_id,task_id)|      | PK id                  |
-+------------------------+      +------------------------+      +------------------------+
 
 === Sessions and Messaging ===
 
@@ -151,9 +87,8 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | dispatches             |
 | PK id                  |
 | session_key, category, |
-| status, task_id,       |
-| tap_count, duration,   |
-| metadata               |
+| status, tap_count,     |
+| duration, metadata     |
 +------------------------+
 
 === Phone Calls ===
@@ -182,8 +117,7 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | email_threads          |
 | PK id                  |
 | thread_id, session_key,|
-| contact_id, project_id,|
-| agenda                 |
+| contact_id, agenda     |
 +------------------------+
 
 === Calendars ===
@@ -210,33 +144,6 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 | notification_type,     |
 | status, delivery_*,    |
 | metadata               |
-+------------------------+
-
-+------------------------+
-| approvals              |
-| PK id                  |
-| approval_type,         |
-| entity_id, title,      |
-| proposal_data, status, |
-| priority               |
-+------------------------+
-
-+------------------------+
-| structured_logs        |
-| PK id (auto)           |
-| level, logger, message,|
-| event_type,            |
-| correlation_id,        |
-| project_id, extra_data |
-+------------------------+
-
-+------------------------+
-| prompt_history         |
-| PK id                  |
-| category, prompt_text, |
-| project_id, task_id,   |
-| session_key,           |
-| token_count_estimate   |
 +------------------------+
 
 +------------------------+
@@ -318,10 +225,8 @@ cat > ~/.config/cyborg/.env <<'EOF'
 CYBORG_PORT=8420
 CYBORG_DASHBOARD_SECRET=your-dashboard-secret
 
-# LLM (pick one or both)
+# LLM
 CYBORG_OPENAI_API_KEY=sk-...
-CYBORG_OPENCLAW_BASE_URL=https://openclaw.example
-CYBORG_OPENCLAW_TOKEN=secret
 
 # WhatsApp Bridge
 CYBORG_WHATSAPP_BRIDGE_ENABLED=true
@@ -395,6 +300,28 @@ The service listens on `127.0.0.1:8420` by default.
 - ReDoc: `http://localhost:8420/redoc`
 - Health: `http://localhost:8420/health`
 
+### Dashboard Development
+
+The dashboard is a React SPA (Vite + TypeScript + Tailwind) in `packages/cyborg-server/cyborg_server/ui_app/`.
+
+```bash
+cd packages/cyborg-server/cyborg_server/ui_app
+npm install
+npm run dev
+```
+
+The Vite dev server runs on port 5173 and proxies API and WebSocket requests to the backend at `127.0.0.1:8420`:
+
+| Path | Proxies to |
+|---|---|
+| `/dashboard/api` | `http://127.0.0.1:8420` |
+| `/dashboard/ws` | `ws://127.0.0.1:8420` |
+| `/phone` | `http://127.0.0.1:8420` |
+
+So the backend must be running separately (`uv run cyborg serve`) for the dev dashboard to work.
+
+For production, `npm run build` outputs static files to `ui_dist/`, which the FastAPI server serves at `/dashboard`.
+
 ## CLI
 
 ```bash
@@ -417,230 +344,19 @@ uv run cyborg uninstall    # Remove systemd service
 
 | Group | Commands |
 |---|---|
-| `task` | `create`, `list`, `get`, `update`, `start`, `complete`, `fail`, `retry`, `block`, `unblock`, `steps`, `step-add`, `subtask-create`, `history`, `delete` |
-| `task plan` | `submit`, `list`, `get`, `approve`, `approve-id`, `reject`, `reject-id` |
-| `project` | `create`, `list`, `get`, `update`, `start`, `pause`, `close`, `tasks`, `task-create`, `journal`, `journal-add`, `execute`, `evaluate`, `delete` |
-| `project spec` | `submit`, `list`, `get`, `approve`, `approve-id`, `reject`, `reject-id` |
-| `planning` | `generate`, `refine` |
-| `health` | `scan`, `analyze`, `projects-needing-attention`, `latest` |
-| `learning` | `extract-insights`, `similar-projects`, `active-insights`, `suggest-criteria` |
 | `contact` | `create`, `list`, `get`, `update`, `delete`, `by-phone`, `by-email`, `by-whatsapp-group`, `set-default`, `get-default`, `clear-default` |
 | `notification` | `list`, `get`, `ack`, `process-due` |
 | `session-route` | `create`, `list`, `get`, `update`, `delete` |
 | `calendar` | `create`, `list`, `get`, `update`, `delete` |
 | `event` | `create`, `list`, `get`, `update`, `delete`, `confirm`, `cancel`, `recipients`, `recipient-add`, `recipient-update` |
-| `context` | `summary`, `tasks`, `projects`, `calendar` |
+| `context` | `summary`, `calendar` |
 | `webhook` | `create`, `list`, `get`, `by-name`, `update`, `delete`, `deliveries`, `delivery-get`, `delivery-retry`, `process-pending` |
 | `call` | `list`, `get` |
-| `openai` | `chat`, `evaluate` |
-| `eval` | `run`, `list`, `show` |
-
-### Structured Payload Flags
-
-- Use `--metadata-json`, `--details-json`, `--plan-json`, and `--success-criteria-json` when an endpoint accepts nested JSON.
-- Repeat `--project-id`, `--task-id`, `--event`, and `--whatsapp-group` to supply multiple values.
-- Use `--session-key`, `--channel`, and `--chat-id` on tasks, contacts, and calendars to identify the source session.
-- Use `--target-kind`, `--target-session-key`, `--target-chat-id`, and `--target-contact-id` on tasks to identify the target session where the task should be actioned.
-- `--target-kind group` routes to a WhatsApp group and should be paired with `--target-session-key` or `--target-chat-id`.
-- `--target-kind dm` routes to a WhatsApp direct message and should be paired with `--target-contact-id`.
-
-## Task States
-
-| State | Description |
-|---|---|
-| `planning` | Task created and awaiting plan submission or plan approval |
-| `pending` | Plan approved and task is ready to start |
-| `active` | Task is in progress |
-| `paused` | Task temporarily paused |
-| `blocked` | Task waiting for user input (with resume instructions) |
-| `completed` | Task finished successfully |
-| `failed` | Task failed (may be retryable depending on retry policy) |
-| `deprecated` | Task no longer relevant |
-
-### Blocked Tasks
-
-When a task needs user input to proceed, put it in `blocked` state with full context:
-
-```bash
-curl -X POST http://127.0.0.1:8420/api/v1/tasks/{task_id}/block \
-  -H 'content-type: application/json' \
-  -d '{
-    "reason": "Waiting for API key from David",
-    "resume_instructions": "When unblocked: 1) Add the API key to .env file as FIRECRAWL_API_KEY. 2) Test the connection with curl to /health endpoint. 3) Update task status to active and continue with step 3 (scrape operation)."
-  }'
-```
-
-Resume instructions must be complete enough that anyone (including a future agent session) can resume the task without remembering the conversation context.
-
-To unblock:
-
-```bash
-curl -X POST http://127.0.0.1:8420/api/v1/tasks/{task_id}/unblock \
-  -H 'content-type: application/json' \
-  -d '{"notes": "David provided the key via WhatsApp"}'
-```
-
-### Complete a Task with Result Summary
-
-When completing a task, provide a result summary that will be added to any parent projects' journals:
-
-```bash
-curl -X POST http://127.0.0.1:8420/api/v1/tasks/{task_id}/complete \
-  -H 'content-type: application/json' \
-  -d '{
-    "result_summary": "Successfully extracted 150 records. Data saved to /data/output.csv. 3 records failed validation and were logged to errors.json."
-  }'
-```
-
-## Project Lifecycle
-
-1. Create a project with a title and description
-2. Submit a project spec with `aim`, `method`, `plan`, and `success_criteria`
-3. The spec must be approved before the project can be started
-4. Once approved, start the project -- linked tasks become actionable
-5. Tasks can be created manually or generated by AI planning
-6. Completing a task automatically: unblocks dependent tasks, generates journal entries, and may trigger strategy refinement
-7. Auto-executing projects progress through plan steps autonomously
-8. Success criteria are evaluated to determine project completion
-
-```bash
-curl -X POST http://127.0.0.1:8420/api/v1/projects \
-  -H 'content-type: application/json' \
-  -d '{
-    "title": "Q1 Data Migration",
-    "aim": "Migrate legacy data to new schema",
-    "description": "Full migration of customer records from legacy system"
-  }'
-
-curl -X POST http://127.0.0.1:8420/api/v1/projects/{project_id}/specs \
-  -H 'content-type: application/json' \
-  -d '{
-    "aim": "Migrate legacy data to new schema",
-    "method": "Extract the data, transform it, load it into the new schema, and verify the output.",
-    "plan": [{"title":"Extract","description":"Export source data","criteria":"data exported","order":0}],
-    "success_criteria": [{"check":"records_migrated > 0","description":"Some records were migrated"}]
-  }'
-
-curl -X POST http://127.0.0.1:8420/api/v1/projects/{project_id}/specs/{spec_id}/approve \
-  -H 'content-type: application/json' \
-  -d '{"approver": "Mike"}'
-
-curl -X POST http://127.0.0.1:8420/api/v1/projects/{project_id}/start
-```
-
-### Project Journal
-
-```bash
-curl -X POST http://127.0.0.1:8420/api/v1/projects/{project_id}/journal \
-  -H 'content-type: application/json' \
-  -d '{
-    "entry_type": "milestone",
-    "content": "Completed phase 1: Database schema designed and approved",
-    "metadata": {"phase": 1, "reviewer": "David"}
-  }'
-```
-
-Entry types: `note`, `milestone`, `decision`, `blocker`, `result`
-
-## Cross-Session Task Routing
-
-Tasks can carry both a source session and a target session.
-
-- **Source session**: `--channel`, `--session-key`, `--chat-id`. This is where Cyborg sends planning prompts, approval requests, reminders, and status updates.
-- **Target session**: `--target-kind`, `--target-session-key`, `--target-chat-id`, `--target-contact-id`. This is where the task should be actioned.
-- For DM targets, look up or create the contact first, then pass its id with `--target-contact-id`.
-- For group targets, register a session route so Cyborg can resolve the concrete target session key.
-- Standard WhatsApp DM targets do not need a registered DM session route. Cyborg derives the target session key as `agent:<agent-id>:whatsapp:direct:+<e164>` from the contact phone number.
-
-```bash
-# Register a group session route
-uv run cyborg session-route create agent:main:whatsapp:group:120363426096069246@g.us \
-  --kind group \
-  --chat-id 120363426096069246@g.us
-
-# Route a task to a group
-uv run cyborg task create "Check if the family is free on Friday" \
-  --plan "1. Ask the family group. 2. Collect answers. 3. Report back." \
-  --channel whatsapp \
-  --session-key agent:main:whatsapp:group:120363400000000000@g.us \
-  --target-kind group \
-  --target-session-key agent:main:whatsapp:group:120363426096069246@g.us
-
-# Route a task to a DM
-uv run cyborg task create "Get Alice's ETA" \
-  --plan "1. DM Alice. 2. Wait for reply. 3. Report back." \
-  --channel whatsapp \
-  --session-key agent:main:whatsapp:group:120363400000000000@g.us \
-  --target-kind dm \
-  --target-contact-id <contact-id>
-```
-
-## AI-Powered Planning
-
-Cyborg can use LLM reasoning capabilities to generate and refine project plans:
-
-```bash
-# Generate a plan from a project aim
-uv run cyborg planning generate \
-  --aim "Migrate legacy data to new schema" \
-  --method "Extract, transform, load" \
-  --context-scope standard \
-  --project-id <project-id>
-
-# Refine a strategy based on recent outcomes
-uv run cyborg planning refine \
-  --project-id <project-id>
-```
-
-## Health Monitoring
-
-```bash
-# Scan all active projects
-uv run cyborg health scan
-
-# Analyze a specific project
-uv run cyborg health analyze --project-id <project-id>
-
-# List projects needing attention
-uv run cyborg health projects-needing-attention
-
-# Show latest health for a project
-uv run cyborg health latest --project-id <project-id>
-```
-
-## Learning
-
-```bash
-# Extract insights from a completed project
-uv run cyborg learning extract-insights --project-id <project-id>
-
-# Find similar past projects
-uv run cyborg learning similar-projects --aim "Migrate legacy data"
-
-# List active insights
-uv run cyborg learning active-insights
-
-# Get success criteria suggestions
-uv run cyborg learning suggest-criteria --aim "Build authentication system"
-```
-
-## Context API
-
-Compact context summaries for injecting into agent sessions:
-
-```bash
-# Full summary
-curl http://127.0.0.1:8420/api/v1/context/summary
-
-# Tasks only
-curl http://127.0.0.1:8420/api/v1/context/tasks
-
-# Projects only
-curl http://127.0.0.1:8420/api/v1/context/projects
-
-# Calendar only
-curl http://127.0.0.1:8420/api/v1/context/calendar
-```
+| `email` | `inbox-list`, `inbox-get`, `send`, `reply`, `process-pending` |
+| `whatsapp` | `status`, `pair`, `send`, `bridge-status` |
+| `memory` | `seed` |
+| `openai` | `prompt` |
+| `eval` | `list`, `run`, `history` |
 
 ## Calendars and Events
 
@@ -669,7 +385,7 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks \
     "name": "my-webhook",
     "url": "https://example.com/webhook",
     "secret": "supersecret",
-    "events": ["task.created", "task.completed"],
+    "events": ["dispatch.created", "dispatch.completed"],
     "retry_count": 3
   }'
 
@@ -692,7 +408,6 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks/process-pending
 | `CYBORG_DB_POOL_SIZE` | `4` | Connection pool size |
 | `CYBORG_PUBLIC_URL` | *(none)* | Public URL for webhook callbacks |
 | `CYBORG_DASHBOARD_SECRET` | *(none)* | Shared secret for dashboard operations |
-| `CYBORG_PROJECTS_BASE_DIR` | `~/.openclaw/workspace/projects` | Base directory for project workspaces |
 | `CYBORG_HEARTBEAT_INTERVAL_SECONDS` | `60` | Heartbeat and notification dispatch interval |
 
 ### LLM
@@ -704,17 +419,6 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks/process-pending
 | `CYBORG_OPENAI_DEFAULT_MODEL` | `gpt-5.4-mini` | Default model |
 | `CYBORG_OPENAI_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `CYBORG_OPENAI_WEB_SEARCH` | `false` | Enable web search tool |
-
-### OpenClaw Integration
-
-| Variable | Description |
-|---|---|
-| `CYBORG_OPENCLAW_BASE_URL` | OpenClaw HTTP base URL |
-| `CYBORG_OPENCLAW_TOKEN` | OpenClaw API token |
-| `CYBORG_OPENCLAW_GATEWAY_URL` | OpenClaw gateway websocket URL (defaults from base URL) |
-| `CYBORG_OPENCLAW_GATEWAY_TOKEN` | Gateway auth token (defaults to `CYBORG_OPENCLAW_TOKEN`) |
-| `CYBORG_OPENCLAW_AGENT_ID` | Agent ID for target task-assignment turns |
-| `CYBORG_OPENCLAW_TIMEOUT_SECONDS` | Request timeout |
 
 ### WhatsApp Bridge
 
@@ -818,27 +522,6 @@ Skills can then use `os.environ.get("GOOGLE_PLACES_API_KEY")` or rely on SDK aut
 ```bash
 uv run pytest
 ```
-
-The default suite is Cyborg-side and does not require a live OpenClaw model or channel transport.
-
-### OpenClaw Live Acceptance Tests
-
-These exercise a real OpenClaw gateway/model against Cyborg's reasoning prompts and synthetic task-assignment sessions.
-
-Required environment:
-
-- `OPENCLAW_ACCEPTANCE=1` or `--openclaw-live`
-- `OPENCLAW_ACCEPTANCE_GATEWAY_URL`
-- `OPENCLAW_ACCEPTANCE_GATEWAY_TOKEN`
-- optional: `OPENCLAW_ACCEPTANCE_AGENT_ID`
-
-Fallback environment variables: `CYBORG_OPENCLAW_GATEWAY_URL`, `CYBORG_OPENCLAW_TOKEN`, `CYBORG_OPENCLAW_AGENT_ID`
-
-```bash
-uv run pytest tests/openclaw_acceptance -m openclaw_live --openclaw-live -q
-```
-
-Failures write artifacts under `.pytest_cache/openclaw_acceptance/` for prompt, gateway, and history debugging.
 
 ## Data Storage
 
