@@ -433,6 +433,41 @@ func (c *Client) handleGroupInfo(evt *events.GroupInfo) {
 	}
 }
 
+// SyncGroups fetches all joined groups and emits GroupSyncEvent for each.
+func (c *Client) SyncGroups() {
+	groups, err := c.client.GetJoinedGroups(context.Background())
+	if err != nil {
+		c.log.Warn("failed to fetch joined groups", "error", err)
+		return
+	}
+	c.log.Info("fetched joined groups", "count", len(groups))
+	for _, g := range groups {
+		var participants []GroupParticipantInfo
+		for _, p := range g.Participants {
+			resolvedJID := c.ResolveLID(p.JID)
+			participants = append(participants, GroupParticipantInfo{
+				JID:          resolvedJID.String(),
+				DisplayName:  p.DisplayName,
+				IsAdmin:      p.IsAdmin,
+				IsSuperAdmin: p.IsSuperAdmin,
+			})
+		}
+		description := ""
+		if g.Topic != "" {
+			description = g.Topic
+		}
+		if c.onEvent != nil {
+			c.onEvent(GroupSyncEvent{
+				GroupJID:     g.JID.String(),
+				GroupName:    g.Name,
+				Description:  description,
+				Participants: participants,
+				Timestamp:    g.GroupCreated.UTC().Format("2006-01-02T15:04:05.000Z"),
+			})
+		}
+	}
+}
+
 func (c *Client) Close() error {
 	c.client.Disconnect()
 	return c.container.Close()

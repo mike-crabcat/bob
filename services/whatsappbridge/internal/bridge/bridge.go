@@ -63,6 +63,9 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 	b.srv.OnConnect(func() {
 		b.log.Info("cyborg client connected, draining incoming queue")
 		b.drainIncoming()
+		if b.wa.IsConnected() {
+			go b.wa.SyncGroups()
+		}
 	})
 	b.wa.SetEventHandler(b.handleWhatsAppEvent)
 
@@ -106,6 +109,7 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 	case whatsapp.ConnectedEvent:
 		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeConnected, wsproto.ConnectedPayload{}))
 		b.drainOutgoing()
+		go b.wa.SyncGroups()
 
 	case whatsapp.DisconnectedEvent:
 		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeDisconnected, wsproto.DisconnectedPayload{
