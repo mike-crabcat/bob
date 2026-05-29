@@ -511,6 +511,27 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
                 "last_active": _utc(row["last_active_at"]),
             })
 
+    groups: list[dict[str, Any]] = []
+    groups_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='whatsappgroup_members'"
+    )
+    if groups_table:
+        group_rows = await db.fetch_all(
+            """SELECT g.name, g.whatsapp_jid, gm.is_admin, gm.joined_at
+               FROM whatsappgroup_members gm
+               JOIN whatsappgroups g ON g.id = gm.group_id
+               WHERE gm.contact_id = ? AND gm.left_at IS NULL AND g.deleted_at IS NULL
+               ORDER BY g.name""",
+            (contact_id,),
+        )
+        for row in group_rows:
+            groups.append({
+                "name": row["name"],
+                "jid": row["whatsapp_jid"],
+                "is_admin": bool(row["is_admin"]),
+                "joined_at": _utc(row["joined_at"]),
+            })
+
     return {
         "id": contact["id"],
         "name": contact["name"],
@@ -520,6 +541,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         "is_default": bool(contact["is_default"]),
         "metadata": json.loads(contact["metadata"]) if contact["metadata"] else {},
         "sessions": sessions,
+        "groups": groups,
         "created_at": _utc(contact["created_at"]),
         "updated_at": _utc(contact["updated_at"]),
     }
