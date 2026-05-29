@@ -1,7 +1,44 @@
 -- Create whatsappgroups and whatsappgroup_members tables,
 -- and remove whatsapp_groups column from contacts.
+-- Foreign keys must be off for the contacts table recreation.
 
--- 1. Create whatsappgroups table
+PRAGMA foreign_keys = OFF;
+
+-- 1. Remove whatsapp_groups column from contacts (SQLite requires table recreation)
+--    Include ALL current columns (including is_default and is_trusted from later migrations).
+
+-- Clean up any leftover contacts_new from a failed prior attempt
+DROP TABLE IF EXISTS contacts_new;
+
+CREATE TABLE contacts_new (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    phone_number TEXT NOT NULL UNIQUE,
+    email TEXT UNIQUE,
+    metadata TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    is_trusted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+INSERT INTO contacts_new
+    (id, name, phone_number, email, metadata, is_default, is_trusted, created_at, updated_at, deleted_at)
+SELECT
+    id, name, phone_number, email, metadata, is_default, is_trusted, created_at, updated_at, deleted_at
+FROM contacts;
+
+DROP TABLE contacts;
+ALTER TABLE contacts_new RENAME TO contacts;
+
+-- Recreate indexes from 80_contacts.sql
+CREATE INDEX IF NOT EXISTS idx_contacts_phone_number ON contacts(phone_number);
+CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
+CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
+CREATE INDEX IF NOT EXISTS idx_contacts_deleted_at ON contacts(deleted_at);
+
+-- 2. Create whatsappgroups table
 
 CREATE TABLE IF NOT EXISTS whatsappgroups (
     id TEXT PRIMARY KEY,
@@ -19,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_whatsappgroups_whatsapp_jid ON whatsappgroups(wha
 CREATE INDEX IF NOT EXISTS idx_whatsappgroups_name ON whatsappgroups(name);
 CREATE INDEX IF NOT EXISTS idx_whatsappgroups_deleted_at ON whatsappgroups(deleted_at);
 
--- 2. Create whatsappgroup_members table
+-- 3. Create whatsappgroup_members table
 
 CREATE TABLE IF NOT EXISTS whatsappgroup_members (
     id TEXT PRIMARY KEY,
@@ -38,30 +75,4 @@ CREATE TABLE IF NOT EXISTS whatsappgroup_members (
 CREATE INDEX IF NOT EXISTS idx_whatsappgroup_members_group_id ON whatsappgroup_members(group_id);
 CREATE INDEX IF NOT EXISTS idx_whatsappgroup_members_contact_id ON whatsappgroup_members(contact_id);
 
--- 3. Remove whatsapp_groups column from contacts (SQLite requires table recreation)
-
-CREATE TABLE IF NOT EXISTS contacts_new (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    phone_number TEXT NOT NULL UNIQUE,
-    email TEXT UNIQUE,
-    metadata TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted_at TEXT
-);
-
-INSERT INTO contacts_new
-    (id, name, phone_number, email, metadata, created_at, updated_at, deleted_at)
-SELECT
-    id, name, phone_number, email, metadata, created_at, updated_at, deleted_at
-FROM contacts;
-
-DROP TABLE contacts;
-ALTER TABLE contacts_new RENAME TO contacts;
-
--- Recreate indexes from 80_contacts.sql (minus the whatsapp_groups column)
-CREATE INDEX IF NOT EXISTS idx_contacts_phone_number ON contacts(phone_number);
-CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
-CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
-CREATE INDEX IF NOT EXISTS idx_contacts_deleted_at ON contacts(deleted_at);
+PRAGMA foreign_keys = ON;
