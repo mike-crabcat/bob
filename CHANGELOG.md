@@ -2,6 +2,31 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## [Unreleased] - 2026-05-28
+
+### Added
+- Add subagent system with Claude Code CLI integration, replacing skill-specific delegation with a generic async subagent service that spawns Claude processes and tracks status, cost, and results
+- Add subagent tools (create_subagent, message_subagent, kill_subagent) for LLM function calling, with automatic result injection back into parent WhatsApp sessions
+- Add subagent lifecycle management: stale subagent cleanup on startup, status tracking, and event-driven result delivery via event bus
+- Add session messages to dashboard session detail view, showing conversation entries from session_messages table alongside LLM calls and summaries in the timeline
+- Add subagent session classification in dashboard to distinguish subagent sessions from WhatsApp sessions by key prefix
+- Add visual distinction for subagent messages in session timeline: amber for task messages (→ subagent) and teal for response messages (subagent →)
+- Add diagnostic logging for empty OpenAI responses to capture refusal details, status, and output types
+- Add skill-guru skill to guide creation of new workspace skills via subagent delegation
+
+### Changed
+- Replace full memory index (~8KB) in system prompt with concise memory tool reference (~400 bytes), reducing per-call token usage by instructing the agent to use memory_search instead of loading all entries
+- Add explicit send_whatsapp_message instruction to incoming WhatsApp user prompts to improve tool call reliability with gpt-5.4-mini
+- Update subagent result notification to instruct agent to relay results via send_whatsapp_message instead of only referencing message_subagent/kill_subagent
+- Update session agenda template to reference subagent tools instead of deprecated skill delegation
+- Replace skill delegation tools with subagent tools in the tool registry
+
+### Fixed
+- Fix WhatsApp reply delivery failure caused by empty chat_id on DM session routes: store chat_id (WhatsApp JID) alongside contact_id for DM routes so subagent result dispatch can resolve the outbound address
+- Relax session_routes CHECK constraint and Pydantic validator to allow DM routes to include chat_id
+- Backfill missing chat_id on all existing WhatsApp DM routes from metadata sender_jid
+- Fix subagent sessions displaying as "whatsapp" channel in dashboard by checking subagent: prefix before :whatsapp: in channel parser
+
 ## [Unreleased] - 2026-05-24
 
 ### Added

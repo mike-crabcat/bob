@@ -140,6 +140,7 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			SenderName:        evt.SenderName,
 			Text:              evt.Text,
 			QuotedMessageID:   evt.QuotedMessageID,
+			MentionedJIDs:     evt.MentionedJIDs,
 			Timestamp:         evt.Timestamp,
 		}
 		if len(evt.Contacts) > 0 {
@@ -183,6 +184,34 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 		} else {
 			b.outQ.MarkFailed(evt.RequestID)
 		}
+
+	case whatsapp.GroupMemberChangeEvent:
+		payload := wsproto.GroupMemberChangePayload{
+			GroupJID:   evt.GroupJID,
+			GroupName:  evt.GroupName,
+			SenderJID:  evt.SenderJID,
+			JoinedJIDs: evt.JoinedJIDs,
+			LeftJIDs:   evt.LeftJIDs,
+			Timestamp:  evt.Timestamp,
+		}
+		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeGroupMemberChange, payload))
+
+	case whatsapp.GroupSyncEvent:
+		payload := wsproto.GroupSyncPayload{
+			GroupJID:    evt.GroupJID,
+			GroupName:   evt.GroupName,
+			Description: evt.Description,
+			Timestamp:   evt.Timestamp,
+		}
+		for _, p := range evt.Participants {
+			payload.Participants = append(payload.Participants, wsproto.GroupParticipantPayload{
+				JID:          p.JID,
+				DisplayName:  p.DisplayName,
+				IsAdmin:      p.IsAdmin,
+				IsSuperAdmin: p.IsSuperAdmin,
+			})
+		}
+		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeGroupSync, payload))
 	}
 }
 

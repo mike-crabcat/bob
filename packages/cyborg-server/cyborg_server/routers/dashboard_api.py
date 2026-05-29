@@ -22,8 +22,8 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "
 def _resolve_workspace_path(settings: Any, path: str) -> Path:
     """Resolve a relative path against the workspace dir, preventing traversal."""
     workspace = settings.harness.workspace_dir.expanduser().resolve()
-    resolved = (workspace / path).resolve() if path else workspace
-    if not str(resolved).startswith(str(workspace)):
+    resolved = (workspace / path) if path else workspace
+    if ".." in Path(path).parts:
         raise ValueError(f"Path escapes workspace directory")
     return resolved
 
@@ -42,6 +42,8 @@ def _utc_now() -> str:
 def _parse_channel(session_key: str) -> str:
     if ":voice:" in session_key or session_key.startswith("bobvoice:"):
         return "voice"
+    if session_key.startswith("subagent:"):
+        return "subagent"
     if ":whatsapp:" in session_key:
         return "whatsapp"
     if ":email:" in session_key:
@@ -364,10 +366,31 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
     )
     current_agenda = agenda_row["agenda"] if agenda_row else ""
 
+    # Session messages (conversation entries from session_messages table)
+    messages: list[dict[str, Any]] = []
+    msgs_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_messages'"
+    )
+    if msgs_table:
+        m_rows = await db.fetch_all(
+            "SELECT id, role, content, channel, created_at FROM session_messages "
+            "WHERE session_key = ? ORDER BY created_at ASC LIMIT 200",
+            (session_key,),
+        )
+        for row in m_rows:
+            messages.append({
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "channel": row["channel"],
+                "created_at": _utc(row["created_at"]),
+            })
+
     return {
         "session_key": session_key,
         "channel": _parse_channel(session_key),
         "calls": calls,
+        "messages": messages,
         "participants": participants,
         "summaries": summaries,
         "current_agenda": current_agenda,
@@ -459,7 +482,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         return {"error": "unauthorized"}
     db = _db(request)
     contact = await db.fetch_one(
-        """SELECT id, name, phone_number, email, whatsapp_groups, metadata,
+        """SELECT id, name, phone_number, email, metadata,
                   is_trusted, is_default, created_at, updated_at
            FROM contacts WHERE id = ? AND deleted_at IS NULL""",
         (contact_id,),
@@ -495,7 +518,6 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         "email": contact["email"],
         "is_trusted": bool(contact["is_trusted"]),
         "is_default": bool(contact["is_default"]),
-        "whatsapp_groups": json.loads(contact["whatsapp_groups"]) if contact["whatsapp_groups"] else [],
         "metadata": json.loads(contact["metadata"]) if contact["metadata"] else {},
         "sessions": sessions,
         "created_at": _utc(contact["created_at"]),
@@ -603,7 +625,7 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
     workspace = settings.harness.workspace_dir.expanduser().resolve()
     entries: list[dict[str, Any]] = []
 
-    def _walk(dir_path: Path, current_depth: int) -> None:
+    def _walk(dir_path: Path, prefix: str, current_depth: int) -> None:
         if len(entries) >= 200:
             return
         try:
@@ -613,8 +635,8 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
         for child in children:
             if len(entries) >= 200:
                 break
-            rel = str(child.relative_to(workspace))
-            entry: dict[str, Any] = {"name": rel, "type": "dir" if child.is_dir() else "file"}
+            name = f"{prefix}{child.name}" if prefix else child.name
+            entry: dict[str, Any] = {"name": name, "type": "dir" if child.is_dir() else "file"}
             if child.is_file():
                 try:
                     entry["size_bytes"] = child.stat().st_size
@@ -622,9 +644,10 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
                     pass
             entries.append(entry)
             if child.is_dir() and current_depth < depth:
-                _walk(child, current_depth + 1)
+                _walk(child, f"{name}/", current_depth + 1)
 
-    _walk(target, 1)
+    prefix = f"{path}/" if path else ""
+    _walk(target, prefix, 1)
     return {"entries": entries, "path": path, "root": str(workspace)}
 
 
@@ -1116,6 +1139,117 @@ async def reject_skill_delegation(request: Request, delegation_id: str) -> dict[
         return result
     except Exception as exc:
         logger.error("Skill reject failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Subagents ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/subagents")
+async def get_subagents(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    rows = await db.fetch_all(
+        """SELECT id, parent_session_key, session_key, task, status,
+                  result, error_message, agent_type, cost_usd,
+                  created_at, updated_at
+           FROM subagents
+           ORDER BY created_at DESC LIMIT 50"""
+    )
+    subagents: list[dict[str, Any]] = []
+    for row in rows:
+        subagents.append({
+            "id": row["id"],
+            "parent_session_key": row["parent_session_key"],
+            "session_key": row["session_key"],
+            "task_preview": (row["task"] or "")[:200],
+            "status": row["status"],
+            "result_preview": (row["result"] or "")[:200],
+            "error_message": row["error_message"],
+            "agent_type": row["agent_type"],
+            "cost_usd": row["cost_usd"] or 0,
+            "created_at": _utc(row["created_at"]),
+            "updated_at": _utc(row["updated_at"]),
+        })
+    return {"subagents": subagents}
+
+
+@router.get("/api/subagents/{subagent_id}")
+async def get_subagent_detail(request: Request, subagent_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one(
+        """SELECT id, parent_session_key, session_key, task, status,
+                  result, error_message, agent_type, claude_session_id, cost_usd,
+                  created_at, updated_at
+           FROM subagents WHERE id = ?""",
+        (subagent_id,),
+    )
+    if not row:
+        return {"error": "not found"}
+    return {
+        "id": row["id"],
+        "parent_session_key": row["parent_session_key"],
+        "session_key": row["session_key"],
+        "task": row["task"],
+        "status": row["status"],
+        "result": row["result"],
+        "error_message": row["error_message"],
+        "agent_type": row["agent_type"],
+        "claude_session_id": row["claude_session_id"],
+        "cost_usd": row["cost_usd"] or 0,
+        "created_at": _utc(row["created_at"]),
+        "updated_at": _utc(row["updated_at"]),
+    }
+
+
+@router.post("/api/subagents/{subagent_id}/message")
+async def message_subagent(request: Request, subagent_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+    if not message:
+        return {"ok": False, "error": "message is required"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.subagent_service import SubagentService
+
+    ctx = AppContext(
+        db=_db(request),
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
+    svc = SubagentService(ctx)
+    try:
+        result = await svc.message_subagent(subagent_id, message)
+        return result
+    except Exception as exc:
+        logger.error("Subagent message failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/subagents/{subagent_id}/kill")
+async def kill_subagent(request: Request, subagent_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.subagent_service import SubagentService
+
+    ctx = AppContext(
+        db=_db(request),
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
+    svc = SubagentService(ctx)
+    try:
+        result = await svc.kill_subagent(subagent_id)
+        return result
+    except Exception as exc:
+        logger.error("Subagent kill failed: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 

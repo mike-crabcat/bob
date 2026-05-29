@@ -29,6 +29,7 @@ type IncomingMessageEvent struct {
 	SenderName        string
 	Text              string
 	QuotedMessageID   string
+	MentionedJIDs     []string
 	Contacts          []SharedContact
 	Timestamp         string
 }
@@ -44,4 +45,28 @@ type SendMessageResultEvent struct {
 	Success           bool
 	WhatsAppMessageID string
 	Error             string
+}
+
+type GroupMemberChangeEvent struct {
+	GroupJID   string
+	GroupName  string
+	SenderJID  string
+	JoinedJIDs []string
+	LeftJIDs   []string
+	Timestamp  string
+}
+
+type GroupSyncEvent struct {
+	GroupJID     string
+	GroupName    string
+	Description  string
+	Participants []GroupParticipantInfo
+	Timestamp    string
+}
+
+type GroupParticipantInfo struct {
+	JID          string
+	DisplayName  string
+	IsAdmin      bool
+	IsSuperAdmin bool
 }

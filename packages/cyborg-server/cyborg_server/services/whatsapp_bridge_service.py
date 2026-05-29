@@ -112,6 +112,8 @@ class WhatsAppBridgeService(BaseService):
         self._last_bridge_status: dict[str, Any] = {}
         self._last_qr_code: str | None = None
         self._last_pairing_code: str | None = None
+        self._subagent_queue: asyncio.Queue[dict[str, Any]] | None = None
+        self._subagent_listener_task: asyncio.Task | None = None
 
     @property
     def connected(self) -> bool:
@@ -123,6 +125,13 @@ class WhatsAppBridgeService(BaseService):
             return
         self._task = asyncio.create_task(self._run_loop(), name="whatsapp_bridge")
 
+        # Subscribe to subagent result events and trigger dispatches
+        if self.ctx.event_bus:
+            self._subagent_queue = self.ctx.event_bus.subscribe()
+            self._subagent_listener_task = asyncio.create_task(
+                self._subagent_event_loop(), name="subagent_listener"
+            )
+
     async def stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
@@ -131,6 +140,16 @@ class WhatsAppBridgeService(BaseService):
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._subagent_listener_task is not None:
+            self._subagent_listener_task.cancel()
+            try:
+                await self._subagent_listener_task
+            except asyncio.CancelledError:
+                pass
+            self._subagent_listener_task = None
+        if self._subagent_queue is not None and self.ctx.event_bus:
+            self.ctx.event_bus.unsubscribe(self._subagent_queue)
+            self._subagent_queue = None
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
@@ -267,7 +286,212 @@ class WhatsAppBridgeService(BaseService):
         except Exception:
             logger.warning("failed to send ack for %s", message_id, exc_info=True)
 
+    async def _subagent_event_loop(self) -> None:
+        """Listen for subagent.result_ready events and trigger dispatches."""
+        assert self._subagent_queue is not None
+        try:
+            while True:
+                event = await self._subagent_queue.get()
+                event_type = event.get("type", "")
+                if event_type != "subagent.result_ready":
+                    continue
+                payload = event.get("payload", {})
+                parent_session_key = payload.get("parent_session_key", "")
+                if ":whatsapp:" not in parent_session_key:
+                    continue
+                try:
+                    await self._dispatch_subagent_result(parent_session_key)
+                except Exception:
+                    logger.exception("failed to dispatch subagent result for %s", parent_session_key)
+        except asyncio.CancelledError:
+            pass
+
+    async def _dispatch_subagent_result(self, session_key: str) -> None:
+        """Dispatch a subagent result into the parent WhatsApp session."""
+        settings = self._get_settings()
+        if not settings.openai.enabled:
+            return
+
+        # Resolve context from session route
+        route = await self.db.fetch_one(
+            "SELECT channel, kind, contact_id, chat_id, metadata FROM session_routes WHERE session_key = ?",
+            (session_key,),
+        )
+        if not route or route["channel"] != "whatsapp":
+            return
+
+        chat_id = route["chat_id"]
+        contact_id = route["contact_id"]
+        is_trusted = False
+        if contact_id:
+            contact = await self.db.fetch_one(
+                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
+                (contact_id,),
+            )
+            if contact:
+                is_trusted = bool(contact.get("is_trusted", 0))
+
+        # Build system prompt
+        from cyborg_server.services.session_agenda_service import SessionAgendaService
+        from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+
+        agenda_svc = SessionAgendaService(self.ctx)
+        agenda = await agenda_svc.get_effective_agenda(
+            session_key, "whatsapp",
+            contact_id=contact_id, is_trusted=is_trusted,
+        )
+        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        participants_prompt = await self._build_participants_prompt(session_key)
+
+        # Load trusted memory if applicable
+        memory_prompt = ""
+        if is_trusted:
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            trusted_wikis = await mem_svc.resolve_accessible_wikis(
+                settings.harness.workspace_dir, session_key
+            )
+            config = mem_svc.load_access_config(settings.harness.workspace_dir)
+            trusted_only = [
+                w for w in trusted_wikis
+                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
+            ]
+            if trusted_only:
+                memory_prompt = mem_svc.build_memory_index(
+                    settings.harness.workspace_dir, trusted_only
+                )
+
+        system_content = "\n\n".join(
+            p for p in (workspace_prompt, agenda, participants_prompt, memory_prompt) if p
+        )
+
+        # Build tools
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+        from cyborg_server.services.tools import Tool
+        from cyborg_server.services.tool_registry import build_common_tools
+        from cyborg_server.services.group_tools import make_group_tools
+
+        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+
+        # Add group tools if this is a group session
+        route_for_kind = await self.db.fetch_one(
+            "SELECT kind FROM session_routes WHERE session_key = ?",
+            (session_key,),
+        )
+        if route_for_kind and route_for_kind["kind"] == "group":
+            tools.extend(make_group_tools(self.ctx, session_key=session_key))
+
+        wa_service = self
+        message_was_sent = [False]
+        sent_texts: list[str] = []
+
+        async def _send_whatsapp_message(text: str) -> str:
+            message_was_sent[0] = True
+            if text.strip().upper() == "NO_REPLY":
+                return "No reply sent."
+            sent_texts.append(text)
+            request_id = await wa_service.send_message(chat_id, text)
+            return f"Message sent (request_id={request_id})"
+
+        tools.append(Tool(
+            name="send_whatsapp_message",
+            description=(
+                "Send a reply to the current WhatsApp conversation. "
+                "You MUST call this tool to deliver your response."
+            ),
+            parameters={"text": {"type": "string", "description": "The message text to send."}},
+            required=["text"],
+            handler=_send_whatsapp_message,
+        ))
+
+        dispatch_id = str(uuid4())
+
+        async def _run_dispatch() -> str:
+            from cyborg_server.services.session_service import SessionService
+            from cyborg_server.services.session_dispatch_gate import SessionDispatchGate
+
+            session_svc = SessionService(self.ctx)
+            async with SessionDispatchGate.get_lock(session_key):
+                claimed = await session_svc.mark_dispatched(session_key)
+                if claimed == 0:
+                    return ""
+
+                messages = await build_chat_messages(
+                    None, session_key,
+                    db=self.db,
+                    system_content=system_content,
+                    max_history=20,
+                )
+
+                result = await LLMDispatchService(self.ctx).chat_with_tools(
+                    messages, tools,
+                    call_category="subagent_result",
+                    session_key=session_key,
+                    dispatch_id=dispatch_id,
+                    contact_id=contact_id,
+                )
+                if not message_was_sent[0] and result.strip():
+                    from cyborg_server.services.tap import tap_dispatch
+                    result = await tap_dispatch(
+                        self.ctx, messages=messages, tools=tools,
+                        session_key=session_key,
+                        send_tool_name="send_whatsapp_message",
+                        first_result=result,
+                        call_category="subagent_result",
+                        dispatch_id=dispatch_id,
+                        contact_id=contact_id,
+                    )
+
+                parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
+                assistant_text = "\n\n".join(parts) if parts else result
+                if not message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in (
+                    "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
+                ):
+                    pass
+                else:
+                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+
+                return result
+
+        asyncio.create_task(_run_dispatch())
+
     async def _build_participants_prompt(self, session_key: str) -> str:
+        # For group sessions, use the group members table for richer info
+        if ":group:" in session_key:
+            route = await self.db.fetch_one(
+                "SELECT chat_id FROM session_routes WHERE session_key = ?",
+                (session_key,),
+            )
+            if route and route["chat_id"]:
+                group = await self.db.fetch_one(
+                    "SELECT id, name, member_count FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
+                    (route["chat_id"],),
+                )
+                if group:
+                    members = await self.db.fetch_all(
+                        """SELECT gm.display_name, gm.is_admin, gm.is_super_admin,
+                                  c.name as contact_name, c.is_trusted
+                           FROM whatsappgroup_members gm
+                           JOIN contacts c ON c.id = gm.contact_id AND c.deleted_at IS NULL
+                           WHERE gm.group_id = ? AND gm.left_at IS NULL
+                           ORDER BY gm.is_super_admin DESC, gm.is_admin DESC, gm.display_name ASC""",
+                        (group["id"],),
+                    )
+                    if members:
+                        lines = [f"## Participants ({len(members)} members in {group['name'] or 'group'})"]
+                        for m in members:
+                            name = m["display_name"] or m["contact_name"] or "Unknown"
+                            badges = []
+                            if m["is_super_admin"]:
+                                badges.append("super admin")
+                            elif m["is_admin"]:
+                                badges.append("admin")
+                            trust = "trusted" if m["is_trusted"] else "untrusted"
+                            badges.append(trust)
+                            lines.append(f"- {name} ({', '.join(badges)})")
+                        return "\n".join(lines)
+
+        # Fallback: session_participants for DMs or when group data unavailable
         rows = await self.db.fetch_all(
             "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
             "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
@@ -284,6 +508,423 @@ class WhatsAppBridgeService(BaseService):
             else:
                 lines.append(f"- {name} ({r['identifier']}, not in contacts)")
         return "\n".join(lines)
+
+    async def _resolve_or_seed_contact(self, phone_number: str, display_name: str = "") -> tuple[str, bool]:
+        """Find an existing contact by phone or auto-seed an untrusted one. Returns (contact_id, is_trusted)."""
+        contact = await self.db.fetch_one(
+            "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+            (phone_number,),
+        )
+        if contact:
+            return contact["id"], bool(contact.get("is_trusted", 0))
+        new_id = str(uuid4())
+        now_iso = utcnow().isoformat()
+        await self.db.execute(
+            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
+               VALUES (?, ?, ?, 0, ?, ?)""",
+            (new_id, display_name or phone_number, phone_number, now_iso, now_iso),
+        )
+        logger.info("auto-seeded untrusted contact %s for phone %s", new_id, phone_number)
+        return new_id, False
+
+    async def _handle_group_sync(self, payload: dict[str, Any]) -> None:
+        """Handle full group participant sync from bridge (fires on connect for each group)."""
+        group_jid = payload.get("group_jid", "")
+        group_name = payload.get("group_name", "")
+        description = payload.get("description", "")
+        participants = payload.get("participants", [])
+
+        if not group_jid:
+            return
+
+        logger.info("group sync: %s (%s) with %d participants", group_name, group_jid, len(participants))
+
+        now_iso = utcnow().isoformat()
+
+        # Upsert group
+        existing_group = await self.db.fetch_one(
+            "SELECT id FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
+            (group_jid,),
+        )
+        if existing_group:
+            group_id = existing_group["id"]
+            await self.db.execute(
+                "UPDATE whatsappgroups SET name = ?, description = ?, member_count = ?, updated_at = ? WHERE id = ?",
+                (group_name, description, len(participants), now_iso, group_id),
+            )
+        else:
+            group_id = str(uuid4())
+            await self.db.execute(
+                """INSERT INTO whatsappgroups (id, whatsapp_jid, name, description, member_count, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (group_id, group_jid, group_name, description, len(participants), now_iso, now_iso),
+            )
+
+        # Process each participant
+        seen_contact_ids: set[str] = set()
+        for p in participants:
+            p_jid = p.get("jid", "")
+            phone_number = _jid_to_phone(p_jid)
+            display_name = p.get("display_name", "")
+            is_admin = 1 if p.get("is_admin") else 0
+            is_super_admin = 1 if p.get("is_super_admin") else 0
+
+            contact_id, _ = await self._resolve_or_seed_contact(phone_number, display_name)
+            seen_contact_ids.add(contact_id)
+
+            # Upsert group member
+            await self.db.execute(
+                """INSERT INTO whatsappgroup_members (id, group_id, contact_id, is_admin, is_super_admin, display_name, joined_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(group_id, contact_id) DO UPDATE SET
+                       is_admin = excluded.is_admin,
+                       is_super_admin = excluded.is_super_admin,
+                       display_name = excluded.display_name,
+                       left_at = NULL,
+                       updated_at = excluded.updated_at""",
+                (str(uuid4()), group_id, contact_id, is_admin, is_super_admin, display_name, now_iso, now_iso, now_iso),
+            )
+
+        # Mark departed members
+        if seen_contact_ids:
+            placeholders = ",".join("?" for _ in seen_contact_ids)
+            await self.db.execute(
+                f"UPDATE whatsappgroup_members SET left_at = ?, updated_at = ? WHERE group_id = ? AND left_at IS NULL AND contact_id NOT IN ({placeholders})",
+                (now_iso, now_iso, group_id, *seen_contact_ids),
+            )
+
+        # Upsert all participants into session_participants
+        agent_id = "main"
+        key_part = group_jid.split("@")[0] if "@" in group_jid else group_jid
+        session_key = f"agent:{agent_id}:whatsapp:group:{key_part}"
+
+        for p in participants:
+            p_jid = p.get("jid", "")
+            phone_number = _jid_to_phone(p_jid)
+            display_name = p.get("display_name", "")
+            contact = await self.db.fetch_one(
+                "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                (phone_number,),
+            )
+            if not contact:
+                continue
+            await self.db.execute(
+                """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_key, identifier) DO UPDATE SET
+                       display_name = excluded.display_name,
+                       contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
+                       is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
+                       last_active_at = excluded.last_active_at""",
+                (session_key, phone_number, display_name or contact["id"], contact["id"],
+                 1 if contact.get("is_trusted") else 0, now_iso),
+            )
+
+        # Ensure session route exists
+        route_service = SessionRouteService(self.ctx)
+        from cyborg_server.exceptions import ConflictError
+        try:
+            await route_service.create_route(SessionRouteCreate(
+                channel="whatsapp",
+                session_key=session_key,
+                kind=SessionRouteKind.GROUP,
+                chat_id=group_jid,
+            ))
+        except ConflictError:
+            pass
+
+    async def _handle_group_member_change(self, payload: dict[str, Any]) -> None:
+        """Handle incremental group member join/leave events."""
+        group_jid = payload.get("group_jid", "")
+        group_name = payload.get("group_name", "")
+        sender_jid = payload.get("sender_jid", "")
+        joined_jids = payload.get("joined_jids", [])
+        left_jids = payload.get("left_jids", [])
+
+        if not group_jid or (not joined_jids and not left_jids):
+            return
+
+        logger.info("group member change: %s joined=%d left=%d", group_jid, len(joined_jids), len(left_jids))
+
+        now_iso = utcnow().isoformat()
+
+        # Resolve or create group
+        group = await self.db.fetch_one(
+            "SELECT id, name FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
+            (group_jid,),
+        )
+        if not group:
+            group_id = str(uuid4())
+            await self.db.execute(
+                """INSERT INTO whatsappgroups (id, whatsapp_jid, name, member_count, created_at, updated_at)
+                   VALUES (?, ?, ?, 0, ?, ?)""",
+                (group_id, group_jid, group_name, now_iso, now_iso),
+            )
+        else:
+            group_id = group["id"]
+
+        agent_id = "main"
+        key_part = group_jid.split("@")[0] if "@" in group_jid else group_jid
+        session_key = f"agent:{agent_id}:whatsapp:group:{key_part}"
+
+        join_names: list[str] = []
+        for jid in joined_jids:
+            phone_number = _jid_to_phone(jid)
+            # Try to get a display name from existing session_participants or contacts
+            display_name = ""
+            existing = await self.db.fetch_one(
+                "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                (phone_number,),
+            )
+            if existing:
+                display_name = existing["name"]
+
+            contact_id, _ = await self._resolve_or_seed_contact(phone_number, display_name)
+            join_names.append(display_name or phone_number)
+
+            # Upsert group member (re-join if previously left)
+            await self.db.execute(
+                """INSERT INTO whatsappgroup_members (id, group_id, contact_id, display_name, joined_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(group_id, contact_id) DO UPDATE SET
+                       left_at = NULL,
+                       joined_at = excluded.joined_at,
+                       display_name = COALESCE(excluded.display_name, whatsappgroup_members.display_name),
+                       updated_at = excluded.updated_at""",
+                (str(uuid4()), group_id, contact_id, display_name, now_iso, now_iso, now_iso),
+            )
+
+            # Upsert session participant
+            contact = await self.db.fetch_one(
+                "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                (phone_number,),
+            )
+            if contact:
+                await self.db.execute(
+                    """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(session_key, identifier) DO UPDATE SET
+                           display_name = COALESCE(excluded.display_name, session_participants.display_name),
+                           contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
+                           last_active_at = excluded.last_active_at""",
+                    (session_key, phone_number, display_name or phone_number, contact["id"],
+                     1 if contact.get("is_trusted") else 0, now_iso),
+                )
+
+        leave_names: list[str] = []
+        for jid in left_jids:
+            phone_number = _jid_to_phone(jid)
+            existing_contact = await self.db.fetch_one(
+                "SELECT id, name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                (phone_number,),
+            )
+            if existing_contact:
+                leave_names.append(existing_contact["name"] or phone_number)
+                await self.db.execute(
+                    "UPDATE whatsappgroup_members SET left_at = ?, updated_at = ? WHERE group_id = ? AND contact_id = ? AND left_at IS NULL",
+                    (now_iso, now_iso, group_id, existing_contact["id"]),
+                )
+            else:
+                leave_names.append(phone_number)
+
+        # Update member count
+        count_row = await self.db.fetch_one(
+            "SELECT COUNT(*) as cnt FROM whatsappgroup_members WHERE group_id = ? AND left_at IS NULL",
+            (group_id,),
+        )
+        member_count = count_row["cnt"] if count_row else 0
+        await self.db.execute(
+            "UPDATE whatsappgroups SET member_count = ?, updated_at = ? WHERE id = ?",
+            (member_count, now_iso, group_id),
+        )
+
+        # Build notification text
+        notification_parts = []
+        if join_names:
+            notification_parts.append(f"Members joined: {', '.join(join_names)}")
+        if leave_names:
+            notification_parts.append(f"Members left: {', '.join(leave_names)}")
+        notification_text = ". ".join(notification_parts)
+
+        # Resolve sender name
+        sender_name = ""
+        if sender_jid:
+            sender_phone = _jid_to_phone(sender_jid)
+            sender_contact = await self.db.fetch_one(
+                "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                (sender_phone,),
+            )
+            if sender_contact:
+                sender_name = sender_contact["name"]
+
+        # Ensure session route exists
+        route_service = SessionRouteService(self.ctx)
+        from cyborg_server.exceptions import ConflictError
+        try:
+            await route_service.create_route(SessionRouteCreate(
+                channel="whatsapp",
+                session_key=session_key,
+                kind=SessionRouteKind.GROUP,
+                chat_id=group_jid,
+            ))
+        except ConflictError:
+            pass
+
+        # Store notification as user message and dispatch
+        settings = self._get_settings()
+        if not settings.openai.enabled:
+            return
+
+        # Determine trust from session route
+        route = await self.db.fetch_one(
+            "SELECT contact_id FROM session_routes WHERE session_key = ?",
+            (session_key,),
+        )
+        is_trusted = False
+        if route and route["contact_id"]:
+            contact = await self.db.fetch_one(
+                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
+                (route["contact_id"],),
+            )
+            if contact:
+                is_trusted = bool(contact.get("is_trusted", 0))
+
+        from cyborg_server.services.session_service import SessionService
+        session_svc = SessionService(self.ctx)
+        await session_svc.add_message(
+            session_key, "user", notification_text,
+            channel="whatsapp", sender_id=None, dispatched=0,
+        )
+
+        # Build system prompt
+        from cyborg_server.services.session_agenda_service import SessionAgendaService
+        from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+
+        agenda_svc = SessionAgendaService(self.ctx)
+        agenda = await agenda_svc.get_effective_agenda(
+            session_key, "whatsapp",
+            contact_id=route["contact_id"] if route else None, is_trusted=is_trusted,
+        )
+        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        participants_prompt = await self._build_participants_prompt(session_key)
+
+        memory_prompt = ""
+        if is_trusted:
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            trusted_wikis = await mem_svc.resolve_accessible_wikis(
+                settings.harness.workspace_dir, session_key
+            )
+            config = mem_svc.load_access_config(settings.harness.workspace_dir)
+            trusted_only = [
+                w for w in trusted_wikis
+                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
+            ]
+            if trusted_only:
+                memory_prompt = mem_svc.build_memory_index(
+                    settings.harness.workspace_dir, trusted_only
+                )
+
+        system_content = "\n\n".join(
+            p for p in (workspace_prompt, agenda, participants_prompt, memory_prompt) if p
+        )
+
+        # Build tools
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+        from cyborg_server.services.tools import Tool
+        from cyborg_server.services.tool_registry import build_common_tools
+        from cyborg_server.services.group_tools import make_group_tools
+
+        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+        tools.extend(make_group_tools(self.ctx, session_key=session_key))
+
+        wa_service = self
+        chat_id = group_jid
+        message_was_sent = [False]
+        sent_texts: list[str] = []
+
+        async def _send_whatsapp_message(text: str) -> str:
+            message_was_sent[0] = True
+            if text.strip().upper() == "NO_REPLY":
+                return "No reply sent."
+            sent_texts.append(text)
+            request_id = await wa_service.send_message(chat_id, text)
+            return f"Message sent (request_id={request_id})"
+
+        tools.append(Tool(
+            name="send_whatsapp_message",
+            description=(
+                "Send a reply to the current WhatsApp conversation. "
+                "You MUST call this tool to deliver your response — your text output will NOT be sent."
+            ),
+            parameters={"text": {"type": "string", "description": "The message text to send."}},
+            required=["text"],
+            handler=_send_whatsapp_message,
+        ))
+
+        dispatch_id = str(uuid4())
+
+        user_content = "\n".join([
+            "## Group Member Change Notification",
+            f"Group: {group_name or group_jid}",
+            f"Changed by: {sender_name or sender_jid or 'unknown'}",
+            "",
+            notification_text,
+            "",
+            "This is a system notification. You do not need to reply unless the member change "
+            "is contextually relevant (e.g., greeting a new member, acknowledging a key person leaving). "
+            "If no response is needed, call send_whatsapp_message with 'NO_REPLY'.",
+        ])
+
+        async def _run_dispatch() -> str:
+            from cyborg_server.services.session_dispatch_gate import SessionDispatchGate
+
+            async with SessionDispatchGate.get_lock(session_key):
+                claimed = await session_svc.mark_dispatched(session_key)
+                if claimed == 0:
+                    return ""
+
+                messages = await build_chat_messages(
+                    None, session_key,
+                    db=self.db,
+                    system_content=system_content,
+                    max_history=20,
+                )
+                # Override the last user message with our notification
+                if messages and messages[-1].get("role") == "user":
+                    messages[-1]["content"] = user_content
+
+                result = await LLMDispatchService(self.ctx).chat_with_tools(
+                    messages, tools,
+                    call_category="whatsapp_group_member_change",
+                    session_key=session_key,
+                    dispatch_id=dispatch_id,
+                    contact_id=route["contact_id"] if route else None,
+                )
+                if not message_was_sent[0] and result.strip():
+                    from cyborg_server.services.tap import tap_dispatch
+                    result = await tap_dispatch(
+                        self.ctx, messages=messages, tools=tools,
+                        session_key=session_key,
+                        send_tool_name="send_whatsapp_message",
+                        first_result=result,
+                        call_category="whatsapp_group_member_change",
+                        dispatch_id=dispatch_id,
+                        contact_id=route["contact_id"] if route else None,
+                    )
+
+                parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
+                assistant_text = "\n\n".join(parts) if parts else result
+                if not message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in (
+                    "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
+                ):
+                    pass
+                else:
+                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+
+                return result
+
+        asyncio.create_task(_run_dispatch())
 
     async def _on_message(self, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type", "")
@@ -308,6 +949,10 @@ class WhatsAppBridgeService(BaseService):
                 logger.warning("send message failed: %s (request %s)", payload.get("error"), payload.get("request_id"))
         elif msg_type == "bridge.status":
             self._last_bridge_status = payload
+        elif msg_type == "whatsapp.group_member_change":
+            await self._handle_group_member_change(payload)
+        elif msg_type == "whatsapp.group_sync":
+            await self._handle_group_sync(payload)
         else:
             logger.debug("unknown bridge message type: %s", msg_type)
 
@@ -323,6 +968,7 @@ class WhatsAppBridgeService(BaseService):
         sender_name = payload.get("sender_name", "")
         text = payload.get("text", "")
         wa_message_id = payload.get("whatsapp_message_id", "")
+        mentioned_jids = payload.get("mentioned_jids", [])
 
         # Ack receipt so the bridge clears it from the incoming queue
         await self._send_ack(wa_message_id)
@@ -370,8 +1016,41 @@ class WhatsAppBridgeService(BaseService):
             key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
-        # Upsert sender as session participant
+        # Resolve @mentions: replace raw phone numbers with display names
         now_iso = utcnow().isoformat()
+        if mentioned_jids and chat_kind == "group":
+            mention_map: dict[str, str] = {}
+            for jid in mentioned_jids:
+                phone = _jid_to_phone(jid)
+                # Try session participants first (group members with display names)
+                participant = await self.db.fetch_one(
+                    "SELECT display_name FROM session_participants WHERE identifier = ? AND session_key = ? LIMIT 1",
+                    (phone, session_key),
+                )
+                if participant and participant["display_name"]:
+                    mention_map[phone] = participant["display_name"]
+                    continue
+                # Then try contacts table
+                contact_match = await self.db.fetch_one(
+                    "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+                    (phone,),
+                )
+                if contact_match and contact_match["name"]:
+                    mention_map[phone] = contact_match["name"]
+                # Upsert mentioned user as participant so dispatch-time resolution can find them
+                await self.db.execute(
+                    """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
+                       VALUES (?, ?, ?, ?, 0, ?)
+                       ON CONFLICT(session_key, identifier) DO UPDATE SET
+                           last_active_at = excluded.last_active_at""",
+                    (session_key, phone, mention_map.get(phone, phone), None, now_iso),
+                )
+            # Replace @phone_number patterns with @DisplayName
+            for phone, name in mention_map.items():
+                bare = phone.lstrip("+")
+                text = re.sub(rf"@{re.escape(bare)}\b", f"@{name}", text)
+
+        # Upsert sender as session participant
         await self.db.execute(
             """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
                VALUES (?, ?, ?, ?, ?, ?)
@@ -405,6 +1084,7 @@ class WhatsAppBridgeService(BaseService):
                     session_key=session_key,
                     kind=SessionRouteKind.DM,
                     contact_id=contact_id,
+                    chat_id=chat_id,
                     metadata={
                         "sender_jid": sender_jid,
                         "sender_name": sender_name,
@@ -466,6 +1146,7 @@ class WhatsAppBridgeService(BaseService):
         ])
         if contacts_block:
             user_content += "\n\n" + contacts_block
+        user_content += "\n\nRespond to this message by calling send_whatsapp_message with your reply."
 
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
@@ -525,11 +1206,16 @@ class WhatsAppBridgeService(BaseService):
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         from cyborg_server.services.tools import Tool
         from cyborg_server.services.tool_registry import build_common_tools
+        from cyborg_server.services.group_tools import make_group_tools
 
         wa_service = self
 
         # Core tools (workspace, memory, docs, changelog, email_send, contact, phone, reflection, delegation)
         tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+
+        # Group-specific tools
+        if chat_kind == "group":
+            tools.extend(make_group_tools(self.ctx, session_key=session_key))
 
         # WhatsApp-specific: outreach tools for trusted contacts
         if contact_id and is_trusted:

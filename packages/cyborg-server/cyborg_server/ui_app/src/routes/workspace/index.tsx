@@ -217,7 +217,7 @@ function WorkspacePage() {
                 <button onClick={copyContent} className="text-[10px] text-accent hover:underline">copy</button>
                 <button onClick={copyPath} className="text-[10px] text-accent hover:underline">copy path</button>
               </div>
-              <pre className="flex-1 overflow-auto p-3 text-xs font-sans text-text whitespace-pre-wrap break-words min-h-0">
+              <pre className="flex-1 overflow-auto p-3 text-xs font-mono text-text whitespace-pre min-h-0">
                 {fileData?.content ?? ""}
               </pre>
             </div>

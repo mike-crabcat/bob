@@ -282,8 +282,6 @@ def _build_contact_payload(
     name: Optional[str] = None,
     phone_number: Optional[str] = None,
     email: Optional[str] = None,
-    whatsapp_groups: Optional[list[str]] = None,
-    clear_whatsapp_groups: bool = False,
     metadata_json: Optional[str] = None,
     channel: Optional[str] = None,
     chat_id: Optional[str] = None,
@@ -296,10 +294,6 @@ def _build_contact_payload(
         payload["phone_number"] = phone_number
     if email is not None:
         payload["email"] = email
-    if whatsapp_groups is not None:
-        payload["whatsapp_groups"] = whatsapp_groups
-    elif clear_whatsapp_groups:
-        payload["whatsapp_groups"] = []
     metadata = _build_metadata(metadata_json, channel, chat_id, session_key)
     if metadata is not None:
         payload["metadata"] = metadata
@@ -501,7 +495,6 @@ def contact_create(
     name: Annotated[str, typer.Argument(help="Contact name")],
     phone_number: Annotated[str, typer.Option("--phone-number", "--phone", "-p", help="Contact phone number")] = ...,
     email: Annotated[Optional[str], typer.Option("--email", "-e", help="Contact email")] = None,
-    whatsapp_groups: Annotated[Optional[list[str]], typer.Option("--whatsapp-group", help="WhatsApp group identifier")] = None,
     metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Contact metadata as JSON object")] = None,
     channel: Annotated[Optional[str], typer.Option(help="Messaging channel for routing")] = None,
     chat_id: Annotated[Optional[str], typer.Option(help="Chat or room identifier for routing")] = None,
@@ -513,7 +506,6 @@ def contact_create(
         name=name,
         phone_number=phone_number,
         email=email,
-        whatsapp_groups=whatsapp_groups,
         metadata_json=metadata_json,
         channel=channel,
         chat_id=chat_id,
@@ -560,8 +552,6 @@ def contact_get(
     typer.echo(f"Phone: {contact['phone_number']}")
     if contact.get("email"):
         typer.echo(f"Email: {contact['email']}")
-    if contact.get("whatsapp_groups"):
-        typer.echo(f"WhatsApp Groups: {', '.join(contact['whatsapp_groups'])}")
     if contact.get("metadata"):
         typer.echo(f"Metadata: {json.dumps(contact['metadata'])}")
 
@@ -572,8 +562,6 @@ def contact_update(
     name: Annotated[Optional[str], typer.Option(help="Contact name")] = None,
     phone_number: Annotated[Optional[str], typer.Option("--phone-number", "--phone", "-p", help="Contact phone number")] = None,
     email: Annotated[Optional[str], typer.Option("--email", "-e", help="Contact email")] = None,
-    whatsapp_groups: Annotated[Optional[list[str]], typer.Option("--whatsapp-group", help="WhatsApp group identifier")] = None,
-    clear_whatsapp_groups: Annotated[bool, typer.Option("--clear-whatsapp-groups", help="Remove all WhatsApp group memberships")] = False,
     metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Contact metadata as JSON object")] = None,
     channel: Annotated[Optional[str], typer.Option(help="Messaging channel for routing")] = None,
     chat_id: Annotated[Optional[str], typer.Option(help="Chat or room identifier for routing")] = None,
@@ -585,8 +573,6 @@ def contact_update(
         name=name,
         phone_number=phone_number,
         email=email,
-        whatsapp_groups=whatsapp_groups,
-        clear_whatsapp_groups=clear_whatsapp_groups,
         metadata_json=metadata_json,
         channel=channel,
         chat_id=chat_id,

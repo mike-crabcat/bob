@@ -60,7 +60,7 @@ A skill file has two parts: a YAML-like frontmatter block and a markdown body.
 
 ### Frontmatter
 
-Delimited by `---` on their own lines at the top of the file. Contains key-value pairs in `key: value` format (not full YAML -- the parser only splits on the first colon).
+Delimited by `---` on their own lines at the top of the file. Contains key-value pairs in `key: value` format (not full YAML -- the parser splits on the first colon per line).
 
 ```markdown
 ---
@@ -77,6 +77,8 @@ Supported keys:
 | `name` | No | Skill identifier. Defaults to the directory name if omitted. |
 | `description` | Yes | One-line summary shown in the system prompt index. |
 | `trigger` | Recommended | Natural language description of when the LLM should activate this skill. The LLM uses this to decide whether to call `use_skill`. |
+
+The parser is intentionally simple: it reads lines between `---` delimiters and splits each on the first colon. No nested structures, lists, or quoting are supported.
 
 ### Body
 
@@ -160,9 +162,9 @@ The flow works as follows:
 
 1. **Scan**: `skill_loader._scan_skills()` iterates over `skills/`, looking for directories that contain `skill.md` or `SKILL.md`. It records each file's modification time (mtime).
 
-2. **Cache check**: `load_skills_index()` hashes the mtimes into a tuple. If the hash matches the cached index, the cached string is returned immediately. Otherwise the index is rebuilt.
+2. **Cache check**: `load_skills_index()` hashes the mtimes into a tuple of sorted `(name, mtime)` pairs. If the hash matches the cached index, the cached string is returned immediately. Otherwise the index is rebuilt.
 
-3. **Build index**: For each skill, the frontmatter is parsed to extract `description` and `trigger`. A compact text index is assembled with one entry per skill.
+3. **Build index**: For each skill, the frontmatter is parsed to extract `description` and `trigger`. A compact text index is assembled with one entry per skill, including instructions to call `use_skill` when a trigger matches.
 
 4. **Inject into prompt**: `prompt_assembler.load_workspace_prompt()` calls `load_skills_index()` and appends the result under a `## Available Skills` heading. This is included in every system prompt sent to the LLM.
 
@@ -243,6 +245,7 @@ Resides at `packages/cyborg-server/cyborg_server/services/skill_loader.py`.
 
 Functions:
 
+- **`_parse_frontmatter(text)`** -- Extracts YAML-like key:value pairs from text between `---` delimiters. Splits each line on the first colon.
 - **`_scan_skills(workspace_dir)`** -- Returns `{skill_name: mtime}` for every directory under `skills/` that contains a `skill.md` or `SKILL.md`.
 - **`load_skills_index(workspace_dir)`** -- Returns a compact index string for the system prompt. Cached at module level by mtime hash. The cache key is `tuple(sorted(mtimes.items()))`.
 - **`load_skill(workspace_dir, skill_name)`** -- Returns the full content of a single skill's `skill.md`, prefixed with its name and path.
@@ -261,8 +264,10 @@ Resides at `packages/cyborg-server/cyborg_server/services/workspace_tools.py`.
 
 Relevant tools:
 
-- **`use_skill(skill_name)`** -- Loads full instructions for a named skill via `skill_loader.load_skill()`. Returns the skill markdown content so the LLM can follow its steps.
-- **`run_script(path, args)`** -- Executes a Python script at the given workspace-relative path. Resolves the path, validates it is a `.py` file within the workspace, then runs it via `uv run` from its parent directory. Uses `build_skill_env()` for environment. Returns stdout on success; returns an error message on timeout (900s) or non-zero exit code.
+- **`use_skill(skill_name)`** -- Loads full instructions for a named skill via `skill_loader.load_skill()`. Returns the skill markdown content prefixed with the skill name and directory path, so the LLM can follow its steps and construct correct `run_script` paths.
+- **`run_script(path, args)`** -- Executes a Python script at the given workspace-relative path. Resolves the path against the workspace root (preventing directory traversal), validates it is a `.py` file, then runs it via `uv run` from its parent directory. Uses `build_skill_env()` for environment. Returns stdout on success; returns an error message on timeout (900s) or non-zero exit code.
+
+Both tools are defined inside `make_workspace_tools(ctx)` which binds them to the application context.
 
 ### `skill_env.py`
 
@@ -283,7 +288,7 @@ Maps `CYBORG_`-prefixed configuration secrets to the standard environment variab
 
 Resides at `packages/cyborg-server/cyborg_server/services/prompt_assembler.py`.
 
-The `load_workspace_prompt()` function assembles the system prompt from workspace files. It calls `load_skills_index()` and appends the result under `## Available Skills`. This section is present in every system prompt, giving the LLM awareness of all available skills on every turn.
+The `load_workspace_prompt()` function assembles the system prompt from workspace files (`SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `USER.md`). It calls `load_skills_index()` and appends the result under `## Available Skills`. This section is present in every system prompt, giving the LLM awareness of all available skills on every turn. The workspace prompt itself is cached by mtime hash of the workspace files.
 
 ### `dashboard_api.py`
 

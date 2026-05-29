@@ -45,7 +45,9 @@ def _output_items_to_dicts(items: list[Any]) -> list[dict[str, Any]]:
         else:
             # Fallback: try to serialize, skip if not possible
             try:
-                result.append({"type": item_type, **{k: v for k, v in item.__dict__.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}})
+                d = {k: v for k, v in item.__dict__.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                d.pop("status", None)
+                result.append({"type": item_type, **d})
             except Exception:
                 result.append({"type": str(item_type)})
     return result
@@ -77,6 +79,11 @@ def _get_cached_client(api_key: str, base_url: str) -> Any:
     _cached_client = (api_key, base_url, client)
     logger.info("OpenAI client created for base_url=%s", base_url)
     return client
+
+
+def _model_skips_temperature(model: str) -> bool:
+    """Return True for models that don't accept the temperature parameter."""
+    return any(model.startswith(p) for p in ("gpt-5.5", "o1", "o3", "o4"))
 
 
 class OpenAIService(BaseService):
@@ -117,8 +124,9 @@ class OpenAIService(BaseService):
         kwargs: dict[str, Any] = {
             "model": resolved_model,
             "input": messages,
-            "temperature": temperature,
         }
+        if not _model_skips_temperature(resolved_model):
+            kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
 
@@ -167,9 +175,10 @@ class OpenAIService(BaseService):
         kwargs: dict[str, Any] = {
             "model": resolved_model,
             "input": messages,
-            "temperature": temperature,
             "stream": True,
         }
+        if not _model_skips_temperature(resolved_model):
+            kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
 
@@ -233,8 +242,9 @@ class OpenAIService(BaseService):
         tool_handlers: dict[str, Callable[..., Awaitable[str]]],
         *,
         model: str | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 100,
         stream_result: StreamResult | None = None,
+        on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -261,13 +271,26 @@ class OpenAIService(BaseService):
             if not function_calls:
                 elapsed = time.monotonic() - t0
                 content = response.output_text or ""
+                if not content:
+                    logger.warning(
+                        "OpenAI empty response: model=%s status=%s output_types=%s refusal=%s",
+                        resolved_model,
+                        getattr(response, "status", None),
+                        [getattr(item, "type", None) for item in (response.output or [])],
+                        getattr(response, "refusal", None) or next(
+                            (getattr(item, "refusal", None) for item in (response.output or [])
+                             if getattr(item, "type", None) == "message"), None
+                        ),
+                    )
                 usage = getattr(response, "usage", None)
+                cached_tokens = self._extract_cached_tokens(usage)
                 logger.info(
                     "OpenAI tool call finished: model=%s iterations=%d latency=%.2fs "
-                    "tool_calls_in_turn=%d tokens=%s",
+                    "tool_calls_in_turn=%d tokens=%s cached_tokens=%s",
                     resolved_model, iteration + 1, elapsed,
                     iteration,
                     usage.total_tokens if usage else None,
+                    cached_tokens,
                 )
                 if stream_result is not None:
                     stream_result.prompt_tokens = usage.input_tokens if usage else None
@@ -282,12 +305,13 @@ class OpenAIService(BaseService):
             # Execute each function call and append results
             for fc in function_calls:
                 handler = tool_handlers.get(fc.name)
+                tool_args: dict = {}
                 if handler is None:
                     result = f"Error: unknown tool '{fc.name}'"
                 else:
                     try:
-                        args = json.loads(fc.arguments)
-                        result = await handler(**args)
+                        tool_args = json.loads(fc.arguments)
+                        result = await handler(**tool_args)
                     except Exception as e:
                         result = f"Error: {e}"
                         logger.warning("Tool %s failed: %s", fc.name, e)
@@ -297,6 +321,12 @@ class OpenAIService(BaseService):
                     "call_id": fc.call_id,
                     "output": result,
                 })
+
+                if on_tool_call:
+                    try:
+                        await on_tool_call(fc.name, tool_args, result[:200])
+                    except Exception:
+                        pass
 
             logger.info(
                 "chat_with_tools: iteration=%d function_calls=%d",
@@ -314,7 +344,8 @@ class OpenAIService(BaseService):
         tool_handlers: dict[str, Callable[..., Awaitable[str]]],
         *,
         model: str | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 100,
+        on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat with tool calling. Runs tool calls non-streamingly,
         then streams the final text response for real-time consumption."""
@@ -345,12 +376,13 @@ class OpenAIService(BaseService):
             messages.extend(_output_items_to_dicts(response.output))
             for fc in function_calls:
                 handler = tool_handlers.get(fc.name)
+                tool_args: dict = {}
                 if handler is None:
                     result = f"Error: unknown tool '{fc.name}'"
                 else:
                     try:
-                        args = json.loads(fc.arguments)
-                        result = await handler(**args)
+                        tool_args = json.loads(fc.arguments)
+                        result = await handler(**tool_args)
                     except Exception as e:
                         result = f"Error: {e}"
                         logger.warning("Tool %s failed: %s", fc.name, e)
@@ -360,6 +392,12 @@ class OpenAIService(BaseService):
                     "call_id": fc.call_id,
                     "output": result,
                 })
+
+                if on_tool_call:
+                    try:
+                        await on_tool_call(fc.name, tool_args, result[:200])
+                    except Exception:
+                        pass
 
             logger.info(
                 "chat_stream_with_tools: iteration=%d function_calls=%d",

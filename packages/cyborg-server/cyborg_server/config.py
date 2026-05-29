@@ -169,12 +169,16 @@ class OpenAISettings:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     default_model: str = "gpt-5.4-mini"
+    memory_model: str = ""
     timeout_seconds: float = 120.0
     web_search_enabled: bool = False
 
     @property
     def enabled(self) -> bool:
         return bool(self.api_key)
+
+    def get_memory_model(self) -> str:
+        return self.memory_model or self.default_model
 
 
 @dataclass(slots=True)
@@ -344,6 +348,7 @@ class Settings:
             api_key=os.getenv("CYBORG_OPENAI_API_KEY", ""),
             base_url=os.getenv("CYBORG_OPENAI_BASE_URL", "https://api.openai.com/v1"),
             default_model=os.getenv("CYBORG_OPENAI_DEFAULT_MODEL", "gpt-5.4-mini"),
+            memory_model=os.getenv("CYBORG_OPENAI_MEMORY_MODEL", ""),
             timeout_seconds=float(os.getenv("CYBORG_OPENAI_TIMEOUT_SECONDS", "120")),
             web_search_enabled=os.getenv("CYBORG_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
         )

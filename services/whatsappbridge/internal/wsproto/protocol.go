@@ -64,6 +64,7 @@ type IncomingMessagePayload struct {
 	SenderName        string           `json:"sender_name,omitempty"`
 	Text              string           `json:"text,omitempty"`
 	QuotedMessageID   string           `json:"quoted_message_id,omitempty"`
+	MentionedJIDs     []string         `json:"mentioned_jids,omitempty"`
 	Media             *MediaInfo       `json:"media,omitempty"`
 	Contacts          []SharedContact  `json:"contacts,omitempty"`
 	Timestamp         string           `json:"timestamp"`
@@ -102,6 +103,30 @@ type SendMessageResultPayload struct {
 	Success           bool   `json:"success"`
 	WhatsAppMessageID string `json:"whatsapp_message_id,omitempty"`
 	Error             string `json:"error,omitempty"`
+}
+
+type GroupMemberChangePayload struct {
+	GroupJID   string   `json:"group_jid"`
+	GroupName  string   `json:"group_name,omitempty"`
+	SenderJID  string   `json:"sender_jid,omitempty"`
+	JoinedJIDs []string `json:"joined_jids,omitempty"`
+	LeftJIDs   []string `json:"left_jids,omitempty"`
+	Timestamp  string   `json:"timestamp"`
+}
+
+type GroupSyncPayload struct {
+	GroupJID     string                    `json:"group_jid"`
+	GroupName    string                    `json:"group_name,omitempty"`
+	Description  string                    `json:"description,omitempty"`
+	Participants []GroupParticipantPayload `json:"participants"`
+	Timestamp    string                    `json:"timestamp"`
+}
+
+type GroupParticipantPayload struct {
+	JID          string `json:"jid"`
+	DisplayName  string `json:"display_name,omitempty"`
+	IsAdmin      bool   `json:"is_admin"`
+	IsSuperAdmin bool   `json:"is_super_admin"`
 }
 
 // --- Downstream messages (cyborg → bridge) ---
@@ -144,5 +169,7 @@ const (
 	TypeSendMedia        = "send_media"
 	TypeAck              = "ack"
 	TypeRequestPairing   = "request_pairing"
-	TypeSendMessageResult = "send_message_result"
+	TypeSendMessageResult  = "send_message_result"
+	TypeGroupMemberChange  = "whatsapp.group_member_change"
+	TypeGroupSync          = "whatsapp.group_sync"
 )

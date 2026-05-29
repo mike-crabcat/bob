@@ -20,7 +20,7 @@ from cyborg_server.services.email_tools import make_email_send_tools
 from cyborg_server.services.contact_tools import make_contact_tools
 from cyborg_server.services.phone_tools import make_phone_tools
 from cyborg_server.services.reflection_service import make_reflection_tools
-from cyborg_server.services.delegation_tools import make_delegation_tools
+from cyborg_server.services.subagent_tools import make_subagent_tools
 
 if TYPE_CHECKING:
     from cyborg_server.context import AppContext
@@ -61,7 +61,7 @@ def build_common_tools(
         _extend(make_contact_tools(ctx))
         _extend(make_reflection_tools(ctx, session_key))
         if ctx.settings.harness.skill_dev_enabled:
-            _extend(make_delegation_tools(ctx, session_key))
+            _extend(make_subagent_tools(ctx, session_key))
 
     # Phone subsystem — adds contact + phone tools when enabled
     if ctx.settings.phone.enabled:

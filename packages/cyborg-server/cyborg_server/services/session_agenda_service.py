@@ -60,8 +60,14 @@ AVAILABLE CAPABILITIES:
 - If asked to contact someone, use search_contacts to find them, then
   send_whatsapp_to_contact to reach out. Provide a clear purpose.
 - To check what someone said, use get_contact_session_messages.
-- If you need a capability you don't have, use delegate_to_claude with a clear
-  user story describing the skill. Review the plan, then implement_delegation to proceed.
+- You have subagent capabilities. Use create_subagent(task) to spawn a background worker.
+  IMPORTANT: After creating a subagent, you MUST immediately reply to the user (via send_whatsapp_message)
+  with a brief summary of what you've delegated and that work is underway. Do NOT wait silently.
+  When a subagent replies, you will receive its message automatically. You can then:
+  - message_subagent(id, message) to continue the conversation and give further instructions
+  - kill_subagent(id) if the task is no longer needed
+  - Or simply use the result and move on — no action needed if the task is complete.
+  Subagents are expensive — only use them for tasks you cannot do yourself.
 
 Keep responses concise and natural for a messaging context.\
 """

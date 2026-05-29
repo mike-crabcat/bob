@@ -28,8 +28,10 @@ _SCRIPT_TIMEOUT_SECONDS = 900
 def _resolve_path(ctx: AppContext, path: str) -> Path:
     """Resolve a relative path against the workspace dir, preventing traversal."""
     workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
-    resolved = (workspace / path).resolve()
-    if not str(resolved).startswith(str(workspace)):
+    resolved = (workspace / path)
+    # Block traversal attacks (e.g. "../../etc/passwd") without resolving symlinks,
+    # so that symlinked directories inside the workspace remain accessible.
+    if ".." in Path(path).parts:
         raise ValueError(f"Path '{path}' escapes workspace directory")
     return resolved
 
@@ -53,7 +55,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
 
         entries: list[dict] = []
 
-        def _walk(dir_path: Path, current_depth: int) -> None:
+        def _walk(dir_path: Path, prefix: str, current_depth: int) -> None:
             if len(entries) >= _MAX_LIST_ENTRIES:
                 return
             try:
@@ -64,9 +66,9 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                 if len(entries) >= _MAX_LIST_ENTRIES:
                     entries.append({"name": "...", "type": "truncated"})
                     return
-                rel = str(child.relative_to(workspace))
+                name = f"{prefix}{child.name}" if prefix else child.name
                 entry: dict = {
-                    "name": rel,
+                    "name": name,
                     "type": "dir" if child.is_dir() else "file",
                 }
                 if child.is_file():
@@ -76,9 +78,10 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                         pass
                 entries.append(entry)
                 if child.is_dir() and current_depth < depth:
-                    _walk(child, current_depth + 1)
+                    _walk(child, f"{name}/", current_depth + 1)
 
-        _walk(target, 1)
+        prefix = f"{path}/" if path else ""
+        _walk(target, prefix, 1)
         return json.dumps(entries)
 
     @tool

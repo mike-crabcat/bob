@@ -231,6 +231,12 @@ func (c *Client) handleEvent(raw any) {
 
 	case *events.PairSuccess:
 		c.log.Info("pair success", "jid", evt.ID.String())
+
+	case *events.JoinedGroup:
+		c.handleJoinedGroup(evt)
+
+	case *events.GroupInfo:
+		c.handleGroupInfo(evt)
 	}
 }
 
@@ -269,6 +275,19 @@ func (c *Client) handleMessage(evt *events.Message) {
 
 	if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
 		msgEvt.QuotedMessageID = ext.GetContextInfo().GetStanzaID()
+		for _, raw := range ext.GetContextInfo().GetMentionedJID() {
+			parsed, err := types.ParseJID(raw)
+			if err != nil {
+				msgEvt.MentionedJIDs = append(msgEvt.MentionedJIDs, raw)
+				continue
+			}
+			resolved := c.ResolveLID(parsed)
+			msgEvt.MentionedJIDs = append(msgEvt.MentionedJIDs, resolved.String())
+			// Replace LID digits in text with resolved phone number digits
+			if resolved.Server != types.HiddenUserServer && resolved.User != parsed.User {
+				msgEvt.Text = strings.Replace(msgEvt.Text, "@"+parsed.User, "@"+resolved.User, 1)
+			}
+		}
 	}
 
 	if c.onEvent != nil {
@@ -342,6 +361,75 @@ func (c *Client) handleReceipt(evt *events.Receipt) {
 				})
 			}
 		}
+	}
+}
+
+func (c *Client) handleJoinedGroup(evt *events.JoinedGroup) {
+	groupName := evt.Name
+	var participants []GroupParticipantInfo
+	for _, p := range evt.Participants {
+		resolvedJID := c.ResolveLID(p.JID)
+		participants = append(participants, GroupParticipantInfo{
+			JID:          resolvedJID.String(),
+			DisplayName:  p.DisplayName,
+			IsAdmin:      p.IsAdmin,
+			IsSuperAdmin: p.IsSuperAdmin,
+		})
+	}
+
+	description := ""
+	if evt.Topic != "" {
+		description = evt.Topic
+	}
+
+	if c.onEvent != nil {
+		c.onEvent(GroupSyncEvent{
+			GroupJID:     evt.JID.String(),
+			GroupName:    groupName,
+			Description:  description,
+			Participants: participants,
+			Timestamp:    evt.GroupCreated.UTC().Format("2006-01-02T15:04:05.000Z"),
+		})
+	}
+}
+
+func (c *Client) handleGroupInfo(evt *events.GroupInfo) {
+	if len(evt.Join) == 0 && len(evt.Leave) == 0 {
+		return
+	}
+
+	var joined []string
+	for _, jid := range evt.Join {
+		resolved := c.ResolveLID(jid)
+		joined = append(joined, resolved.String())
+	}
+
+	var left []string
+	for _, jid := range evt.Leave {
+		resolved := c.ResolveLID(jid)
+		left = append(left, resolved.String())
+	}
+
+	senderJID := ""
+	if evt.Sender != nil {
+		resolved := c.ResolveLID(*evt.Sender)
+		senderJID = resolved.String()
+	}
+
+	groupName := ""
+	if evt.Name != nil {
+		groupName = evt.Name.Name
+	}
+
+	if c.onEvent != nil {
+		c.onEvent(GroupMemberChangeEvent{
+			GroupJID:   evt.JID.String(),
+			GroupName:  groupName,
+			SenderJID:  senderJID,
+			JoinedJIDs: joined,
+			LeftJIDs:   left,
+			Timestamp:  evt.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
+		})
 	}
 }
 

@@ -117,12 +117,12 @@ The agent then has a normal conversation with the target, pursuing the objective
 When the agent calls `finish_outreach(result)`:
 
 1. Reads outreach metadata from the session route
-2. Clears the outreach fields from the route's metadata
+2. Clears the outreach fields from the route's metadata (`outreach_initiated_from`, `outreach_objective`, `outreach_requestor`, `outreach_message`)
 3. Builds a structured result message containing the target contact name, objective, requestor, and result text
 4. Stores the result as a `user` message in the **requestor's session** (Session A)
 5. Dispatches a new LLM call in the requestor's session, giving it the result plus a `send_whatsapp_message` tool to relay the answer back to the requestor via WhatsApp
 
-If the agent does not explicitly call `send_whatsapp_message` during the result dispatch, the system auto-sends the LLM output as a fallback. This ensures the requestor always receives an answer.
+If the agent does not explicitly call `send_whatsapp_message` during the result dispatch, the system invokes the **tap dispatch** mechanism -- a lightweight follow-up LLM call that reminds the agent to use the send tool. This ensures the requestor always receives an answer.
 
 The completion dispatch runs as a background `asyncio.Task` so it does not block the target session from continuing.
 
@@ -132,10 +132,12 @@ The completion dispatch runs as a background `asyncio.Task` so it does not block
 |---|---|---|
 | Outreach tools | `services/whatsapp_outreach_tools.py` | `send_whatsapp_to_contact`, `get_contact_session_messages`, `finish_outreach` |
 | WhatsApp bridge | `services/whatsapp_bridge_service.py` | WebSocket client to Go bridge; handles incoming messages, detects outreach state, injects outreach prompt and tools |
+| Tool registry | `services/tool_registry.py` | `build_common_tools()` assembles shared tools; channel-specific tools (outreach, WhatsApp send) added by the bridge |
 | Session routes | `services/session_route_service.py` | Routes map session keys to WhatsApp chats; route metadata carries outreach state |
 | Session agenda | `services/session_agenda_service.py` | Determines system prompt based on trust level (unverified / known-untrusted / trusted) |
-| Dispatch gate | `services/session_dispatch_gate.py` | Per-session asyncio lock ensuring only one LLM dispatch runs per session at a time |
+| Dispatch gate | `services/session_dispatch_gate.py` | Per-session `asyncio.Lock` ensuring only one LLM dispatch runs per session at a time |
 | Prompt assembler | `services/prompt_assembler.py` | Builds the system prompt (workspace + agenda + participants + outreach + memory) and chat history |
+| Tap dispatch | `services/tap.py` | Follow-up LLM call when the agent produced text but did not use its send tool |
 | LLM dispatch | `services/llm_dispatch.py` | Routes LLM calls to OpenAI with tool support; logs all interactions to `llm_call_log` |
 
 ## Trust Model
@@ -171,7 +173,7 @@ The `SessionAgendaService` uses the trust tier to select the appropriate system 
 |---|---|---|
 | Unverified | `WHATSAPP_DEFAULT_AGENDA` | No identity assumptions, no sensitive data, no link clicking |
 | Known Untrusted | `WHATSAPP_KNOWN_UNTRUSTED_AGENDA` | No config changes, stay within conversation bounds |
-| Trusted | `WHATSAPP_TRUSTED_AGENDA` | Full capabilities including outreach, contact search, delegation |
+| Trusted | `WHATSAPP_TRUSTED_AGENDA` | Full capabilities including outreach, contact search, subagents |
 
 ## Session Key Convention
 
@@ -195,6 +197,7 @@ session_routes
 +-- session_key (TEXT)      -- "agent:main:whatsapp:dm:61412345678"
 +-- kind (TEXT)             -- "dm" | "group" | "thread"
 +-- contact_id (TEXT FK)    -- -> contacts.id
++-- chat_id (TEXT)          -- "{digits}@s.whatsapp.net" for DMs, "{id}@g.us" for groups
 +-- metadata (TEXT JSON)    -- {outreach_initiated_from, outreach_objective, ...}
 +-- is_active (INT)
 ```
@@ -246,7 +249,7 @@ Outreach lifecycle as seen in metadata:
 
 ## Tool Injection Points
 
-The bridge service's `_handle_incoming_message` method controls which tools are available based on trust and outreach state:
+The bridge service's `_handle_incoming_message` method controls which tools are available based on trust and outreach state. Tools are assembled in two stages: `build_common_tools()` from `tool_registry.py` provides the shared set, then the bridge adds channel-specific tools.
 
 ```
 Incoming WhatsApp message
@@ -254,25 +257,32 @@ Incoming WhatsApp message
          v
   Resolve contact + trust tier
          |
-         +-- All sessions get:
+         +-- build_common_tools() provides:
          |   - workspace tools
          |   - memory tools
          |   - docs tools
          |   - changelog tools
-         |   - send_whatsapp_message
-         |   - send_whatsapp_media
+         |   - email_send tools
          |
          +-- Trusted contacts also get:
          |   - contact tools (search_contacts, etc.)
          |   - outreach tools (send_whatsapp_to_contact,
          |     get_contact_session_messages)
          |   - reflection tools
-         |   - delegation tools (if skill_dev_enabled)
-         |   - phone tools (if phone subsystem enabled)
+         |   - subagent tools (if skill_dev_enabled)
+         |
+         +-- Phone subsystem (if enabled):
+         |   - contact tools
+         |   - phone tools
+         |
+         +-- Channel-specific (always):
+         |   - send_whatsapp_message
+         |   - send_whatsapp_media
          |
          +-- Session has outreach metadata?
              |
              +-- Yes: add finish_outreach tool
+                    + inject outreach prompt into system message
              +-- No: nothing extra
 ```
 
@@ -280,19 +290,20 @@ Incoming WhatsApp message
 
 Every LLM invocation goes through the `LLMDispatchService`. For WhatsApp messages, the dispatch runs as a background `asyncio.Task` gated by a per-session lock (`SessionDispatchGate`) to ensure only one dispatch runs per session at a time:
 
-1. Incoming message arrives, a background task is created
+1. Incoming message arrives, a background task is created via `asyncio.create_task`
 2. The task acquires the session lock via `SessionDispatchGate.get_lock(session_key)`
-3. It marks queued messages as dispatched (`mark_dispatched`) to enable batching
+3. It marks queued messages as dispatched (`mark_dispatched`) to enable batching of rapid messages
 4. `LLMDispatchService.chat_with_tools` runs the LLM call with the assembled tools
 5. On success, the LLM response is logged with latency and token usage
-6. Auto-send fallback: if the LLM produced text but never called `send_whatsapp_message`, the text is sent anyway
+6. **Tap fallback**: if the LLM produced text but never called `send_whatsapp_message`, a second LLM call (`tap_dispatch`) is made, appending a reminder that the send tool must be used
 7. The assistant response is recorded in session history
+8. If the response is a `NO_REPLY` variant, it is not recorded to avoid poisoning future context
 
 The same dispatch mechanism is used for both incoming WhatsApp messages (`call_category="whatsapp_incoming"`) and outreach result delivery (`call_category="outreach_result"`).
 
 ## System Prompt Assembly
 
-The system prompt for each dispatch is assembled from multiple layers:
+The system prompt for each dispatch is assembled from multiple layers by `load_workspace_prompt` and the bridge service:
 
 ```
   +--------------------+
@@ -313,7 +324,7 @@ The system prompt for each dispatch is assembled from multiple layers:
   +--------------------+
 ```
 
-Each layer is conditionally included. The workspace prompt is cached and reloaded only when workspace files change on disk.
+Each layer is conditionally included. The workspace prompt is cached and reloaded only when workspace files change on disk (tracked via `st_mtime` hash).
 
 ## Logging
 

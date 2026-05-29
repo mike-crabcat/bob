@@ -1,14 +1,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type React from "react";
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { fetchAPI, postAPI, putAPI } from "@/lib/api";
 import { RichText } from "@/components/shared/rich-text";
+import { useWSEvents } from "@/hooks/use-live-data";
 
 interface SessionDetail {
   session_key: string;
   channel: string;
   calls: CallItem[];
+  messages: MessageItem[];
   participants: ParticipantItem[];
   summaries: SummaryItem[];
   current_agenda: string;
@@ -27,6 +29,7 @@ interface CallItem {
   error_message: string | null;
   contact_id: string | null;
   contact_name: string | null;
+  tools?: string[];
 }
 
 interface ParticipantItem {
@@ -35,6 +38,14 @@ interface ParticipantItem {
   contact_id: string | null;
   is_trusted: boolean;
   last_active: string;
+}
+
+interface MessageItem {
+  id: string;
+  role: string;
+  content: string;
+  channel: string;
+  created_at: string;
 }
 
 interface SummaryItem {
@@ -49,6 +60,7 @@ interface SummaryItem {
 
 type TimelineEntry =
   | { kind: "call"; data: CallItem }
+  | { kind: "message"; data: MessageItem }
   | { kind: "summary"; data: SummaryItem };
 
 function toMs(ts: string): number {
@@ -63,6 +75,7 @@ function stripMetadataEnvelope(text: string): string {
 function buildTimeline(detail: SessionDetail): TimelineEntry[] {
   const items: (TimelineEntry & { time: number })[] = [
     ...detail.calls.map((c) => ({ kind: "call" as const, time: toMs(c.created_at), data: c })),
+    ...detail.messages.map((m) => ({ kind: "message" as const, time: toMs(m.created_at), data: m })),
     ...detail.summaries.map((s) => ({ kind: "summary" as const, time: toMs(s.active_to), data: s })),
   ];
   return items.sort((a, b) => b.time - a.time);
@@ -135,6 +148,61 @@ function SessionDetailPage() {
     queryFn: () => fetchAPI<SessionDetail>(`/sessions/${encodeURIComponent(sessionKey)}`),
   });
 
+  // Live running-call state keyed by session
+  const liveRunning = useRef<Map<string, CallItem>>(new Map());
+  const liveTools = useRef<Map<string, string[]>>(new Map());
+  const wsEvents = useWSEvents();
+  const _lastEvent = wsEvents[0]; // consume latest to trigger re-render
+
+  // Process WS events for this session
+  if (_lastEvent && _lastEvent.payload?.session_key === sessionKey) {
+    const evt = _lastEvent;
+    if (evt.type === "llm.call.running") {
+      const key = `${evt.payload.session_key}-${evt.timestamp}`;
+      if (!liveRunning.current.has(key)) {
+        liveRunning.current.set(key, {
+          id: `live-${Date.now()}`,
+          created_at: new Date().toISOString(),
+          call_category: (evt.payload.call_category as string) || "",
+          status: "running",
+          latency_seconds: null,
+          model: (evt.payload.model as string) || "",
+          user_message: "",
+          response_preview: "",
+          error_message: null,
+          contact_id: null,
+          contact_name: null,
+          tools: [],
+        });
+        liveTools.current.set(key, []);
+      }
+    } else if (evt.type === "llm.call.tool_completed") {
+      const runningKey = [...liveRunning.current.keys()].pop();
+      if (runningKey) {
+        const tools = liveTools.current.get(runningKey) || [];
+        tools.push((evt.payload.tool_name as string) || "unknown");
+        liveTools.current.set(runningKey, tools);
+        const call = liveRunning.current.get(runningKey);
+        if (call) call.tools = [...tools];
+      }
+    } else if (evt.type === "llm.call.completed" || evt.type === "llm.call.failed") {
+      // Clear all live entries and refetch
+      if (liveRunning.current.size > 0) {
+        liveRunning.current.clear();
+        liveTools.current.clear();
+        queryClient.invalidateQueries({ queryKey: ["session-detail", sessionKey] });
+      }
+    }
+  }
+
+  // Merge live calls into the detail
+  const mergedDetail = useMemo(() => {
+    if (!detail) return detail;
+    const liveCalls = [...liveRunning.current.values()];
+    if (liveCalls.length === 0) return detail;
+    return { ...detail, calls: [...liveCalls, ...detail.calls] };
+  }, [detail, liveRunning.current.size, liveTools.current.size]);
+
   const reflectMutation = useMutation({
     mutationFn: (query: string) =>
       postAPI<{ response_text: string }>(
@@ -160,7 +228,7 @@ function SessionDetailPage() {
     },
   });
 
-  if (!detail) {
+  if (!mergedDetail) {
     return <div className="p-4 text-muted text-center text-xs">loading...</div>;
   }
 
@@ -168,19 +236,19 @@ function SessionDetailPage() {
     <div className="flex flex-col gap-3 p-3">
       <div>
         <Link to="/sessions" className="text-xs text-accent hover:underline">&larr; sessions</Link>
-        <h1 className="text-sm font-medium mt-1 break-all">{detail.session_key}</h1>
+        <h1 className="text-sm font-medium mt-1 break-all">{mergedDetail.session_key}</h1>
         <div className="flex items-center gap-2 mt-1 text-[10px] text-muted">
-          <span className="uppercase">{detail.channel}</span>
-          <span>{detail.stats.total_calls} calls</span>
-          <span className="text-success">{detail.stats.completed} ok</span>
-          {detail.stats.failed > 0 && <span className="text-error">{detail.stats.failed} failed</span>}
+          <span className="uppercase">{mergedDetail.channel}</span>
+          <span>{mergedDetail.stats.total_calls} calls</span>
+          <span className="text-success">{mergedDetail.stats.completed} ok</span>
+          {mergedDetail.stats.failed > 0 && <span className="text-error">{mergedDetail.stats.failed} failed</span>}
         </div>
       </div>
 
-      {detail.participants.length > 0 && (
+      {mergedDetail.participants.length > 0 && (
         <section>
           <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">participants</h2>
-          {detail.participants.map((p) => (
+          {mergedDetail.participants.map((p) => (
             <div key={p.identifier} className="flex items-center gap-1 text-xs py-0.5">
               <span className={`w-1.5 h-1.5 rounded-full ${p.is_trusted ? "bg-success" : "bg-muted"}`} />
               <span className="text-text">{p.display_name}</span>
@@ -195,7 +263,7 @@ function SessionDetailPage() {
           <h2 className="text-xs text-muted font-sans uppercase tracking-wider">agenda</h2>
           {!editingAgenda && (
             <button
-              onClick={() => { setEditAgenda(detail.current_agenda ?? ""); setEditingAgenda(true); }}
+              onClick={() => { setEditAgenda(mergedDetail.current_agenda ?? ""); setEditingAgenda(true); }}
               className="text-[10px] text-accent hover:underline"
             >
               edit
@@ -230,9 +298,9 @@ function SessionDetailPage() {
               )}
             </div>
           </div>
-        ) : detail.current_agenda ? (
+        ) : mergedDetail.current_agenda ? (
           <div className="text-xs text-text bg-surface border border-border p-2 whitespace-pre-wrap">
-            {detail.current_agenda}
+            {mergedDetail.current_agenda}
           </div>
         ) : (
           <div className="text-xs text-muted">no agenda set</div>
@@ -279,10 +347,38 @@ function SessionDetailPage() {
 
       <section>
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">
-          timeline ({detail.calls.length} calls, {detail.summaries.length} summaries)
+          timeline ({mergedDetail.calls.length} calls, {mergedDetail.messages.length} messages, {mergedDetail.summaries.length} summaries)
         </h2>
-        {buildTimeline(detail).map((entry) =>
-          entry.kind === "summary" ? (
+        {buildTimeline(mergedDetail).map((entry) =>
+          entry.kind === "message" ? (
+            <div key={`m-${entry.data.id}`} className={`border-l-2 py-2 px-2 mb-px ${
+              entry.data.channel === "subagent"
+                ? entry.data.role === "user"
+                  ? "border-amber-500/60 bg-amber-500/5"
+                  : "border-teal-500/60 bg-teal-500/5"
+                : entry.data.role === "user" ? "border-accent/40 bg-accent/5" : "border-muted/30 bg-muted/5"
+            }`}>
+              <div className="flex items-center gap-2 text-[10px] text-muted">
+                {entry.data.channel === "subagent" ? (
+                  <span className={
+                    entry.data.role === "user"
+                      ? "text-amber-400 font-medium"
+                      : "text-teal-400 font-medium"
+                  }>
+                    {entry.data.role === "user" ? "→ subagent" : "subagent →"}
+                  </span>
+                ) : (
+                  <span className={entry.data.role === "user" ? "text-accent" : "text-muted"}>
+                    {entry.data.role === "user" ? "user" : "cyborg"}
+                  </span>
+                )}
+                {entry.data.channel && entry.data.channel !== "subagent" && <span>via {entry.data.channel}</span>}
+              </div>
+              <div className="text-xs text-text mt-0.5 whitespace-pre-wrap line-clamp-6">
+                {entry.data.content}
+              </div>
+            </div>
+          ) : entry.kind === "summary" ? (
             <div key={`s-${entry.data.id}`} className="bg-accent/10 border-l-2 border-accent p-2 mb-px">
               <div className="text-[10px] text-accent mb-0.5">summary · {entry.data.message_count} msgs</div>
               <div className="text-xs text-text"><RichText text={entry.data.summary_text} /></div>
@@ -294,6 +390,25 @@ function SessionDetailPage() {
             <TapCard key={`c-${entry.data.id}`} call={entry.data} sessionKey={sessionKey} />
           ) : entry.data.call_category === "reflection" ? (
             <ReflectionCard key={`c-${entry.data.id}`} call={entry.data} />
+          ) : entry.data.status === "running" ? (
+            <div
+              key={`c-${entry.data.id}`}
+              className="block border-b border-border py-2 bg-accent/5"
+            >
+              <div className="flex items-center gap-2 text-[10px] text-muted">
+                <span className="inline-block w-2 h-2 rounded-full bg-accent animate-pulse" />
+                <span>{entry.data.call_category}</span>
+                <span>{entry.data.model}</span>
+                <span className="text-accent">running</span>
+              </div>
+              {entry.data.tools && entry.data.tools.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {entry.data.tools.map((t, i) => (
+                    <span key={i} className="text-[9px] bg-surface border border-border px-1.5 py-0.5 text-muted">{t}</span>
+                  ))}
+                </div>
+              )}
+            </div>
           ) : (
             <Link
               key={`c-${entry.data.id}`}

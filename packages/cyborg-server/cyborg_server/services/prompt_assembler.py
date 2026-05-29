@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,15 +49,15 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     MemoryService.ensure_memory_structure(workspace_dir)
     memory_dir = workspace_dir / "memory"
     if memory_dir.is_dir():
-        config = MemoryService.load_access_config(workspace_dir)
-        always_wikis = [
-            name for name, conf in config.get("wikis", {}).items()
-            if conf.get("access") == "always"
-        ]
-        if always_wikis:
-            mem_index = MemoryService._build_memory_index_static(workspace_dir, always_wikis)
-            if mem_index:
-                parts.append("## Memory\n\n" + mem_index)
+        parts.append(
+            "## Memory\n\n"
+            "You have persistent memory with these tools:\n"
+            "- **memory_search(query)** — Always start here. Searches all entries and returns an abstract with matches.\n"
+            "- **memory_read(wiki, category, slug)** — Read a specific entry in full.\n"
+            "- **memory_browse(wiki, category)** — List all entries in a category.\n"
+            "- **memory_write(wiki, category, slug, title, content)** — Write a new entry (queued as a bulletin, curated by dream process).\n"
+            "- Wiki: `core`. Categories: `people`, `facts`, `research`.\n"
+        )
 
     # Append grounding rules to reduce hallucinated tool claims
     parts.append(
@@ -86,6 +87,15 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     return combined
 
 
+def _resolve_mentions(text: str, mention_names: dict[str, str]) -> str:
+    """Replace @digits patterns with display names from the mention map."""
+    def _replace(m: re.Match[str]) -> str:
+        digits = m.group(1)
+        name = mention_names.get(digits)
+        return f"@{name}" if name else m.group(0)
+    return re.sub(r"@(\d{7,15})", _replace, text)
+
+
 async def build_chat_messages(
     user_message: str | None = None,
     session_key: str = "",
@@ -111,15 +121,20 @@ async def build_chat_messages(
 
         # For group sessions, resolve sender_id to display names
         sender_names: dict[str, str] = {}
+        mention_names: dict[str, str] = {}
         if is_group:
             participants = await db.fetch_all(
-                "SELECT contact_id, display_name FROM session_participants "
+                "SELECT contact_id, display_name, identifier FROM session_participants "
                 "WHERE session_key = ?",
                 (session_key,),
             )
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]
+                if p["display_name"] and p["identifier"]:
+                    digits = re.sub(r"\D", "", p["identifier"])
+                    if digits:
+                        mention_names[digits] = p["display_name"]
 
         rows = await db.fetch_all(
             "SELECT role, content, sender_id FROM session_messages "
@@ -138,12 +153,15 @@ async def build_chat_messages(
                 "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
             ):
                 continue
+            content = row["content"]
+            if is_group and mention_names:
+                content = _resolve_mentions(content, mention_names)
             if is_group and row["role"] == "user" and row["sender_id"]:
                 name = sender_names.get(row["sender_id"])
                 if name:
-                    messages.append({"role": "user", "content": f"[{name}] {row['content']}"})
+                    messages.append({"role": "user", "content": f"[{name}] {content}"})
                     continue
-            messages.append({"role": row["role"], "content": row["content"]})
+            messages.append({"role": row["role"], "content": content})
 
     if user_message is not None:
         messages.append({"role": "user", "content": user_message})

@@ -55,6 +55,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app_ctx = AppContext(db=database, settings=resolved_settings)
 
+        # Clean up stale subagents from previous runs
+        try:
+            from cyborg_server.services.subagent_service import SubagentService
+            await SubagentService(app_ctx).cleanup_stale()
+        except Exception:
+            logger.debug("Subagent cleanup skipped (table may not exist yet)")
+
         event_bus = EventBus()
         app_ctx.event_bus = event_bus
         app.state.event_bus = event_bus

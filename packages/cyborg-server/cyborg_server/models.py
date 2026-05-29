@@ -283,7 +283,6 @@ class ContactFields(CyborgModel):
     name: str = Field(min_length=1, max_length=255)
     phone_number: str = Field(min_length=1, max_length=50)
     email: str | None = Field(default=None, max_length=255)
-    whatsapp_groups: list[str] = Field(default_factory=list)
     metadata: MetadataDict = Field(default_factory=dict)
 
     @field_validator("name")
@@ -312,7 +311,6 @@ class ContactUpdate(CyborgModel):
     phone_number: str | None = Field(default=None, min_length=1, max_length=50)
     email: str | None = Field(default=None, max_length=255)
     is_trusted: bool | None = None
-    whatsapp_groups: list[str] | None = None
     metadata: MetadataDict | None = None
 
     @field_validator("name")
@@ -370,8 +368,6 @@ class SessionRouteFields(CyborgModel):
         if self.kind == SessionRouteKind.DM:
             if self.contact_id is None:
                 raise ValueError("dm session routes require contact_id")
-            if self.chat_id is not None:
-                raise ValueError("dm session routes cannot include chat_id")
         if self.kind == SessionRouteKind.THREAD:
             if self.chat_id is None:
                 raise ValueError("thread session routes require chat_id")
