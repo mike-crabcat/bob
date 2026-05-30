@@ -183,136 +183,25 @@ async def remove_inbox(
 async def send_email(
     inbox_id: UUID,
     payload: EmailSendRequest,
-    database: Database = Depends(get_database),
-    settings: Settings = Depends(get_settings),
     ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Send a new email from a registered inbox."""
-    from cyborg_server.services.agentmail_client import AgentMailClient
-    from cyborg_server.services.email_polling_service import (
-        CUSTOM_AGENDA_TEMPLATE,
-        resolve_or_create_email_thread,
-    )
-    inbox = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
-        (str(inbox_id),),
-    )
-    if inbox is None:
-        raise HTTPException(status_code=404, detail="Inbox not found or inactive")
+    from cyborg_server.services.email_delivery_service import EmailDeliveryService
 
-    # Send via AgentMail
-    async with AgentMailClient(
-        base_url=settings.agentmail.base_url,
-        api_key=settings.agentmail.api_key,
-    ) as client:
-        result = await client.send_message(
-            inbox["agentmail_inbox_id"],
+    delivery_service = EmailDeliveryService(ctx)
+    try:
+        result = await delivery_service.send_new_email(
+            inbox_id=str(inbox_id),
             to=payload.to,
             subject=payload.subject,
             text=payload.text,
             html=payload.html,
             cc=payload.cc,
+            agenda=payload.agenda,
             attachments=[a.model_dump(exclude_none=True) for a in payload.attachments] if payload.attachments else None,
         )
-
-    agentmail_message_id = result.get("message_id", "")
-    agentmail_thread_id = result.get("thread_id", "")
-
-    if not agentmail_thread_id:
-        return result
-
-    # Look up contact from recipient
-    contact_id = None
-    recipient_email = payload.to if isinstance(payload.to, str) else (payload.to[0] if payload.to else "")
-    if recipient_email:
-        contact = await database.fetch_one(
-            "SELECT id FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
-            (recipient_email,),
-        )
-        if contact:
-            contact_id = contact["id"]
-
-    # Create thread + session route (or find existing)
-    thread, is_new_thread = await resolve_or_create_email_thread(
-        database,
-        inbox=inbox,
-        agentmail_thread_id=agentmail_thread_id,
-        subject=payload.subject,
-        contact_id=contact_id,
-        agenda=payload.agenda,
-    )
-
-    # Store outgoing message record
-    from cyborg_server.services.email_delivery_service import EmailDeliveryService
-    delivery_service = EmailDeliveryService(ctx)
-    await delivery_service._persist_sent_message(
-        inbox=inbox,
-        agentmail_response=result,
-        agentmail_thread_id=agentmail_thread_id,
-        text=payload.text,
-        html=payload.html,
-        subject=payload.subject,
-        to_addresses=[payload.to] if isinstance(payload.to, str) else payload.to,
-        cc_addresses=payload.cc,
-        has_attachments=bool(payload.attachments),
-    )
-
-    # Dispatch to LLM for context priming
-    if settings.openai.enabled:
-        from cyborg_server.services.llm_dispatch import LLMDispatchService
-        from cyborg_server.services.session_service import SessionService
-        from cyborg_server.services.dispatch_service import DispatchService
-
-        send_parts: list[str] = []
-
-        send_parts += [
-            "## Email You Just Sent",
-            "This is provided for your context. Do NOT reply — wait for the recipient to respond.",
-            "",
-            f"Subject: {payload.subject}",
-            f"To: {payload.to}",
-            "",
-            payload.text,
-        ]
-
-        send_content = "\n".join(send_parts)
-        session_key = thread["session_key"]
-
-        logger.info(
-            "Dispatching send to LLM session=%s new_thread=%s",
-            session_key, is_new_thread,
-        )
-
-        from cyborg_server.services.prompt_assembler import load_workspace_prompt
-
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
-        custom_agenda = CUSTOM_AGENDA_TEMPLATE.format(agenda=payload.agenda) if is_new_thread and payload.agenda else None
-        system_parts = [p for p in (workspace_prompt, custom_agenda, "You are managing an email conversation. The following is an outgoing email you sent for your context.") if p]
-
-        messages = [
-            {"role": "system", "content": "\n\n".join(system_parts)},
-            {"role": "user", "content": send_content},
-        ]
-
-        dispatch_id = await DispatchService(ctx).record_dispatch(
-            notification_type="email_outgoing",
-            session_key=session_key,
-        )
-
-        async def _run_send_dispatch() -> str:
-            result = await LLMDispatchService(ctx).chat_with_tools(
-                messages, [],
-                call_category="email_outgoing",
-                session_key=session_key,
-                dispatch_id=dispatch_id,
-            )
-            session_svc = SessionService(ctx)
-            await session_svc.add_message(session_key, "assistant", payload.text, channel="email")
-            return result
-
-        DispatchService(ctx).track(dispatch_id, _run_send_dispatch())
-        logger.info("Send dispatch tracking for thread %s (dispatch=%s)", thread["id"], dispatch_id)
-
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return result
 
 

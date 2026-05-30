@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,14 +47,42 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
 
+    # Load memory index for always-accessible wikis
+    from cyborg_server.services.memory_service import MemoryService
+    MemoryService.ensure_memory_structure(workspace_dir)
+    memory_dir = workspace_dir / "memory"
+    if memory_dir.is_dir():
+        parts.append(
+            "## Memory\n\n"
+            "You have persistent memory with these tools:\n"
+            "- **memory_search(query)** — Always start here. Searches all entries and returns an abstract with matches.\n"
+            "- **memory_read(wiki, category, slug)** — Read a specific entry in full.\n"
+            "- **memory_browse(wiki, category)** — List all entries in a category.\n"
+            "- **memory_write(wiki, category, slug, title, content)** — Write a new entry (queued as a bulletin, curated by dream process).\n"
+            "- Wiki: `core`. Categories: `people`, `facts`, `research`.\n"
+            "\n"
+            "## People Profiles\n\n"
+            "Your most important memories are person profiles. When you learn something about someone\n"
+            "(preferences, personality, dietary info, work, family, interests):\n"
+            "- Use memory_write(wiki=\"core\", category=\"people\", ...) to save it.\n"
+            "- If the person has no profile yet, create one.\n"
+            "- These profiles are automatically loaded in future DM conversations with that person.\n"
+        )
+
     # Append grounding rules to reduce hallucinated tool claims
+    parts.append(
+        "## CRITICAL: How to Respond\n"
+        "Your text output is NOT delivered to the user. Only tool calls have effect.\n"
+        "ALWAYS call send_whatsapp_message (or email_reply) as your final action — even for short replies, "
+        "even for acknowledgments, even for jokes. Without that call, nothing is sent.\n"
+        "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
+    )
     parts.append(
         "## Grounding Rules\n"
         "- Only state that you have done something if you used a tool that confirmed success.\n"
         "- If you did not call a tool, the action did not happen — do not claim it did.\n"
         "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
         "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
-        "- CRITICAL: To reply, you MUST call the send_whatsapp_message (WhatsApp) or email_reply (email) tool. Your text output is NOT delivered — it is discarded. If you write a response without calling the tool, the user will NOT receive it."
     )
 
     combined = "\n\n".join(parts)
@@ -65,30 +97,57 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     return combined
 
 
+def _resolve_mentions(text: str, mention_names: dict[str, str]) -> str:
+    """Replace @digits patterns with display names from the mention map."""
+    def _replace(m: re.Match[str]) -> str:
+        digits = m.group(1)
+        name = mention_names.get(digits)
+        return f"@{name}" if name else m.group(0)
+    return re.sub(r"@(\d{7,15})", _replace, text)
+
+
 async def build_chat_messages(
-    user_message: str,
+    user_message: str | list[dict[str, Any]] | None = None,
     session_key: str = "",
     *,
     db: Any = None,
     system_content: str = "",
     voice_instructions: str = "",
     max_history: int = 20,
-) -> list[dict[str, str]]:
-    """Build a messages array: system prompt + session history + user message."""
+) -> list[dict[str, Any]]:
+    """Build a messages array: system prompt + session history + optional user message."""
     system_parts: list[str] = []
     if system_content:
         system_parts.append(system_content)
     if voice_instructions:
         system_parts.append(voice_instructions)
 
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     if system_parts:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
     if session_key and db is not None:
-        # Use a lightweight approach — just query directly
+        is_group = ":group:" in session_key
+
+        # For group sessions, resolve sender_id to display names
+        sender_names: dict[str, str] = {}
+        mention_names: dict[str, str] = {}
+        if is_group:
+            participants = await db.fetch_all(
+                "SELECT contact_id, display_name, identifier FROM session_participants "
+                "WHERE session_key = ?",
+                (session_key,),
+            )
+            for p in participants:
+                if p["contact_id"] and p["display_name"]:
+                    sender_names[p["contact_id"]] = p["display_name"]
+                if p["display_name"] and p["identifier"]:
+                    digits = re.sub(r"\D", "", p["identifier"])
+                    if digits:
+                        mention_names[digits] = p["display_name"]
+
         rows = await db.fetch_all(
-            "SELECT role, content FROM session_messages "
+            "SELECT role, content, sender_id, metadata FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
             "AND rowid IN (SELECT rowid FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
@@ -97,8 +156,52 @@ async def build_chat_messages(
             (session_key, session_key, max_history),
         )
         for row in rows:
-            if row["content"]:
-                messages.append({"role": row["role"], "content": row["content"]})
+            if not row["content"]:
+                continue
+            # Skip stale NO_REPLY entries that poison future decisions
+            if row["role"] == "assistant" and row["content"].strip().upper().rstrip(".") in (
+                "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
+            ):
+                continue
+            content = row["content"]
+            if is_group and mention_names:
+                content = _resolve_mentions(content, mention_names)
 
-    messages.append({"role": "user", "content": user_message})
+            # Check for image metadata and reconstruct multimodal content
+            meta: dict[str, Any] = {}
+            raw_meta = row.get("metadata")
+            if raw_meta:
+                try:
+                    meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            image_path = meta.get("image_path")
+            mime_type = meta.get("image_mime_type", "image/jpeg")
+
+            if image_path and row["role"] == "user" and os.path.isfile(image_path):
+                text_prefix = ""
+                if is_group and row["sender_id"]:
+                    name = sender_names.get(row["sender_id"])
+                    if name:
+                        text_prefix = f"[{name}] "
+                with open(image_path, "rb") as f:
+                    image_data = base64.b64encode(f.read()).decode()
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": text_prefix + content},
+                        {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_data}"},
+                    ],
+                })
+                continue
+
+            if is_group and row["role"] == "user" and row["sender_id"]:
+                name = sender_names.get(row["sender_id"])
+                if name:
+                    messages.append({"role": "user", "content": f"[{name}] {content}"})
+                    continue
+            messages.append({"role": row["role"], "content": content})
+
+    if user_message is not None:
+        messages.append({"role": "user", "content": user_message})
     return messages

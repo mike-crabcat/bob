@@ -22,8 +22,8 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "
 def _resolve_workspace_path(settings: Any, path: str) -> Path:
     """Resolve a relative path against the workspace dir, preventing traversal."""
     workspace = settings.harness.workspace_dir.expanduser().resolve()
-    resolved = (workspace / path).resolve() if path else workspace
-    if not str(resolved).startswith(str(workspace)):
+    resolved = (workspace / path) if path else workspace
+    if ".." in Path(path).parts:
         raise ValueError(f"Path escapes workspace directory")
     return resolved
 
@@ -40,12 +40,16 @@ def _utc_now() -> str:
 
 
 def _parse_channel(session_key: str) -> str:
-    if session_key.startswith("bobvoice:"):
+    if ":voice:" in session_key or session_key.startswith("bobvoice:"):
         return "voice"
+    if session_key.startswith("subagent:"):
+        return "subagent"
     if ":whatsapp:" in session_key:
         return "whatsapp"
     if ":email:" in session_key:
         return "email"
+    if ":phone:" in session_key:
+        return "phone"
     return "other"
 
 
@@ -193,95 +197,14 @@ async def get_home(request: Request) -> dict[str, Any]:
                 "created_at": _utc(row["created_at"]),
             })
 
-    # Active dispatches
-    active_dispatches: list[dict[str, Any]] = []
-    dispatch_rows = await db.fetch_all(
-        """SELECT d.id, d.notification_type, d.session_key, d.task_id, d.project_id,
-                  d.status, d.dispatched_at, d.tap_count,
-                  t.title AS task_title, p.title AS project_title
-           FROM dispatches d
-           LEFT JOIN tasks t ON t.id = d.task_id AND t.deleted_at IS NULL
-           LEFT JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
-           WHERE d.status = 'active'
-           ORDER BY d.dispatched_at ASC
-           LIMIT 20"""
-    )
-    for row in dispatch_rows:
-        active_dispatches.append({
-            "id": row["id"],
-            "notification_type": row["notification_type"],
-            "session_key": row["session_key"],
-            "task_id": row["task_id"],
-            "task_title": row["task_title"],
-            "project_title": row["project_title"],
-            "dispatched_at": row["dispatched_at"],
-            "tap_count": row["tap_count"],
-        })
-
-    # Project/task stats
-    project_stats = {}
-    ps = await db.fetch_one(
-        """SELECT COUNT(*) as total,
-                  SUM(CASE WHEN state='planning' THEN 1 ELSE 0 END) as planning,
-                  SUM(CASE WHEN state='active' THEN 1 ELSE 0 END) as active,
-                  SUM(CASE WHEN state='paused' THEN 1 ELSE 0 END) as paused,
-                  SUM(CASE WHEN state='closed' THEN 1 ELSE 0 END) as closed
-           FROM projects WHERE deleted_at IS NULL"""
-    )
-    if ps:
-        project_stats = {
-            "planning": int(ps["planning"] or 0),
-            "active": int(ps["active"] or 0),
-            "paused": int(ps["paused"] or 0),
-            "closed": int(ps["closed"] or 0),
-        }
-
-    task_rows = await db.fetch_all(
-        "SELECT status, COUNT(*) as count FROM tasks WHERE deleted_at IS NULL GROUP BY status"
-    )
-    task_stats = {row["status"]: row["count"] for row in task_rows}
-
     # Recent activity
     recent_activities: list[dict[str, Any]] = []
-    journal_rows = await db.fetch_all(
-        """SELECT project_id, entry_type, content, created_at
-           FROM project_journal_entries
-           ORDER BY created_at DESC LIMIT 8"""
-    )
-    for row in journal_rows:
-        content = row["content"] or ""
-        recent_activities.append({
-            "type": "journal",
-            "label": row["entry_type"].replace("_", " ").title(),
-            "summary": content[:140] + "..." if len(content) > 140 else content,
-            "created_at": _utc(row["created_at"]),
-            "project_id": row["project_id"],
-        })
-
-    notif_rows = await db.fetch_all(
-        """SELECT title, message, notification_type, created_at
-           FROM notifications ORDER BY created_at DESC LIMIT 8"""
-    )
-    for row in notif_rows:
-        message = row["message"] or ""
-        recent_activities.append({
-            "type": "notification",
-            "label": row["notification_type"].replace("_", " ").title(),
-            "summary": message[:140] + "..." if len(message) > 140 else message,
-            "created_at": _utc(row["created_at"]),
-            "title": row["title"],
-        })
-
-    recent_activities.sort(key=lambda a: a.get("created_at") or "", reverse=True)
 
     return {
         "active_sessions": active_sessions,
         "chart_buckets": chart_buckets,
         "chart_categories": chart_categories,
         "recent_summaries": recent_summaries,
-        "active_dispatches": active_dispatches,
-        "project_stats": project_stats,
-        "task_stats": task_stats,
         "recent_activities": recent_activities[:15],
     }
 
@@ -443,10 +366,31 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
     )
     current_agenda = agenda_row["agenda"] if agenda_row else ""
 
+    # Session messages (conversation entries from session_messages table)
+    messages: list[dict[str, Any]] = []
+    msgs_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_messages'"
+    )
+    if msgs_table:
+        m_rows = await db.fetch_all(
+            "SELECT id, role, content, channel, created_at FROM session_messages "
+            "WHERE session_key = ? ORDER BY created_at ASC LIMIT 200",
+            (session_key,),
+        )
+        for row in m_rows:
+            messages.append({
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "channel": row["channel"],
+                "created_at": _utc(row["created_at"]),
+            })
+
     return {
         "session_key": session_key,
         "channel": _parse_channel(session_key),
         "calls": calls,
+        "messages": messages,
         "participants": participants,
         "summaries": summaries,
         "current_agenda": current_agenda,
@@ -538,7 +482,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         return {"error": "unauthorized"}
     db = _db(request)
     contact = await db.fetch_one(
-        """SELECT id, name, phone_number, email, whatsapp_groups, metadata,
+        """SELECT id, name, phone_number, email, metadata,
                   is_trusted, is_default, created_at, updated_at
            FROM contacts WHERE id = ? AND deleted_at IS NULL""",
         (contact_id,),
@@ -567,6 +511,27 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
                 "last_active": _utc(row["last_active_at"]),
             })
 
+    groups: list[dict[str, Any]] = []
+    groups_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='whatsappgroup_members'"
+    )
+    if groups_table:
+        group_rows = await db.fetch_all(
+            """SELECT g.name, g.whatsapp_jid, gm.is_admin, gm.joined_at
+               FROM whatsappgroup_members gm
+               JOIN whatsappgroups g ON g.id = gm.group_id
+               WHERE gm.contact_id = ? AND gm.left_at IS NULL AND g.deleted_at IS NULL
+               ORDER BY g.name""",
+            (contact_id,),
+        )
+        for row in group_rows:
+            groups.append({
+                "name": row["name"],
+                "jid": row["whatsapp_jid"],
+                "is_admin": bool(row["is_admin"]),
+                "joined_at": _utc(row["joined_at"]),
+            })
+
     return {
         "id": contact["id"],
         "name": contact["name"],
@@ -574,9 +539,9 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         "email": contact["email"],
         "is_trusted": bool(contact["is_trusted"]),
         "is_default": bool(contact["is_default"]),
-        "whatsapp_groups": json.loads(contact["whatsapp_groups"]) if contact["whatsapp_groups"] else [],
         "metadata": json.loads(contact["metadata"]) if contact["metadata"] else {},
         "sessions": sessions,
+        "groups": groups,
         "created_at": _utc(contact["created_at"]),
         "updated_at": _utc(contact["updated_at"]),
     }
@@ -682,7 +647,7 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
     workspace = settings.harness.workspace_dir.expanduser().resolve()
     entries: list[dict[str, Any]] = []
 
-    def _walk(dir_path: Path, current_depth: int) -> None:
+    def _walk(dir_path: Path, prefix: str, current_depth: int) -> None:
         if len(entries) >= 200:
             return
         try:
@@ -692,8 +657,8 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
         for child in children:
             if len(entries) >= 200:
                 break
-            rel = str(child.relative_to(workspace))
-            entry: dict[str, Any] = {"name": rel, "type": "dir" if child.is_dir() else "file"}
+            name = f"{prefix}{child.name}" if prefix else child.name
+            entry: dict[str, Any] = {"name": name, "type": "dir" if child.is_dir() else "file"}
             if child.is_file():
                 try:
                     entry["size_bytes"] = child.stat().st_size
@@ -701,9 +666,10 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
                     pass
             entries.append(entry)
             if child.is_dir() and current_depth < depth:
-                _walk(child, current_depth + 1)
+                _walk(child, f"{name}/", current_depth + 1)
 
-    _walk(target, 1)
+    prefix = f"{path}/" if path else ""
+    _walk(target, prefix, 1)
     return {"entries": entries, "path": path, "root": str(workspace)}
 
 
@@ -767,6 +733,293 @@ async def write_workspace_file(request: Request, path: str = "") -> dict[str, An
     return {"ok": True}
 
 
+# ── Memory ──────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/memory/stats")
+async def get_memory_stats(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    config = svc.load_access_config(workspace)
+    wiki_names = list(config.get("wikis", {}).keys())
+
+    result = svc.list_recent_entries(workspace, wiki_names)
+
+    INTERNAL_CATEGORIES = {"bulletins", "digested"}
+    stats = result["stats"]
+
+    for wiki_data in stats.get("wikis", {}).values():
+        wiki_data["internal_categories"] = {
+            k: v for k, v in wiki_data["categories"].items()
+            if k in INTERNAL_CATEGORIES
+        }
+        wiki_data["categories"] = {
+            k: v for k, v in wiki_data["categories"].items()
+            if k not in INTERNAL_CATEGORIES
+        }
+
+    result["recent"] = [e for e in result["recent"] if e["category"] not in INTERNAL_CATEGORIES]
+    stats["total_entries"] = len(result["recent"])
+
+    # Pipeline status
+    bulletins = svc.read_bulletins(workspace)
+    result["pending_bulletins"] = len(bulletins)
+
+    last_dream = await _db(request).fetch_one(
+        "SELECT created_at FROM memory_dream_log ORDER BY created_at DESC LIMIT 1"
+    )
+    result["last_dream"] = _utc(last_dream["created_at"]) if last_dream else None
+
+    return result
+
+
+@router.get("/api/memory/searches")
+async def get_memory_searches(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    searches: list[dict[str, Any]] = []
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_search_log'"
+    )
+    if table_exists:
+        rows = await db.fetch_all(
+            "SELECT id, query, results_json, session_key, result_count, latency_seconds, created_at "
+            "FROM memory_search_log ORDER BY created_at DESC LIMIT 100"
+        )
+        for row in rows:
+            results = []
+            abstract = ""
+            try:
+                parsed = json.loads(row["results_json"]) if row["results_json"] else {}
+                if isinstance(parsed, dict):
+                    results = parsed.get("results", [])
+                    abstract = parsed.get("abstract", "")
+                elif isinstance(parsed, list):
+                    results = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+            searches.append({
+                "id": row["id"],
+                "query": row["query"],
+                "abstract": abstract,
+                "results": results,
+                "session_key": row["session_key"],
+                "result_count": row["result_count"],
+                "latency_seconds": row["latency_seconds"],
+                "created_at": _utc(row["created_at"]),
+            })
+    return {"searches": searches}
+
+
+@router.get("/api/memory/search")
+async def run_memory_search(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    query = request.query_params.get("q", "").strip()
+    if not query:
+        return {"error": "missing query parameter 'q'"}
+
+    db = _db(request)
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=db)
+    svc = MemoryService(ctx)
+
+    import time
+    start = time.monotonic()
+    result = await svc.search_entries(workspace, ["core"], query)
+    latency = time.monotonic() - start
+
+    # Log it
+    from uuid import uuid4
+    try:
+        await db.execute(
+            "INSERT INTO memory_search_log (id, query, results_json, session_key, result_count, latency_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid4()), query, json.dumps(result), None, len(result.get("results", [])), latency),
+        )
+    except Exception:
+        pass
+
+    result["latency_seconds"] = latency
+    return result
+
+
+@router.get("/api/memory/bulletins")
+async def get_memory_bulletins(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    bulletins = svc.read_bulletins(workspace)
+    for b in bulletins:
+        b["path"] = str(b["path"])
+    return {"bulletins": bulletins}
+
+
+@router.get("/api/memory/dreams")
+async def get_memory_dreams(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    dreams: list[dict[str, Any]] = []
+    table_exists = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_dream_log'"
+    )
+    if table_exists:
+        rows = await db.fetch_all(
+            "SELECT id, bulletins_processed, entries_created, bulletin_slugs, "
+            "operations_json, raw_response, duration_seconds, status, created_at "
+            "FROM memory_dream_log ORDER BY created_at DESC LIMIT 20"
+        )
+        for row in rows:
+            operations = []
+            try:
+                operations = json.loads(row["operations_json"]) if row["operations_json"] else []
+            except (json.JSONDecodeError, TypeError):
+                pass
+            slugs = []
+            try:
+                slugs = json.loads(row["bulletin_slugs"]) if row["bulletin_slugs"] else []
+            except (json.JSONDecodeError, TypeError):
+                pass
+            dreams.append({
+                "id": row["id"],
+                "bulletins_processed": row["bulletins_processed"],
+                "entries_created": row["entries_created"],
+                "bulletin_slugs": slugs,
+                "operations": operations,
+                "raw_response": row["raw_response"] or "",
+                "duration_seconds": row["duration_seconds"],
+                "status": row["status"],
+                "created_at": _utc(row["created_at"]),
+            })
+    return {"dreams": dreams}
+
+
+@router.get("/api/memory/category/{category}")
+async def get_memory_category(request: Request, category: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    entries = svc.browse_category(workspace, "core", category)
+    for e in entries:
+        e["path"] = f"memory/core/{category}/{e['slug']}.md"
+    return {"category": category, "entries": entries}
+
+
+@router.post("/api/memory/digested")
+async def get_digested_bulletins(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    slugs: list[str] = body.get("slugs", [])
+    if not slugs:
+        return {"bulletins": []}
+
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    digested_dir = svc._memory_dir(workspace) / "core" / "digested"
+
+    results: list[dict[str, Any]] = []
+    for slug in slugs:
+        path = digested_dir / f"{slug}.md"
+        if path.is_file():
+            results.append({"slug": slug, "content": path.read_text(encoding="utf-8")})
+    return {"bulletins": results}
+
+
+@router.post("/api/memory/redigest")
+async def redigest_bulletin(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    slug: str = body.get("slug", "")
+    if not slug:
+        return {"error": "missing slug"}
+
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+
+    digested = svc._memory_dir(workspace) / "core" / "digested" / f"{slug}.md"
+    bulletins = svc._memory_dir(workspace) / "core" / "bulletins" / f"{slug}.md"
+
+    if not digested.is_file():
+        return {"error": f"digested bulletin not found: {slug}"}
+
+    digested.rename(bulletins)
+    svc.rebuild_wiki_index(workspace, "core")
+    return {"ok": True, "slug": slug}
+
+
+@router.post("/api/memory/lint")
+async def lint_memory_entries(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    return await svc.lint_entries(workspace)
+
+
+@router.post("/api/memory/backfill-people")
+async def backfill_people(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    return await svc.backfill_people(workspace)
+
+
 # ── Skills ──────────────────────────────────────────────────────────────────
 
 
@@ -784,8 +1037,12 @@ async def get_installed_skills(request: Request) -> dict[str, Any]:
 
     skills: list[dict[str, Any]] = []
     for child in sorted(skills_dir.iterdir()):
+        if not child.is_dir():
+            continue
         md = child / "skill.md"
-        if not child.is_dir() or not md.is_file():
+        if not md.is_file():
+            md = child / "SKILL.md"
+        if not md.is_file():
             continue
         content = md.read_text(encoding="utf-8").strip()
         fm = _parse_frontmatter(content)
@@ -922,6 +1179,117 @@ async def reject_skill_delegation(request: Request, delegation_id: str) -> dict[
         return {"ok": False, "error": str(exc)}
 
 
+# ── Subagents ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/subagents")
+async def get_subagents(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    rows = await db.fetch_all(
+        """SELECT id, parent_session_key, session_key, task, status,
+                  result, error_message, agent_type, cost_usd,
+                  created_at, updated_at
+           FROM subagents
+           ORDER BY created_at DESC LIMIT 50"""
+    )
+    subagents: list[dict[str, Any]] = []
+    for row in rows:
+        subagents.append({
+            "id": row["id"],
+            "parent_session_key": row["parent_session_key"],
+            "session_key": row["session_key"],
+            "task_preview": (row["task"] or "")[:200],
+            "status": row["status"],
+            "result_preview": (row["result"] or "")[:200],
+            "error_message": row["error_message"],
+            "agent_type": row["agent_type"],
+            "cost_usd": row["cost_usd"] or 0,
+            "created_at": _utc(row["created_at"]),
+            "updated_at": _utc(row["updated_at"]),
+        })
+    return {"subagents": subagents}
+
+
+@router.get("/api/subagents/{subagent_id}")
+async def get_subagent_detail(request: Request, subagent_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one(
+        """SELECT id, parent_session_key, session_key, task, status,
+                  result, error_message, agent_type, claude_session_id, cost_usd,
+                  created_at, updated_at
+           FROM subagents WHERE id = ?""",
+        (subagent_id,),
+    )
+    if not row:
+        return {"error": "not found"}
+    return {
+        "id": row["id"],
+        "parent_session_key": row["parent_session_key"],
+        "session_key": row["session_key"],
+        "task": row["task"],
+        "status": row["status"],
+        "result": row["result"],
+        "error_message": row["error_message"],
+        "agent_type": row["agent_type"],
+        "claude_session_id": row["claude_session_id"],
+        "cost_usd": row["cost_usd"] or 0,
+        "created_at": _utc(row["created_at"]),
+        "updated_at": _utc(row["updated_at"]),
+    }
+
+
+@router.post("/api/subagents/{subagent_id}/message")
+async def message_subagent(request: Request, subagent_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+    if not message:
+        return {"ok": False, "error": "message is required"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.subagent_service import SubagentService
+
+    ctx = AppContext(
+        db=_db(request),
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
+    svc = SubagentService(ctx)
+    try:
+        result = await svc.message_subagent(subagent_id, message)
+        return result
+    except Exception as exc:
+        logger.error("Subagent message failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@router.post("/api/subagents/{subagent_id}/kill")
+async def kill_subagent(request: Request, subagent_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.subagent_service import SubagentService
+
+    ctx = AppContext(
+        db=_db(request),
+        settings=request.app.state.settings,
+        event_bus=getattr(request.app.state, "event_bus", None),
+    )
+    svc = SubagentService(ctx)
+    try:
+        result = await svc.kill_subagent(subagent_id)
+        return result
+    except Exception as exc:
+        logger.error("Subagent kill failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 # ── Phone ────────────────────────────────────────────────────────────────────
 
 
@@ -984,7 +1352,7 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
         return {"error": "Call not found"}
     exchanges = await db.fetch_all(
         """SELECT exchange_index, user_transcript, assistant_transcript,
-                  stt_ms, openclaw_ms, tts_first_chunk_ms, e2e_ms,
+                  stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
                   started_at, created_at
            FROM phone_call_exchanges
            WHERE call_id = ?

@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import shutil
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from cyborg_server.context import AppContext
 from cyborg_server.services.skill_env import build_skill_env
-from cyborg_server.services.tools import tool
+from cyborg_server.services.tools import ImageInjection, tool
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,10 @@ _SCRIPT_TIMEOUT_SECONDS = 900
 def _resolve_path(ctx: AppContext, path: str) -> Path:
     """Resolve a relative path against the workspace dir, preventing traversal."""
     workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
-    resolved = (workspace / path).resolve()
-    if not str(resolved).startswith(str(workspace)):
+    resolved = (workspace / path)
+    # Block traversal attacks (e.g. "../../etc/passwd") without resolving symlinks,
+    # so that symlinked directories inside the workspace remain accessible.
+    if ".." in Path(path).parts:
         raise ValueError(f"Path '{path}' escapes workspace directory")
     return resolved
 
@@ -53,7 +56,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
 
         entries: list[dict] = []
 
-        def _walk(dir_path: Path, current_depth: int) -> None:
+        def _walk(dir_path: Path, prefix: str, current_depth: int) -> None:
             if len(entries) >= _MAX_LIST_ENTRIES:
                 return
             try:
@@ -64,9 +67,9 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                 if len(entries) >= _MAX_LIST_ENTRIES:
                     entries.append({"name": "...", "type": "truncated"})
                     return
-                rel = str(child.relative_to(workspace))
+                name = f"{prefix}{child.name}" if prefix else child.name
                 entry: dict = {
-                    "name": rel,
+                    "name": name,
                     "type": "dir" if child.is_dir() else "file",
                 }
                 if child.is_file():
@@ -76,9 +79,10 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                         pass
                 entries.append(entry)
                 if child.is_dir() and current_depth < depth:
-                    _walk(child, current_depth + 1)
+                    _walk(child, f"{name}/", current_depth + 1)
 
-        _walk(target, 1)
+        prefix = f"{path}/" if path else ""
+        _walk(target, prefix, 1)
         return json.dumps(entries)
 
     @tool
@@ -89,6 +93,12 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         resolved = _resolve_path(ctx, path)
         if not resolved.is_file():
             return f"Error: '{path}' is not a file"
+
+        # Detect image files and provide a helpful message
+        suffix = resolved.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
+            size = resolved.stat().st_size
+            return f"Image file ({suffix}, {size} bytes). Images cannot be read as text."
 
         size = resolved.stat().st_size
         if size > _MAX_READ_BYTES:
@@ -101,6 +111,31 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         return content.decode("utf-8")
 
     @tool
+    async def read_image(
+        path: str,
+    ) -> ImageInjection:
+        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP. Path is relative to the workspace root ('/')."""
+        resolved = _resolve_path(ctx, path)
+        if not resolved.is_file():
+            return ImageInjection(text=f"Error: '{path}' is not a file", data_url="")
+
+        suffix = resolved.suffix.lower()
+        _MIME_MAP = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+        }
+        mime = _MIME_MAP.get(suffix)
+        if not mime:
+            return ImageInjection(text=f"Error: '{path}' is not a supported image format (use png, jpg, gif, webp, or bmp)", data_url="")
+
+        data = resolved.read_bytes()
+        b64 = base64.b64encode(data).decode()
+        return ImageInjection(
+            text=f"Image loaded from {path} ({len(data)} bytes)",
+            data_url=f"data:{mime};base64,{b64}",
+        )
+
+    @tool
     async def write_file(
         path: str,
         content: str,
@@ -109,7 +144,12 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         if len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
             return f"Error: content exceeds {_MAX_WRITE_BYTES} bytes"
 
+        workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
         resolved = _resolve_path(ctx, path)
+
+        # Guard memory directory — use memory_write tool instead to keep indexes in sync
+        if str(resolved).startswith(str(workspace / "memory")):
+            return "Error: Use the memory_write tool to modify memory entries (ensures the index stays in sync)"
         if resolved.exists() and resolved.is_dir():
             return f"Error: '{path}' is a directory"
 
@@ -172,7 +212,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         from cyborg_server.services.skill_loader import load_skill
         return load_skill(ctx.settings.harness.workspace_dir, skill_name)
 
-    tools = [list_files, read_file, write_file, run_script, use_skill]
+    tools = [list_files, read_file, read_image, write_file, run_script, use_skill]
 
     if session_key:
         @tool

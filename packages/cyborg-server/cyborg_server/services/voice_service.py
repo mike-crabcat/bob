@@ -22,7 +22,8 @@ from cyborg_server.services.voice_protocol import (
     PartialResponseMessage,
     ResponseTextMessage,
 )
-from cyborg_server.services.voice_session_store import VoiceSessionStore
+from cyborg_server.services.lesson_progress_service import LessonProgressService
+from cyborg_server.services.session_service import SessionService
 from cyborg_server.services.voice_transport import VoiceTransport
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ _TOTAL_LESSONS = 10
 
 
 def _session_key(user_id: str, session_mode: str) -> str:
-    return f"bobvoice:{session_mode}:{user_id}"
+    return f"agent:main:voice:session:{user_id}:{session_mode}"
 
 
 def _process_language_tags(text: str, default_lang: str) -> list[tuple[str, str]]:
@@ -92,12 +93,15 @@ def _common_prefix_len(a: str, b: str) -> int:
 
 
 class VoiceService(BaseService):
-    """Orchestrates the voice chat pipeline using the dispatch system."""
+    """Orchestrates the voice chat pipeline."""
+
+    _voice_semaphore: asyncio.Semaphore = asyncio.Semaphore(10)
 
     def __init__(self, ctx: AppContext, engines: VoiceEngineManager) -> None:
         super().__init__(ctx)
         self.engines = engines
-        self._session_store = VoiceSessionStore(ctx)
+        self._lesson_store = LessonProgressService(ctx)
+        self._session_svc = SessionService(ctx)
 
     def _lessons_dir(self) -> Path | None:
         voice = self.ctx.settings.voice
@@ -115,7 +119,6 @@ class VoiceService(BaseService):
         user_id: str = "mike",
         session_mode: str = "chat",
         agenda: str = "",
-        warmup_ok: bool = False,
     ) -> None:
         """Run the full voice pipeline: STT → LLM dispatch → TTS, tracked as a dispatch."""
         audio_data = b"".join(audio_chunks)
@@ -145,7 +148,7 @@ class VoiceService(BaseService):
             "text": text, "language": detected_lang, "latency_ms": stt_ms,
         })
 
-        # --- Dispatch through the dispatch system ---
+        # --- Run voice pipeline ---
         await transport.send_status("thinking")
 
         is_beginner = session_mode == "beginner_french"
@@ -155,14 +158,12 @@ class VoiceService(BaseService):
 
         session_key = _session_key(user_id, session_mode)
 
-        from cyborg_server.services.dispatch_service import DispatchService
-
-        dispatch_service = DispatchService(self.ctx)
-        from cyborg_server.models import DispatchCategory
-
-        dispatch_id = await dispatch_service.record_dispatch(
-            notification_type=DispatchCategory.VOICE_CHAT.value,
-            session_key=session_key,
+        # Store user message immediately so queued messages are visible
+        # to the next dispatch that acquires the session lock.
+        user_meta = {"language": detected_lang} if detected_lang else None
+        await self._session_svc.add_message(
+            session_key, "user", text,
+            channel="voice", metadata=user_meta, dispatched=0,
         )
 
         coro = self._voice_dispatch_coro(
@@ -178,10 +179,16 @@ class VoiceService(BaseService):
             t0=t0,
             stt_ms=stt_ms,
             agenda=agenda,
-            warmup_ok=warmup_ok,
-            dispatch_id=dispatch_id,
         )
-        dispatch_service.track(dispatch_id, coro)
+        asyncio.create_task(self._run_with_semaphore(coro))
+
+    async def _run_with_semaphore(self, coro) -> None:
+        """Run a voice pipeline coroutine under the concurrency semaphore."""
+        async with self._voice_semaphore:
+            try:
+                await coro
+            except Exception:
+                logger.exception("Voice pipeline failed")
 
     async def _voice_dispatch_coro(
         self,
@@ -198,13 +205,8 @@ class VoiceService(BaseService):
         t0: float,
         stt_ms: int,
         agenda: str = "",
-        warmup_ok: bool = False,
-        dispatch_id: str = "",
     ) -> None:
-        """Coroutine that runs the streaming gateway call + TTS pipeline.
-
-        Wrapped by DispatchService.track() for lifecycle management.
-        """
+        """Coroutine that runs the streaming gateway call + TTS pipeline."""
         t1 = time.monotonic()
 
         # Timing breakdown
@@ -322,128 +324,139 @@ class VoiceService(BaseService):
         # --- LLM streaming call ---
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
         from cyborg_server.services.llm_dispatch import LLMDispatchService
+        from cyborg_server.services.session_dispatch_gate import SessionDispatchGate
 
         settings = self._get_settings()
         t_gateway_connect = time.monotonic()
         t_prepare = t_gateway_connect
         t_stream_start = t_gateway_connect
-        try:
-            voice_instructions = ""
-            message = text
 
-            if lesson_context:
-                message = f"{lesson_context} {text}"
-            elif session_mode.endswith("_teacher"):
-                prompt = self._load_prompt_template(session_mode)
-                message = f"{prompt} {text}" if prompt else text
-            else:
-                voice_instructions = (
-                    "You are participating in a live voice conversation. "
-                    "Respond in plain spoken language: no emojis, no markdown formatting, "
-                    "no asterisks, no bullet points. Just natural speech."
+        async with SessionDispatchGate.get_lock(session_key):
+            claimed = await self._session_svc.mark_dispatched(session_key)
+            if claimed == 0:
+                # Another dispatch already handled our message
+                await sentence_queue.put(None)
+                await tts_task
+                await transport.send_message("response_text", {"text": ""})
+                await transport.send_message("audio_done", {})
+                await transport.send_status("idle")
+                return
+
+            try:
+                voice_instructions = ""
+                message = text
+
+                if lesson_context:
+                    message = f"{lesson_context} {text}"
+                elif session_mode.endswith("_teacher"):
+                    prompt = self._load_prompt_template(session_mode)
+                    message = f"{prompt} {text}" if prompt else text
+                else:
+                    voice_instructions = (
+                        "You are participating in a live voice conversation. "
+                        "Respond in plain spoken language: no emojis, no markdown formatting, "
+                        "no asterisks, no bullet points. Just natural speech."
+                    )
+                    if agenda:
+                        voice_instructions += f"\n\nCALL AGENDA: {agenda}. Follow this agenda throughout the conversation. Stay on topic and work toward the agenda's goal."
+
+                # Check for stored session agenda
+                from cyborg_server.services.session_agenda_service import SessionAgendaService
+                session_agenda = await SessionAgendaService(self.ctx).get_agenda(session_key)
+                if session_agenda and not agenda:
+                    voice_instructions += f"\n\nAGENDA: {session_agenda}"
+
+                if detected_lang and detected_lang != "en":
+                        lang_name = _LANGUAGE_NAMES.get(detected_lang, detected_lang)
+                        voice_instructions += f"\n\nRespond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes."
+
+                workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+                messages = await build_chat_messages(
+                    None, session_key,
+                    db=self.db,
+                    system_content=workspace_prompt,
+                    voice_instructions=voice_instructions,
+                    max_history=settings.harness.max_history_messages,
                 )
-                if agenda:
-                    voice_instructions += f"\n\nCALL AGENDA: {agenda}. Follow this agenda throughout the conversation. Stay on topic and work toward the agenda's goal."
 
-            # Check for stored session agenda
-            from cyborg_server.services.session_agenda_service import SessionAgendaService
-            session_agenda = await SessionAgendaService(self.ctx).get_agenda(session_key)
-            if session_agenda and not agenda:
-                voice_instructions += f"\n\nAGENDA: {session_agenda}"
+                dispatch = LLMDispatchService(self.ctx)
+                t_prepare = time.monotonic()
+                t_stream_start = t_prepare
+                accumulated = ""
 
-            if detected_lang and detected_lang != "en":
-                    lang_name = _LANGUAGE_NAMES.get(detected_lang, detected_lang)
-                    voice_instructions += f"\n\nRespond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes."
+                # Build workspace tools for file access during conversation
+                from cyborg_server.services.workspace_tools import make_workspace_tools
+                tools = make_workspace_tools(self.ctx, session_key=session_key)
 
-            workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
-            messages = await build_chat_messages(
-                message, session_key,
-                db=self.db,
-                system_content=workspace_prompt,
-                voice_instructions=voice_instructions,
-                max_history=settings.harness.max_history_messages,
+                async for chunk in dispatch.chat_stream_with_tools(
+                    messages,
+                    tools=tools,
+                    provider="openai",
+                    model=settings.harness.default_model,
+                    call_category="voice_chat",
+                    session_key=session_key,
+                ):
+                    if chunk:
+                        accumulated += chunk
+                        await on_delta(accumulated)
+                        if on_tool_start and len(accumulated) < 20:
+                            await on_tool_start()
+                response = accumulated
+            except Exception:
+                logger.exception("LLM dispatch error during voice dispatch")
+                response = "Sorry, I couldn't reach the AI service."
+
+            t_gateway_done = time.monotonic()
+            llm_ms = int((t_gateway_done - t1) * 1000)
+            latency["llm_total_ms"] = llm_ms
+            latency["llm_prepare_ms"] = int((t_prepare - t_gateway_connect) * 1000)
+            latency["llm_stream_ms"] = int((t_gateway_done - t_stream_start) * 1000)
+            latency["first_audio_at_ms"] = tts_first_chunk_ms or 0
+            logger.info(
+                "Voice pipeline timing: STT=%dms prepare=%dms stream=%dms llm_total=%dms tts_first_chunk=%dms",
+                stt_ms,
+                latency["llm_prepare_ms"],
+                latency["llm_stream_ms"],
+                llm_ms,
+                tts_first_chunk_ms or 0,
             )
 
-            dispatch = LLMDispatchService(self.ctx)
-            t_prepare = time.monotonic()
-            t_stream_start = t_prepare
-            accumulated = ""
+            if last_accumulated:
+                response = last_accumulated
 
-            # Build workspace tools for file access during conversation
-            from cyborg_server.services.workspace_tools import make_workspace_tools
-            tools = make_workspace_tools(self.ctx, session_key=session_key)
+            clean_response, completed_steps_raw, completed_lessons = _extract_instruction_tokens(response)
 
-            async for chunk in dispatch.chat_stream_with_tools(
-                messages,
-                tools=tools,
-                provider="openai",
-                model=settings.harness.default_model,
-                call_category="voice_chat",
-                session_key=session_key,
-                dispatch_id=dispatch_id,
-            ):
-                if chunk:
-                    accumulated += chunk
-                    await on_delta(accumulated)
-                    if on_tool_start and len(accumulated) < 20:
-                        await on_tool_start()
-            response = accumulated
-        except Exception:
-            logger.exception("LLM dispatch error during voice dispatch")
-            response = "Sorry, I couldn't reach the AI service."
+            # Flush remaining speech buffer
+            remaining = speech_buffer[tts_pos:]
+            if remaining.strip():
+                tts_pos = len(speech_buffer)
+                clean_remaining = _STEP_COMPLETE_RE.sub("", remaining)
+                clean_remaining = _LESSON_COMPLETE_RE.sub("", clean_remaining)
+                clean_remaining = _HANGUP_RE.sub("", clean_remaining)
+                if clean_remaining.strip():
+                    fragments = _process_language_tags(clean_remaining, default_tts_lang)
+                    for frag_text, frag_lang in fragments:
+                        await sentence_queue.put((frag_text, frag_lang))
 
-        t_gateway_done = time.monotonic()
-        llm_ms = int((t_gateway_done - t1) * 1000)
-        latency["llm_total_ms"] = llm_ms
-        latency["gateway_prepare_ms"] = int((t_prepare - t_gateway_connect) * 1000)
-        latency["gateway_stream_ms"] = int((t_gateway_done - t_stream_start) * 1000)
-        latency["first_audio_at_ms"] = tts_first_chunk_ms or 0
-        logger.info(
-            "Voice pipeline timing: STT=%dms prepare=%dms stream=%dms llm_total=%dms tts_first_chunk=%dms",
-            stt_ms,
-            latency["gateway_prepare_ms"],
-            latency["gateway_stream_ms"],
-            llm_ms,
-            tts_first_chunk_ms or 0,
-        )
+            await sentence_queue.put(None)
+            await tts_task
 
-        if last_accumulated:
-            response = last_accumulated
+            # Signal hangup if agent requested it
+            if _HANGUP_RE.search(response):
+                try:
+                    await transport.send_message("hangup", {})
+                except Exception:
+                    pass
 
-        clean_response, completed_steps_raw, completed_lessons = _extract_instruction_tokens(response)
+            # --- Persist session ---
+            if is_beginner:
+                for lesson_num, step_idx in completed_steps_raw:
+                    await self._lesson_store.mark_step_complete(user_id, "beginner_french", lesson_num, step_idx)
+                for lesson_num in completed_lessons:
+                    new_lesson = await self._lesson_store.advance_lesson(user_id, "beginner_french", _TOTAL_LESSONS)
+                    await self._lesson_store.reset_lesson(user_id, "beginner_french", new_lesson)
 
-        # Flush remaining speech buffer
-        remaining = speech_buffer[tts_pos:]
-        if remaining.strip():
-            tts_pos = len(speech_buffer)
-            clean_remaining = _STEP_COMPLETE_RE.sub("", remaining)
-            clean_remaining = _LESSON_COMPLETE_RE.sub("", clean_remaining)
-            clean_remaining = _HANGUP_RE.sub("", clean_remaining)
-            if clean_remaining.strip():
-                fragments = _process_language_tags(clean_remaining, default_tts_lang)
-                for frag_text, frag_lang in fragments:
-                    await sentence_queue.put((frag_text, frag_lang))
-
-        await sentence_queue.put(None)
-        await tts_task
-
-        # Signal hangup if agent requested it
-        if _HANGUP_RE.search(response):
-            try:
-                await transport.send_message("hangup", {})
-            except Exception:
-                pass
-
-        # --- Persist session ---
-        if is_beginner:
-            for lesson_num, step_idx in completed_steps_raw:
-                await self._session_store.mark_step_complete(user_id, "beginner_french", lesson_num, step_idx)
-            for lesson_num in completed_lessons:
-                new_lesson = await self._session_store.advance_lesson(user_id, "beginner_french", _TOTAL_LESSONS)
-                await self._session_store.reset_lesson(user_id, "beginner_french", new_lesson)
-
-        await self._session_store.add_message(session_key, "user", text, language=detected_lang)
-        await self._session_store.add_message(session_key, "assistant", clean_response)
+            await self._session_svc.add_message(session_key, "assistant", clean_response, channel="voice")
 
         # --- Send final messages ---
         if tts_first_chunk_ms is None:
@@ -473,14 +486,14 @@ class VoiceService(BaseService):
         if not lessons_dir:
             return None
 
-        current_lesson = await self._session_store.get_current_lesson(user_id, session_mode, _TOTAL_LESSONS)
+        current_lesson = await self._lesson_store.get_current_lesson(user_id, session_mode, _TOTAL_LESSONS)
         lesson_path = lessons_dir / f"beginner_french_{current_lesson:02d}.md"
         if not lesson_path.is_file():
             current_lesson = 1
             lesson_path = lessons_dir / "beginner_french_01.md"
 
         lesson_content = lesson_path.read_text(encoding="utf-8")
-        completed_steps = await self._session_store.get_completed_steps(user_id, session_mode, current_lesson)
+        completed_steps = await self._lesson_store.get_completed_steps(user_id, session_mode, current_lesson)
 
         prompts_dir = self._prompts_dir()
         if not prompts_dir:

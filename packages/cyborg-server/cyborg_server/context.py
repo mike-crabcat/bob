@@ -16,5 +16,4 @@ class AppContext:
     db: Database
     settings: Settings
     voice_engines: Any | None = None
-    openclaw_hook_service: Any | None = None
     event_bus: Any | None = None

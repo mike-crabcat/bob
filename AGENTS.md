@@ -34,6 +34,12 @@ Note: There is an empty `data/cyborg.db` at the project root — this is a lefto
   - `templates/dashboard/` - Jinja2 HTML templates (cyberpunk dark theme with Tailwind CSS, HTMX)
   - `services/` - Background services (email polling, etc.)
 
+## Runtime paths
+
+The cyborg.db is at `/home/bob/.config/cyborg/cyborg.db`
+Fetch logs for the running service using `journalctl` comand e.g. `journalctl --user -u cyborg.service --since "10 min ago"  # recent`
+The workspace directory is `/home/bob/.config/cyborg/harness`
+
 ## Development
 
 - Package manager: `uv`

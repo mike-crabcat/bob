@@ -3,6 +3,13 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { fetchAPI, putAPI } from "@/lib/api";
 
+interface ContactGroup {
+  name: string;
+  jid: string;
+  is_admin: boolean;
+  joined_at: string;
+}
+
 interface ContactDetail {
   id: string;
   name: string;
@@ -10,7 +17,7 @@ interface ContactDetail {
   email: string | null;
   is_trusted: boolean;
   is_default: boolean;
-  whatsapp_groups: string[];
+  groups: ContactGroup[];
   sessions: ContactSession[];
   created_at: string;
   updated_at: string;
@@ -193,11 +200,14 @@ function ContactDetailPage() {
         </section>
       )}
 
-      {detail.whatsapp_groups.length > 0 && (
+      {detail.groups.length > 0 && (
         <section>
-          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">whatsapp groups</h2>
-          {detail.whatsapp_groups.map((g) => (
-            <div key={g} className="text-xs text-text py-0.5">{g}</div>
+          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">whatsapp groups ({detail.groups.length})</h2>
+          {detail.groups.map((g) => (
+            <div key={g.jid} className="flex items-center gap-2 py-0.5">
+              <span className="text-xs text-text">{g.name || g.jid}</span>
+              {g.is_admin && <span className="text-[10px] text-accent">admin</span>}
+            </div>
           ))}
         </section>
       )}

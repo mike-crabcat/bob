@@ -170,7 +170,7 @@ async def resolve_or_create_email_thread(
 
 
 class EmailPollingService(BaseService):
-    """Poll AgentMail inboxes for new messages and dispatch to OpenClaw."""
+    """Poll AgentMail inboxes for new messages and process them."""
 
     def __init__(
         self,
@@ -277,7 +277,7 @@ class EmailPollingService(BaseService):
         """Process a single incoming email message.
 
         Returns True if the message was newly processed, False if already seen.
-        When backfill=True, skips mark-read and OpenClaw dispatch (historical sync).
+        When backfill=True, skips mark-read and LLM dispatch (historical sync).
         """
         agentmail_message_id = message.get("message_id", "")
         if not agentmail_message_id:
@@ -613,66 +613,91 @@ class EmailPollingService(BaseService):
 
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         from cyborg_server.services.email_tools import make_email_tools
-        from cyborg_server.services.workspace_tools import make_workspace_tools
+        from cyborg_server.services.tool_registry import build_common_tools
         from cyborg_server.services.session_service import SessionService
-        from cyborg_server.services.dispatch_service import DispatchService
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
         workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
         participants_prompt = await self._build_participants_prompt(session_key)
-        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.") if p)
 
-        messages = await build_chat_messages(
-            email_content,
-            session_key,
-            db=self.db,
-            system_content=system_content,
-            max_history=20,
+        # Load trusted-only memory index for trusted sessions
+        memory_prompt = ""
+        if is_trusted:
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            trusted_wikis = await mem_svc.resolve_accessible_wikis(
+                settings.harness.workspace_dir, session_key
+            )
+            config = mem_svc.load_access_config(settings.harness.workspace_dir)
+            trusted_only = [
+                w for w in trusted_wikis
+                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
+            ]
+            if trusted_only:
+                memory_prompt = mem_svc.build_memory_index(
+                    settings.harness.workspace_dir, trusted_only
+                )
+
+        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.", memory_prompt) if p)
+
+        # Store user message immediately so queued messages are visible
+        # to the next dispatch that acquires the session lock.
+        await SessionService(self.ctx).add_message(
+            session_key, "user", body, channel="email", dispatched=0,
         )
 
-        tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"]) + make_workspace_tools(self.ctx, session_key=session_key)
+        # Email-specific tools (reply/skip) + common tool set
+        reply_sent = [False]
+        tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"], reply_tracker=reply_sent)
+        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted))
 
-        if contact_id and is_trusted:
-            from cyborg_server.services.contact_tools import make_contact_tools
-            from cyborg_server.services.reflection_service import make_reflection_tools
-            tools.extend(make_contact_tools(self.ctx))
-            tools.extend(make_reflection_tools(self.ctx, session_key))
-
-        # Add phone call tools when phone subsystem is enabled
-        if self.ctx.settings.phone.enabled:
-            from cyborg_server.services.contact_tools import make_contact_tools
-            from cyborg_server.services.phone_tools import make_phone_tools
-            existing_names = {t.name for t in tools}
-            contact_tools = make_contact_tools(self.ctx)
-            tools.extend(t for t in contact_tools if t.name not in existing_names)
-            phone_tools = make_phone_tools(self.ctx)
-            tools.extend(t for t in phone_tools if t.name not in existing_names)
-
-        dispatch_id = await DispatchService(self.ctx).record_dispatch(
-            notification_type="email_incoming",
-            session_key=session_key,
-        )
+        dispatch_id = str(uuid4())
 
         async def _run_dispatch() -> str:
-            result = await LLMDispatchService(self.ctx).chat_with_tools(
-                messages, tools,
-                call_category="email_incoming",
-                session_key=session_key,
-                dispatch_id=dispatch_id,
-                contact_id=contact_id,
-            )
-            session_svc = SessionService(self.ctx)
-            await session_svc.add_message(session_key, "user", body, channel="email")
-            await session_svc.add_message(session_key, "assistant", result, channel="email")
-            if self.ctx.event_bus:
-                await self.ctx.event_bus.publish("email.message.received", {
-                    "session_key": session_key,
-                    "subject": thread.get("subject", ""),
-                    "from_address": message.get("from", ""),
-                })
-            return result
+            from cyborg_server.services.session_dispatch_gate import SessionDispatchGate
 
-        DispatchService(self.ctx).track(dispatch_id, _run_dispatch())
+            session_svc = SessionService(self.ctx)
+            async with SessionDispatchGate.get_lock(session_key):
+                claimed = await session_svc.mark_dispatched(session_key)
+                if claimed == 0:
+                    return ""
+
+                messages = await build_chat_messages(
+                    None, session_key,
+                    db=self.db,
+                    system_content=system_content,
+                    max_history=20,
+                )
+
+                result = await LLMDispatchService(self.ctx).chat_with_tools(
+                    messages, tools,
+                    call_category="email_incoming",
+                    session_key=session_key,
+                    dispatch_id=dispatch_id,
+                    contact_id=contact_id,
+                )
+                # Tap: if LLM didn't use email_reply, give it a second chance.
+                if not reply_sent[0] and result.strip():
+                    from cyborg_server.services.tap import tap_dispatch
+                    result = await tap_dispatch(
+                        self.ctx, messages=messages, tools=tools,
+                        session_key=session_key,
+                        send_tool_name="email_reply",
+                        first_result=result,
+                        call_category="email_incoming",
+                        dispatch_id=dispatch_id,
+                        contact_id=contact_id,
+                    )
+                await session_svc.add_message(session_key, "assistant", result, channel="email")
+                if self.ctx.event_bus:
+                    await self.ctx.event_bus.publish("email.message.received", {
+                        "session_key": session_key,
+                        "subject": thread.get("subject", ""),
+                        "from_address": message.get("from", ""),
+                    })
+                return result
+
+        asyncio.create_task(_run_dispatch())
 
     async def _upsert_email_participants(self, session_key: str, message: dict[str, Any]) -> None:
         """Upsert sender and to/cc addresses as session participants."""
@@ -776,7 +801,7 @@ class EmailPollingService(BaseService):
         """Sync a single inbox — fetch all messages and persist missing ones.
 
         Unlike poll_inbox, this fetches all messages (not just unread),
-        skips mark-read and OpenClaw dispatch, and fixes thread message counts.
+        skips mark-read and LLM dispatch, and fixes thread message counts.
         """
         if isinstance(inbox, str):
             row = await self.db.fetch_one(

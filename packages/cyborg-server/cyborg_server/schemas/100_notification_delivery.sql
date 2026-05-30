@@ -1,4 +1,4 @@
--- Track direct OpenClaw delivery attempts for notifications.
+-- Track direct delivery attempts for notifications.
 
 ALTER TABLE notifications ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE notifications ADD COLUMN delivery_attempt_count INTEGER NOT NULL DEFAULT 0;

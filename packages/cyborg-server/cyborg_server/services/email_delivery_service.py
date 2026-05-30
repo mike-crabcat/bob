@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from uuid import uuid4
@@ -121,15 +122,19 @@ class EmailDeliveryService(BaseService):
         text: str,
         html: str | None = None,
         cc: list[str] | None = None,
+        agenda: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Send a new email from a registered inbox."""
+        """Send a new email, create thread, persist message, and prime LLM context.
+
+        Returns the AgentMail response dict.
+        """
         inbox = await self.db.fetch_one(
-            "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
+            "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
             (inbox_id,),
         )
         if inbox is None:
-            raise ValueError(f"Inbox {inbox_id} not found")
+            raise ValueError(f"Inbox {inbox_id} not found or inactive")
 
         result = await self.client.send_message(
             inbox["agentmail_inbox_id"],
@@ -142,18 +147,103 @@ class EmailDeliveryService(BaseService):
         )
 
         agentmail_thread_id = result.get("thread_id", "")
-        if agentmail_thread_id:
-            await self._persist_sent_message(
-                inbox=inbox,
-                agentmail_response=result,
-                agentmail_thread_id=agentmail_thread_id,
-                text=text,
-                html=html,
-                subject=subject,
-                to_addresses=[to] if isinstance(to, str) else to,
-                cc_addresses=cc,
-                has_attachments=bool(attachments),
+        if not agentmail_thread_id:
+            return result
+
+        # Look up contact from recipient
+        contact_id = None
+        recipient_email = to if isinstance(to, str) else (to[0] if to else "")
+        if recipient_email:
+            contact = await self.db.fetch_one(
+                "SELECT id FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
+                (recipient_email,),
             )
+            if contact:
+                contact_id = contact["id"]
+
+        # Create thread + session route
+        from cyborg_server.services.email_polling_service import (
+            CUSTOM_AGENDA_TEMPLATE,
+            resolve_or_create_email_thread,
+        )
+        thread, is_new_thread = await resolve_or_create_email_thread(
+            self.db,
+            inbox=inbox,
+            agentmail_thread_id=agentmail_thread_id,
+            subject=subject,
+            contact_id=contact_id,
+            agenda=agenda,
+        )
+
+        # Persist agenda to session_agendas immediately (not waiting for lazy migration)
+        if agenda and thread:
+            from cyborg_server.services.session_agenda_service import SessionAgendaService
+            await SessionAgendaService(self.ctx).set_agenda(thread["session_key"], agenda)
+
+        # Persist outgoing message
+        await self._persist_sent_message(
+            inbox=inbox,
+            agentmail_response=result,
+            agentmail_thread_id=agentmail_thread_id,
+            text=text,
+            html=html,
+            subject=subject,
+            to_addresses=[to] if isinstance(to, str) else to,
+            cc_addresses=cc,
+            has_attachments=bool(attachments),
+        )
+
+        # Dispatch to LLM for context priming
+        settings = self._get_settings()
+        if settings.openai.enabled:
+            from cyborg_server.services.llm_dispatch import LLMDispatchService
+            from cyborg_server.services.session_service import SessionService
+            from cyborg_server.services.prompt_assembler import load_workspace_prompt
+
+            send_content = "\n".join([
+                "## Email You Just Sent",
+                "This is provided for your context. Do NOT reply — wait for the recipient to respond.",
+                "",
+                f"Subject: {subject}",
+                f"To: {to}",
+                "",
+                text,
+            ])
+
+            session_key = thread["session_key"]
+            logger.info("Dispatching send to LLM session=%s new_thread=%s", session_key, is_new_thread)
+
+            workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+            custom_agenda = CUSTOM_AGENDA_TEMPLATE.format(agenda=agenda) if is_new_thread and agenda else None
+            system_parts = [p for p in (
+                workspace_prompt,
+                custom_agenda,
+                "You are managing an email conversation. The following is an outgoing email you sent for your context.",
+            ) if p]
+
+            messages = [
+                {"role": "system", "content": "\n\n".join(system_parts)},
+                {"role": "user", "content": send_content},
+            ]
+
+            dispatch_id = str(uuid4())
+            ctx = self.ctx
+            email_text = text
+
+            async def _run_send_dispatch() -> str:
+                result = await LLMDispatchService(ctx).chat_with_tools(
+                    messages, [],
+                    call_category="email_outgoing",
+                    session_key=session_key,
+                    dispatch_id=dispatch_id,
+                )
+                session_svc = SessionService(ctx)
+                await session_svc.add_message(session_key, "assistant", email_text, channel="email")
+                return result
+
+            asyncio.create_task(_run_send_dispatch())
+            logger.info("Send dispatch tracking for thread %s (dispatch=%s)", thread["id"], dispatch_id)
+
         return result
 
     async def _persist_sent_message(

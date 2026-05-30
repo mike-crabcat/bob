@@ -109,7 +109,7 @@ class ResponseTextMessage(BaseModel):
 class LatencyMessage(BaseModel):
     type: Literal["latency"] = "latency"
     stt_ms: int | None = None
-    openclaw_total_ms: int | None = None
+    llm_total_ms: int | None = None
     tts_first_chunk_ms: int | None = None
     e2e_ms: int | None = None
 

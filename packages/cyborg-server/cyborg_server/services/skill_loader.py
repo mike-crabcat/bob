@@ -30,14 +30,18 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
 
 
 def _scan_skills(workspace_dir: Path) -> dict[str, float]:
-    """Return {skill_name: mtime} for all skills with a skill.md."""
+    """Return {skill_name: mtime} for all skills with a skill.md or SKILL.md."""
     skills_dir = workspace_dir / "skills"
     if not skills_dir.is_dir():
         return {}
     mtimes: dict[str, float] = {}
     for skill_path in sorted(skills_dir.iterdir()):
+        if not skill_path.is_dir():
+            continue
         md = skill_path / "skill.md"
-        if skill_path.is_dir() and md.is_file():
+        if not md.is_file():
+            md = skill_path / "SKILL.md"
+        if md.is_file():
             mtimes[skill_path.name] = md.stat().st_mtime
     return mtimes
 
@@ -63,6 +67,8 @@ def load_skills_index(workspace_dir: Path) -> str:
     )
     for skill_name in sorted(mtimes):
         md = skills_dir / skill_name / "skill.md"
+        if not md.is_file():
+            md = skills_dir / skill_name / "SKILL.md"
         content = md.read_text(encoding="utf-8").strip()
         fm = _parse_frontmatter(content)
         desc = fm.get("description", "")
@@ -80,7 +86,10 @@ def load_skills_index(workspace_dir: Path) -> str:
 def load_skill(workspace_dir: Path, skill_name: str) -> str:
     """Load a single skill's full instructions, prefixed with its directory path."""
     workspace_dir = workspace_dir.expanduser()
-    md = workspace_dir / "skills" / skill_name / "skill.md"
+    skill_dir = workspace_dir / "skills" / skill_name
+    md = skill_dir / "skill.md"
+    if not md.is_file():
+        md = skill_dir / "SKILL.md"
     if not md.is_file():
         return f"Error: skill '{skill_name}' not found"
     content = md.read_text(encoding="utf-8").strip()
@@ -104,6 +113,8 @@ def load_skills_prompt(workspace_dir: Path) -> str:
     parts: list[str] = []
     for skill_name in sorted(mtimes):
         md = skills_dir / skill_name / "skill.md"
+        if not md.is_file():
+            md = skills_dir / skill_name / "SKILL.md"
         content = md.read_text(encoding="utf-8").strip()
         if content:
             parts.append(content)

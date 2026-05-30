@@ -1,42 +1,70 @@
-#!/bin/bash
-# Backup script for Cyborg project
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
+BACKUP_NAME="cyborg_backup_${TIMESTAMP}.zip"
+BACKUP_PATH="$HOME/${BACKUP_NAME}"
+WORKSPACE_DIR="$HOME/.config/cyborg"
+DATA_DIR="$HOME/.local/share/cyborg"
 
-BACKUP_DIR="$HOME/.openclaw/backups/cyborg"
-SOURCE_DIR="$HOME/.openclaw/workspace/projects/cyborg"
-DB_DIR="$HOME/.local/share/cyborg"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_NAME="cyborg_backup_${TIMESTAMP}"
-BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
+# Collect files into a temp staging dir
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
 
-echo "Creating Cyborg backup: $BACKUP_NAME"
+# Databases
+for db in \
+  "$HOME/.local/share/cyborg/cyborg.db" \
+  "$HOME/.config/cyborg/harness/cyborg.db" \
+  "$HOME/.config/cyborg/cyborg.db" \
+  "$HOME/.local/share/cyborg/whatsappbridge/.env" \
+  "$HOME/.openclaw/lcm.db" \
+  "$HOME/.openclaw/bobvoice-sessions.db"; do
+  if [ -f "$db" ]; then
+    dest="$STAGE/$(echo "$db" | sed "s|^$HOME/||")"
+    mkdir -p "$(dirname "$dest")"
+    cp "$db" "$dest"
+  fi
+done
 
-# Create backup directory
-mkdir -p "$BACKUP_PATH"
-
-# Backup source code
-echo "  → Backing up source code..."
-cp -r "$SOURCE_DIR" "$BACKUP_PATH/source"
-
-# Backup database
-echo "  → Backing up database..."
-if [ -d "$DB_DIR" ]; then
-    mkdir -p "$BACKUP_PATH/database"
-    cp -r "$DB_DIR"/* "$BACKUP_PATH/database/" 2>/dev/null || true
+# Workspace config (harness settings, etc)
+if [ -d "$WORKSPACE_DIR" ]; then
+  mkdir -p "$STAGE/.config/cyborg"
+  cp -r "$WORKSPACE_DIR"/.env "$STAGE/.config/cyborg/" 2>/dev/null || true
+  for f in "$WORKSPACE_DIR"/settings*.json "$WORKSPACE_DIR"/harness/*.json; do
+    [ -f "$f" ] || continue
+    dest="$STAGE/$(echo "$f" | sed "s|^$HOME/||")"
+    mkdir -p "$(dirname "$dest")"
+    cp "$f" "$dest"
+  done
 fi
 
-# Create tarball
-echo "  → Creating tarball..."
-cd "$BACKUP_DIR"
-tar -czf "${BACKUP_NAME}.tar.gz" "$BACKUP_NAME"
-rm -rf "$BACKUP_NAME"
+# Data directory (non-code runtime data)
+if [ -d "$DATA_DIR" ]; then
+  mkdir -p "$STAGE/.local/share"
+  cp -r "$DATA_DIR" "$STAGE/.local/share/" \
+    --exclude='*.log' 2>/dev/null || \
+    rsync -a --exclude='*.log' "$DATA_DIR/" "$STAGE/.local/share/cyborg/" 2>/dev/null || \
+    cp -r "$DATA_DIR" "$STAGE/.local/share/"
+fi
 
-# Keep only last 10 backups
-echo "  → Cleaning old backups..."
-ls -t *.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+# Project-level config files (not source code)
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+for f in \
+  "$PROJECT_DIR/.env" \
+  "$PROJECT_DIR/.env.local" \
+  "$PROJECT_DIR/pyproject.toml" \
+  "$PROJECT_DIR/DOCS.yaml" \
+  "$PROJECT_DIR/packages/cyborg-server/pyproject.toml"; do
+  [ -f "$f" ] || continue
+  dest="$STAGE/$(echo "$f" | sed "s|^$HOME/||")"
+  mkdir -p "$(dirname "$dest")"
+  cp "$f" "$dest"
+done
 
-echo "✅ Backup complete: $BACKUP_DIR/${BACKUP_NAME}.tar.gz"
-echo ""
-echo "Recent backups:"
-ls -lh "$BACKUP_DIR"/*.tar.gz 2>/dev/null | tail -5
+# Zip it up
+cd "$STAGE"
+zip -r "$BACKUP_PATH" .
+cd - > /dev/null
+
+echo "Backup created: ${BACKUP_PATH}"
+echo "Size: $(du -h "$BACKUP_PATH" | cut -f1)"

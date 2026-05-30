@@ -41,15 +41,13 @@ def _normalize_phone_number(phone: str) -> str:
 
 def _row_to_contact(row: dict[str, Any]) -> ContactResponse:
     """Convert a database row to a ContactResponse."""
-    whatsapp_groups = json.loads(row["whatsapp_groups"]) if row["whatsapp_groups"] else []
     metadata = json.loads(row["metadata"]) if row["metadata"] else {}
-    
+
     return ContactResponse(
         id=UUID(row["id"]),
         name=row["name"],
         phone_number=row["phone_number"],
         email=row["email"],
-        whatsapp_groups=whatsapp_groups,
         metadata=metadata,
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -71,15 +69,14 @@ async def create_contact(
     try:
         await database.execute(
             """
-            INSERT INTO contacts (id, name, phone_number, email, whatsapp_groups, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO contacts (id, name, phone_number, email, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(contact_id),
                 payload.name,
                 normalized_phone,
                 payload.email,
-                json.dumps(payload.whatsapp_groups),
                 json.dumps(payload.metadata),
                 now,
                 now,
@@ -173,8 +170,6 @@ async def update_contact(
         updates["email"] = payload.email
     if payload.is_trusted is not None:
         updates["is_trusted"] = 1 if payload.is_trusted else 0
-    if payload.whatsapp_groups is not None:
-        updates["whatsapp_groups"] = json.dumps(payload.whatsapp_groups)
     if payload.metadata is not None:
         updates["metadata"] = json.dumps(payload.metadata)
     
@@ -278,19 +273,15 @@ async def get_contacts_by_whatsapp_group(
     database: Database = Depends(get_database),
 ) -> list[ContactResponse]:
     """Find all contacts that are members of a WhatsApp group."""
-    # Get all non-deleted contacts and filter by group membership
     rows = await database.fetch_all(
-        "SELECT * FROM contacts WHERE deleted_at IS NULL",
-        (),
+        """SELECT c.* FROM contacts c
+           JOIN whatsappgroup_members gm ON gm.contact_id = c.id
+           JOIN whatsappgroups g ON g.id = gm.group_id
+           WHERE g.whatsapp_jid = ? AND c.deleted_at IS NULL AND gm.left_at IS NULL""",
+        (group_id,),
     )
 
-    matching_contacts = []
-    for row in rows:
-        whatsapp_groups = json.loads(row["whatsapp_groups"]) if row["whatsapp_groups"] else []
-        if group_id in whatsapp_groups:
-            matching_contacts.append(_row_to_contact(row))
-
-    return matching_contacts
+    return [_row_to_contact(row) for row in rows]
 
 
 @router.get("/default", response_model=ContactResponse)

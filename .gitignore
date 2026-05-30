@@ -6,3 +6,4 @@ scripts/publish.sh
 scripts/rollout.sh
 .claude/
 services/whatsappbridge/bin
+packages/cyborg-server/cyborg_server/ui_dist

@@ -21,6 +21,14 @@ type SharedContact struct {
 	Phone       string
 }
 
+type MediaInfo struct {
+	MediaType string // "image", "document", "audio", "video"
+	MimeType  string
+	Filename  string
+	SizeBytes int64
+	FilePath  string // absolute path on disk
+}
+
 type IncomingMessageEvent struct {
 	WhatsAppMessageID string
 	ChatID            string
@@ -29,7 +37,9 @@ type IncomingMessageEvent struct {
 	SenderName        string
 	Text              string
 	QuotedMessageID   string
+	MentionedJIDs     []string
 	Contacts          []SharedContact
+	Media             *MediaInfo
 	Timestamp         string
 }
 
@@ -44,4 +54,28 @@ type SendMessageResultEvent struct {
 	Success           bool
 	WhatsAppMessageID string
 	Error             string
+}
+
+type GroupMemberChangeEvent struct {
+	GroupJID   string
+	GroupName  string
+	SenderJID  string
+	JoinedJIDs []string
+	LeftJIDs   []string
+	Timestamp  string
+}
+
+type GroupSyncEvent struct {
+	GroupJID     string
+	GroupName    string
+	Description  string
+	Participants []GroupParticipantInfo
+	Timestamp    string
+}
+
+type GroupParticipantInfo struct {
+	JID          string
+	DisplayName  string
+	IsAdmin      bool
+	IsSuperAdmin bool
 }

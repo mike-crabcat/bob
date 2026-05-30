@@ -9,6 +9,18 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+
+def _content_char_len(content: Any) -> int:
+    """Return character length of message content, handling both str and list[dict]."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(part.get("text", "")) if isinstance(part, dict) else 0
+            for part in content
+        )
+    return 0
+
 from cyborg_server.services.tools import Tool
 
 from cyborg_server.services.base import BaseService
@@ -147,10 +159,25 @@ class LLMDispatchService(BaseService):
     def _get_service(self) -> OpenAIService:
         return OpenAIService(self.ctx)
 
+    def _make_tool_callback(self, session_key: str | None, call_category: str) -> Any:
+        async def _on_tool_call(name: str, args: dict, result_summary: str) -> None:
+            if self.ctx.event_bus is None:
+                return
+            await self.ctx.event_bus.publish("llm.call.tool_completed", {
+                "session_key": session_key,
+                "call_category": call_category,
+                "tool_name": name,
+            })
+        return _on_tool_call
+
     def _resolve_model(self, model: str | None = None) -> str:
         if model:
             return model
         return self._get_settings().openai.default_model
+
+    @property
+    def memory_model(self) -> str:
+        return self._get_settings().openai.get_memory_model()
 
     async def chat(
         self,
@@ -205,7 +232,7 @@ class LLMDispatchService(BaseService):
                 "LLM dispatch: model=%s category=%s latency=%.2fs "
                 "input_chars=%d output_chars=%d",
                 resolved_model, call_category, elapsed,
-                sum(len(m.get("content", "")) for m in messages),
+                sum(_content_char_len(m.get("content", "")) for m in messages),
                 len(result or ""),
             )
             await self._publish_call(
@@ -312,7 +339,7 @@ class LLMDispatchService(BaseService):
                 "LLM dispatch stream: model=%s category=%s latency=%.2fs ttft=%.2fs "
                 "input_chars=%d output_chars=%d tokens=%s",
                 resolved_model, call_category, elapsed, ttft or 0,
-                sum(len(m.get("content", "")) for m in messages),
+                sum(_content_char_len(m.get("content", "")) for m in messages),
                 len(accumulated),
                 stream_result.total_tokens,
             )
@@ -359,7 +386,7 @@ class LLMDispatchService(BaseService):
         tools: list[Tool],
         *,
         model: str | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 100,
         call_category: str = "tool_call",
         session_key: str | None = None,
         project_id: str | None = None,
@@ -382,6 +409,22 @@ class LLMDispatchService(BaseService):
         tools_json = json.dumps(openai_tools) if openai_tools else None
 
         t0 = time.monotonic()
+        log_id = await _record_log(
+            self.db,
+            provider="openai", model=resolved_model,
+            call_category=call_category, session_key=session_key,
+            system_prompt=system_prompt, user_message=user_message,
+            messages_json=json.dumps(_sanitize_for_json(messages)),
+            tools_json=tools_json,
+            status="running",
+            project_id=project_id, task_id=task_id,
+            dispatch_id=dispatch_id, contact_id=contact_id,
+        )
+        await self._publish_call(
+            status="running", session_key=session_key,
+            call_category=call_category, model=resolved_model,
+            latency_seconds=None, total_tokens=None,
+        )
         try:
             stream_result = StreamResult()
 
@@ -392,30 +435,19 @@ class LLMDispatchService(BaseService):
                 model=resolved_model,
                 max_iterations=max_iterations,
                 stream_result=stream_result,
+                on_tool_call=self._make_tool_callback(session_key, call_category),
             )
             elapsed = time.monotonic() - t0
 
-            await _record_log(
-                self.db,
-                provider="openai",
-                model=resolved_model,
-                call_category=call_category,
-                session_key=session_key,
-                system_prompt=system_prompt,
-                user_message=user_message,
-                messages_json=json.dumps(_sanitize_for_json(messages)),
-                tools_json=tools_json,
+            await _record_log(self.db, log_id=log_id,
                 response_text=result,
                 latency_seconds=elapsed,
                 prompt_tokens=stream_result.prompt_tokens,
                 completion_tokens=stream_result.completion_tokens,
                 total_tokens=stream_result.total_tokens,
                 cached_tokens=stream_result.cached_tokens,
+                messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="completed",
-                project_id=project_id,
-                task_id=task_id,
-                dispatch_id=dispatch_id,
-                contact_id=contact_id,
             )
 
             logger.info(
@@ -435,23 +467,11 @@ class LLMDispatchService(BaseService):
         except Exception as exc:
             elapsed = time.monotonic() - t0
             logger.error("LLM dispatch tools failed: model=%s error=%s", resolved_model, exc)
-            await _record_log(
-                self.db,
-                provider="openai",
-                model=resolved_model,
-                call_category=call_category,
-                session_key=session_key,
-                system_prompt=system_prompt,
-                user_message=user_message,
-                messages_json=json.dumps(_sanitize_for_json(messages)),
-                tools_json=tools_json,
+            await _record_log(self.db, log_id=log_id,
                 latency_seconds=elapsed,
+                messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="failed",
                 error_message=str(exc),
-                project_id=project_id,
-                task_id=task_id,
-                dispatch_id=dispatch_id,
-                contact_id=contact_id,
             )
             await self._publish_call(
                 status="failed", session_key=session_key,
@@ -467,7 +487,7 @@ class LLMDispatchService(BaseService):
         tools: list[Tool],
         *,
         model: str | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 100,
         call_category: str = "voice_chat",
         session_key: str | None = None,
         project_id: str | None = None,
@@ -501,6 +521,11 @@ class LLMDispatchService(BaseService):
             project_id=project_id, task_id=task_id,
             dispatch_id=dispatch_id, contact_id=contact_id,
         )
+        await self._publish_call(
+            status="running", session_key=session_key,
+            call_category=call_category, model=resolved_model,
+            latency_seconds=None, total_tokens=None,
+        )
         accumulated = ""
         ttft: float | None = None
 
@@ -511,6 +536,7 @@ class LLMDispatchService(BaseService):
                 tool_handlers=tool_handlers,
                 model=resolved_model,
                 max_iterations=max_iterations,
+                on_tool_call=self._make_tool_callback(session_key, call_category),
             ):
                 if chunk:
                     if ttft is None:

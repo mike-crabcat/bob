@@ -4,10 +4,10 @@ This module provides structured logging utilities that output JSON-formatted log
 with consistent fields including correlation IDs for request tracking.
 
 Usage:
-    from cyborg_server.structured_logging import get_logger, log_reasoning_request
+    from cyborg_server.structured_logging import get_logger
 
     logger = get_logger(__name__)
-    logger.info("Task completed", extra={"task_id": "abc-123", "project_id": "def-456"})
+    logger.info("Request completed", extra={"session_key": "agent:main:..."})
 """
 
 from __future__ import annotations
@@ -190,109 +190,6 @@ def log_execution(
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-
-def log_reasoning_request(
-    logger: logging.Logger,
-    reasoning_type: str,
-    project_id: str | None = None,
-    task_id: str | None = None,
-    duration_seconds: float | None = None,
-    success: bool | None = None,
-    error: str | None = None,
-    **extra: Any,
-) -> None:
-    """Log an OpenClaw reasoning request with structured fields.
-
-    Args:
-        logger: Logger instance
-        reasoning_type: Type of reasoning (plan_generation, evaluation, refinement, etc.)
-        project_id: Associated project ID
-        task_id: Associated task ID
-        duration_seconds: Request duration
-        success: Whether the request succeeded
-        error: Error message if failed
-        **extra: Additional fields to include
-    """
-    log_data: dict[str, Any] = {
-        "event_type": "reasoning_request",
-        "reasoning_type": reasoning_type,
-    }
-
-    if project_id:
-        log_data["project_id"] = project_id
-    if task_id:
-        log_data["task_id"] = task_id
-    if duration_seconds is not None:
-        log_data["duration_seconds"] = round(duration_seconds, 3)
-
-    if success is not None:
-        log_data["success"] = success
-    if error:
-        log_data["error"] = error
-
-    log_data.update(extra)
-
-    if success:
-        logger.info("Reasoning request completed", extra=log_data)
-    elif success is False:
-        logger.error("Reasoning request failed", extra=log_data)
-
-
-def log_autonomy_decision(
-    logger: logging.Logger,
-    decision_type: str,
-    project_id: str,
-    **extra: Any,
-) -> None:
-    """Log an autonomous decision with structured fields.
-
-    Args:
-        logger: Logger instance
-        decision_type: Type of decision (refinement, follow_up_tasks, completion, etc.)
-        project_id: Associated project ID
-        **extra: Additional fields to include
-    """
-    log_data: dict[str, Any] = {
-        "event_type": "autonomy_decision",
-        "decision_type": decision_type,
-        "project_id": project_id,
-    }
-
-    log_data.update(extra)
-
-    logger.info(f"Autonomy decision: {decision_type}", extra=log_data)
-
-
-def log_health_check(
-    logger: logging.Logger,
-    project_id: str,
-    health_score: float,
-    risk_level: str,
-    **extra: Any,
-) -> None:
-    """Log a health check result with structured fields.
-
-    Args:
-        logger: Logger instance
-        project_id: Associated project ID
-        health_score: Health score (0-1)
-        risk_level: Risk level (low, medium, high, critical)
-        **extra: Additional fields to include
-    """
-    log_data: dict[str, Any] = {
-        "event_type": "health_check",
-        "project_id": project_id,
-        "health_score": health_score,
-        "risk_level": risk_level,
-    }
-
-    log_data.update(extra)
-
-    if risk_level in ("high", "critical"):
-        logger.warning(f"Health check: {risk_level} risk", extra=log_data)
-    else:
-        logger.info("Health check completed", extra=log_data)
 
 
 def log_metric(

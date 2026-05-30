@@ -609,6 +609,12 @@ class SessionRouteService(BaseService):
                     raise ConflictError("Thread email session routes require chat_id (thread_id)")
                 return
             raise ConflictError("Email session routes must use kind 'thread'")
+        if channel == "phone":
+            if kind == SessionRouteKind.DM:
+                if contact_id is None:
+                    raise ConflictError("Phone DM session routes require contact_id")
+                return
+            raise ConflictError("Phone session routes must use kind 'dm'")
         raise ConflictError(f"Unsupported channel: {channel}")
 
     def _decode_route_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -625,9 +631,6 @@ class SessionRouteService(BaseService):
         return f"{self._resolve_agent_prefix()}email:thread:{thread_id}"
 
     def _resolve_agent_prefix(self) -> str:
-        settings = self._get_settings()
-        if settings.openclaw.agent_id:
-            return f"agent:{settings.openclaw.agent_id}:"
         return "agent:main:"
 
     def _resolve_whatsapp_agent_prefix(self, source_session_key: str | None) -> str:

@@ -10,9 +10,12 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from typing import Any
 from uuid import uuid4
+
+from cyborg_server.services.base import utcnow
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -38,24 +41,6 @@ def _build_phone_context() -> str:
         "at the end of your response. The call will be terminated after your response "
         "is fully spoken. Do not mention the hangup token to the caller."
     )
-
-
-def _build_warmup_message(phone_context: str, agenda: str) -> str:
-    prefix = (
-        "[You are a voice assistant. Respond in plain spoken language: "
-        "no emojis, no markdown formatting, no asterisks, no bullet points. Just natural speech.]"
-    )
-    full_agenda = f"{phone_context} {agenda}".strip() if agenda else phone_context
-    prefix += (
-        f" [CALL AGENDA: {full_agenda}. "
-        "Follow this agenda throughout the conversation. "
-        "Stay on topic and work toward the agenda's goal.]"
-    )
-    prefix += (
-        " [NO_REPLY: This is a session warmup before the call connects. "
-        "Do not generate a substantive response. Reply with a single period.]"
-    )
-    return prefix
 
 
 class _CallRecorderProxy:
@@ -119,18 +104,18 @@ class _CallRecorderProxy:
             await self._db.execute(
                 """INSERT INTO phone_call_exchanges
                    (call_id, exchange_index, user_transcript, assistant_transcript,
-                    stt_ms, openclaw_ms, tts_first_chunk_ms, e2e_ms,
-                    gateway_prepare_ms, gateway_stream_ms, tts_wait_lock_ms, tts_generate_ms,
+                    stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
+                    llm_prepare_ms, llm_stream_ms, tts_wait_lock_ms, tts_generate_ms,
                     started_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self._call_id, self._exchange_index,
                  self.user_transcript, self.assistant_transcript,
                  self.latency.get("stt_ms"),
-                 self.latency.get("openclaw_total_ms"),
+                 self.latency.get("llm_total_ms"),
                  self.latency.get("tts_first_chunk_ms"),
                  self.latency.get("e2e_ms"),
-                 self.latency.get("gateway_prepare_ms"),
-                 self.latency.get("gateway_stream_ms"),
+                 self.latency.get("llm_prepare_ms"),
+                 self.latency.get("llm_stream_ms"),
                  self.latency.get("tts_wait_lock_ms"),
                  self.latency.get("tts_generate_ms"),
                  started_iso),
@@ -139,46 +124,113 @@ class _CallRecorderProxy:
             logger.warning("Failed to log phone call exchange", exc_info=True)
 
 
-async def _run_warmup(
-    db: Any,
-    settings: Any,
-    session_key: str,
-    warmup_message: str,
-) -> bool:
-    """Pre-warm the OpenClaw session. Returns True on success."""
-    from cyborg_server.context import AppContext
-    from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-
-    t0 = time.monotonic()
-    try:
-        ctx = AppContext(db=db, settings=settings)
-        openclaw_svc = OpenClawHookService(ctx)
-
-        try:
-            await openclaw_svc.patch_session_model(session_key)
-        except Exception:
-            logger.warning("Warmup: model patch failed (non-fatal)", exc_info=True)
-
-        coro = await openclaw_svc.prepare_streaming_agent_dispatch(
-            message=warmup_message,
-            session_key=session_key,
-            idempotency_key=str(uuid4()),
-        )
-        await coro
-
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.info("Warmup succeeded for %s in %dms", session_key, elapsed_ms)
-        return True
-    except Exception:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.warning("Warmup failed for %s after %dms", session_key, elapsed_ms, exc_info=True)
-        return False
-
-
 async def _emit_event(app_state: Any, event_type: str, payload: dict) -> None:
     event_bus = getattr(app_state, "event_bus", None)
     if event_bus:
         await event_bus.publish(event_type, payload)
+
+
+def _normalize_phone(raw: str) -> str:
+    """Normalize a phone number to +CC format."""
+    digits = re.sub(r"\D", "", raw)
+    if raw.startswith("+"):
+        return "+" + digits
+    if digits.startswith("0"):
+        return "+61" + digits[1:]
+    if digits.startswith("61"):
+        return "+" + digits
+    return "+" + digits
+
+
+def _build_inbound_phone_context(phone_number: str, contact_name: str | None = None) -> str:
+    name_hint = f" The caller's name is {contact_name}." if contact_name else ""
+    return (
+        "This is an inbound phone call from a real person. "
+        "They called your number, so greet them and find out how you can help. "
+        f"Their phone number is {phone_number}.{name_hint} "
+        "Respond in plain spoken language: no emojis, no markdown, no formatting. "
+        "To end the call at any time, include <hangup/> at the end of your response. "
+        "Do not mention the hangup token to the caller."
+    )
+
+
+async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number: str) -> None:
+    """Set up session data for an inbound call: contact resolution, agenda, DB record."""
+    if call_sid in _call_agendas:
+        return
+
+    call_id = str(uuid4())
+    session_key = f"agent:main:phone:call:{call_id}"
+    phone_number = _normalize_phone(from_number)
+
+    # Resolve contact
+    contact_id: str | None = None
+    is_trusted = False
+    contact_name: str | None = None
+    contact = await db.fetch_one(
+        "SELECT id, is_trusted, name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+        (phone_number,),
+    )
+    if contact:
+        contact_id = contact["id"]
+        is_trusted = bool(contact.get("is_trusted", 0))
+        contact_name = contact.get("name")
+    else:
+        # Auto-seed an untrusted contact
+        from uuid import uuid4 as _uuid4
+        new_id = str(_uuid4())
+        now_iso = utcnow().isoformat()
+        await db.execute(
+            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
+               VALUES (?, ?, ?, 0, ?, ?)""",
+            (new_id, phone_number, phone_number, now_iso, now_iso),
+        )
+        contact_id = new_id
+
+    # Resolve agenda
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.session_agenda_service import SessionAgendaService
+    ctx = AppContext(db=db, settings=settings)
+    agenda_svc = SessionAgendaService(ctx)
+    agenda = await agenda_svc.get_effective_agenda(
+        session_key, "phone", contact_id=contact_id, is_trusted=is_trusted,
+    )
+
+    inbound_context = _build_inbound_phone_context(phone_number, contact_name)
+
+    # Create session route
+    from cyborg_server.services.session_route_service import SessionRouteService
+    from cyborg_server.models import SessionRouteCreate, SessionRouteKind
+    route_service = SessionRouteService(ctx)
+    from cyborg_server.exceptions import ConflictError
+    try:
+        await route_service.create_route(SessionRouteCreate(
+            channel="phone",
+            session_key=session_key,
+            kind=SessionRouteKind.DM,
+            contact_id=contact_id,
+        ))
+    except ConflictError:
+        pass
+
+    # Insert DB record
+    await db.execute(
+        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at)
+           VALUES (?, ?, ?, 'inbound', 'ringing', ?, datetime('now'))""",
+        (call_id, call_sid, phone_number, agenda),
+    )
+
+    # Store for the media_stream handler
+    _call_agendas[call_sid] = {
+        "agenda": f"{inbound_context} {agenda}".strip() if agenda else inbound_context,
+        "phone_number": phone_number,
+        "call_id": call_id,
+        "session_key": session_key,
+        "contact_id": contact_id,
+    }
+
+    logger.info("Set up inbound call %s from %s (contact=%s, trusted=%s)",
+                call_sid, phone_number, contact_id, is_trusted)
 
 
 async def initiate_outbound_call(
@@ -198,15 +250,7 @@ async def initiate_outbound_call(
         return {"error": "Phone subsystem is not enabled"}
 
     call_id = str(uuid4())
-    session_key = f"bobvoice:chat:phone:{call_id}"
-
-    warmup_message = _build_warmup_message(_build_phone_context(), agenda)
-    warmup_ok = await _run_warmup(
-        db=db,
-        settings=settings,
-        session_key=session_key,
-        warmup_message=warmup_message,
-    )
+    session_key = f"agent:main:phone:call:{call_id}"
 
     from twilio.rest import Client
 
@@ -226,7 +270,6 @@ async def initiate_outbound_call(
         "phone_number": to_number,
         "call_id": call_id,
         "session_key": session_key,
-        "warmup_done": warmup_ok,
     }
 
     await db.execute(
@@ -235,7 +278,7 @@ async def initiate_outbound_call(
         (call_id, call.sid, to_number, agenda),
     )
 
-    logger.info("Initiated call %s to %s (warmup: %s)", call.sid, to_number, warmup_ok)
+    logger.info("Initiated call %s to %s", call.sid, to_number)
 
     if app_state:
         await _emit_event(app_state, "phone.call.ringing", {
@@ -270,8 +313,23 @@ async def initiate_call(request: Request) -> dict:
 
 @router.post("/twiml")
 async def twiml_webhook(request: Request) -> PlainTextResponse:
-    """Return TwiML that connects the call to our Media Stream WebSocket."""
-    base_url = request.app.state.settings.phone.base_url or request.app.state.settings.resolved_public_url
+    """Return TwiML that connects the call to our Media Stream WebSocket.
+
+    For inbound calls, also sets up session data, contact resolution, and DB record.
+    """
+    db = request.app.state.db
+    settings = request.app.state.settings
+
+    # Twilio sends form data with call parameters
+    form = await request.form()
+    call_sid = str(form.get("CallSid", ""))
+    direction = str(form.get("Direction", ""))
+    from_number = str(form.get("From", ""))
+
+    if direction == "inbound" and call_sid:
+        await _setup_inbound_call(db, settings, call_sid, from_number)
+
+    base_url = settings.phone.base_url or settings.resolved_public_url
     ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -333,7 +391,7 @@ async def get_call(call_id: str, request: Request) -> dict:
 
     exchanges = await db.fetch_all(
         """SELECT exchange_index, user_transcript, assistant_transcript,
-                  stt_ms, openclaw_ms, tts_first_chunk_ms, e2e_ms,
+                  stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
                   started_at, created_at
            FROM phone_call_exchanges
            WHERE call_id = ?
@@ -372,7 +430,6 @@ async def media_stream(websocket: WebSocket) -> None:
     hello_task: asyncio.Task | None = None
     first_utterance_done = False
     media_count = 0
-    warmup_ok = False
 
     try:
         while True:
@@ -407,18 +464,13 @@ async def media_stream(websocket: WebSocket) -> None:
                 stored = _call_agendas.get(call_sid, {})
                 if isinstance(stored, dict):
                     raw_agenda = stored.get("agenda", "")
-                    stored_phone = stored.get("phone_number", "")
                     call_id = stored.get("call_id", str(uuid4()))
-                    warmup_ok = stored.get("warmup_done", False)
                 else:
-                    # Legacy format
                     raw_agenda = stored or ""
-                    stored_phone = ""
                     call_id = str(uuid4())
-                    warmup_ok = False
                 phone_context = _build_phone_context()
                 agenda = f"{phone_context} {raw_agenda}".strip() if raw_agenda else phone_context
-                logger.info("Twilio stream started: %s (call: %s, warmup: %s)", stream_sid, call_sid, warmup_ok)
+                logger.info("Twilio stream started: %s (call: %s)", stream_sid, call_sid)
 
                 # Update call record to active
                 await db.execute(
@@ -496,7 +548,7 @@ async def media_stream(websocket: WebSocket) -> None:
                             _run_voice_pipeline(
                                 websocket, transport, wav_bytes,
                                 processing_lock, agenda, call_id, exchange_index, db, ctx,
-                                utterance_time, warmup_ok=warmup_ok,
+                                utterance_time,
                             )
                         )
                         exchange_index += 1
@@ -571,7 +623,7 @@ async def _say_hello_if_silent(
             await db.execute(
                 """INSERT INTO phone_call_exchanges
                    (call_id, exchange_index, user_transcript, assistant_transcript,
-                    stt_ms, openclaw_ms, tts_first_chunk_ms, e2e_ms, started_at)
+                    stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms, started_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (call_id, exchange_index,
                  "(silence)", "Hello?",
@@ -597,7 +649,6 @@ async def _run_voice_pipeline(
     db: Any,
     ctx: Any,
     utterance_time: float = 0.0,
-    warmup_ok: bool = False,
 ) -> None:
     """Run the voice pipeline for a single utterance and log the exchange."""
     proxy = _CallRecorderProxy(transport, call_id, exchange_index, db, utterance_time)
@@ -615,7 +666,6 @@ async def _run_voice_pipeline(
                 user_id=f"phone:{call_id}",
                 session_mode="chat",
                 agenda=agenda,
-                warmup_ok=warmup_ok,
             )
         except asyncio.CancelledError:
             logger.info("Voice pipeline cancelled for exchange %d (barge-in)", exchange_index)
@@ -628,7 +678,7 @@ async def _run_voice_pipeline(
             proxy.done.set()
 
         # Wait for the full pipeline (LLM + TTS) to complete before releasing the lock,
-        # preventing concurrent dispatches to the same OpenClaw session.
+        # preventing concurrent dispatches to the same session.
         if not proxy.done.is_set():
             try:
                 await asyncio.wait_for(proxy.done.wait(), timeout=120)

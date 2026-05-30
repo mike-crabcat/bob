@@ -1,5 +1,5 @@
 -- Store prompt history for audit and analysis
--- Every prompt sent to OpenClaw sessions is logged here
+-- Every prompt sent to LLM sessions is logged here
 
 CREATE TABLE IF NOT EXISTS prompt_history (
     id TEXT PRIMARY KEY,

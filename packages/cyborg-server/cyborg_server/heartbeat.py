@@ -59,36 +59,6 @@ class HeartbeatRunner:
                 continue
 
 
-class NotificationDispatchTask:
-    """Dispatch pending notifications on each heartbeat cycle."""
-
-    name = "notification_dispatch"
-
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.services.notification_service import NotificationService
-
-        await NotificationService(ctx).dispatch_pending()
-
-
-class BlockedProjectCheckTask:
-    """Find blocked projects missing notifications and raise one."""
-
-    name = "blocked_project_check"
-
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.models import ProjectState
-        from cyborg_server.services.notification_service import NotificationService
-
-        blocked = await ctx.db.fetch_all(
-            """SELECT id FROM projects
-               WHERE deleted_at IS NULL AND state = ? AND blocked_reason IS NOT NULL""",
-            (ProjectState.PAUSED.value,),
-        )
-        notification_service = NotificationService(ctx)
-        for project in blocked:
-            await notification_service.sync_project_state(project["id"])
-
-
 class EmailPollingTask:
     """Poll AgentMail inboxes for new email messages."""
 
@@ -113,25 +83,6 @@ class EmailPollingTask:
                 logger.info("Email polling processed %d new message(s)", count)
         finally:
             await client.close()
-
-
-class StuckDispatchCheckTask:
-    """Log stuck dispatches that have been active beyond the timeout threshold."""
-
-    name = "stuck_dispatch_check"
-
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.services.dispatch_service import DispatchService
-
-        dispatch_service = DispatchService(ctx)
-        stuck = await dispatch_service.get_stuck_dispatches(
-            timeout_minutes=ctx.settings.dispatch_stuck_timeout_minutes,
-        )
-        if stuck:
-            logger.warning(
-                "Found %d stuck dispatch(es) older than %.0f minutes",
-                len(stuck), ctx.settings.dispatch_stuck_timeout_minutes,
-            )
 
 
 class EmailSyncTask:
@@ -213,7 +164,45 @@ class SessionIdleSummaryTask:
                     memory_prompts=result["memory_prompts"],
                     message_count=session["message_count"],
                     model_used=ctx.settings.openai.default_model,
+                    people_updates=result.get("people_updates"),
                 )
+
+                # Trigger memory reflection from conversation summary
+                if result.get("memory_prompts") or result.get("people_updates"):
+                    try:
+                        from cyborg_server.services.memory_service import MemoryService
+                        mem_svc = MemoryService(ctx)
+                        # General reflection
+                        if result.get("memory_prompts"):
+                            await mem_svc.reflect_and_update(
+                                ctx.settings.harness.workspace_dir,
+                                session["session_key"],
+                                result["summary_text"],
+                                result["memory_prompts"],
+                                active_from=session["active_from"],
+                                active_to=session["last_message_at"],
+                                participants=participants,
+                                contact_ids=list(contact_to_name.keys()),
+                            )
+                        # Person-targeted bulletins
+                        people_updates = result.get("people_updates") or {}
+                        for contact_ref, facts in people_updates.items():
+                            if facts:
+                                await mem_svc.reflect_and_update(
+                                    ctx.settings.harness.workspace_dir,
+                                    session["session_key"],
+                                    summary_text="\n".join(f"- {f}" for f in facts),
+                                    memory_prompts=facts,
+                                    active_from=session["active_from"],
+                                    active_to=session["last_message_at"],
+                                    participants=participants,
+                                    contact_ids=list(contact_to_name.keys()),
+                                )
+                    except Exception:
+                        logger.exception(
+                            "Memory reflection failed for session %s",
+                            session["session_key"],
+                        )
                 logger.info(
                     "Session summary generated for %s (%d messages)",
                     session["session_key"], session["message_count"],
@@ -223,6 +212,29 @@ class SessionIdleSummaryTask:
                     "Failed to generate summary for session %s",
                     session["session_key"],
                 )
+
+        # After all summaries, run the memory dream to curate bulletins
+        try:
+            from cyborg_server.services.memory_service import MemoryService
+            from uuid import uuid4
+            import json as _json
+
+            mem_svc = MemoryService(ctx)
+            result = await mem_svc.run_dream(ctx.settings.harness.workspace_dir)
+            if result["status"] != "empty":
+                await ctx.db.execute(
+                    "INSERT INTO memory_dream_log "
+                    "(id, bulletins_processed, entries_created, bulletin_slugs, "
+                    "operations_json, raw_response, duration_seconds, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid4()), result["bulletins_processed"], result["entries_created"],
+                     _json.dumps(result["bulletin_slugs"]),
+                     _json.dumps(result["operations"]),
+                     result.get("raw_response"),
+                     result.get("duration_seconds"), result["status"]),
+                )
+        except Exception:
+            logger.exception("Memory dream process failed")
 
 
 class CallCleanupTask:

@@ -37,17 +37,27 @@ class SessionService(BaseService):
         channel: str | None = None,
         sender_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        dispatched: int = 1,
     ) -> str:
         """Store a message. Returns the message ID."""
         msg_id = str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
         await self.db.execute(
             """INSERT INTO session_messages
-               (id, session_key, role, content, sender_id, channel, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, session_key, role, content, sender_id, channel, meta_json),
+               (id, session_key, role, content, sender_id, channel, metadata, dispatched)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, session_key, role, content, sender_id, channel, meta_json, dispatched),
         )
         return msg_id
+
+    async def mark_dispatched(self, session_key: str) -> int:
+        """Mark all undispatched user messages as dispatched. Returns count marked."""
+        count = await self.db.execute(
+            "UPDATE session_messages SET dispatched = 1 "
+            "WHERE session_key = ? AND dispatched = 0 AND role = 'user'",
+            (session_key,),
+        )
+        return count
 
     async def get_messages(
         self,

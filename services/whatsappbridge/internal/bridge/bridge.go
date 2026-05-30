@@ -42,7 +42,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 		return nil, err
 	}
 
-	wa, err := whatsapp.NewClient(cfg.SessionDBPath(), log.With("component", "whatsapp"))
+	wa, err := whatsapp.NewClient(cfg.SessionDBPath(), cfg.DataDir, log.With("component", "whatsapp"))
 	if err != nil {
 		inQ.Close()
 		outQ.Close()
@@ -63,6 +63,9 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 	b.srv.OnConnect(func() {
 		b.log.Info("cyborg client connected, draining incoming queue")
 		b.drainIncoming()
+		if b.wa.IsConnected() {
+			go b.wa.SyncGroups()
+		}
 	})
 	b.wa.SetEventHandler(b.handleWhatsAppEvent)
 
@@ -106,6 +109,7 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 	case whatsapp.ConnectedEvent:
 		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeConnected, wsproto.ConnectedPayload{}))
 		b.drainOutgoing()
+		go b.wa.SyncGroups()
 
 	case whatsapp.DisconnectedEvent:
 		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeDisconnected, wsproto.DisconnectedPayload{
@@ -140,7 +144,16 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			SenderName:        evt.SenderName,
 			Text:              evt.Text,
 			QuotedMessageID:   evt.QuotedMessageID,
+			MentionedJIDs:     evt.MentionedJIDs,
 			Timestamp:         evt.Timestamp,
+		}
+		if evt.Media != nil {
+			payload.Media = &wsproto.MediaInfo{
+				MediaType: evt.Media.MediaType,
+				MimeType:  evt.Media.MimeType,
+				Filename:  evt.Media.Filename,
+				SizeBytes: evt.Media.SizeBytes,
+			}
 		}
 		if len(evt.Contacts) > 0 {
 			payload.Contacts = make([]wsproto.SharedContact, len(evt.Contacts))
@@ -183,6 +196,34 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 		} else {
 			b.outQ.MarkFailed(evt.RequestID)
 		}
+
+	case whatsapp.GroupMemberChangeEvent:
+		payload := wsproto.GroupMemberChangePayload{
+			GroupJID:   evt.GroupJID,
+			GroupName:  evt.GroupName,
+			SenderJID:  evt.SenderJID,
+			JoinedJIDs: evt.JoinedJIDs,
+			LeftJIDs:   evt.LeftJIDs,
+			Timestamp:  evt.Timestamp,
+		}
+		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeGroupMemberChange, payload))
+
+	case whatsapp.GroupSyncEvent:
+		payload := wsproto.GroupSyncPayload{
+			GroupJID:    evt.GroupJID,
+			GroupName:   evt.GroupName,
+			Description: evt.Description,
+			Timestamp:   evt.Timestamp,
+		}
+		for _, p := range evt.Participants {
+			payload.Participants = append(payload.Participants, wsproto.GroupParticipantPayload{
+				JID:          p.JID,
+				DisplayName:  p.DisplayName,
+				IsAdmin:      p.IsAdmin,
+				IsSuperAdmin: p.IsSuperAdmin,
+			})
+		}
+		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeGroupSync, payload))
 	}
 }
 

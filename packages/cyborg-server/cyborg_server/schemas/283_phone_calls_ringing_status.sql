@@ -35,7 +35,7 @@ CREATE TABLE phone_call_exchanges (
     user_transcript TEXT NOT NULL DEFAULT '',
     assistant_transcript TEXT NOT NULL DEFAULT '',
     stt_ms INTEGER,
-    openclaw_ms INTEGER,
+    llm_total_ms INTEGER,
     tts_first_chunk_ms INTEGER,
     e2e_ms INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

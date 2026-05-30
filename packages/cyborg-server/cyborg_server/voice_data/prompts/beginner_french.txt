@@ -51,7 +51,7 @@ When ALL steps AND quiz questions for a lesson are completed, emit:
 
 ## Workspace Instructions
 
-Copy this lesson to your workspace for tracking: ~/.openclaw/workspace/projects/beginner-french/{USER_ID}/lesson_{LESSON_NUMBER:02d}.md
+Copy this lesson to your workspace for tracking: ~/.cyborg/workspace/projects/beginner-french/{USER_ID}/lesson_{LESSON_NUMBER:02d}.md
 Update the checkboxes in your workspace copy as the user completes each step. This helps you track progress across sessions.
 
 ## Response Style
