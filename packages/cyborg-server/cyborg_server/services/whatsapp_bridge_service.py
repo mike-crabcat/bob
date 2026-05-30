@@ -517,6 +517,20 @@ class WhatsAppBridgeService(BaseService):
         )
         if contact:
             return contact["id"], bool(contact.get("is_trusted", 0))
+
+        # Fallback: prefix match to catch JIDs with extra trailing digits
+        # e.g. +614154068544 should match existing +61415406854
+        if len(phone_number) > 6:
+            prefix_matches = await self.db.fetch_all(
+                "SELECT id, is_trusted, phone_number FROM contacts WHERE deleted_at IS NULL "
+                "AND (phone_number = ? OR ? LIKE phone_number || '%' OR phone_number LIKE ? || '%') "
+                "ORDER BY LENGTH(phone_number) DESC LIMIT 1",
+                (phone_number[:-1], phone_number, phone_number),
+            )
+            if prefix_matches:
+                best = prefix_matches[0]
+                logger.info("resolved contact %s via prefix match: %s → %s", best["id"], phone_number, best["phone_number"])
+                return best["id"], bool(best.get("is_trusted", 0))
         new_id = str(uuid4())
         now_iso = utcnow().isoformat()
         await self.db.execute(

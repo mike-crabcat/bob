@@ -311,7 +311,7 @@ class SubagentService(BaseService):
             "--output-format", "json",
             "--model", model,
             "--max-budget-usd", str(max_budget),
-            "--allowed-tools", "Read Write Glob Grep",
+            "--allowed-tools", "Read Write Glob Grep Bash",
             "--system-prompt", SUBAGENT_SYSTEM_PROMPT,
         ]
         if session_id:
