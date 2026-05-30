@@ -11,6 +11,7 @@ from typing import Any, NoReturn
 
 from cyborg_server.context import AppContext
 from cyborg_server.services.base import BaseService
+from cyborg_server.services.tools import ImageInjection
 
 try:
     from openai import AsyncOpenAI
@@ -22,6 +23,18 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+
+
+def _content_length(content: Any) -> int:
+    """Return character length of message content, handling both str and list[dict]."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(part.get("text", "")) if isinstance(part, dict) else 0
+            for part in content
+        )
+    return 0
 
 
 def _output_items_to_dicts(items: list[Any]) -> list[dict[str, Any]]:
@@ -152,7 +165,7 @@ class OpenAIService(BaseService):
                 usage.output_tokens if usage else None,
                 usage.total_tokens if usage else None,
                 cached_tokens,
-                sum(len(m.get("content", "")) for m in messages),
+                sum(_content_length(m.get("content", "")) for m in messages),
                 len(content),
             )
             return content
@@ -239,7 +252,7 @@ class OpenAIService(BaseService):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        tool_handlers: dict[str, Callable[..., Awaitable[str]]],
+        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection]]],
         *,
         model: str | None = None,
         max_iterations: int = 100,
@@ -316,15 +329,30 @@ class OpenAIService(BaseService):
                         result = f"Error: {e}"
                         logger.warning("Tool %s failed: %s", fc.name, e)
 
-                messages.append({
-                    "type": "function_call_output",
-                    "call_id": fc.call_id,
-                    "output": result,
-                })
+                if isinstance(result, ImageInjection):
+                    messages.append({
+                        "type": "function_call_output",
+                        "call_id": fc.call_id,
+                        "output": result.text,
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": result.text},
+                            {"type": "input_image", "image_url": result.data_url},
+                        ],
+                    })
+                else:
+                    messages.append({
+                        "type": "function_call_output",
+                        "call_id": fc.call_id,
+                        "output": result,
+                    })
 
                 if on_tool_call:
                     try:
-                        await on_tool_call(fc.name, tool_args, result[:200])
+                        summary = result.text[:200] if isinstance(result, ImageInjection) else result[:200]
+                        await on_tool_call(fc.name, tool_args, summary)
                     except Exception:
                         pass
 
@@ -341,7 +369,7 @@ class OpenAIService(BaseService):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        tool_handlers: dict[str, Callable[..., Awaitable[str]]],
+        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection]]],
         *,
         model: str | None = None,
         max_iterations: int = 100,
@@ -395,7 +423,8 @@ class OpenAIService(BaseService):
 
                 if on_tool_call:
                     try:
-                        await on_tool_call(fc.name, tool_args, result[:200])
+                        summary = result.text[:200] if isinstance(result, ImageInjection) else result[:200]
+                        await on_tool_call(fc.name, tool_args, summary)
                     except Exception:
                         pass
 

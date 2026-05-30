@@ -9,6 +9,18 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+
+def _content_char_len(content: Any) -> int:
+    """Return character length of message content, handling both str and list[dict]."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(part.get("text", "")) if isinstance(part, dict) else 0
+            for part in content
+        )
+    return 0
+
 from cyborg_server.services.tools import Tool
 
 from cyborg_server.services.base import BaseService
@@ -220,7 +232,7 @@ class LLMDispatchService(BaseService):
                 "LLM dispatch: model=%s category=%s latency=%.2fs "
                 "input_chars=%d output_chars=%d",
                 resolved_model, call_category, elapsed,
-                sum(len(m.get("content", "")) for m in messages),
+                sum(_content_char_len(m.get("content", "")) for m in messages),
                 len(result or ""),
             )
             await self._publish_call(
@@ -327,7 +339,7 @@ class LLMDispatchService(BaseService):
                 "LLM dispatch stream: model=%s category=%s latency=%.2fs ttft=%.2fs "
                 "input_chars=%d output_chars=%d tokens=%s",
                 resolved_model, call_category, elapsed, ttft or 0,
-                sum(len(m.get("content", "")) for m in messages),
+                sum(_content_char_len(m.get("content", "")) for m in messages),
                 len(accumulated),
                 stream_result.total_tokens,
             )

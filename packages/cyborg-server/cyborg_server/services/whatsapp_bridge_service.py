@@ -525,6 +525,16 @@ class WhatsAppBridgeService(BaseService):
             (new_id, display_name or phone_number, phone_number, now_iso, now_iso),
         )
         logger.info("auto-seeded untrusted contact %s for phone %s", new_id, phone_number)
+
+        # Auto-create person memory entry
+        from cyborg_server.services.memory_service import MemoryService
+        mem_svc = MemoryService(self.ctx)
+        mem_svc.ensure_person_entry(
+            self.ctx.settings.harness.workspace_dir,
+            contact_id=new_id, name=display_name or phone_number,
+            phone_number=phone_number, channel="WhatsApp",
+        )
+
         return new_id, False
 
     async def _handle_group_sync(self, payload: dict[str, Any]) -> None:
@@ -969,11 +979,24 @@ class WhatsAppBridgeService(BaseService):
         text = payload.get("text", "")
         wa_message_id = payload.get("whatsapp_message_id", "")
         mentioned_jids = payload.get("mentioned_jids", [])
+        media = payload.get("media")
+
+        # Resolve image path from media metadata
+        image_path: str | None = None
+        image_mime_type: str = "image/jpeg"
+        if media and media.get("media_type") == "image":
+            media_dir = settings.whatsapp_bridge.media_dir.expanduser().resolve()
+            filename = media.get("filename", "")
+            if filename:
+                resolved = (media_dir / filename).resolve()
+                if str(resolved).startswith(str(media_dir)) and resolved.is_file():
+                    image_path = str(resolved)
+                    image_mime_type = media.get("mime_type", "image/jpeg")
 
         # Ack receipt so the bridge clears it from the incoming queue
         await self._send_ack(wa_message_id)
 
-        if not text:
+        if not text and not image_path:
             return
 
         logger.info(
@@ -1007,6 +1030,15 @@ class WhatsAppBridgeService(BaseService):
             contact_id = new_id
             is_trusted = False
             logger.info("auto-seeded untrusted contact %s for phone %s", contact_id, phone_number)
+
+            # Auto-create person memory entry for new contacts
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            mem_svc.ensure_person_entry(
+                settings.harness.workspace_dir,
+                contact_id=contact_id, name=sender_name or phone_number,
+                phone_number=phone_number, channel="WhatsApp",
+            )
 
         # Derive session key
         agent_id = "main"
@@ -1107,6 +1139,17 @@ class WhatsAppBridgeService(BaseService):
 
         participants_prompt = await self._build_participants_prompt(session_key)
 
+        # Inject person profile for DM sessions
+        person_context = ""
+        if contact_id and chat_kind != "group":
+            from cyborg_server.services.memory_service import MemoryService
+            mem_svc = MemoryService(self.ctx)
+            entry = mem_svc.find_person_entry(
+                settings.harness.workspace_dir, contact_id=contact_id,
+            )
+            if entry:
+                person_context = f"## Person Profile\n\n{entry}"
+
         # Handle shared contacts — auto-seed into contacts table
         shared_contacts = payload.get("contacts", [])
         contacts_block = ""
@@ -1151,9 +1194,16 @@ class WhatsAppBridgeService(BaseService):
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
         from cyborg_server.services.session_service import SessionService
+        message_metadata: dict[str, Any] | None = None
+        if image_path:
+            message_metadata = {
+                "image_path": image_path,
+                "image_mime_type": image_mime_type,
+            }
         await SessionService(self.ctx).add_message(
-            session_key, "user", text,
+            session_key, "user", text or "[Image]",
             channel="whatsapp", sender_id=contact_id, dispatched=0,
+            metadata=message_metadata,
         )
 
         # Check for active outreach request and inject into system prompt
@@ -1198,7 +1248,7 @@ class WhatsAppBridgeService(BaseService):
                 )
 
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, agenda, participants_prompt, outreach_prompt, memory_prompt) if p
+            p for p in (workspace_prompt, agenda, participants_prompt, person_context, outreach_prompt, memory_prompt) if p
         )
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)

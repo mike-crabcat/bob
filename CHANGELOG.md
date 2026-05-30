@@ -2,6 +2,23 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## [Unreleased] - 2026-05-30
+
+### Added
+- Add multimodal image support: Go bridge downloads incoming WhatsApp images to disk and forwards metadata to the Python server, which stores image references in message metadata and reconstructs OpenAI `input_image` content parts in the prompt for GPT-5.5 vision
+- Add WhatsApp group understanding with member tracking: new `whatsappgroups` and `whatsappgroup_members` tables replace flat text column, Go bridge handles GroupInfo and JoinedGroup events, member changes trigger LLM dispatch in group sessions
+- Add group participants tool for LLM function calling in WhatsApp group sessions
+- Add SyncGroups on connect to populate group tables from existing WhatsApp memberships (not just new joins)
+
+### Changed
+- Add media_dir configuration to WhatsAppBridgeSettings for configurable image storage path
+- Improve workspace read_file tool to recognize image extensions and return a descriptive message instead of binary file error
+
+### Fixed
+- Fix migration 305: disable foreign key checks during contacts table recreation to prevent constraint failures from whatsappgroup_members references
+- Fix contact detail page: update dashboard API and React component to query new group tables instead of removed whatsapp_groups column
+- Fix LLM dispatch and OpenAI service logging to handle multimodal message content (list of content parts) without crashing
+
 ## [Unreleased] - 2026-05-28
 
 ### Added

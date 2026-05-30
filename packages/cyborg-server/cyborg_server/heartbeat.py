@@ -164,23 +164,40 @@ class SessionIdleSummaryTask:
                     memory_prompts=result["memory_prompts"],
                     message_count=session["message_count"],
                     model_used=ctx.settings.openai.default_model,
+                    people_updates=result.get("people_updates"),
                 )
 
                 # Trigger memory reflection from conversation summary
-                if result.get("memory_prompts"):
+                if result.get("memory_prompts") or result.get("people_updates"):
                     try:
                         from cyborg_server.services.memory_service import MemoryService
                         mem_svc = MemoryService(ctx)
-                        await mem_svc.reflect_and_update(
-                            ctx.settings.harness.workspace_dir,
-                            session["session_key"],
-                            result["summary_text"],
-                            result["memory_prompts"],
-                            active_from=session["active_from"],
-                            active_to=session["last_message_at"],
-                            participants=participants,
-                            contact_ids=list(contact_to_name.keys()),
-                        )
+                        # General reflection
+                        if result.get("memory_prompts"):
+                            await mem_svc.reflect_and_update(
+                                ctx.settings.harness.workspace_dir,
+                                session["session_key"],
+                                result["summary_text"],
+                                result["memory_prompts"],
+                                active_from=session["active_from"],
+                                active_to=session["last_message_at"],
+                                participants=participants,
+                                contact_ids=list(contact_to_name.keys()),
+                            )
+                        # Person-targeted bulletins
+                        people_updates = result.get("people_updates") or {}
+                        for contact_ref, facts in people_updates.items():
+                            if facts:
+                                await mem_svc.reflect_and_update(
+                                    ctx.settings.harness.workspace_dir,
+                                    session["session_key"],
+                                    summary_text="\n".join(f"- {f}" for f in facts),
+                                    memory_prompts=facts,
+                                    active_from=session["active_from"],
+                                    active_to=session["last_message_at"],
+                                    participants=participants,
+                                    contact_ids=list(contact_to_name.keys()),
+                                )
                     except Exception:
                         logger.exception(
                             "Memory reflection failed for session %s",

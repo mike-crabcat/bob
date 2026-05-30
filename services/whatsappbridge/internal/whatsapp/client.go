@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -20,6 +22,7 @@ type Client struct {
 	log       *slog.Logger
 	client    *whatsmeow.Client
 	container *sqlstore.Container
+	mediaDir  string
 
 	mu        sync.RWMutex
 	connected bool
@@ -27,7 +30,7 @@ type Client struct {
 	onEvent EventHandler
 }
 
-func NewClient(sessionDBPath string, log *slog.Logger) (*Client, error) {
+func NewClient(sessionDBPath string, mediaDir string, log *slog.Logger) (*Client, error) {
 	container, err := sqlstore.New(
 		context.Background(),
 		"sqlite3",
@@ -51,6 +54,7 @@ func NewClient(sessionDBPath string, log *slog.Logger) (*Client, error) {
 		log:       log,
 		client:    client,
 		container: container,
+		mediaDir:  mediaDir,
 	}
 
 	client.AddEventHandler(c.handleEvent)
@@ -244,7 +248,8 @@ func (c *Client) handleMessage(evt *events.Message) {
 	info := evt.Info
 	text, contacts := extractTextAndContacts(evt.Message)
 
-	if text == "" {
+	img := evt.Message.GetImageMessage()
+	if text == "" && img == nil {
 		return
 	}
 
@@ -271,6 +276,35 @@ func (c *Client) handleMessage(evt *events.Message) {
 		Text:              text,
 		Contacts:          contacts,
 		Timestamp:         info.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
+	}
+
+	// Download and save image if present
+	if img != nil {
+		data, err := c.client.Download(context.Background(), img)
+		if err != nil {
+			c.log.Warn("failed to download image", "error", err, "msg_id", info.ID)
+		} else {
+			mediaDir := filepath.Join(c.mediaDir, "media")
+			os.MkdirAll(mediaDir, 0755)
+			filename := info.ID + ".jpg"
+			fullPath := filepath.Join(mediaDir, filename)
+			if err := os.WriteFile(fullPath, data, 0644); err != nil {
+				c.log.Warn("failed to save image", "error", err)
+			} else {
+				mimeType := img.GetMimetype()
+				if mimeType == "" {
+					mimeType = "image/jpeg"
+				}
+				msgEvt.Media = &MediaInfo{
+					MediaType: "image",
+					MimeType:  mimeType,
+					Filename:  filename,
+					SizeBytes: int64(len(data)),
+					FilePath:  fullPath,
+				}
+				c.log.Info("saved incoming image", "msg_id", info.ID, "size", len(data), "path", fullPath)
+			}
+		}
 	}
 
 	if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
@@ -302,6 +336,9 @@ func extractTextAndContacts(msg *waE2E.Message) (string, []SharedContact) {
 	}
 	if ext := msg.GetExtendedTextMessage(); ext != nil {
 		return ext.GetText(), nil
+	}
+	if img := msg.GetImageMessage(); img != nil {
+		return img.GetCaption(), nil
 	}
 	if contact := msg.GetContactMessage(); contact != nil {
 		c := parseContact(contact.GetDisplayName(), contact.GetVcard())

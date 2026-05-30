@@ -1005,6 +1005,21 @@ async def lint_memory_entries(request: Request) -> dict[str, Any]:
     return await svc.lint_entries(workspace)
 
 
+@router.post("/api/memory/backfill-people")
+async def backfill_people(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    settings = request.app.state.settings
+    workspace = settings.harness.workspace_dir
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory_service import MemoryService
+
+    ctx = AppContext(settings=settings, db=_db(request))
+    svc = MemoryService(ctx)
+    return await svc.backfill_people(workspace)
+
+
 # ── Skills ──────────────────────────────────────────────────────────────────
 
 

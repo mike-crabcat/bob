@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import shutil
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from cyborg_server.context import AppContext
 from cyborg_server.services.skill_env import build_skill_env
-from cyborg_server.services.tools import tool
+from cyborg_server.services.tools import ImageInjection, tool
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,12 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         if not resolved.is_file():
             return f"Error: '{path}' is not a file"
 
+        # Detect image files and provide a helpful message
+        suffix = resolved.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
+            size = resolved.stat().st_size
+            return f"Image file ({suffix}, {size} bytes). Images cannot be read as text."
+
         size = resolved.stat().st_size
         if size > _MAX_READ_BYTES:
             return f"Error: file is {size} bytes (max {_MAX_READ_BYTES})"
@@ -102,6 +109,31 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
             return "Error: binary file"
 
         return content.decode("utf-8")
+
+    @tool
+    async def read_image(
+        path: str,
+    ) -> ImageInjection:
+        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP. Path is relative to the workspace root ('/')."""
+        resolved = _resolve_path(ctx, path)
+        if not resolved.is_file():
+            return ImageInjection(text=f"Error: '{path}' is not a file", data_url="")
+
+        suffix = resolved.suffix.lower()
+        _MIME_MAP = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+        }
+        mime = _MIME_MAP.get(suffix)
+        if not mime:
+            return ImageInjection(text=f"Error: '{path}' is not a supported image format (use png, jpg, gif, webp, or bmp)", data_url="")
+
+        data = resolved.read_bytes()
+        b64 = base64.b64encode(data).decode()
+        return ImageInjection(
+            text=f"Image loaded from {path} ({len(data)} bytes)",
+            data_url=f"data:{mime};base64,{b64}",
+        )
 
     @tool
     async def write_file(
@@ -180,7 +212,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         from cyborg_server.services.skill_loader import load_skill
         return load_skill(ctx.settings.harness.workspace_dir, skill_name)
 
-    tools = [list_files, read_file, write_file, run_script, use_skill]
+    tools = [list_files, read_file, read_image, write_file, run_script, use_skill]
 
     if session_key:
         @tool

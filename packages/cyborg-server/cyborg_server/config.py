@@ -203,6 +203,7 @@ class WhatsAppBridgeSettings:
     url: str = "ws://127.0.0.1:8430/ws"
     token: str = ""
     reconnect_interval_seconds: float = 10.0
+    media_dir: Path = Path("~/.local/share/cyborg/whatsappbridge/media")
 
 
 @dataclass(slots=True)
@@ -369,6 +370,7 @@ class Settings:
             url=os.getenv("CYBORG_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:8430/ws"),
             token=os.getenv("CYBORG_WHATSAPP_BRIDGE_TOKEN", ""),
             reconnect_interval_seconds=float(os.getenv("CYBORG_WHATSAPP_BRIDGE_RECONNECT_INTERVAL_SECONDS", "10")),
+            media_dir=_env_path("CYBORG_WHATSAPP_BRIDGE_MEDIA_DIR", Path("~/.local/share/cyborg/whatsappbridge/media")),
         )
 
         return cls(

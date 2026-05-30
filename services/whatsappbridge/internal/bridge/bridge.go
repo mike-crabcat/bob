@@ -42,7 +42,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 		return nil, err
 	}
 
-	wa, err := whatsapp.NewClient(cfg.SessionDBPath(), log.With("component", "whatsapp"))
+	wa, err := whatsapp.NewClient(cfg.SessionDBPath(), cfg.DataDir, log.With("component", "whatsapp"))
 	if err != nil {
 		inQ.Close()
 		outQ.Close()
@@ -146,6 +146,14 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			QuotedMessageID:   evt.QuotedMessageID,
 			MentionedJIDs:     evt.MentionedJIDs,
 			Timestamp:         evt.Timestamp,
+		}
+		if evt.Media != nil {
+			payload.Media = &wsproto.MediaInfo{
+				MediaType: evt.Media.MediaType,
+				MimeType:  evt.Media.MimeType,
+				Filename:  evt.Media.Filename,
+				SizeBytes: evt.Media.SizeBytes,
+			}
 		}
 		if len(evt.Contacts) > 0 {
 			payload.Contacts = make([]wsproto.SharedContact, len(evt.Contacts))

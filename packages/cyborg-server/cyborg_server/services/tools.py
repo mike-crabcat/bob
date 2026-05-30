@@ -59,6 +59,17 @@ def _python_type_to_schema(py_type: Any) -> dict[str, Any]:
 
 
 @dataclass
+class ImageInjection:
+    """Returned by a tool handler to inject an image into the LLM conversation.
+
+    The tool calling loop detects this and adds a user message with the image
+    content alongside the text response.
+    """
+    text: str
+    data_url: str  # e.g. "data:image/jpeg;base64,..."
+
+
+@dataclass
 class Tool:
     """An LLM-callable tool with schema and handler."""
 
@@ -66,7 +77,7 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     required: list[str]
-    handler: Callable[..., Awaitable[str]]
+    handler: Callable[..., Awaitable[str | ImageInjection]]
 
     def to_openai_format(self) -> dict[str, Any]:
         """Convert to OpenAI Responses API tool definition format."""

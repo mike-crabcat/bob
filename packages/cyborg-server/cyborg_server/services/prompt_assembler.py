@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -57,6 +60,13 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
             "- **memory_browse(wiki, category)** — List all entries in a category.\n"
             "- **memory_write(wiki, category, slug, title, content)** — Write a new entry (queued as a bulletin, curated by dream process).\n"
             "- Wiki: `core`. Categories: `people`, `facts`, `research`.\n"
+            "\n"
+            "## People Profiles\n\n"
+            "Your most important memories are person profiles. When you learn something about someone\n"
+            "(preferences, personality, dietary info, work, family, interests):\n"
+            "- Use memory_write(wiki=\"core\", category=\"people\", ...) to save it.\n"
+            "- If the person has no profile yet, create one.\n"
+            "- These profiles are automatically loaded in future DM conversations with that person.\n"
         )
 
     # Append grounding rules to reduce hallucinated tool claims
@@ -97,14 +107,14 @@ def _resolve_mentions(text: str, mention_names: dict[str, str]) -> str:
 
 
 async def build_chat_messages(
-    user_message: str | None = None,
+    user_message: str | list[dict[str, Any]] | None = None,
     session_key: str = "",
     *,
     db: Any = None,
     system_content: str = "",
     voice_instructions: str = "",
     max_history: int = 20,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Build a messages array: system prompt + session history + optional user message."""
     system_parts: list[str] = []
     if system_content:
@@ -112,7 +122,7 @@ async def build_chat_messages(
     if voice_instructions:
         system_parts.append(voice_instructions)
 
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     if system_parts:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
@@ -137,7 +147,7 @@ async def build_chat_messages(
                         mention_names[digits] = p["display_name"]
 
         rows = await db.fetch_all(
-            "SELECT role, content, sender_id FROM session_messages "
+            "SELECT role, content, sender_id, metadata FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
             "AND rowid IN (SELECT rowid FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
@@ -156,6 +166,35 @@ async def build_chat_messages(
             content = row["content"]
             if is_group and mention_names:
                 content = _resolve_mentions(content, mention_names)
+
+            # Check for image metadata and reconstruct multimodal content
+            meta: dict[str, Any] = {}
+            raw_meta = row.get("metadata")
+            if raw_meta:
+                try:
+                    meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            image_path = meta.get("image_path")
+            mime_type = meta.get("image_mime_type", "image/jpeg")
+
+            if image_path and row["role"] == "user" and os.path.isfile(image_path):
+                text_prefix = ""
+                if is_group and row["sender_id"]:
+                    name = sender_names.get(row["sender_id"])
+                    if name:
+                        text_prefix = f"[{name}] "
+                with open(image_path, "rb") as f:
+                    image_data = base64.b64encode(f.read()).decode()
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": text_prefix + content},
+                        {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_data}"},
+                    ],
+                })
+                continue
+
             if is_group and row["role"] == "user" and row["sender_id"]:
                 name = sender_names.get(row["sender_id"])
                 if name:

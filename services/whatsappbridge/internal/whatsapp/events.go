@@ -21,6 +21,14 @@ type SharedContact struct {
 	Phone       string
 }
 
+type MediaInfo struct {
+	MediaType string // "image", "document", "audio", "video"
+	MimeType  string
+	Filename  string
+	SizeBytes int64
+	FilePath  string // absolute path on disk
+}
+
 type IncomingMessageEvent struct {
 	WhatsAppMessageID string
 	ChatID            string
@@ -31,6 +39,7 @@ type IncomingMessageEvent struct {
 	QuotedMessageID   string
 	MentionedJIDs     []string
 	Contacts          []SharedContact
+	Media             *MediaInfo
 	Timestamp         string
 }
 

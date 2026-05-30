@@ -610,6 +610,18 @@ class MemoryService(BaseService):
         "- UPDATE an existing entry (merge new info, resolve conflicts — newer info wins), OR\n"
         "- IGNORE only if the bulletin contains no factual claims at all\n"
         "\n"
+        "## People-First Processing\n"
+        "\n"
+        "Person profiles are the MOST IMPORTANT category. When bulletins contain information about a person\n"
+        "(identified by name or {{{{contact:ID|Name}}}} references):\n"
+        "\n"
+        "1. ALWAYS create or update a people/ entry for that person — never store person info only in facts/ or research/.\n"
+        "2. If no people/ entry exists for the person, create one using the people template. Use the contact name as slug.\n"
+        "3. Merge new information into the correct section headers (Personality, Interests, Dietary, Work, Family, Preferences, etc.).\n"
+        "4. If a bulletin references multiple people, create/update entries for EACH person separately.\n"
+        "5. Embed the contact_id in a metadata comment at the top: <!-- contact_id: ID -->\n"
+        "6. Person profiles should be comprehensive and current — this is your top priority.\n"
+        "\n"
         "{templates_section}"
         "\n"
         "Rules for headers:\n"
@@ -853,6 +865,256 @@ class MemoryService(BaseService):
                 linted += cat_count
 
         return {"linted": linted, "categories": by_category}
+
+    # ── People backfill ──────────────────────────────────────────
+
+    _BACKFILL_SYSTEM_PROMPT = (
+        "You are a memory extraction agent. Your job is to scan existing memory entries\n"
+        "and extract any information about specific people that should be in person profiles.\n"
+        "\n"
+        "You will receive:\n"
+        "1. EXISTING PEOPLE ENTRIES — already-curated person profiles\n"
+        "2. SOURCE ENTRIES — entries from other categories (facts, events, locations, research)\n"
+        "\n"
+        "For each person mentioned in the source entries:\n"
+        "- If a people entry already exists for that person, extract any NEW facts not yet in their profile\n"
+        "- If no people entry exists, extract all person-relevant facts to create a new profile\n"
+        "\n"
+        "People-relevant facts include: personality traits, preferences, dietary info, work details,\n"
+        "family info, interests, communication style, personal details, relationships.\n"
+        "\n"
+        "Use the people category template headers:\n"
+        "Overview, Personality, Interests, Dietary, Work, Family, Preferences, Contact, Relationships\n"
+        "\n"
+        "Rules:\n"
+        "- Use ## (h2) headings for sections — omit sections with no content\n"
+        "- Content should be concise bullet points\n"
+        "- If a person is referenced by {{contact:ID|Name}}, include <!-- contact_id: ID --> at the top\n"
+        "- Use the person's display name as the title and derive a slug from it (lowercase, hyphens)\n"
+        "- Do NOT duplicate information already in the existing people entries\n"
+        "- Include transcript references [[session:...]] if present in the source\n"
+        "\n"
+        'Return a JSON array of write operations: [{{"action":"write","wiki":"core","category":"people",'
+        '"slug":"...","title":"...","content":"...","source":"fact/slug or event/slug etc"}}]\n'
+        "Return an empty array [] if no person-relevant information is found in the sources."
+    )
+
+    async def backfill_people(self, workspace_dir: Path) -> dict[str, Any]:
+        """Scan existing non-people entries and extract person-relevant facts into people profiles."""
+        memory_dir = self._memory_dir(workspace_dir)
+        source_categories = ("facts", "events", "locations", "research")
+
+        # Collect existing people entries
+        existing_people: list[dict[str, str]] = []
+        people_entries = self.browse_category(workspace_dir, "core", "people")
+        for entry in people_entries:
+            full = self.read_entry(workspace_dir, "core", "people", entry["slug"])
+            if full:
+                existing_people.append({
+                    "slug": entry["slug"],
+                    "title": entry["title"],
+                    "content": full[:800],
+                })
+
+        # Collect source entries from other categories
+        source_entries: list[dict[str, str]] = []
+        for cat in source_categories:
+            entries = self.browse_category(workspace_dir, "core", cat)
+            for entry in entries:
+                full = self.read_entry(workspace_dir, "core", cat, entry["slug"])
+                if full:
+                    source_entries.append({
+                        "category": cat,
+                        "slug": entry["slug"],
+                        "title": entry["title"],
+                        "content": full,
+                    })
+
+        if not source_entries:
+            return {"status": "no_sources", "created": 0, "updated": 0, "sources_scanned": 0}
+
+        # Build prompt
+        existing_block = ""
+        if existing_people:
+            lines = []
+            for p in existing_people:
+                lines.append(f"[{p['slug']}] {p['title']}\n{p['content'][:400]}")
+            existing_block = "## EXISTING PEOPLE ENTRIES\n\n" + "\n\n".join(lines)
+
+        source_lines = []
+        for s in source_entries:
+            source_lines.append(f"[{s['category']}/{s['slug']}] {s['title']}\n{s['content'][:600]}")
+        source_block = "## SOURCE ENTRIES\n\n" + "\n\n".join(source_lines)
+
+        user_prompt = source_block
+        if existing_block:
+            user_prompt = existing_block + "\n\n" + user_prompt
+
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+        llm = LLMDispatchService(self.ctx)
+
+        response = await llm.chat(
+            messages=[
+                {"role": "system", "content": self._BACKFILL_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            model=llm.memory_model,
+            call_category="memory_backfill",
+            temperature=0.3,
+            max_tokens=3000,
+        )
+
+        try:
+            text = response.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            operations = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("People backfill: failed to parse LLM response")
+            return {"status": "failed", "created": 0, "updated": 0,
+                    "sources_scanned": len(source_entries), "raw_response": response}
+
+        if not isinstance(operations, list):
+            return {"status": "failed", "created": 0, "updated": 0,
+                    "sources_scanned": len(source_entries), "raw_response": response}
+
+        created = 0
+        updated = 0
+        results: list[dict[str, str]] = []
+        for op in operations:
+            if op.get("action") != "write":
+                continue
+            slug = op.get("slug", "")
+            title = op.get("title", "")
+            content = op.get("content", "")
+            if not all([slug, title, content]):
+                continue
+
+            is_new = not (memory_dir / "core" / "people" / f"{slug}.md").is_file()
+            self.write_entry(workspace_dir, "core", "people", slug, title, content)
+            if is_new:
+                created += 1
+            else:
+                updated += 1
+            results.append({"slug": slug, "title": title, "source": op.get("source", ""), "is_new": str(is_new)})
+
+        logger.info("People backfill: %d created, %d updated from %d sources",
+                     created, updated, len(source_entries))
+        return {
+            "status": "completed",
+            "created": created,
+            "updated": updated,
+            "sources_scanned": len(source_entries),
+            "results": results,
+        }
+
+    # ── Person entries ──────────────────────────────────────────
+
+    _CONTACT_ID_COMMENT_RE = __import__("re").compile(r"<!-- contact_id: (.+?) -->")
+
+    def ensure_person_entry(
+        self,
+        workspace_dir: Path,
+        *,
+        contact_id: str,
+        name: str,
+        phone_number: str = "",
+        email: str = "",
+        channel: str = "",
+    ) -> str | None:
+        """Create a person memory stub if one does not already exist.
+
+        Returns the slug if created or already exists, None on failure.
+        """
+        memory_dir = self._memory_dir(workspace_dir)
+        people_dir = memory_dir / "core" / "people"
+        people_dir.mkdir(parents=True, exist_ok=True)
+
+        # Derive slug from name
+        slug = name.lower().strip()
+        slug = __import__("re").sub(r"[^a-z0-9]+", "-", slug).strip("-")
+        if not slug or slug.replace("-", "").isdigit():
+            slug = f"contact-{contact_id[:8]}"
+
+        # Check if entry already exists (by slug or by contact_id)
+        entry_path = people_dir / f"{slug}.md"
+        if entry_path.is_file():
+            return slug
+
+        # Also check if any existing entry has this contact_id
+        existing_slug = self._find_slug_by_contact_id(people_dir, contact_id)
+        if existing_slug:
+            return existing_slug
+
+        # Handle slug collisions by appending counter
+        base_slug = slug
+        counter = 2
+        while entry_path.is_file():
+            slug = f"{base_slug}-{counter}"
+            entry_path = people_dir / f"{slug}.md"
+            counter += 1
+
+        contact_lines = []
+        if phone_number:
+            contact_lines.append(f"- Phone: {phone_number}")
+        if email:
+            contact_lines.append(f"- Email: {email}")
+        if channel:
+            contact_lines.append(f"- Channel: {channel}")
+
+        content = (
+            f"<!-- contact_id: {contact_id} -->\n\n"
+            f"## Overview\n\n"
+            f"Contact via {channel or 'unknown'}. {name}.\n\n"
+            f"## Contact\n\n"
+            + "\n".join(contact_lines)
+        )
+
+        self.write_entry(workspace_dir, "core", "people", slug, name, content)
+        logger.info("Auto-created person entry: core/people/%s for contact %s", slug, contact_id)
+        return slug
+
+    def find_person_entry(
+        self,
+        workspace_dir: Path,
+        *,
+        contact_id: str = "",
+        name: str = "",
+    ) -> str | None:
+        """Find a person memory entry by contact_id or name. Returns full content or None."""
+        memory_dir = self._memory_dir(workspace_dir)
+        people_dir = memory_dir / "core" / "people"
+        if not people_dir.is_dir():
+            return None
+
+        if contact_id:
+            slug = self._find_slug_by_contact_id(people_dir, contact_id)
+            if slug:
+                return self.read_entry(workspace_dir, "core", "people", slug)
+
+        # Fallback: search by name in titles
+        if name:
+            name_lower = name.lower()
+            for md_file in people_dir.glob("*.md"):
+                if md_file.name.startswith("_"):
+                    continue
+                text = md_file.read_text(encoding="utf-8")
+                title, _ = _parse_entry_summary(text)
+                if title.lower() == name_lower:
+                    return text
+
+        return None
+
+    def _find_slug_by_contact_id(self, people_dir: Path, contact_id: str) -> str | None:
+        """Scan people entries for a matching contact_id metadata comment."""
+        for md_file in people_dir.glob("*.md"):
+            if md_file.name.startswith("_"):
+                continue
+            # Read only first 200 chars to find the metadata comment quickly
+            head = md_file.read_text(encoding="utf-8")[:200]
+            if f"contact_id: {contact_id}" in head:
+                return md_file.stem
+        return None
 
     # ── Seed ────────────────────────────────────────────────────
 
