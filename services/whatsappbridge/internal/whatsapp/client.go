@@ -178,19 +178,57 @@ func (c *Client) ParseJID(s string) (types.JID, bool) {
 }
 
 // ResolveLID resolves a LID (linked ID) to a phone number JID.
+// For s.whatsapp.net JIDs, it also normalizes phone numbers that have
+// extra trailing digits by checking progressively shorter prefixes against
+// the LID store.
 func (c *Client) ResolveLID(jid types.JID) types.JID {
-	if jid.Server != types.HiddenUserServer {
-		return jid
+	if jid.Server == types.HiddenUserServer {
+		return c.resolveLIDToPN(jid)
 	}
+	if jid.Server == types.DefaultUserServer {
+		return c.normalizePhoneJID(jid)
+	}
+	return jid
+}
+
+func (c *Client) resolveLIDToPN(lid types.JID) types.JID {
 	if c.client.Store.LIDs == nil {
-		return jid
+		return lid
 	}
-	pn, err := c.client.Store.LIDs.GetPNForLID(context.Background(), jid)
+	pn, err := c.client.Store.LIDs.GetPNForLID(context.Background(), lid)
 	if err != nil || pn.IsEmpty() {
-		c.log.Debug("could not resolve LID to PN", "lid", jid.String(), "error", err)
-		return jid
+		c.log.Debug("could not resolve LID to PN", "lid", lid.String(), "error", err)
+		return lid
 	}
 	return pn
+}
+
+// normalizePhoneJID checks if a phone number JID has extra trailing digits
+// by looking it up in the LID store. If the full number isn't known, it tries
+// progressively shorter prefixes to find the correct phone number.
+func (c *Client) normalizePhoneJID(jid types.JID) types.JID {
+	if c.client.Store.LIDs == nil || len(jid.User) < 8 {
+		return jid
+	}
+
+	// First check if the full number is already known
+	lid, err := c.client.Store.LIDs.GetLIDForPN(context.Background(), jid)
+	if err == nil && !lid.IsEmpty() {
+		return jid
+	}
+
+	// Try shorter prefixes to find the real phone number
+	for n := len(jid.User) - 1; n >= 8; n-- {
+		candidate := types.JID{User: jid.User[:n], Server: types.DefaultUserServer}
+		lid, err := c.client.Store.LIDs.GetLIDForPN(context.Background(), candidate)
+		if err == nil && !lid.IsEmpty() {
+			c.log.Info("normalized phone number JID by trimming extra digits",
+				"from", jid.User, "to", candidate.User)
+			return candidate
+		}
+	}
+
+	return jid
 }
 
 func (c *Client) handleEvent(raw any) {
