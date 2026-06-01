@@ -32,10 +32,10 @@ def _build_dream_messages(
     bulletins: list[dict],
     existing_entries: str = "",
 ) -> list[dict]:
-    """Build the messages array that run_dream() would send to the LLM."""
-    from cyborg_server.services.memory_service import MemoryService
+    """Build the messages array that the dream process would send to the LLM."""
+    from cyborg_server.services.memory.prompts import ENTITY_UPDATE_PROMPT
 
-    system_prompt = MemoryService._DREAM_SYSTEM_PROMPT
+    system_prompt = ENTITY_UPDATE_PROMPT
 
     bulletin_lines: list[str] = []
     for i, b in enumerate(bulletins, 1):
@@ -47,9 +47,9 @@ def _build_dream_messages(
             header += ")"
         bulletin_lines.append(f"{header}\n{b['content']}")
 
-    user_prompt = "## NEW BULLETINS\n\n" + "\n\n".join(bulletin_lines)
+    user_prompt = "## NEW CLAIMS\n\n" + "\n\n".join(bulletin_lines)
     if existing_entries:
-        user_prompt += "\n\n## EXISTING CURATED ENTRIES\n\n" + existing_entries
+        user_prompt += "\n\n## EXISTING ENTITIES\n\n" + existing_entries
 
     return [
         {"role": "system", "content": system_prompt},

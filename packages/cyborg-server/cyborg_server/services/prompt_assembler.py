@@ -47,27 +47,28 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
 
-    # Load memory index for always-accessible wikis
-    from cyborg_server.services.memory_service import MemoryService
+    # Load memory index
+    from cyborg_server.services.memory import MemoryService
     MemoryService.ensure_memory_structure(workspace_dir)
     memory_dir = workspace_dir / "memory"
     if memory_dir.is_dir():
-        parts.append(
+        # Build entity-based index
+        from cyborg_server.services.memory.index_service import build_memory_index_text
+        memory_index = build_memory_index_text(memory_dir)
+        memory_section = (
             "## Memory\n\n"
             "You have persistent memory with these tools:\n"
-            "- **memory_search(query)** — Always start here. Searches all entries and returns an abstract with matches.\n"
-            "- **memory_read(wiki, category, slug)** — Read a specific entry in full.\n"
-            "- **memory_browse(wiki, category)** — List all entries in a category.\n"
-            "- **memory_write(wiki, category, slug, title, content)** — Write a new entry (queued as a bulletin, curated by dream process).\n"
-            "- Wiki: `core`. Categories: `people`, `facts`, `research`.\n"
+            "- **memory_search(query, entity_type?)** — Always start here. Searches all entities and returns an abstract with matches.\n"
+            "- **memory_read(entity_id)** — Read a specific entity in full (e.g. contact-7c9f0fd7).\n"
+            "- **memory_browse(entity_type)** — List all entities of a type.\n"
+            "- **memory_write(content, channel_id?, visibility?)** — Write a new bulletin (queued, curated by dream process).\n"
+            "- **memory_graph(entity_id, depth?)** — Explore related entities.\n"
             "\n"
-            "## People Profiles\n\n"
-            "Your most important memories are person profiles. When you learn something about someone\n"
-            "(preferences, personality, dietary info, work, family, interests):\n"
-            "- Use memory_write(wiki=\"core\", category=\"people\", ...) to save it.\n"
-            "- If the person has no profile yet, create one.\n"
-            "- These profiles are automatically loaded in future DM conversations with that person.\n"
+            "Entity types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.\n"
         )
+        if memory_index:
+            memory_section += "\n" + memory_index
+        parts.append(memory_section)
 
     # Append grounding rules to reduce hallucinated tool claims
     parts.append(

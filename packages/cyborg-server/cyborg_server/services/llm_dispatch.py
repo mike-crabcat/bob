@@ -159,15 +159,18 @@ class LLMDispatchService(BaseService):
     def _get_service(self) -> OpenAIService:
         return OpenAIService(self.ctx)
 
-    def _make_tool_callback(self, session_key: str | None, call_category: str) -> Any:
+    def _make_tool_callback(self, session_key: str | None, call_category: str, log_id: str | None = None) -> Any:
         async def _on_tool_call(name: str, args: dict, result_summary: str) -> None:
             if self.ctx.event_bus is None:
                 return
-            await self.ctx.event_bus.publish("llm.call.tool_completed", {
+            payload: dict[str, Any] = {
                 "session_key": session_key,
                 "call_category": call_category,
                 "tool_name": name,
-            })
+            }
+            if log_id:
+                payload["log_id"] = log_id
+            await self.ctx.event_bus.publish("llm.call.tool_completed", payload)
         return _on_tool_call
 
     def _resolve_model(self, model: str | None = None) -> str:
@@ -424,6 +427,7 @@ class LLMDispatchService(BaseService):
             status="running", session_key=session_key,
             call_category=call_category, model=resolved_model,
             latency_seconds=None, total_tokens=None,
+            log_id=log_id,
         )
         try:
             stream_result = StreamResult()
@@ -435,7 +439,7 @@ class LLMDispatchService(BaseService):
                 model=resolved_model,
                 max_iterations=max_iterations,
                 stream_result=stream_result,
-                on_tool_call=self._make_tool_callback(session_key, call_category),
+                on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
             )
             elapsed = time.monotonic() - t0
 
@@ -525,6 +529,7 @@ class LLMDispatchService(BaseService):
             status="running", session_key=session_key,
             call_category=call_category, model=resolved_model,
             latency_seconds=None, total_tokens=None,
+            log_id=log_id,
         )
         accumulated = ""
         ttft: float | None = None
@@ -536,7 +541,7 @@ class LLMDispatchService(BaseService):
                 tool_handlers=tool_handlers,
                 model=resolved_model,
                 max_iterations=max_iterations,
-                on_tool_call=self._make_tool_callback(session_key, call_category),
+                on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
             ):
                 if chunk:
                     if ttft is None:

@@ -29,10 +29,10 @@ def make_whatsapp_outreach_tools(
     wa_service: WhatsAppBridgeService,
     current_session_key: str,
 ) -> list:
-    """Create outreach tools for a trusted WhatsApp DM session.
+    """Create outreach tools for a WhatsApp DM session.
 
     Tools: send_whatsapp_to_contact, get_contact_session_messages.
-    Only injected for trusted contacts in DM sessions.
+    Injected for any contact in DM sessions.
     """
 
     @tool
@@ -41,11 +41,10 @@ def make_whatsapp_outreach_tools(
         message: str,
         objective: str,
     ) -> str:
-        """Send a WhatsApp message to a trusted contact (not the current chat).
-        The contact must be trusted. The 'objective' describes the specific outcome
-        you need from this conversation, e.g. "Find out if John can meet on Thursday
-        and what time works." The target session will be instructed to work toward
-        this objective and report back when complete."""
+        """Send a WhatsApp message to a contact (not the current chat).
+        The 'objective' describes the specific outcome you need from this conversation,
+        e.g. "Find out if John can meet on Thursday and what time works." The target
+        session will be instructed to work toward this objective and report back when complete."""
         from cyborg_server.exceptions import ConflictError
         from cyborg_server.models import SessionRouteCreate, SessionRouteKind
         from cyborg_server.services.session_route_service import SessionRouteService
@@ -53,15 +52,13 @@ def make_whatsapp_outreach_tools(
 
         db = ctx.db
 
-        # Look up contact and validate trust
+        # Look up contact
         contact = await db.fetch_one(
-            "SELECT id, name, phone_number, is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, name, phone_number FROM contacts WHERE id = ? AND deleted_at IS NULL",
             (contact_id,),
         )
         if contact is None:
             return json.dumps({"ok": False, "error": "Contact not found"})
-        if not bool(contact.get("is_trusted", 0)):
-            return json.dumps({"ok": False, "error": "Contact is not trusted"})
 
         phone = contact["phone_number"]
         if not phone:

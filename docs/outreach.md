@@ -75,7 +75,7 @@ A trusted contact in a WhatsApp DM session asks the agent to reach out to someon
 
 The tool (`make_whatsapp_outreach_tools` in `whatsapp_outreach_tools.py`) performs these steps:
 
-1. **Validates the target contact** exists and is trusted (`is_trusted = 1`)
+1. **Validates the target contact** exists and has a phone number
 2. **Checks the WhatsApp bridge** is connected
 3. **Sends the message** via the bridge to `{phone_digits}@s.whatsapp.net`
 4. **Creates or updates a session route** for the target with outreach metadata:
@@ -120,7 +120,7 @@ When the agent calls `finish_outreach(result)`:
 2. Clears the outreach fields from the route's metadata (`outreach_initiated_from`, `outreach_objective`, `outreach_requestor`, `outreach_message`)
 3. Builds a structured result message containing the target contact name, objective, requestor, and result text
 4. Stores the result as a `user` message in the **requestor's session** (Session A)
-5. Dispatches a new LLM call in the requestor's session, giving it the result plus a `send_whatsapp_message` tool to relay the answer back to the requestor via WhatsApp
+5. Dispatches a new LLM call in the requestor's session with workspace tools and a `send_whatsapp_message` tool to relay the answer back to the requestor via WhatsApp
 
 If the agent does not explicitly call `send_whatsapp_message` during the result dispatch, the system invokes the **tap dispatch** mechanism -- a lightweight follow-up LLM call that reminds the agent to use the send tool. This ensures the requestor always receives an answer.
 
@@ -165,7 +165,7 @@ Outreach is only available to **trusted** contacts. Three trust tiers control ag
                   +-----------------------------------------+
 ```
 
-The trust tier is resolved in `_handle_incoming_message` by looking up the sender's phone number in the `contacts` table. Unknown WhatsApp senders are auto-seeded as unverified contacts with `is_trusted = 0`.
+The trust tier is resolved in `_handle_incoming_message` by looking up the sender's phone number in the `contacts` table. Unknown WhatsApp senders are auto-seeded as unverified contacts with `is_trusted = 0`. The `_resolve_or_seed_contact` method also performs prefix matching on phone numbers to handle JIDs with extra trailing digits.
 
 The `SessionAgendaService` uses the trust tier to select the appropriate system prompt:
 
@@ -174,6 +174,8 @@ The `SessionAgendaService` uses the trust tier to select the appropriate system 
 | Unverified | `WHATSAPP_DEFAULT_AGENDA` | No identity assumptions, no sensitive data, no link clicking |
 | Known Untrusted | `WHATSAPP_KNOWN_UNTRUSTED_AGENDA` | No config changes, stay within conversation bounds |
 | Trusted | `WHATSAPP_TRUSTED_AGENDA` | Full capabilities including outreach, contact search, subagents |
+
+Note: outreach tools (`send_whatsapp_to_contact`, `get_contact_session_messages`) are also injected for trusted contacts in **group** sessions, enabling outreach from group conversations where a trusted participant makes a request.
 
 ## Session Key Convention
 
@@ -308,23 +310,19 @@ The system prompt for each dispatch is assembled from multiple layers by `load_w
 ```
   +--------------------+
   | Workspace prompt   |  SOUL.md, IDENTITY.md, AGENTS.md, USER.md,
-  |                    |  skills index, memory index (always-access wikis),
+  |                    |  skills index, memory index,
   |                    |  grounding rules
   +--------------------+
-  | Agenda             |  Trust-tier-specific instructions
-  |                    |  (unverified / known-untrusted / trusted)
-  +--------------------+
   | Participants       |  Who is in this session (name, trust status)
+  +--------------------+
+  | Person profile     |  Memory profile for the DM contact (DM sessions only)
   +--------------------+
   | Outreach prompt    |  Active outreach objective (if applicable)
   |                    |  + instruction to call finish_outreach
   +--------------------+
-  | Trusted memory     |  Memory index for trusted-access wikis
-  |                    |  (only injected for trusted contacts)
-  +--------------------+
 ```
 
-Each layer is conditionally included. The workspace prompt is cached and reloaded only when workspace files change on disk (tracked via `st_mtime` hash).
+Each layer is conditionally included. The workspace prompt is cached and reloaded only when workspace files change on disk (tracked via `st_mtime` hash). The person profile layer uses the memory service's `find_person_entry` to surface contact-specific context from the entity memory system.
 
 ## Logging
 

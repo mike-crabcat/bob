@@ -1782,15 +1782,14 @@ app.add_typer(whatsapp_app, name="whatsapp")
 
 @memory_app.command("seed")
 def memory_seed(
-    batch_size: Annotated[int, typer.Option("--batch-size", help="Summaries per LLM call")] = 10,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without calling LLM")] = False,
 ) -> None:
-    """Bulk-process session summaries to seed the memory wiki."""
+    """Regenerate memory from all session history using the bulletin generator."""
     import asyncio
-    asyncio.run(_memory_seed(batch_size, dry_run))
+    asyncio.run(_memory_seed(dry_run))
 
 
-async def _memory_seed(batch_size: int, dry_run: bool) -> None:
+async def _memory_seed(dry_run: bool) -> None:
     from cyborg_server.config import Settings
     from cyborg_server.context import AppContext
     from cyborg_server.database import Database
@@ -1803,78 +1802,127 @@ async def _memory_seed(batch_size: int, dry_run: bool) -> None:
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from cyborg_server.services.memory_service import MemoryService
+        from cyborg_server.services.memory.seed import seed_from_history
 
         workspace = settings.harness.workspace_dir
-        MemoryService.ensure_memory_structure(workspace)
+        result = await seed_from_history(ctx, workspace, dry_run=dry_run)
 
-        rows = await db.fetch_all(
-            "SELECT id, session_key, summary_text, memory_prompts "
-            "FROM session_summaries "
-            "WHERE memory_prompts IS NOT NULL AND memory_prompts != '[]' "
-            "ORDER BY created_at ASC"
-        )
-        if not rows:
-            typer.echo("No summaries with memory_prompts found.")
-            return
+        typer.echo(f"\nSeed result:")
+        typer.echo(f"  Sessions processed: {result.get('sessions_processed', 0)}")
+        typer.echo(f"  Bulletins generated: {result.get('bulletins_generated', 0)}")
+        typer.echo(f"  Bulletins skipped: {result.get('bulletins_skipped', 0)}")
+        typer.echo(f"  Errors: {len(result.get('errors', []))}")
+    finally:
+        await db.close()
 
-        typer.echo(f"Found {len(rows)} summaries to process.")
 
-        # Batch summaries — group by session_key to maintain context
-        batches: list[list[dict]] = []
-        current_batch: list[dict] = []
-        for row in rows:
-            current_batch.append(dict(row))
-            if len(current_batch) >= batch_size:
-                batches.append(current_batch)
-                current_batch = []
-        if current_batch:
-            batches.append(current_batch)
+@memory_app.command("rebuild")
+def memory_rebuild(
+    all: Annotated[bool, typer.Option("--all", help="Rebuild all derived data from bulletins")] = False,
+    entity_id: Annotated[Optional[str], typer.Option("--entity", help="Rebuild indexes for a specific entity")] = None,
+) -> None:
+    """Rebuild memory indexes and derived data from bulletins."""
+    import asyncio
+    asyncio.run(_memory_rebuild(all, entity_id))
 
-        typer.echo(f"Processing in {len(batches)} batch(es) of up to {batch_size}.")
 
+async def _memory_rebuild(all: bool, entity_id: str | None) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)
-        total_written = 0
 
-        for i, batch in enumerate(batches):
-            all_prompts: list[str] = []
-            combined_summary_parts: list[str] = []
-            for r in batch:
-                prompts = json.loads(r["memory_prompts"]) if r["memory_prompts"] else []
-                all_prompts.extend(prompts)
-                combined_summary_parts.append(f"[{r['session_key'][:40]}] {r['summary_text']}")
+        result = await svc.rebuild(workspace, entity_id=entity_id, all=all)
+        typer.echo(f"Rebuild result: {json.dumps(result, indent=2)}")
+    finally:
+        await db.close()
 
-            if not all_prompts:
-                continue
 
-            combined_summary = "\n".join(combined_summary_parts[:5])
+@memory_app.command("validate")
+def memory_validate() -> None:
+    """Validate memory structure: check frontmatter, dangling refs, required fields."""
+    import asyncio
+    asyncio.run(_memory_validate())
 
-            if dry_run:
-                typer.echo(f"\nBatch {i+1}/{len(batches)}: {len(all_prompts)} prompts from {len(batch)} summaries")
-                for p in all_prompts:
-                    typer.echo(f"  - {p[:120]}")
-                continue
 
-            typer.echo(f"Processing batch {i+1}/{len(batches)} ({len(all_prompts)} prompts)...")
+async def _memory_validate() -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
 
-            try:
-                # Use a synthetic session key for bulk processing (treat as trusted)
-                await svc.reflect_and_update(
-                    workspace, "bulk_seed", combined_summary, all_prompts
-                )
-                total_written += len(all_prompts)
-            except Exception as exc:
-                typer.echo(f"  Error: {exc}", err=True)
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
 
-        if dry_run:
-            typer.echo(f"\nDry run: {len(rows)} summaries, {sum(len(json.loads(r['memory_prompts'])) for r in rows)} total prompts")
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        workspace = settings.harness.workspace_dir
+        svc = MemoryService(ctx)
+
+        result = svc.validate(workspace)
+        if result["valid"]:
+            typer.echo("Memory is valid.")
         else:
-            typer.echo(f"\nDone. Processed {total_written} prompts across {len(batches)} batches.")
+            typer.echo(f"Issues found ({len(result['issues'])}):")
+            for issue in result["issues"]:
+                typer.echo(f"  - {issue}")
+    finally:
+        await db.close()
 
-            # Show what was written
-            idx = MemoryService._build_memory_index_static(workspace, ["core"])
-            if idx:
-                typer.echo(f"\nCurrent memory index:\n{idx}")
+
+@memory_app.command("query")
+def memory_query(
+    question: Annotated[str, typer.Argument(help="Question to search memory for")],
+    entity_type: Annotated[str, typer.Option("--type", help="Filter to entity type")] = "",
+    actor: Annotated[Optional[str], typer.Option("--actor", help="Actor contact ID")] = None,
+    channel: Annotated[Optional[str], typer.Option("--channel", help="Channel context")] = None,
+) -> None:
+    """Query memory with a natural language question."""
+    import asyncio
+    asyncio.run(_memory_query(question, entity_type, actor, channel))
+
+
+async def _memory_query(question: str, entity_type: str, actor: str | None, channel: str | None) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        workspace = settings.harness.workspace_dir
+        svc = MemoryService(ctx)
+
+        result = await svc.search_entries(workspace, question, entity_type=entity_type or "")
+        typer.echo(f"\nAbstract: {result.get('abstract', '')}")
+        typer.echo(f"\nResults ({len(result.get('results', []))}):")
+        for r in result.get("results", []):
+            typer.echo(f"  - {r.get('entity_id', '')} ({r.get('entity_type', '')})")
+            if r.get("relevance"):
+                typer.echo(f"    {r['relevance']}")
     finally:
         await db.close()
 

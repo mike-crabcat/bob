@@ -356,7 +356,9 @@ func (b *Bridge) handleSendMedia(payload wsproto.SendMediaPayload) {
 
 	var msgID string
 	mime := strings.ToLower(payload.MimeType)
-	if strings.HasPrefix(mime, "image/") {
+	if mime == "image/gif" {
+		msgID, err = b.wa.SendGIF(jid, data, payload.Caption)
+	} else if strings.HasPrefix(mime, "image/") {
 		msgID, err = b.wa.SendImage(jid, data, payload.MimeType, payload.Caption)
 	} else {
 		fileName := "file"

@@ -1,7 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
 import { fetchAPI } from "@/lib/api";
+import { useWSEvents } from "@/hooks/use-live-data";
 
 interface ChatMessage {
   role: string;
@@ -97,16 +98,72 @@ function MessageBubble({ role, content }: { role: string; content: string }) {
   );
 }
 
+function LiveToolCard({ name, output }: { name: string; output?: string }) {
+  return (
+    <div className="bg-surface border border-accent/30">
+      <div className="p-2 border-b border-border">
+        <div className="text-xs text-accent font-medium">{name}</div>
+      </div>
+      {output ? (
+        <div className="p-2">
+          <div className="text-[9px] text-muted uppercase mb-0.5">output</div>
+          <div className="text-xs text-muted whitespace-pre-wrap break-words">{output}</div>
+        </div>
+      ) : (
+        <div className="p-2">
+          <div className="text-[9px] text-muted flex items-center gap-1">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+            running...
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CallDetailPage() {
   const { sessionKey, callId } = Route.useParams();
+  const queryClient = useQueryClient();
 
   const { data: call } = useQuery<CallDetail>({
     queryKey: ["call-detail", callId],
     queryFn: () => fetchAPI<CallDetail>(`/calls/${callId}`),
   });
 
+  const liveTools = useRef<Map<string, string>>(new Map());
+  const wsEvents = useWSEvents();
+  const _lastEvent = wsEvents[0];
+
+  const isRunning = call?.status === "running";
+
+  if (isRunning && _lastEvent) {
+    const evt = _lastEvent;
+    const evtLogId = evt.payload?.log_id as string | undefined;
+    if (evtLogId === callId && evt.type === "llm.call.tool_completed") {
+      liveTools.current.set(evt.payload.tool_name as string, "");
+    }
+    if (evt.type === "llm.call.completed" || evt.type === "llm.call.failed") {
+      if (liveTools.current.size > 0) {
+        liveTools.current.clear();
+        queryClient.invalidateQueries({ queryKey: ["call-detail", callId] });
+        queryClient.invalidateQueries({ queryKey: ["session-detail", sessionKey] });
+      }
+    }
+  }
+
   if (!call) {
     return <div className="p-4 text-muted text-center text-xs">loading...</div>;
+  }
+
+  if ("error" in call) {
+    return (
+      <div className="flex flex-col gap-3 p-3">
+        <Link to="/sessions/$sessionKey" params={{ sessionKey }} className="text-xs text-accent hover:underline">
+          &larr; session
+        </Link>
+        <div className="text-xs text-error text-center">call not found</div>
+      </div>
+    );
   }
 
   const allMsgs = call.messages ?? [];
@@ -114,6 +171,7 @@ function CallDetailPage() {
   const toolCalls = allMsgs.filter(isToolCall);
   const toolOutputs = allMsgs.filter(isToolOutput);
   const webSearches = allMsgs.filter(isWebSearch);
+  const liveToolNames = [...liveTools.current.keys()];
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -124,7 +182,9 @@ function CallDetailPage() {
         <div className="flex items-center gap-2 mt-1 text-[10px] text-muted flex-wrap">
           <span className="uppercase">{call.call_category}</span>
           <span>{call.model}</span>
-          <span className={call.status === "completed" ? "text-success" : "text-error"}>{call.status}</span>
+          <span className={call.status === "completed" ? "text-success" : isRunning ? "text-accent animate-pulse" : "text-error"}>
+            {call.status}
+          </span>
           {call.latency_seconds != null && <span>{call.latency_seconds.toFixed(2)}s</span>}
           {call.ttft_seconds != null && <span>ttft {call.ttft_seconds.toFixed(2)}s</span>}
           {call.total_tokens != null && <span>{call.total_tokens} tok</span>}
@@ -164,10 +224,10 @@ function CallDetailPage() {
         </section>
       )}
 
-      {(toolCalls.length > 0 || webSearches.length > 0) && (
+      {(toolCalls.length > 0 || webSearches.length > 0 || liveToolNames.length > 0) && (
         <section>
           <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">
-            tool calls ({webSearches.length + toolCalls.length})
+            tool calls ({webSearches.length + toolCalls.length + liveToolNames.length})
           </h2>
           <div className="flex flex-col gap-1">
             {webSearches.map((ws) => (
@@ -195,6 +255,9 @@ function CallDetailPage() {
                 </div>
               );
             })}
+            {liveToolNames.map((name) => (
+              <LiveToolCard key={name} name={name} />
+            ))}
           </div>
         </section>
       )}
