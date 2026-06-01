@@ -161,48 +161,51 @@ class SessionIdleSummaryTask:
                     summary_text=result["summary_text"],
                     topics=result["topics"],
                     participants=participants,
-                    memory_prompts=result["memory_prompts"],
                     message_count=session["message_count"],
                     model_used=ctx.settings.openai.default_model,
-                    people_updates=result.get("people_updates"),
                 )
 
-                # Trigger memory reflection from conversation summary
-                if result.get("memory_prompts") or result.get("people_updates"):
-                    try:
-                        from cyborg_server.services.memory_service import MemoryService
+                # Generate bulletin directly from transcript
+                try:
+                    from cyborg_server.services.memory import MemoryService
+                    from cyborg_server.services.memory.bulletin_generator import (
+                        build_generator_input,
+                        generate_bulletin,
+                        validate_draft_bulletin,
+                    )
+                    from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+                    transcript_text = "\n".join(
+                        f"[{m.get('sender_id', m['role'])}] {m['content'][:500]}"
+                        for m in messages[-50:]
+                    )
+                    gen_input = build_generator_input(
+                        session_key=session["session_key"],
+                        transcript_start=session["active_from"],
+                        transcript_end=session["last_message_at"],
+                        transcript_text=transcript_text,
+                        contact_ids=list(contact_to_name.keys()),
+                    )
+                    llm = LLMDispatchService(ctx)
+                    draft = await generate_bulletin(llm, gen_input)
+                    is_valid, data = validate_draft_bulletin(draft)
+                    if is_valid and data.get("create_bulletin"):
                         mem_svc = MemoryService(ctx)
-                        # General reflection
-                        if result.get("memory_prompts"):
-                            await mem_svc.reflect_and_update(
-                                ctx.settings.harness.workspace_dir,
-                                session["session_key"],
-                                result["summary_text"],
-                                result["memory_prompts"],
-                                active_from=session["active_from"],
-                                active_to=session["last_message_at"],
-                                participants=participants,
-                                contact_ids=list(contact_to_name.keys()),
-                            )
-                        # Person-targeted bulletins
-                        people_updates = result.get("people_updates") or {}
-                        for contact_ref, facts in people_updates.items():
-                            if facts:
-                                await mem_svc.reflect_and_update(
-                                    ctx.settings.harness.workspace_dir,
-                                    session["session_key"],
-                                    summary_text="\n".join(f"- {f}" for f in facts),
-                                    memory_prompts=facts,
-                                    active_from=session["active_from"],
-                                    active_to=session["last_message_at"],
-                                    participants=participants,
-                                    contact_ids=list(contact_to_name.keys()),
-                                )
-                    except Exception:
-                        logger.exception(
-                            "Memory reflection failed for session %s",
-                            session["session_key"],
+                        mem_svc.write_bulletin(
+                            ctx.settings.harness.workspace_dir,
+                            channel_id=gen_input.channel_id,
+                            source_type="session_transcript_range",
+                            source_id=session["session_key"],
+                            visibility=gen_input.visibility,
+                            scope=gen_input.scope,
+                            entities=gen_input.known_entities,
+                            content=draft,
                         )
+                except Exception:
+                    logger.exception(
+                        "Bulletin generation failed for session %s",
+                        session["session_key"],
+                    )
                 logger.info(
                     "Session summary generated for %s (%d messages)",
                     session["session_key"], session["message_count"],
@@ -215,7 +218,7 @@ class SessionIdleSummaryTask:
 
         # After all summaries, run the memory dream to curate bulletins
         try:
-            from cyborg_server.services.memory_service import MemoryService
+            from cyborg_server.services.memory import MemoryService
             from uuid import uuid4
             import json as _json
 
@@ -227,11 +230,11 @@ class SessionIdleSummaryTask:
                     "(id, bulletins_processed, entries_created, bulletin_slugs, "
                     "operations_json, raw_response, duration_seconds, status) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(uuid4()), result["bulletins_processed"], result["entries_created"],
-                     _json.dumps(result["bulletin_slugs"]),
-                     _json.dumps(result["operations"]),
-                     result.get("raw_response"),
-                     result.get("duration_seconds"), result["status"]),
+                    (str(uuid4()), result["bulletins_processed"],
+                     result.get("entity_ops", 0),
+                     _json.dumps(result.get("bulletin_slugs", [])),
+                     _json.dumps(result.get("operations", [])),
+                     None, result.get("duration_seconds"), result["status"]),
                 )
         except Exception:
             logger.exception("Memory dream process failed")

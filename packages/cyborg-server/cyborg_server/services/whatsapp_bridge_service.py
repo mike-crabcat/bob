@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 def _jid_to_phone(jid: str) -> str:
     """Extract phone number from WhatsApp JID and normalize to +CC format."""
     phone_part = jid.split("@")[0] if "@" in jid else jid
+    phone_part = phone_part.split(":")[0] if ":" in phone_part else phone_part
     digits = re.sub(r"\D", "", phone_part)
     if phone_part.startswith("+"):
         return "+" + digits
@@ -44,15 +45,88 @@ _BRIDGE_MAX_PAYLOAD_BYTES = 700_000
 _WHATSAPP_MAX_DIMENSION = 1920
 
 
+def _resize_gif(path: str) -> str | None:
+    """Downsize an animated GIF by dropping frames and scaling, preserving animation."""
+    import tempfile
+    from PIL import Image
+
+    img = Image.open(path)
+    if not getattr(img, "is_animated", False):
+        # Not actually animated — treat as static
+        img.close()
+        return None
+
+    frames = []
+    durations = []
+    n_frames = img.n_frames
+    # Start by skipping every other frame, increase skip if still too large
+    for skip in (1, 2, 3, 4):
+        frames.clear()
+        durations.clear()
+        for i in range(0, n_frames, skip + 1):
+            img.seek(i)
+            frame = img.copy()
+            w, h = frame.size
+            if max(w, h) > _WHATSAPP_MAX_DIMENSION:
+                ratio = _WHATSAPP_MAX_DIMENSION / max(w, h)
+                frame = frame.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            frames.append(frame)
+            durations.append(img.info.get("duration", 100))
+
+        if not frames:
+            img.close()
+            return None
+
+        from io import BytesIO
+        buf = BytesIO()
+        frames[0].save(
+            buf, format="GIF", save_all=True,
+            append_images=frames[1:], duration=durations, loop=img.info.get("loop", 0),
+            optimize=True,
+        )
+        for f in frames:
+            f.close()
+        if buf.tell() <= _BRIDGE_MAX_PAYLOAD_BYTES:
+            tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
+            tmp.write(buf.getvalue())
+            tmp.close()
+            img.close()
+            return tmp.name
+
+    img.close()
+    return None
+
+
 async def _prepare_media(path: str) -> str | None:
     """Resize/convert an image to fit WhatsApp and bridge WebSocket limits. Returns path to send."""
     import mimetypes
 
     mime = (mimetypes.guess_type(path)[0] or "").lower()
-    if not mime.startswith("image/"):
+    lower_path = path.lower()
+
+    if not mime.startswith("image/") and not lower_path.endswith(".gif"):
         return path
 
-    needs_resize = os.path.getsize(path) > _BRIDGE_MAX_PAYLOAD_BYTES
+    is_gif = mime == "image/gif" or lower_path.endswith(".gif")
+    file_size = os.path.getsize(path)
+
+    # GIFs: if within limits, send as-is to preserve animation
+    if is_gif:
+        if file_size <= _BRIDGE_MAX_PAYLOAD_BYTES:
+            return path
+        # Too large — try to reduce frames (returns None for non-animated GIFs)
+        import functools
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, functools.partial(_resize_gif, path))
+            if result is not None:
+                return result
+            # Non-animated or resize failed — fall through to static path
+        except Exception:
+            logger.exception("failed to resize gif %s", path)
+
+    # Static images
+    needs_resize = file_size > _BRIDGE_MAX_PAYLOAD_BYTES
     if not needs_resize:
         try:
             from PIL import Image
@@ -64,7 +138,6 @@ async def _prepare_media(path: str) -> str | None:
             return path
 
     import functools
-    import tempfile
 
     def _resize() -> str | None:
         from io import BytesIO
@@ -74,7 +147,6 @@ async def _prepare_media(path: str) -> str | None:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
 
-        # Scale down dimensions until file fits, starting from max allowed
         w, h = img.size
         dim = min(max(w, h), _WHATSAPP_MAX_DIMENSION)
         for quality in (85, 70, 55, 40):
@@ -343,26 +415,8 @@ class WhatsAppBridgeService(BaseService):
         workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
         participants_prompt = await self._build_participants_prompt(session_key)
 
-        # Load trusted memory if applicable
-        memory_prompt = ""
-        if is_trusted:
-            from cyborg_server.services.memory_service import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            trusted_wikis = await mem_svc.resolve_accessible_wikis(
-                settings.harness.workspace_dir, session_key
-            )
-            config = mem_svc.load_access_config(settings.harness.workspace_dir)
-            trusted_only = [
-                w for w in trusted_wikis
-                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
-            ]
-            if trusted_only:
-                memory_prompt = mem_svc.build_memory_index(
-                    settings.harness.workspace_dir, trusted_only
-                )
-
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, agenda, participants_prompt, memory_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, agenda) if p
         )
 
         # Build tools
@@ -420,7 +474,7 @@ class WhatsAppBridgeService(BaseService):
                     None, session_key,
                     db=self.db,
                     system_content=system_content,
-                    max_history=20,
+                    max_history=100,
                 )
 
                 result = await LLMDispatchService(self.ctx).chat_with_tools(
@@ -541,7 +595,7 @@ class WhatsAppBridgeService(BaseService):
         logger.info("auto-seeded untrusted contact %s for phone %s", new_id, phone_number)
 
         # Auto-create person memory entry
-        from cyborg_server.services.memory_service import MemoryService
+        from cyborg_server.services.memory import MemoryService
         mem_svc = MemoryService(self.ctx)
         mem_svc.ensure_person_entry(
             self.ctx.settings.harness.workspace_dir,
@@ -832,25 +886,8 @@ class WhatsAppBridgeService(BaseService):
         workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
         participants_prompt = await self._build_participants_prompt(session_key)
 
-        memory_prompt = ""
-        if is_trusted:
-            from cyborg_server.services.memory_service import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            trusted_wikis = await mem_svc.resolve_accessible_wikis(
-                settings.harness.workspace_dir, session_key
-            )
-            config = mem_svc.load_access_config(settings.harness.workspace_dir)
-            trusted_only = [
-                w for w in trusted_wikis
-                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
-            ]
-            if trusted_only:
-                memory_prompt = mem_svc.build_memory_index(
-                    settings.harness.workspace_dir, trusted_only
-                )
-
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, agenda, participants_prompt, memory_prompt) if p
+            p for p in (workspace_prompt, participants_prompt) if p
         )
 
         # Build tools
@@ -899,6 +936,8 @@ class WhatsAppBridgeService(BaseService):
             "is contextually relevant (e.g., greeting a new member, acknowledging a key person leaving). "
             "If no response is needed, call send_whatsapp_message with 'NO_REPLY'.",
         ])
+        if agenda:
+            user_content = agenda + "\n\n" + user_content
 
         async def _run_dispatch() -> str:
             from cyborg_server.services.session_dispatch_gate import SessionDispatchGate
@@ -912,7 +951,7 @@ class WhatsAppBridgeService(BaseService):
                     None, session_key,
                     db=self.db,
                     system_content=system_content,
-                    max_history=20,
+                    max_history=100,
                 )
                 # Override the last user message with our notification
                 if messages and messages[-1].get("role") == "user":
@@ -1024,13 +1063,19 @@ class WhatsAppBridgeService(BaseService):
         contact_id = None
         is_trusted = False
         contact = await self.db.fetch_one(
-            "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+            "SELECT id, name, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
             (phone_number,),
         )
         if contact:
             contact_id = contact["id"]
             is_trusted = bool(contact.get("is_trusted", 0))
             logger.info("resolved contact %s (trusted=%s) for phone %s", contact_id, is_trusted, phone_number)
+            # Backfill name from WhatsApp if contact has no real name
+            if sender_name and contact["name"] in ("", phone_number):
+                await self.db.execute(
+                    "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
+                    (sender_name, utcnow().isoformat(), contact_id),
+                )
         else:
             logger.info("no contact found for phone %s", phone_number)
             # Auto-seed an untrusted contact for unknown WhatsApp senders
@@ -1046,7 +1091,7 @@ class WhatsAppBridgeService(BaseService):
             logger.info("auto-seeded untrusted contact %s for phone %s", contact_id, phone_number)
 
             # Auto-create person memory entry for new contacts
-            from cyborg_server.services.memory_service import MemoryService
+            from cyborg_server.services.memory import MemoryService
             mem_svc = MemoryService(self.ctx)
             mem_svc.ensure_person_entry(
                 settings.harness.workspace_dir,
@@ -1156,7 +1201,7 @@ class WhatsAppBridgeService(BaseService):
         # Inject person profile for DM sessions
         person_context = ""
         if contact_id and chat_kind != "group":
-            from cyborg_server.services.memory_service import MemoryService
+            from cyborg_server.services.memory import MemoryService
             mem_svc = MemoryService(self.ctx)
             entry = mem_svc.find_person_entry(
                 settings.harness.workspace_dir, contact_id=contact_id,
@@ -1201,6 +1246,8 @@ class WhatsAppBridgeService(BaseService):
             "",
             text,
         ])
+        if agenda:
+            user_content = agenda + "\n\n" + user_content
         if contacts_block:
             user_content += "\n\n" + contacts_block
         user_content += "\n\nRespond to this message by calling send_whatsapp_message with your reply."
@@ -1242,27 +1289,8 @@ class WhatsAppBridgeService(BaseService):
                     "When you have the information needed, call the finish_outreach tool to relay the result back."
                 )
 
-        # Load trusted-only memory index for trusted sessions
-        memory_prompt = ""
-        if is_trusted:
-            from cyborg_server.services.memory_service import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            trusted_wikis = await mem_svc.resolve_accessible_wikis(
-                settings.harness.workspace_dir, session_key
-            )
-            # Filter to only trusted-access wikis (always-access ones are already in workspace_prompt)
-            config = mem_svc.load_access_config(settings.harness.workspace_dir)
-            trusted_only = [
-                w for w in trusted_wikis
-                if config.get("wikis", {}).get(w, {}).get("access") == "trusted"
-            ]
-            if trusted_only:
-                memory_prompt = mem_svc.build_memory_index(
-                    settings.harness.workspace_dir, trusted_only
-                )
-
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, agenda, participants_prompt, person_context, outreach_prompt, memory_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, outreach_prompt) if p
         )
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
@@ -1281,8 +1309,8 @@ class WhatsAppBridgeService(BaseService):
         if chat_kind == "group":
             tools.extend(make_group_tools(self.ctx, session_key=session_key))
 
-        # WhatsApp-specific: outreach tools for trusted contacts
-        if contact_id and is_trusted:
+        # WhatsApp-specific: outreach tools (trusted DMs and groups)
+        if contact_id and (is_trusted or chat_kind == "group"):
             from cyborg_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
@@ -1372,7 +1400,7 @@ class WhatsAppBridgeService(BaseService):
                     None, session_key,
                     db=self.db,
                     system_content=system_content,
-                    max_history=20,
+                    max_history=100,
                 )
 
                 result = await LLMDispatchService(self.ctx).chat_with_tools(

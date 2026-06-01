@@ -12,7 +12,8 @@ import time
 from uuid import uuid4
 
 from cyborg_server.context import AppContext
-from cyborg_server.services.memory_service import MemoryService
+from cyborg_server.services.memory import MemoryService
+from cyborg_server.services.memory.channels import resolve_channel_id
 from cyborg_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -25,74 +26,66 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
     @tool
     async def memory_write(
-        wiki: str,
-        category: str,
-        slug: str,
-        title: str,
         content: str,
+        channel_id: str = "",
+        visibility: str = "private",
     ) -> str:
-        """Create a memory bulletin. Wiki and category must be valid per access.yml.
-        Slug is a short identifier (lowercase, hyphens, no spaces). Content is markdown.
-        Your write will be queued as a bulletin and curated into the right category by the dream process."""
+        """Create a memory bulletin. Content is markdown.
+        Your write will be queued as a bulletin and curated into entities by the dream process.
+        Use channel_id to associate with a conversation channel (e.g. channel-whatsapp-group-123).
+        Visibility can be: private, contact, group, channel, public."""
         workspace = ctx.settings.harness.workspace_dir
 
-        writable = await svc.resolve_writable_wikis(workspace, session_key)
-        if wiki not in writable:
-            return json.dumps({"error": f"Write access denied for wiki '{wiki}'"})
+        cid = channel_id or resolve_channel_id(session_key)
 
-        if not svc.validate_wiki_category(workspace, wiki, category):
-            return json.dumps({"error": f"Invalid category '{category}' for wiki '{wiki}'"})
-
-        path = await svc.write_bulletin(
+        path = svc.write_bulletin(
             workspace,
-            session_key=session_key,
+            channel_id=cid,
             source_type="manual",
+            source_id=session_key,
             content=content,
-            intended_category=category,
-            intended_slug=slug,
-            intended_title=title,
+            visibility=visibility,
         )
         return json.dumps({"ok": True, "path": path, "queued": True})
 
     @tool
     async def memory_read(
-        wiki: str,
-        category: str,
-        slug: str,
+        entity_id: str,
     ) -> str:
-        """Read a specific memory entry by wiki, category, and slug. Returns full markdown content."""
+        """Read a specific memory entity by ID (e.g. contact-7c9f0fd7, trip-bali-2026).
+        Returns full markdown content of the entity document."""
         workspace = ctx.settings.harness.workspace_dir
 
-        accessible = await svc.resolve_accessible_wikis(workspace, session_key)
-        if wiki not in accessible:
-            return json.dumps({"error": f"Access denied for wiki '{wiki}'"})
+        entity = svc.read_entity(workspace, entity_id)
+        if entity is None:
+            return json.dumps({"error": f"Entity not found: {entity_id}"})
 
-        content = svc.read_entry(workspace, wiki, category, slug)
-        if content is None:
-            return json.dumps({"error": f"Entry not found: {wiki}/{category}/{slug}"})
-        return content
+        from cyborg_server.services.memory.models import serialize_frontmatter
+        return serialize_frontmatter(
+            {
+                "entity_id": entity.entity_id,
+                "entity_type": entity.entity_type,
+                "display_name": entity.display_name,
+                **entity.extra_frontmatter,
+            },
+            entity.body,
+        )
 
     @tool
     async def memory_search(
         query: str,
-        wiki: str = "",
+        entity_type: str = "",
     ) -> str:
-        """Search across memory entries. Optionally filter to a specific wiki.
-        Returns an abstract summarizing findings, plus a list of matching documents
-        with workspace paths and relevance explanations. Use read_file with the path
-        to read the full document."""
+        """Search across memory entities. Optionally filter to a specific entity type
+        (contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions).
+        Returns an abstract summarizing findings, plus a list of matching entities
+        with IDs and relevance explanations. Use memory_read with the entity_id to read the full document."""
         workspace = ctx.settings.harness.workspace_dir
 
-        accessible = await svc.resolve_accessible_wikis(workspace, session_key)
-        if wiki and wiki not in accessible:
-            return json.dumps({"error": f"Access denied for wiki '{wiki}'"})
-
-        search_wikis = [wiki] if wiki else accessible
         start = time.monotonic()
-        result = await svc.search_entries(workspace, search_wikis, query)
+        result = await svc.search_entries(workspace, query, entity_type=entity_type)
         latency = time.monotonic() - start
 
-        # Log the search
         try:
             await ctx.db.execute(
                 "INSERT INTO memory_search_log (id, query, results_json, session_key, result_count, latency_seconds) "
@@ -106,17 +99,63 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
     @tool
     async def memory_browse(
-        wiki: str,
-        category: str,
+        entity_type: str,
     ) -> str:
-        """List all memory entries in a wiki category. Returns slug, title, and last-modified date."""
+        """List all memory entities of a given type.
+        Types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.
+        Returns entity_id, display_name, and status for each."""
         workspace = ctx.settings.harness.workspace_dir
 
-        accessible = await svc.resolve_accessible_wikis(workspace, session_key)
-        if wiki not in accessible:
-            return json.dumps({"error": f"Access denied for wiki '{wiki}'"})
-
-        entries = svc.browse_category(workspace, wiki, category)
+        entities = svc.list_entities(workspace, entity_type)
+        entries = [
+            {
+                "entity_id": e.entity_id,
+                "display_name": e.display_name,
+                "status": e.status,
+            }
+            for e in entities
+        ]
         return json.dumps(entries)
 
-    return [memory_write, memory_read, memory_search, memory_browse]
+    @tool
+    async def memory_graph(
+        entity_id: str,
+        depth: int = 1,
+    ) -> str:
+        """Explore the memory graph around an entity.
+        Returns the entity and its directly related entities (Related Entities section).
+        Depth controls how many hops to follow (1 = immediate neighbors only).
+        Currently only depth=1 is supported."""
+        workspace = ctx.settings.harness.workspace_dir
+
+        entity = svc.read_entity(workspace, entity_id)
+        if entity is None:
+            return json.dumps({"error": f"Entity not found: {entity_id}"})
+
+        # For depth 1, return direct related entities
+        related: dict[str, list[dict]] = {}
+        for cat, ids in entity.related_entities.items():
+            if not ids:
+                continue
+            cat_entries = []
+            for rid in ids[:20]:  # Cap per category
+                related_entity = svc.read_entity(workspace, rid)
+                if related_entity:
+                    cat_entries.append({
+                        "entity_id": related_entity.entity_id,
+                        "entity_type": related_entity.entity_type,
+                        "display_name": related_entity.display_name,
+                    })
+                else:
+                    cat_entries.append({"entity_id": rid, "status": "not_found"})
+            if cat_entries:
+                related[cat] = cat_entries
+
+        return json.dumps({
+            "entity_id": entity.entity_id,
+            "entity_type": entity.entity_type,
+            "display_name": entity.display_name,
+            "related": related,
+        })
+
+    return [memory_write, memory_read, memory_search, memory_browse, memory_graph]

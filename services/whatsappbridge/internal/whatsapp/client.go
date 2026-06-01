@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -160,6 +161,46 @@ func (c *Client) SendDocument(jid types.JID, data []byte, mimeType, fileName, ca
 	}
 	if caption != "" {
 		msg.DocumentMessage.Caption = &caption
+	}
+
+	resp, err := c.client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return "", err
+	}
+	return string(resp.ServerID), nil
+}
+
+// SendGIF converts GIF data to a silent MP4 via ffmpeg, then uploads and sends
+// it as a VideoMessage with GifPlayback so WhatsApp displays it as an animated GIF.
+func (c *Client) SendGIF(jid types.JID, gifData []byte, caption string) (string, error) {
+	mp4Data, err := gifToMP4(gifData)
+	if err != nil {
+		// Fall back to sending as document if conversion fails
+		c.log.Warn("gif to mp4 conversion failed, sending as document", "error", err)
+		return c.SendDocument(jid, gifData, "image/gif", "animation.gif", caption)
+	}
+
+	uploaded, err := c.client.Upload(context.Background(), mp4Data, whatsmeow.MediaVideo)
+	if err != nil {
+		return "", fmt.Errorf("upload gif video: %w", err)
+	}
+
+	mimeType := "video/mp4"
+	gifPlayback := true
+	msg := &waE2E.Message{
+		VideoMessage: &waE2E.VideoMessage{
+			Mimetype:      &mimeType,
+			GifPlayback:   &gifPlayback,
+			MediaKey:      uploaded.MediaKey,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    &uploaded.FileLength,
+			URL:           &uploaded.URL,
+			DirectPath:    &uploaded.DirectPath,
+		},
+	}
+	if caption != "" {
+		msg.VideoMessage.Caption = &caption
 	}
 
 	resp, err := c.client.SendMessage(context.Background(), jid, msg)
@@ -546,4 +587,43 @@ func (c *Client) SyncGroups() {
 func (c *Client) Close() error {
 	c.client.Disconnect()
 	return c.container.Close()
+}
+
+func gifToMP4(gifData []byte) ([]byte, error) {
+	inFile, err := os.CreateTemp("", "gif-*.gif")
+	if err != nil {
+		return nil, fmt.Errorf("create temp input: %w", err)
+	}
+	defer os.Remove(inFile.Name())
+
+	if _, err := inFile.Write(gifData); err != nil {
+		inFile.Close()
+		return nil, fmt.Errorf("write temp input: %w", err)
+	}
+	inFile.Close()
+
+	outFile, err := os.CreateTemp("", "gif-*.mp4")
+	if err != nil {
+		return nil, fmt.Errorf("create temp output: %w", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+	defer os.Remove(outPath)
+
+	cmd := exec.Command("/home/linuxbrew/.linuxbrew/bin/ffmpeg",
+		"-y",
+		"-i", inFile.Name(),
+		"-c:v", "libx264",
+		"-preset", "fast",
+		"-crf", "23",
+		"-pix_fmt", "yuv420p",
+		"-movflags", "+faststart",
+		"-an",
+		outPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ffmpeg: %w: %s", err, string(output))
+	}
+
+	return os.ReadFile(outPath)
 }

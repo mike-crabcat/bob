@@ -262,12 +262,10 @@ Both caches invalidate automatically when any `skill.md` file is modified. No se
 
 Resides at `packages/cyborg-server/cyborg_server/services/workspace_tools.py`.
 
-Relevant tools:
+Relevant tools (both defined inside `make_workspace_tools(ctx)` which binds them to the application context):
 
 - **`use_skill(skill_name)`** -- Loads full instructions for a named skill via `skill_loader.load_skill()`. Returns the skill markdown content prefixed with the skill name and directory path, so the LLM can follow its steps and construct correct `run_script` paths.
 - **`run_script(path, args)`** -- Executes a Python script at the given workspace-relative path. Resolves the path against the workspace root (preventing directory traversal), validates it is a `.py` file, then runs it via `uv run` from its parent directory. Uses `build_skill_env()` for environment. Returns stdout on success; returns an error message on timeout (900s) or non-zero exit code.
-
-Both tools are defined inside `make_workspace_tools(ctx)` which binds them to the application context.
 
 ### `skill_env.py`
 
@@ -281,6 +279,7 @@ Maps `CYBORG_`-prefixed configuration secrets to the standard environment variab
 | `CYBORG_OPENAI_BASE_URL` | `OPENAI_BASE_URL` |
 | `CYBORG_AGENTMAIL_API_KEY` | `AGENTMAIL_API_KEY` |
 | `CYBORG_GOOGLE_PLACES_API_KEY` | `GOOGLE_PLACES_API_KEY` |
+| `CYBORG_GIPHY_API_KEY` | `GIPHY_API_KEY` |
 
 `build_skill_env()` starts from the parent process environment and injects these mappings. Only variables that are set and non-empty are mapped.
 

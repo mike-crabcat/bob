@@ -47,8 +47,9 @@ interface DreamLog {
   id: string;
   bulletins_processed: number;
   entries_created: number;
+  claims_extracted: number;
   bulletin_slugs: string[];
-  operations: Array<{ category: string; slug: string; title: string }>;
+  operations: Array<{ bulletin: string; source: string; claims: number; entity_ops: number; content_preview: string }>;
   raw_response: string;
   duration_seconds: number | null;
   status: string;
@@ -184,7 +185,7 @@ function DreamRunCard({ d, onOpen, onRedigest }: { d: DreamLog; onOpen: (path: s
           <div className="flex items-center gap-1.5">
             <span className={`text-[8px] ${statusColor} px-1 rounded`}>{d.status}</span>
             <span className="text-[11px] text-text">
-              {d.bulletins_processed} bulletin{d.bulletins_processed !== 1 ? "s" : ""} → {d.entries_created} entr{d.entries_created !== 1 ? "ies" : "y"}
+              {d.bulletins_processed} bulletin{d.bulletins_processed !== 1 ? "s" : ""} → {d.claims_extracted} claim{d.claims_extracted !== 1 ? "s" : ""} → {d.entries_created} entr{d.entries_created !== 1 ? "ies" : "y"}
             </span>
             {d.duration_seconds != null && (
               <span className="text-[9px] text-muted/50">{d.duration_seconds.toFixed(1)}s</span>
@@ -194,7 +195,7 @@ function DreamRunCard({ d, onOpen, onRedigest }: { d: DreamLog; onOpen: (path: s
             <div className="flex items-center gap-1 flex-wrap">
               {d.operations.slice(0, 4).map((op, i) => (
                 <span key={i} className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">
-                  {op.category}/{op.slug}
+                  {op.claims}c/{op.entity_ops}e
                 </span>
               ))}
               {d.operations.length > 4 && (
@@ -242,25 +243,26 @@ function DreamRunCard({ d, onOpen, onRedigest }: { d: DreamLog; onOpen: (path: s
             </div>
           )}
 
-          {/* Entries written */}
+          {/* Per-bulletin breakdown */}
           {d.operations.length > 0 && (
             <div className="mb-2">
-              <span className="text-[9px] text-muted/50 uppercase tracking-wide">memory updates</span>
-              <div className="mt-1">
-                {d.operations.map((op, i) => {
-                  const entryPath = `memory/core/${op.category}/${op.slug}.md`;
-                  return (
-                    <button
-                      key={i}
-                      onClick={() => onOpen(entryPath)}
-                      className="w-full flex items-center gap-1.5 py-1 hover:bg-surface/50 transition-colors text-left"
-                    >
-                      <span className="text-[8px] text-accent bg-accent/10 px-1 rounded shrink-0">{op.category}</span>
-                      <span className="text-[10px] text-text truncate">{op.title}</span>
-                      <span className="text-[9px] text-muted/40 font-mono shrink-0">{op.slug}</span>
-                    </button>
-                  );
-                })}
+              <span className="text-[9px] text-muted/50 uppercase tracking-wide">per-bulletin breakdown</span>
+              <div className="mt-1 flex flex-col gap-1">
+                {d.operations.map((op, i) => (
+                  <div key={i} className="bg-surface/50 border border-border/50 rounded px-2 py-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[8px] text-muted/50 font-mono">{op.bulletin}</span>
+                      <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{op.claims} claims</span>
+                      <span className="text-[8px] text-success/60 bg-success/5 px-1 rounded">{op.entity_ops} entity ops</span>
+                      {op.source && (
+                        <span className="text-[8px] text-muted/40 truncate ml-auto">{op.source.split(":").slice(-1)[0]}</span>
+                      )}
+                    </div>
+                    {op.content_preview && (
+                      <p className="text-[10px] text-text/70 mt-0.5 truncate">{op.content_preview}</p>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           )}

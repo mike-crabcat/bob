@@ -1,33 +1,36 @@
 # Memory Wiki System
 
-The memory wiki gives Cyborg a persistent, structured knowledge base that survives across conversations. Without memory, every session starts from scratch -- the LLM has no recollection of facts, people, or preferences discussed in prior exchanges. The memory system closes this gap by letting the assistant record useful information during and after conversations, then automatically surfacing it in future prompts.
+The memory wiki gives Cyborg a persistent, structured knowledge base that survives across conversations. Without memory, every session starts from scratch -- the LLM has no recollection of facts, people, or preferences discussed in prior exchanges. The memory system closes this gap by recording useful information during and after conversations, then automatically surfacing it in future prompts.
 
-Memory is organized as a file-based wiki stored under the workspace directory. A lightweight index is always injected into the system prompt, so the assistant knows what it knows without extra tool calls. When it needs detail, it uses on-demand tools to read or search entries. When it learns something worth remembering, it queues a bulletin. A background dream process curates bulletins into well-structured entries organized by category. A second background flow also extracts facts from completed conversations automatically.
+Memory is organized as a file-based wiki stored under the workspace directory. A lightweight entity index is always injected into the system prompt, so the assistant knows what it knows without extra tool calls. When it needs detail, it uses on-demand tools to read, search, or graph-traverse entries. When it learns something worth remembering, it writes a bulletin. A background dream pipeline curates bulletins into structured entity documents via an intermediate claim-extraction step.
+
+The data model follows a four-stage pipeline:
+
+```
+channel  -->  bulletin  -->  claim  -->  entity document
+(source)     (record)     (atom)     (derived view)
+```
 
 ## Architecture Overview
 
 ```
                               Prompt Assembly
-                              ===============
+                              ==============
                               +-----------+
                               | SOUL.md   |
                               | IDENTITY  |
                               | AGENTS.md |
                               | USER.md   |
                               | Skills    |
-                              |  Index    |
                               +-----+-----+
                                     |
                      +--------------+--------------+
                      |                             |
               +------+------+              +-------+-------+
               | Memory Index |              | Grounding     |
-              | (_index.md)  |              | Rules         |
+              | (entities)   |              | Rules         |
               +------+------+              +---------------+
-                     |                              |
-                     | always-accessible wikis       |
-                     | loaded into every prompt      |
-                     |                              |
+                     |
               +------+------+
               |  System     |
               |  Prompt     |
@@ -46,214 +49,287 @@ Memory is organized as a file-based wiki stored under the workspace directory. A
               |  + Tools     |
               +------+------+
                      |
-         +-----------+-----------+-----------+
-         |           |           |           |
-    memory_write  memory_read  memory_search memory_browse
-         |           |           |             |
-         v           |           v             v
-   +----------+      |    +------------+  +----------+
-   | bulletin |      |    | LLM-powered|  | category |
-   | queue    |      |    | semantic   |  | listing  |
-   +----+-----+      |    | search     |  +----------+
+         +-----------+-----------+-----------+-----------+
+         |           |           |           |           |
+    memory_write  memory_read  memory_search memory_browse memory_graph
+         |           |           |             |           |
+         v           |           v             v           v
+   +----------+      |    +------------+ +----------+ +---------+
+   | bulletin |      |    | LLM-powered| | entity   | | graph   |
+   | queue    |      |    | semantic   | | listing  | | traverse|
+   +----+-----+      |    | search     | +----------+ +---------+
         |            |    +------+-----+
         |            |           |
         |            |     search logged to
         |            |     memory_search_log
         |            |
         |            v
-        |    +-----------------+
-        |    | memory/         |
-        |    |  (filesystem)   |
-        |    +-----------------+
+        |    +--------------------------+
+        |    | memory/                  |
+        |    |  entities/               |
+        |    |    contacts/             |
+        |    |    groups/               |
+        |    |    channels/             |
+        |    |    trips/ ...            |
+        |    |  bulletins/              |
+        |    |  claims/                 |
+        |    |  indexes/                |
+        |    |  aliases/                |
+        |    +--------------------------+
         |
         v
   Heartbeat (SessionIdleSummaryTask)
         |
-        v
-  SessionSummaryService.generate_summary()
+        +--> generate_summary() -- store to DB
         |
-        +--> summary_text
-        +--> memory_prompts[]
-        |
-        v
-  store_summary() to DB
-        |
-        v
-  MemoryService.reflect_and_update()
-        |
-        v
-  write_bulletin() --> memory/core/bulletins/blt-xxxx.md
+        +--> build_generator_input() from transcript
+        |    --> generate_bulletin() via LLM
+        |    --> write_bulletin() to memory/bulletins/
         |
         v
   MemoryService.run_dream()
         |
         v
-  LLM call: curate bulletins into structured entries
-        |
-        v
-  write_entry() --> memory/core/<category>/<slug>.md
-  move_to_digested() --> memory/core/digested/
-        |
-        v
-  rebuild_wiki_index() --> memory/core/_index.md
+  For each pending bulletin:
+    1. extract_claims_from_bulletin() --> write claims to memory/claims/
+    2. _update_entities_from_claims()  --> LLM writes/updates entity docs
+    3. rebuild indexes + aliases
+    4. mark bulletin digested
 ```
 
 ## File-Based Storage
 
-All memory data lives under `<workspace_dir>/memory/`. There is no database table for entries -- everything is a markdown file on disk, versioned alongside the workspace.
+All memory data lives under `<workspace_dir>/memory/`. There is no database table for entries -- everything is a markdown file on disk, versioned alongside the workspace. Each file uses YAML frontmatter for metadata.
 
 ### Directory Structure
 
 ```
 memory/
-  access.yml               # Wiki configuration and access control
-  core/                    # Default wiki (created automatically)
-    _index.md              # Auto-generated compact index
-    people/                # Category directories
-      alice-johnson.md
-      bob-smith.md
-    facts/
-      coffee-preference.md
-      timezone.md
-    events/
-      trip-to-perth.md
-    locations/
-      office-address.md
-    research/
-      project-alpha.md
-    bulletins/             # Incoming queue for uncurated facts
-      blt-a1b2c3d4e5f6.md
-    digested/              # Processed bulletins (archive)
-      blt-f9e8d7c6b5a4.md
+  bulletins/                    # Immutable source records
+    2026/                       # Year
+      05/                       # Month
+        bulletin-2026-05-31-a1b2c3.md
+      06/
+        bulletin-2026-06-01-d4e5f6.md
+  claims/                       # Extracted atomic claims
+    claim-2026-05-31-001.md
+    claim-2026-06-01-001.md
+  entities/                     # Derived entity documents
+    contacts/                   # People
+      contact-7c9f0fd7.md
+      contact-a3b4c5d6.md
+    groups/                     # WhatsApp groups, etc.
+      group-12036342829458.md
+    channels/                   # Communication channels
+      channel-whatsapp-group-12036342829458.md
+    trips/                      # Travel plans
+      trip-bali-2026.md
+    locations/                  # Places
+      location-seminyak.md
+    events/                     # Calendar events
+    tasks/                      # Action items
+    artifacts/                  # Documents, spreadsheets
+    decisions/                  # Decisions made
+  indexes/                      # Derived lookup structures
+    entity-map.yml              # entity_id -> {type, display_name, path}
+    reverse-links.yml           # entity_id -> [referencing entity_ids]
+  aliases/                      # Name-to-ID mapping
+    aliases.yml                 # display_name -> entity_id
+  summaries/                    # Reserved for summary caching
+  policies/                     # Reserved for access policies
 ```
 
-The `memory/` directory and default `core` wiki structure are created automatically by `MemoryService.ensure_memory_structure()` the first time the system starts or when the prompt assembler runs.
+The `memory/` directory and its subdirectory structure are created automatically by `MemoryService.ensure_memory_structure()` the first time the system starts or when the prompt assembler runs.
 
-### access.yml
+### Entity Document Format
 
-The `access.yml` file defines wikis, their categories, and access policies. If it does not exist when the system starts, a default is created automatically from the `_DEFAULT_ACCESS_YML` constant in `memory_service.py`.
-
-```yaml
-wikis:
-  core:
-    description: "General knowledge"
-    categories: [people, facts, events, locations, research, bulletins, digested]
-    access: always
-    write: always
-```
-
-Each wiki has these fields:
-
-- `description` -- human-readable label
-- `categories` -- list of category names; each becomes a subdirectory under the wiki directory
-- `access` -- read access level: `always`, `trusted`, or `never`
-- `write` -- write access level: `always`, `trusted`, or `never`
-
-The config is parsed with `yaml.safe_load()` and cached in a module-level variable (`_config_cache`) with mtime-based invalidation, so edits to `access.yml` take effect on the next prompt assembly cycle without a restart.
-
-### Per-Wiki Indexes (_index.md)
-
-Each wiki has an auto-generated `_index.md` file that summarizes its contents in a compact format. The index is rebuilt every time an entry is written or updated via `rebuild_wiki_index()`.
-
-The rebuild process:
-1. Reads the wiki config to get the ordered list of categories.
-2. For each category, scans its directory for `.md` files (skipping any starting with `_`).
-3. Parses each entry to extract the title (from the `# ` heading) and a one-line summary (first non-heading paragraph).
-4. Formats each entry as `slug (title, summary...)`.
-5. Writes the combined output to `memory/<wiki>/_index.md`.
-
-Example `_index.md`:
+Each entity document is a markdown file with YAML frontmatter:
 
 ```markdown
-### core
-**people**: alice-johnson (Alice Johnson, Software engineer at TechCorp), bob-smith (Bob Smith, Prefers dark roast coffee)
-**facts**: coffee-preference (Coffee preference, Only drinks pour-over), timezone (Timezone, UTC+8 Australia/Perth)
-**events**: trip-to-perth (Trip to Perth, Planned for March 2025)
+---
+entity_id: contact-7c9f0fd7
+entity_type: contact
+display_name: Alice Johnson
+status: active
+contact_source: contacts_db
+---
+
+# Alice Johnson
+
+## Summary
+
+Software engineer at TechCorp. Prefers pour-over coffee.
+
+## Current State
+
+Working on Project Alpha. UTC+8 timezone.
+
+## Related Entities
+
+contacts: []
+groups: [group-12036342829458]
+channels: [channel-whatsapp-group-12036342829458]
+trips: [trip-bali-2026]
+locations: []
+events: []
+tasks: [task-compare-villas]
+artifacts: []
+decisions: []
+
+## Timeline
+
+- 2026-05-30: Joined Bali trip planning group.
+- 2026-05-31: Volunteered to compare villas.
+
+## Source Bulletins
+
+- bulletin-2026-05-31-a1b2c3
 ```
 
-The index for `always`-access wikis is loaded into every system prompt, so the assistant always knows what memory entries exist. This is intentionally lightweight -- just slugs, titles, and truncated summaries (max 80 chars). Full content is retrieved on demand via `memory_read`.
+The `Related Entities` section is mandatory and contains all typed lists even when empty. This enables graph traversal via the `memory_graph` tool.
+
+### Bulletin Format
+
+Bulletins are immutable source records with frontmatter tracking provenance:
+
+```markdown
+---
+id: bulletin-2026-05-31-a1b2c3
+created_at: "2026-05-31T10:30:00+00:00"
+channel_id: channel-whatsapp-group-12036342829458
+source_type: session_transcript_range
+source_id: agent:main:whatsapp:group:12036342829458
+visibility: group
+scope:
+  - public
+  - group-12036342829458
+entities:
+  contacts:
+    - id: contact-7c9f0fd7
+      display_name: Alice Johnson
+  channels:
+    - id: channel-whatsapp-group-12036342829458
+digested: true
+---
+
+# Update
+
+Group decided to stay in Seminyak for the Bali trip. Alice volunteered to compare villas.
+```
+
+Once digested by the dream pipeline, the `digested: true` flag is set in the frontmatter rather than moving the file.
+
+### Claim Format
+
+Claims are atomic typed propositions extracted from bulletins:
+
+```markdown
+---
+id: claim-2026-05-31-001
+type: decision
+subject_id: trip-bali-2026
+predicate: accommodation_focus
+object_id: location-seminyak
+status: active
+source_bulletins:
+  - bulletin-2026-05-31-a1b2c3
+visibility: group
+scope:
+  - group-12036342829458
+created_at: "2026-05-31T12:00:00+00:00"
+superseded_by: []
+---
+
+Bali 2026 accommodation search should focus on Seminyak.
+```
+
+Claim types: `fact`, `preference`, `constraint`, `decision`, `task`, `availability`, `booking`, `artifact`, `relationship`, `private_note`.
+
+### Derived Indexes
+
+Three derived index files are maintained by `index_service.rebuild_all()`:
+
+| File | Purpose |
+|------|---------|
+| `indexes/entity-map.yml` | Maps entity_id to `{entity_type, display_name, path}` for quick lookups |
+| `indexes/reverse-links.yml` | Maps entity_id to list of entity_ids that reference it (for graph traversal) |
+| `aliases/aliases.yml` | Maps display names (and lowercase variants) to entity IDs for name resolution |
+
+These are rebuilt automatically after every dream cycle and after entity writes.
 
 ## Authoring Memory Entries
 
 ### Real-Time: memory_write Tool
 
-During an active conversation, the LLM can use the `memory_write` tool to queue a bulletin for a fact worth recording. This is the fastest path -- the assistant decides a fact is worth remembering and writes it in the same turn. The bulletin is not immediately placed in a curated category; instead, it lands in the `bulletins/` queue to be processed by the dream process.
+During an active conversation, the LLM can use the `memory_write` tool to queue a bulletin. This is the fastest path -- the assistant decides a fact is worth remembering and writes it in the same turn. The bulletin lands in `memory/bulletins/YYYY/MM/` awaiting the dream process.
 
 Parameters:
 
-| Parameter  | Description                                          |
-|------------|------------------------------------------------------|
-| `wiki`     | Wiki name (must exist in `access.yml`)               |
-| `category` | Intended category within the wiki                    |
-| `slug`     | URL-safe identifier (lowercase, hyphens, no spaces)  |
-| `title`    | Human-readable title                                 |
-| `content`  | Markdown body                                        |
+| Parameter | Description |
+|-----------|-------------|
+| `content` | Markdown body describing what to remember |
+| `channel_id` | Optional channel association (defaults to session's channel) |
+| `visibility` | Privacy level: `private`, `contact`, `group`, `channel`, `public` |
 
-The tool validates that the wiki and category are defined in `access.yml`, checks write access via `resolve_writable_wikis()`, then calls `write_bulletin()` which generates a unique slug (`blt-<uuid12>`), attaches metadata (source session, intended category, participants, timestamps), and writes the file into `memory/core/bulletins/`. The wiki index is rebuilt after each write.
+The tool derives the channel_id from the session key via `resolve_channel_id()`, validates the input, and calls `write_bulletin()` which generates a unique ID (`bulletin-YYYY-MM-DD-xxxxxx`), attaches metadata (source session, timestamps), and writes the file. The workspace's `write_file` tool is guarded to reject writes into `memory/` -- all modifications must go through `memory_write` to keep indexes consistent.
 
-The workspace's `write_file` tool is guarded to reject writes into `memory/` -- all modifications must go through `memory_write` to keep indexes consistent. The guard in `workspace_tools.py` checks if the resolved path starts with `workspace/memory` and returns an error message directing the caller to use `memory_write` instead.
+### Post-Session: Bulletin Generation via Heartbeat
 
-### Post-Session: Reflection via Heartbeat
-
-After a conversation goes idle, the heartbeat system generates a summary and extracts `memory_prompts` -- a list of facts worth remembering. The flow is:
+After a conversation goes idle, the heartbeat system generates a summary and produces a bulletin from the transcript. The flow is:
 
 1. `SessionIdleSummaryTask` (registered in `heartbeat.py`) runs on each heartbeat cycle.
 2. It calls `SessionSummaryService.find_idle_sessions()` to detect sessions with no recent activity beyond the configured idle threshold.
-3. For each idle session, it fetches messages and participants, then calls `generate_summary()`.
-4. The summary LLM call produces `summary_text`, `topics`, and `memory_prompts` (a list of specific facts or action items worth remembering).
-5. The summary is stored in the `session_summaries` database table.
-6. If `memory_prompts` is non-empty, `MemoryService.reflect_and_update()` is called.
+3. For each idle session, it fetches messages and participants, then calls `generate_summary()` to produce `summary_text` and `topics`.
+4. The summary is stored in the `session_summaries` database table.
+5. Independently, the heartbeat task builds a `BulletinGeneratorInput` from the transcript using `build_generator_input()`:
+   - Derives `channel_id`, `visibility`, `scope`, and `channel_type` from the session key.
+   - Includes the last 50 messages (truncated to 500 chars each) as the transcript.
+6. Calls `generate_bulletin()` which invokes an LLM with the `BULLETIN_GENERATION_PROMPT` system prompt.
+7. The LLM decides whether to create a bulletin (using the memory-worthiness rules in the prompt) or to decline with a reason.
+8. The response is validated via `validate_draft_bulletin()`.
+9. If valid and `create_bulletin: true`, the bulletin is written to disk.
 
-The reflection process in `reflect_and_update()`:
-1. Formats the memory prompts as bullet points.
-2. Calls `write_bulletin()` to write a single bulletin containing all the prompts, with session metadata (session key, time window, participants, contact IDs).
-3. The bulletin is placed in `memory/core/bulletins/` awaiting the dream process.
+The bulletin generator uses a detailed system prompt that enforces memory-worthiness rules (only decisions, tasks, preferences, constraints, bookings, artifacts, trips, locations, availability changes, relationships, and important facts) and rejects conversational noise (greetings, jokes, emoji reactions, duplicates).
 
-After all session summaries are processed, the heartbeat task runs `MemoryService.run_dream()` to curate pending bulletins into structured entries (see Dream Process below).
+After all session summaries are processed, the heartbeat task runs `MemoryService.run_dream()` to curate pending bulletins into structured entries.
 
 ## The Dream Process
 
-The dream process is the curation pipeline that transforms raw bulletins into well-structured, categorized memory entries. It runs automatically at the end of each heartbeat cycle (after session summaries are generated).
+The dream process is the curation pipeline that transforms raw bulletins into structured entity documents. It runs automatically at the end of each heartbeat cycle. The pipeline has three stages per bulletin:
 
-### How It Works
+### Stage 1: Claim Extraction
 
-1. `run_dream()` reads all pending bulletins from `memory/core/bulletins/`.
-2. If there are no bulletins, it returns immediately with `{"status": "empty"}`.
-3. It builds a catalog of all bulletins with their metadata (session key, time window, participants, content).
-4. It also builds a catalog of existing curated entries across all categories (`people`, `facts`, `events`, `locations`, `research`).
-5. Both catalogs are sent to an LLM with a detailed system prompt that instructs it to:
-   - CREATE new entries for new topics/people.
-   - UPDATE existing entries by merging new information (newer info wins).
-   - IGNORE bulletins with no factual claims.
-6. The LLM returns a JSON array of write operations, each specifying `wiki`, `category`, `slug`, `title`, `content`, and `source_bulletins`.
-7. Each operation is validated (wiki exists, category is valid, all fields non-empty, category is not `bulletins` or `digested`).
-8. Valid operations are written via `write_entry()`, which creates the file and rebuilds the wiki index.
-9. All processed bulletins are moved to `memory/core/digested/` for archival.
-10. The result is logged to the `memory_dream_log` database table.
+`extract_claims_from_bulletin()` sends the bulletin to an LLM with the `CLAIM_EXTRACTION_PROMPT` system prompt. The LLM returns a JSON array of atomic claim objects, each with:
+- `type` (fact, preference, constraint, decision, task, etc.)
+- `subject_id` and `object_id` (canonical entity IDs)
+- `predicate` (a verb phrase like `accommodation_focus`)
+- `body` (human-readable statement)
+- `visibility` and `scope` (inherited from the bulletin)
+- `source_bulletin_id` (provenance link)
 
-### Category Templates
+Entity IDs in claims are normalized via `normalize_entity_id()` which handles raw UUIDs, contact ID formats, and artifact paths. Claims are written to `memory/claims/` as individual markdown files.
 
-The dream process uses category-specific templates to structure entries consistently:
+### Stage 2: Entity Document Update
 
-- **people**: Overview, Personality, Interests, Dietary, Work, Family, Preferences, Contact, Relationships
-- **events**: Summary, Date, Participants, Location, Details, Follow-up
-- **facts**: Summary, Details, Procedures
-- **locations**: Description, Address, Notes, Related
-- **research**: Topic, Findings, Status, Notes
+`_update_entities_from_claims()` collects all entity IDs referenced in the claims, reads any existing entity documents, and sends everything to an LLM with the `ENTITY_UPDATE_PROMPT` system prompt. The LLM returns a JSON array of write operations, each containing the full entity document (frontmatter + markdown body) including:
+- Summary and Current State sections (prioritizing latest information)
+- Related Entities section with all typed lists (mandatory)
+- Timeline of recent events
+- Source Bulletins list for provenance
 
-Templates can be overridden by placing a `_template.md` file in the category directory under `core/`. If no template file exists, the hardcoded defaults are used.
+The entity update agent resolves contact names from the database, normalizes entity IDs, and handles both creates and updates. Existing entity documents are merged with new claims, with newer information taking precedence.
 
-### Transcript References
+### Stage 3: Index Rebuild
 
-The dream process includes `[[session:key window]]` tags on bullet points to trace information back to the conversation it came from. When updating an existing entry, existing tags are preserved and new ones are appended.
+After all bulletins are processed, `rebuild_indexes()` rebuilds the three derived index files (entity-map, reverse-links, aliases) and the compact text index used for prompt injection.
+
+### Bulletin Digestion
+
+Processed bulletins are marked `digested: true` in their frontmatter (via `_mark_digested()`). They remain in place for provenance and can be re-digested via the dashboard.
 
 ### Dream Log
 
-Every dream run is logged to the `memory_dream_log` table with the number of bulletins processed, entries created, bulletin slugs, the full operations list, the raw LLM response, duration, and status. This powers the dashboard's dream log view.
-
-### Linting
-
-The `lint_entries()` method can restructure all curated entries to match the current category templates. It sends each entry to an LLM with the template instructions and rewrites it if the structure differs. This is available via the dashboard and ensures entries stay formatted consistently as templates evolve.
+Every dream run is logged to the `memory_dream_log` database table with the number of bulletins processed, entries created, claims extracted, per-bulletin operation details, duration, and status.
 
 ## Retrieval
 
@@ -262,88 +338,132 @@ The `lint_entries()` method can restructure all curated entries to match the cur
 The `prompt_assembler` module integrates memory during prompt construction in `load_workspace_prompt()`. The process:
 
 1. `ensure_memory_structure()` is called to guarantee the directory exists.
-2. The memory directory is checked for existence.
-3. A `## Memory` section is appended to the system prompt, containing:
-   - A description of the available tools (`memory_search`, `memory_read`, `memory_browse`, `memory_write`).
-   - The wiki name and categories (currently hardcoded to `core` with `people`, `facts`, `research`).
+2. `build_memory_index_text()` scans `memory/entities/` and builds a compact listing of all entities grouped by type, showing display names and truncated summaries (max 80 chars).
+3. A `## Memory` section is appended to the system prompt containing tool usage instructions and the entity index.
 
-This is a zero-overhead path -- no tool call, no extra latency. The assistant starts every turn knowing what it knows. Note that the `_index.md` content itself is loaded via `_build_memory_index_static()` which reads the index files for always-accessible wikis and prepends a header with tool usage instructions.
+This is a zero-overhead path -- no tool call, no extra latency. The assistant starts every turn knowing what entities exist.
+
+Example index injection:
+
+```
+## Memory
+
+You have persistent memory with these tools:
+- **memory_search(query, entity_type?)** -- Always start here.
+- **memory_read(entity_id)** -- Read a specific entity.
+- **memory_browse(entity_type)** -- List all entities of a type.
+- **memory_write(content, channel_id?, visibility?)** -- Write a new bulletin.
+- **memory_graph(entity_id, depth?)** -- Explore related entities.
+
+Entity types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.
+
+**contacts**: Alice Johnson -- Software engineer at TechCorp, Bob Smith -- Prefers dark roast coffee
+**groups**: Bali Trip Group -- Planning trip to Bali in June 2026
+**trips**: trip-bali-2026 -- Group trip to Bali, dates June 2026
+```
 
 ### memory_read Tool
 
-Reads a single entry by wiki, category, and slug. Returns the full markdown content (title heading + body). Checks that the session has read access to the requested wiki via `resolve_accessible_wikis()`. Returns an error JSON if access is denied or the entry is not found.
+Reads a single entity by canonical ID. Returns the full markdown content (frontmatter + body). Checks that the entity exists. Returns an error JSON if not found.
 
 ### memory_search Tool
 
-Semantic search across one or all accessible wikis. The search is LLM-powered:
+Semantic search across entity documents. The search is LLM-powered:
 
-1. Collects all entries (excluding files starting with `_`) from the target wikis by walking the directory tree with `rglob("*.md")`.
-2. Builds a catalog with full text (truncated to 500 chars per entry), titles, summaries, and workspace-relative paths.
-3. Sends the catalog and query to an LLM with a strict system prompt requesting a JSON response with `abstract` (1-2 sentence summary) and `results` (array of matched entries with index numbers and relevance explanations).
-4. Falls back to keyword matching across title, summary, and full text if the LLM response is not valid JSON.
-5. Maps index numbers back to entry paths and titles.
+1. Collects all entity documents (or filtered to a specific `entity_type`) from `memory/entities/`.
+2. Builds a catalog with truncated body text (300 chars per entry), entity IDs, types, and display names.
+3. Sends the catalog and query to an LLM with a strict system prompt requesting JSON with `abstract` (1-2 sentence summary) and `results` (array of matched entries with index numbers and relevance explanations).
+4. Maps index numbers back to entity IDs and paths.
 
-Returns `{abstract, results}` where each result has `path` (workspace-relative, e.g. `memory/core/people/alice-johnson.md`), `title`, and `relevance` (a sentence explaining why it matched). The assistant can use `read_file` with the path to get the full document.
+Returns `{abstract, results}` where each result has `entity_id`, `entity_type`, `display_name`, `path`, and `relevance`. The assistant can use `memory_read` with the entity_id to get the full document.
 
-The search uses the model specified by `LLMDispatchService.memory_model` (configured via `openai.memory_model` in settings), with temperature 0.0 for deterministic results.
-
-Every search is logged to the `memory_search_log` database table (see Search Logging below).
+Uses the model specified by `LLMDispatchService.memory_model` with temperature 0.0. Every search is logged to the `memory_search_log` database table.
 
 ### memory_browse Tool
 
-Lists all entries in a wiki category. Returns a JSON array of `{slug, title, modified}` sorted alphabetically by filename. Useful for exploring what exists in a category before searching.
+Lists all entities of a given type. Returns a JSON array of `{entity_id, display_name, status}` sorted alphabetically by filename. Useful for exploring what exists in a category before searching.
 
-## Access Control
+### memory_graph Tool
 
-Each wiki has independent read (`access`) and write (`write`) policies:
+Explores the memory graph around an entity. Reads the entity's Related Entities section, then loads each referenced entity to build a neighbor map. Returns the entity's metadata plus a dict of `{category: [neighbor_entities]}`. Currently supports depth=1 (immediate neighbors).
 
-| Level    | Behavior                                                              |
-|----------|-----------------------------------------------------------------------|
-| `always` | Accessible to all sessions, including unauthenticated ones            |
-| `trusted`| Only accessible when `session_participants.is_trusted = 1` for the session |
-| `never`  | Never accessible (reserved for future use)                            |
+## Entity Resolution
 
-The trust check queries the `session_participants` table:
+The `entity_resolver` module handles mapping between different ID formats and display names:
 
-```sql
-SELECT 1 AS ok FROM session_participants
-WHERE session_key = ? AND is_trusted = 1 LIMIT 1
-```
+- `canonical_contact_id(uuid)` -- Converts full UUIDs to `contact-{hex8}` format (e.g. `7c9f0fd7-6134-4495-aa8c-f04f11bc15e8` becomes `contact-7c9f0fd7`).
+- `normalize_entity_id(entity_id, entity_type)` -- Normalizes any entity ID variant, handling raw UUIDs, slashes in artifact paths, and different contact ID formats.
+- `resolve_contact(db, name_or_ref)` -- Resolves names, `{{contact:UUID|Name}}` template references, or raw UUIDs to canonical contact IDs using database lookups.
+- `load_aliases(memory_dir)` -- Loads the aliases index for name-to-ID resolution.
 
-Access is resolved per-request in two methods:
-- `resolve_accessible_wikis()` -- determines which wikis the session can read.
-- `resolve_writable_wikis()` -- determines which wikis the session can write to.
+Channel IDs are derived from session keys via `channels.resolve_channel_id()`:
 
-Both methods iterate the `access.yml` config and check the appropriate field (`access` or `write`) against the trust level. The `memory_write`, `memory_read`, `memory_search`, and `memory_browse` tools all check access before performing any operation.
+| Session Key Format | Channel ID |
+|---|---|
+| `agent:main:whatsapp:group:120363...` | `channel-whatsapp-group-120363...` |
+| `agent:main:whatsapp:dm:61456224867` | `channel-whatsapp-dm-61456224867` |
+| `agent:main:email:thread-id` | `channel-email-thread-id` |
 
-## CLI: cyborg memory seed
+Visibility and scope are also derived from the session key:
+- Group chats get `visibility: group` with a `group-{id}` scope.
+- DMs get `visibility: contact` with the contact's ID in scope.
+- Other sessions default to `visibility: private`.
 
-The `cyborg memory seed` command bulk-processes historical session summaries to populate the memory wiki retroactively. This is useful when the memory system is first enabled on an existing installation with accumulated session data.
+## CLI Commands
+
+### cyborg memory seed
+
+Regenerates all memory from session history using the bulletin generator. Useful for initial setup or full regeneration.
 
 ```bash
 # Dry run -- see what would be processed without calling the LLM
 cyborg memory seed --dry-run
 
-# Process in batches of 10 summaries per LLM call
-cyborg memory seed --batch-size 10
+# Full seed -- generates bulletins and runs dream pipeline
+cyborg memory seed
 ```
 
-The command:
+The command (`seed_from_history()`) follows this process:
 
-1. Loads settings and connects to the database.
-2. Calls `MemoryService.ensure_memory_structure()` to create the directory if needed.
-3. Queries `session_summaries` for rows with non-empty `memory_prompts`.
-4. Groups summaries into batches (by insertion order, configurable size via `--batch-size`).
-5. For each batch, combines summaries (up to 5 summary texts) and collects all memory prompts.
-6. Calls `reflect_and_update()` with a synthetic `bulk_seed` session key (treated as a trusted session).
-7. The reflection process writes bulletins for the prompts.
-8. Prints a summary and the current memory index.
+1. Backs up any old `core/` directory to `core.v1.bak/` (v1 legacy).
+2. Creates the v6 directory structure.
+3. Queries all distinct session keys from `session_messages`, ordered by first message.
+4. Loads known contacts from the database for entity resolution.
+5. For each session with 3+ messages:
+   - Builds a transcript from messages (with sender names resolved).
+   - Splits long transcripts into 8000-char chunks.
+   - Calls `generate_bulletin()` with the transcript and known entity hints.
+   - Validates the response and writes the bulletin if valid.
+6. Runs the dream pipeline on all generated bulletins.
 
-In dry-run mode, the LLM is not called -- the command just lists the prompts that would be processed. Note that seed only writes bulletins; the dream process must run separately (via the heartbeat or a dashboard trigger) to curate them into structured entries.
+### cyborg memory rebuild
+
+Rebuilds derived data from bulletins.
+
+```bash
+# Rebuild indexes only for a specific entity
+cyborg memory rebuild --entity contact-7c9f0fd7
+
+# Full rebuild: clear claims and indexes, re-process all bulletins
+cyborg memory rebuild --all
+```
+
+### cyborg memory validate
+
+Validates memory structure by checking that all entity documents have required frontmatter fields (`entity_id`, `entity_type`, `display_name`).
+
+### cyborg memory query
+
+Queries memory with a natural language question. Optionally filters by entity type, actor, or channel.
+
+```bash
+cyborg memory query "What is left to do for Bali?"
+cyborg memory query "Alice" --type contacts
+```
 
 ## Search Logging
 
-Every `memory_search` call (from tool or dashboard) is logged to the `memory_search_log` table. The schema is defined in `schemas/300_memory_search_log.sql`:
+Every `memory_search` call (from tool or dashboard) is logged to the `memory_search_log` table. Schema from `schemas/300_memory_search_log.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS memory_search_log (
@@ -355,28 +475,25 @@ CREATE TABLE IF NOT EXISTS memory_search_log (
     latency_seconds REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_memory_search_log_created
-    ON memory_search_log(created_at DESC);
 ```
 
 Fields:
 
-| Column            | Description                                           |
-|-------------------|-------------------------------------------------------|
-| `id`              | UUID primary key                                      |
-| `query`           | The search query string                               |
-| `results_json`    | Full JSON response (abstract + results array)         |
-| `session_key`     | Session that initiated the search (null for dashboard)|
-| `result_count`    | Number of results returned                            |
-| `latency_seconds` | Wall-clock time for the search operation              |
-| `created_at`      | Timestamp                                             |
+| Column | Description |
+|--------|-------------|
+| `id` | UUID primary key |
+| `query` | The search query string |
+| `results_json` | Full JSON response (abstract + results array) |
+| `session_key` | Session that initiated the search (null for dashboard) |
+| `result_count` | Number of results returned |
+| `latency_seconds` | Wall-clock time for the search operation |
+| `created_at` | Timestamp |
 
-Logging is performed in the `memory_search` tool after the search completes. Failures to log are caught and logged at debug level to avoid disrupting the search response. The same logging happens in the dashboard search endpoint, with `session_key` set to `null`.
+Logging failures are caught silently to avoid disrupting the search response.
 
 ## Dream Logging
 
-Every dream run is logged to the `memory_dream_log` table. The schema is defined in `schemas/301_memory_dream_log.sql` and extended by `302_memory_dream_log_raw_response.sql`:
+Every dream run is logged to the `memory_dream_log` table. Schema from `schemas/301_memory_dream_log.sql` and extended by `schemas/302_memory_dream_log_raw_response.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS memory_dream_log (
@@ -390,57 +507,62 @@ CREATE TABLE IF NOT EXISTS memory_dream_log (
     status TEXT NOT NULL DEFAULT 'completed',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_memory_dream_log_created
-    ON memory_dream_log(created_at DESC);
 ```
 
-The dream log is written by the heartbeat task in `SessionIdleSummaryTask.run()` after `run_dream()` completes. It captures the full result including the raw LLM response for debugging and auditing.
+The dream log is written by the heartbeat task after `run_dream()` completes, capturing the full result including per-bulletin operation details.
 
 ## Dashboard Memory Page
 
 The dashboard includes a memory page at `/memory` with these features:
 
-1. **Stats header** -- Total entry count and per-category counts, pulled from `GET /api/memory/stats`.
-2. **Live search** -- An input field that calls `GET /api/memory/search?q=...` and displays results inline with abstract, relevance explanations, and latency. Search results are clickable to open a content viewer.
-3. **Pending bulletins** -- Shows all bulletins in the queue with their source session, intended category, and content preview. Each bulletin is clickable to view full content.
-4. **Dream log** -- A feed of dream runs showing status, bulletins consumed, entries created, duration, and the resulting operations. Each run is expandable to show:
-   - The consumed bulletins with content (fetched from the `digested/` archive via `POST /api/memory/digested`).
-   - The memory entries written (clickable to view content).
+1. **Stats header** -- Total entity count and per-type counts, pulled from `GET /api/memory/stats`.
+2. **Live search** -- An input field that calls `GET /api/memory/search?q=...` and displays results with abstract, relevance explanations, and latency. Results are clickable to open a content viewer.
+3. **Pending bulletins** -- Shows all undigested bulletins with their source session, source type, and content preview. Each bulletin is clickable to view full content.
+4. **Dream log** -- A feed of dream runs showing status, bulletins consumed, claims extracted, entries created, duration, and per-bulletin operation details. Each run is expandable to show:
+   - The consumed bulletins with content (fetched via `POST /api/memory/digested`).
+   - Per-bulletin breakdown of claims and entity operations.
    - The raw LLM response for debugging.
-   - A "re-digest" button to move a bulletin back from `digested/` to `bulletins/` for reprocessing.
-5. **Lint** -- A button (with confirmation) to trigger `POST /api/memory/lint` which reformats all entries to match current category templates.
+   - A "re-digest" button to re-process a bulletin through the dream pipeline.
+5. **Validate (lint)** -- A button (with confirmation) to trigger `POST /api/memory/lint` which validates all entity documents for required fields.
 6. **Content viewer** -- An inline panel that loads any memory file's content via `GET /api/workspace/file?path=...`.
 
 Dashboard API endpoints (defined in `routers/dashboard_api.py`):
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/memory/stats` | Entry counts, per-category stats, pending bulletins, last dream time |
-| `GET /api/memory/search?q=...` | Search the `core` wiki, log result, return with latency |
+| `GET /api/memory/stats` | Entity counts, per-type stats, pending bulletins, last dream time |
+| `GET /api/memory/search?q=...` | Search entities, log result, return with latency |
 | `GET /api/memory/searches` | Last 100 search log entries with parsed results |
-| `GET /api/memory/bulletins` | Current pending bulletins |
+| `GET /api/memory/bulletins` | Current pending (undigested) bulletins |
 | `GET /api/memory/dreams` | Last 20 dream log entries |
-| `GET /api/memory/category/{category}` | Entries in a specific category |
-| `POST /api/memory/digested` | Fetch content of digested bulletins by slug |
-| `POST /api/memory/redigest` | Move a digested bulletin back to the queue |
-| `POST /api/memory/lint` | Reformat all entries to match templates |
+| `GET /api/memory/category/{category}` | Entities in a specific type directory |
+| `POST /api/memory/digested` | Fetch content of specific bulletins by slug |
+| `POST /api/memory/redigest` | Re-process a bulletin through the dream pipeline |
+| `POST /api/memory/lint` | Validate all entity documents |
 
-All endpoints are protected by the dashboard secret (Bearer token or `?secret=` query parameter) if one is configured.
+All endpoints are protected by the dashboard secret (Bearer token or `?secret=` query parameter).
 
 ## Key Source Files
 
 | File | Purpose |
 |------|---------|
-| `services/memory_service.py` | Core service: CRUD, index building, search, reflection, dream, lint, bulletins, config loading |
-| `services/memory_tools.py` | LLM function-call tools (memory_write, memory_read, memory_search, memory_browse) |
+| `services/memory/service.py` | Core service: bulletin/entity CRUD, dream pipeline, search, reflection, validation |
+| `services/memory/models.py` | Data models (Bulletin, Claim, EntityDocument, EntityRef, QueryContext, frontmatter helpers) |
+| `services/memory/claim_service.py` | Claim extraction from bulletins, claim CRUD, active claim queries |
+| `services/memory/entity_resolver.py` | Entity ID normalization, contact resolution, alias loading |
+| `services/memory/channels.py` | Session key to channel ID/visibility/scope derivation |
+| `services/memory/index_service.py` | Derived index building (entity-map, reverse-links, aliases, prompt index text) |
+| `services/memory/prompts.py` | LLM system prompts for bulletin generation, claim extraction, entity update, retrieval |
+| `services/memory/bulletin_generator.py` | Transcript-to-bulletin LLM pipeline with input construction and output validation |
+| `services/memory/seed.py` | Bulk history regeneration from session messages |
+| `services/memory_tools.py` | LLM function-call tools (memory_write, memory_read, memory_search, memory_browse, memory_graph) |
 | `services/prompt_assembler.py` | Injects memory index and tool descriptions into system prompt |
 | `services/workspace_tools.py` | Guards `memory/` directory from direct write_file access |
-| `services/session_summary_service.py` | Generates summaries with memory_prompts from session history |
-| `heartbeat.py` | SessionIdleSummaryTask triggers reflection + dream after summaries are stored |
-| `cli.py` | `cyborg memory seed` command for bulk processing historical summaries |
+| `services/session_summary_service.py` | Generates summaries from session history |
+| `heartbeat.py` | SessionIdleSummaryTask triggers bulletin generation + dream after summaries |
+| `cli.py` | CLI commands: `cyborg memory seed/rebuild/validate/query` |
 | `schemas/300_memory_search_log.sql` | Database schema for search logging |
 | `schemas/301_memory_dream_log.sql` | Database schema for dream run logging |
 | `schemas/302_memory_dream_log_raw_response.sql` | Adds raw_response column to dream log |
-| `routers/dashboard_api.py` | Dashboard API endpoints for memory stats, search, bulletins, dreams, lint |
+| `routers/dashboard_api.py` | Dashboard API endpoints for memory stats, search, bulletins, dreams |
 | `ui_app/src/routes/memory/index.tsx` | Dashboard memory page UI component |

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 from uuid import uuid4
-
-import re
 
 from cyborg_server.services.base import BaseService
 
@@ -18,12 +17,6 @@ _SUMMARY_SYSTEM_PROMPT = (
     'Return ONLY a JSON object with these keys:\n'
     '- "summary": exactly 2 sentences giving a high-level summary of the conversation.\n'
     '- "topics": array of short topic strings discussed.\n'
-    '- "memory_prompts": array of specific facts or action items worth remembering.\n'
-    '- "people_updates": object mapping participant names (using contact reference format) to arrays\n'
-    "  of person-relevant facts discovered about them. For each participant mentioned, extract:\n"
-    "  personality traits, preferences, dietary info, work details, family info, interests,\n"
-    "  communication style, personal details they revealed. Be liberal — record anything that\n"
-    "  helps build a richer profile. Example: {\"{{contact:abc|Jane}}\": [\"vegetarian\", \"works at Acme Corp\"]}\n"
     "\n"
     "IMPORTANT: Always use actual participant names — NEVER write \"the user\" or \"a participant\".\n"
     "The transcript labels each message with the speaker's name. Use those names in your output.\n"
@@ -31,7 +24,6 @@ _SUMMARY_SYSTEM_PROMPT = (
     "\n"
     "When referring to a person by name, use the contact reference format: {{contact:ID|Name}}\n"
     "For example, if contact ID 'abc123' has display name 'Mike', write: {{contact:abc123|Mike}}\n"
-    "Use this format in summary, topics, memory_prompts, and people_updates wherever a person's name appears.\n"
 )
 
 _CONTACT_REF_RE = re.compile(r"\{\{contact:([^|}]+)\|([^}]+)\}\}")
@@ -144,7 +136,7 @@ class SessionSummaryService(BaseService):
         contact_to_name: dict[str, str] | None = None,
         identifier_to_name: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Call the LLM to generate a summary. Returns {summary_text, topics, memory_prompts}."""
+        """Call the LLM to generate a summary. Returns {summary_text, topics}."""
         from cyborg_server.services.llm_dispatch import LLMDispatchService
 
         resolved = identifier_to_name or {}
@@ -192,27 +184,15 @@ class SessionSummaryService(BaseService):
             valid_ids = set(contact_map)
             summary_text = _validate_refs(parsed.get("summary", ""), valid_ids)
             topics = [_validate_refs(t, valid_ids) for t in parsed.get("topics", [])]
-            memory_prompts = [_validate_refs(p, valid_ids) for p in parsed.get("memory_prompts", [])]
-            people_updates_raw = parsed.get("people_updates", {})
-            people_updates: dict[str, list[str]] = {}
-            if isinstance(people_updates_raw, dict):
-                for key, facts in people_updates_raw.items():
-                    validated_key = _validate_refs(key, valid_ids)
-                    if isinstance(facts, list):
-                        people_updates[validated_key] = [_validate_refs(str(f), valid_ids) for f in facts]
             return {
                 "summary_text": summary_text,
                 "topics": topics,
-                "memory_prompts": memory_prompts,
-                "people_updates": people_updates,
             }
         except (json.JSONDecodeError, ValueError):
-            logger.warning("Failed to parse LLM summary as JSON")
+            logger.warning("Failed to parse LLM summary as JSON, using raw text")
             return {
-                "summary_text": (response or "")[:300],
+                "summary_text": _strip_code_fences(response or "")[:300],
                 "topics": [],
-                "memory_prompts": [],
-                "people_updates": {},
             }
 
     async def store_summary(
@@ -223,10 +203,8 @@ class SessionSummaryService(BaseService):
         summary_text: str,
         topics: list[str],
         participants: list[str],
-        memory_prompts: list[str],
         message_count: int,
         model_used: str,
-        people_updates: dict[str, list[str]] | None = None,
     ) -> str:
         """Insert a summary row. Returns the summary ID."""
         summary_id = str(uuid4())
@@ -243,10 +221,10 @@ class SessionSummaryService(BaseService):
                 summary_text,
                 json.dumps(topics),
                 json.dumps(participants),
-                json.dumps(memory_prompts),
+                json.dumps([]),
                 message_count,
                 model_used,
-                json.dumps(people_updates or {}),
+                json.dumps({}),
             ),
         )
         if self.ctx.event_bus:

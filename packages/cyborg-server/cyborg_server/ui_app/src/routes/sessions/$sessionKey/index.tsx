@@ -253,10 +253,11 @@ function SessionDetailPage() {
   if (_lastEvent && _lastEvent.payload?.session_key === sessionKey) {
     const evt = _lastEvent;
     if (evt.type === "llm.call.running") {
-      const key = `${evt.payload.session_key}-${evt.timestamp}`;
+      const logId = (evt.payload.log_id as string) || `live-${Date.now()}`;
+      const key = `${evt.payload.session_key}-${logId}`;
       if (!liveRunning.current.has(key)) {
         liveRunning.current.set(key, {
-          id: `live-${Date.now()}`,
+          id: logId,
           created_at: new Date().toISOString(),
           call_category: (evt.payload.call_category as string) || "",
           status: "running",
@@ -277,20 +278,33 @@ function SessionDetailPage() {
         liveTools.current.set(key, []);
       }
     } else if (evt.type === "llm.call.tool_completed") {
-      const runningKey = [...liveRunning.current.keys()].pop();
+      const logId = evt.payload.log_id as string | undefined;
+      const runningKey = logId
+        ? [...liveRunning.current.keys()].find((k) => k.endsWith(`-${logId}`))
+        : [...liveRunning.current.keys()].pop();
       if (runningKey) {
         const tools = liveTools.current.get(runningKey) || [];
         tools.push((evt.payload.tool_name as string) || "unknown");
         liveTools.current.set(runningKey, tools);
         const call = liveRunning.current.get(runningKey);
-        if (call) call.tools = [...tools];
+        if (call) {
+          call.tool_count = tools.length;
+          call.tools = [...tools];
+        }
       }
     } else if (evt.type === "llm.call.completed" || evt.type === "llm.call.failed") {
-      if (liveRunning.current.size > 0) {
+      const logId = evt.payload.log_id as string | undefined;
+      if (logId) {
+        const key = [...liveRunning.current.keys()].find((k) => k.endsWith(`-${logId}`));
+        if (key) {
+          liveRunning.current.delete(key);
+          liveTools.current.delete(key);
+        }
+      } else if (liveRunning.current.size > 0) {
         liveRunning.current.clear();
         liveTools.current.clear();
-        queryClient.invalidateQueries({ queryKey: ["session-detail", sessionKey] });
       }
+      queryClient.invalidateQueries({ queryKey: ["session-detail", sessionKey] });
     }
   }
 
@@ -298,7 +312,9 @@ function SessionDetailPage() {
     if (!detail) return detail;
     const liveCalls = [...liveRunning.current.values()];
     if (liveCalls.length === 0) return detail;
-    return { ...detail, calls: [...liveCalls, ...detail.calls] };
+    const liveIds = new Set(liveCalls.map((c) => c.id));
+    const filtered = detail.calls.filter((c) => !liveIds.has(c.id));
+    return { ...detail, calls: [...liveCalls, ...filtered] };
   }, [detail, liveRunning.current.size, liveTools.current.size]);
 
   const reflectMutation = useMutation({
