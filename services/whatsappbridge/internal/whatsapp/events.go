@@ -79,3 +79,10 @@ type GroupParticipantInfo struct {
 	IsAdmin      bool
 	IsSuperAdmin bool
 }
+
+type ChatPresenceEvent struct {
+	ChatJID   string
+	SenderJID string
+	Media     string // "text" or "audio"
+	Timestamp string
+}

@@ -150,6 +150,17 @@ type AckPayload struct {
 	MessageID string `json:"message_id"`
 }
 
+type ChatPresencePayload struct {
+	ChatJID   string `json:"chat_id"`
+	SenderJID string `json:"sender_jid"`
+	Media     string `json:"media"`
+	Timestamp string `json:"timestamp"`
+}
+
+type SubscribePresencePayload struct {
+	ChatJID string `json:"chat_id"`
+}
+
 type RequestPairingPayload struct {
 	Method      string `json:"method"`       // "qr" or "phone_code"
 	PhoneNumber string `json:"phone_number,omitempty"`
@@ -172,4 +183,6 @@ const (
 	TypeSendMessageResult  = "send_message_result"
 	TypeGroupMemberChange  = "whatsapp.group_member_change"
 	TypeGroupSync          = "whatsapp.group_sync"
+	TypeChatPresence       = "whatsapp.chat_presence"
+	TypeSubscribePresence  = "subscribe_presence"
 )

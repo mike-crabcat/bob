@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -279,6 +280,10 @@ func (c *Client) handleEvent(raw any) {
 		c.connected = true
 		c.mu.Unlock()
 		c.log.Info("whatsapp connected")
+		// Mark as available so we receive typing/presence notifications
+		if err := c.client.SendPresence(context.Background(), types.PresenceAvailable); err != nil {
+			c.log.Warn("failed to send available presence", "error", err)
+		}
 		if c.onEvent != nil {
 			c.onEvent(ConnectedEvent{})
 		}
@@ -320,6 +325,19 @@ func (c *Client) handleEvent(raw any) {
 
 	case *events.GroupInfo:
 		c.handleGroupInfo(evt)
+
+	case *events.ChatPresence:
+		if evt.State == types.ChatPresenceComposing {
+			if c.onEvent != nil {
+				senderJID := c.ResolveLID(evt.Sender)
+				c.onEvent(ChatPresenceEvent{
+					ChatJID:   evt.Chat.String(),
+					SenderJID: senderJID.String(),
+					Media:     string(evt.Media),
+					Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+				})
+			}
+		}
 	}
 }
 
@@ -581,7 +599,19 @@ func (c *Client) SyncGroups() {
 				Timestamp:    g.GroupCreated.UTC().Format("2006-01-02T15:04:05.000Z"),
 			})
 		}
+		// Auto-subscribe to presence for all groups
+		if err := c.client.SubscribePresence(context.Background(), g.JID); err != nil {
+			c.log.Warn("failed to subscribe presence for group", "jid", g.JID.String(), "error", err)
+		}
 	}
+}
+
+func (c *Client) SubscribePresence(chatJID string) error {
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("parse jid: %w", err)
+	}
+	return c.client.SubscribePresence(context.Background(), jid)
 }
 
 func (c *Client) Close() error {

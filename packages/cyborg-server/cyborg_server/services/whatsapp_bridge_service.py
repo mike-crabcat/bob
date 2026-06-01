@@ -186,6 +186,7 @@ class WhatsAppBridgeService(BaseService):
         self._last_pairing_code: str | None = None
         self._subagent_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._subagent_listener_task: asyncio.Task | None = None
+        self._presence_subscribed: set[str] = set()
 
     @property
     def connected(self) -> bool:
@@ -485,16 +486,17 @@ class WhatsAppBridgeService(BaseService):
                     contact_id=contact_id,
                 )
                 if not message_was_sent[0] and result.strip():
-                    from cyborg_server.services.tap import tap_dispatch
-                    result = await tap_dispatch(
-                        self.ctx, messages=messages, tools=tools,
-                        session_key=session_key,
-                        send_tool_name="send_whatsapp_message",
-                        first_result=result,
-                        call_category="subagent_result",
-                        dispatch_id=dispatch_id,
-                        contact_id=contact_id,
-                    )
+                    from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                    if tap_enabled():
+                        result = await tap_dispatch(
+                            self.ctx, messages=messages, tools=tools,
+                            session_key=session_key,
+                            send_tool_name="send_whatsapp_message",
+                            first_result=result,
+                            call_category="subagent_result",
+                            dispatch_id=dispatch_id,
+                            contact_id=contact_id,
+                        )
 
                 parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
                 assistant_text = "\n\n".join(parts) if parts else result
@@ -965,16 +967,17 @@ class WhatsAppBridgeService(BaseService):
                     contact_id=route["contact_id"] if route else None,
                 )
                 if not message_was_sent[0] and result.strip():
-                    from cyborg_server.services.tap import tap_dispatch
-                    result = await tap_dispatch(
-                        self.ctx, messages=messages, tools=tools,
-                        session_key=session_key,
-                        send_tool_name="send_whatsapp_message",
-                        first_result=result,
-                        call_category="whatsapp_group_member_change",
-                        dispatch_id=dispatch_id,
-                        contact_id=route["contact_id"] if route else None,
-                    )
+                    from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                    if tap_enabled():
+                        result = await tap_dispatch(
+                            self.ctx, messages=messages, tools=tools,
+                            session_key=session_key,
+                            send_tool_name="send_whatsapp_message",
+                            first_result=result,
+                            call_category="whatsapp_group_member_change",
+                            dispatch_id=dispatch_id,
+                            contact_id=route["contact_id"] if route else None,
+                        )
 
                 parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
                 assistant_text = "\n\n".join(parts) if parts else result
@@ -989,9 +992,116 @@ class WhatsAppBridgeService(BaseService):
 
         asyncio.create_task(_run_dispatch())
 
+    async def subscribe_presence(self, chat_id: str) -> None:
+        """Request the bridge to subscribe to presence for a chat."""
+        payload = {
+            "type": "subscribe_presence",
+            "id": str(uuid4()),
+            "timestamp": utcnow().isoformat(),
+            "payload": {"chat_id": chat_id},
+        }
+        if self._ws is not None:
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception:
+                logger.debug("failed to send presence subscription for %s", chat_id)
+
+    async def _handle_chat_presence(self, payload: dict[str, Any]) -> None:
+        """Handle typing/presence events from the bridge."""
+        chat_id = payload.get("chat_id", "")
+        sender_jid = payload.get("sender_jid", "")
+        sender_name = payload.get("sender_name", "")
+        if not chat_id or not sender_jid:
+            return
+
+        chat_kind = "group" if "@g.us" in chat_id else "dm"
+        agent_id = "main"
+        if chat_kind == "group":
+            key_part = chat_id.split("@")[0]
+        else:
+            key_part = sender_jid.split("@")[0]
+        session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
+
+        # Check if patience is enabled for this session
+        route_row = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if not route_row or not route_row["metadata"]:
+            return
+        try:
+            route_meta = json.loads(route_row["metadata"])
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not route_meta.get("patience_enabled"):
+            return
+
+        import time as _time
+        from cyborg_server.services.patience_buffer import PendingItem, PatienceBufferRegistry
+
+        item = PendingItem(
+            item_type="typing",
+            timestamp=_time.monotonic(),
+            sender_jid=sender_jid,
+            sender_name=sender_name or "",
+            payload={},
+        )
+        buffer = PatienceBufferRegistry.get(session_key)
+        buffer.add(item)
+        buffer.cancel_timer()
+
+        # Cancel existing timer — the next message will re-evaluate with the LLM.
+        # Typing just resets the clock; we don't set a new timer here.
+        logger.info("patience: typing indicator from %s in %s, buffer=%d messages + %d typing",
+                     sender_name, session_key,
+                     len([i for i in buffer.items if i.item_type == "message"]),
+                     len([i for i in buffer.items if i.item_type == "typing"]))
+
+    async def _handle_slash_command(
+        self, text: str, session_key: str, chat_id: str,
+        chat_kind: str, sender_jid: str, sender_name: str,
+    ) -> None:
+        """Handle slash commands from trusted contacts."""
+        parts = text.strip().split(None, 1)
+        command = parts[0].lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+        logger.info("slash command from %s in %s: %s %s", sender_name, session_key, command, args)
+
+        if command == "/patience":
+            await self._cmd_patience(args, session_key, chat_id)
+
+    async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
+        """Toggle patience for the current session."""
+        arg = args.strip().lower()
+        if arg not in ("on", "off"):
+            await self.send_message(chat_id, "Usage: /patience on|off")
+            return
+
+        enabled = arg == "on"
+        route = await self.db.fetch_one(
+            "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if not route:
+            await self.send_message(chat_id, "No session route found")
+            return
+
+        meta = json.loads(route["metadata"]) if route["metadata"] else {}
+        meta["patience_enabled"] = enabled
+        await self.db.execute(
+            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(meta), utcnow().isoformat(), route["id"]),
+        )
+        logger.info("patience %s for session %s (route %s)", arg, session_key, route["id"])
+
+        status = "enabled — waiting for silence before responding" if enabled else "disabled — responding immediately"
+        await self.send_message(chat_id, f"Patience {status}")
+
     async def _on_message(self, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type", "")
         payload = msg.get("payload", {})
+        if msg_type not in ("whatsapp.incoming_message", "whatsapp.message_acked", "bridge.status"):
+            logger.info("bridge message: type=%s", msg_type)
 
         if msg_type == "whatsapp.connected":
             logger.info("whatsapp connected via bridge")
@@ -1016,6 +1126,8 @@ class WhatsAppBridgeService(BaseService):
             await self._handle_group_member_change(payload)
         elif msg_type == "whatsapp.group_sync":
             await self._handle_group_sync(payload)
+        elif msg_type == "whatsapp.chat_presence":
+            await self._handle_chat_presence(payload)
         else:
             logger.debug("unknown bridge message type: %s", msg_type)
 
@@ -1106,6 +1218,13 @@ class WhatsAppBridgeService(BaseService):
         else:
             key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
+
+        # Slash command interception — trusted contacts only, never stored or dispatched
+        if text.startswith("/"):
+            logger.info("slash command intercepted from %s (trusted=%s): %s", sender_name, is_trusted, text[:50])
+            if is_trusted:
+                await self._handle_slash_command(text, session_key, chat_id, chat_kind, sender_jid, sender_name)
+            return
 
         # Resolve @mentions: replace raw phone numbers with display names
         now_iso = utcnow().isoformat()
@@ -1413,16 +1532,17 @@ class WhatsAppBridgeService(BaseService):
                 # Tap: if LLM produced text but didn't use send_whatsapp_message,
                 # give it a second chance with a reminder.
                 if not message_was_sent[0] and result.strip():
-                    from cyborg_server.services.tap import tap_dispatch
-                    result = await tap_dispatch(
-                        self.ctx, messages=messages, tools=tools,
-                        session_key=session_key,
-                        send_tool_name="send_whatsapp_message",
-                        first_result=result,
-                        call_category="whatsapp_incoming",
-                        dispatch_id=dispatch_id,
-                        contact_id=contact_id,
-                    )
+                    from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                    if tap_enabled():
+                        result = await tap_dispatch(
+                            self.ctx, messages=messages, tools=tools,
+                            session_key=session_key,
+                            send_tool_name="send_whatsapp_message",
+                            first_result=result,
+                            call_category="whatsapp_incoming",
+                            dispatch_id=dispatch_id,
+                            contact_id=contact_id,
+                        )
                 # Record to unified session history — combine LLM text output + all sent messages
                 # If nothing was sent and the result is just a NO_REPLY variant, skip recording
                 # to avoid poisoning future decisions with a pattern of non-responses.
@@ -1443,4 +1563,46 @@ class WhatsAppBridgeService(BaseService):
                     })
                 return result
 
-        asyncio.create_task(_run_dispatch())
+        # Check if patience is enabled for this session (per-session via route metadata)
+        patience_enabled = False
+        route_row = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if route_row and route_row["metadata"]:
+            try:
+                route_meta = json.loads(route_row["metadata"])
+                patience_enabled = route_meta.get("patience_enabled", False)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        logger.info(
+            "patience check: session=%s route_found=%s enabled=%s",
+            session_key, route_row is not None, patience_enabled,
+        )
+
+        if patience_enabled:
+            import time as _time
+            from cyborg_server.services.patience_buffer import PendingItem
+            from cyborg_server.services.patience_gate import submit_to_patience
+
+            item = PendingItem(
+                item_type="message",
+                timestamp=_time.monotonic(),
+                sender_jid=sender_jid,
+                sender_name=sender_name or "",
+                payload={"text": text},
+            )
+            await submit_to_patience(
+                self.ctx, session_key, item, _run_dispatch,
+                bot_name=settings.patience.bot_name,
+                model=settings.patience.model,
+                max_pending_items=settings.patience.max_pending_items,
+                max_context_messages=settings.patience.max_context_messages,
+            )
+
+            # Auto-subscribe to presence for this chat
+            if chat_id not in self._presence_subscribed:
+                await self.subscribe_presence(chat_id)
+                self._presence_subscribed.add(chat_id)
+        else:
+            asyncio.create_task(_run_dispatch())
