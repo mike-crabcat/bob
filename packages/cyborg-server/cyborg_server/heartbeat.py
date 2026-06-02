@@ -114,6 +114,61 @@ class EmailSyncTask:
 _last_call_cleanup: datetime | None = None
 
 
+async def _generate_session_bulletin(
+    ctx: AppContext,
+    session: dict,
+    messages: list[dict],
+    contact_to_name: dict[str, str],
+) -> dict | None:
+    """Generate a single bulletin for an idle session.
+
+    Returns the validated bulletin data dict if one was written, else None.
+    Loads the full contacts DB as ``known_entities`` so the LLM uses canonical
+    contact IDs rather than inventing name-slug / unresolved- variants.
+    """
+    from cyborg_server.services.memory import MemoryService
+    from cyborg_server.services.memory.bulletin_generator import (
+        build_generator_input,
+        generate_bulletin,
+        validate_draft_bulletin,
+    )
+    from cyborg_server.services.memory.contact_directory import ContactDirectory
+    from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+    transcript_text = "\n".join(
+        f"[{m.get('sender_id', m['role'])}] {m['content'][:500]}"
+        for m in messages[-50:]
+    )
+
+    directory = await ContactDirectory.load(ctx.db)
+    gen_input = build_generator_input(
+        session_key=session["session_key"],
+        transcript_start=session["active_from"],
+        transcript_end=session["last_message_at"],
+        transcript_text=transcript_text,
+        contact_ids=list(contact_to_name.keys()),
+        known_entities=directory.as_known_entities(),
+    )
+    llm = LLMDispatchService(ctx)
+    draft = await generate_bulletin(llm, gen_input)
+    is_valid, data = validate_draft_bulletin(draft)
+    if not is_valid or not data.get("create_bulletin"):
+        return None
+
+    mem_svc = MemoryService(ctx)
+    mem_svc.write_bulletin(
+        ctx.settings.harness.workspace_dir,
+        channel_id=gen_input.channel_id,
+        source_type="session_transcript_range",
+        source_id=session["session_key"],
+        visibility=gen_input.visibility,
+        scope=gen_input.scope,
+        entities=data.get("entities", {}),
+        content=draft,
+    )
+    return data
+
+
 class SessionIdleSummaryTask:
     """Detect idle sessions and generate summaries for their active periods."""
 
@@ -167,40 +222,7 @@ class SessionIdleSummaryTask:
 
                 # Generate bulletin directly from transcript
                 try:
-                    from cyborg_server.services.memory import MemoryService
-                    from cyborg_server.services.memory.bulletin_generator import (
-                        build_generator_input,
-                        generate_bulletin,
-                        validate_draft_bulletin,
-                    )
-                    from cyborg_server.services.llm_dispatch import LLMDispatchService
-
-                    transcript_text = "\n".join(
-                        f"[{m.get('sender_id', m['role'])}] {m['content'][:500]}"
-                        for m in messages[-50:]
-                    )
-                    gen_input = build_generator_input(
-                        session_key=session["session_key"],
-                        transcript_start=session["active_from"],
-                        transcript_end=session["last_message_at"],
-                        transcript_text=transcript_text,
-                        contact_ids=list(contact_to_name.keys()),
-                    )
-                    llm = LLMDispatchService(ctx)
-                    draft = await generate_bulletin(llm, gen_input)
-                    is_valid, data = validate_draft_bulletin(draft)
-                    if is_valid and data.get("create_bulletin"):
-                        mem_svc = MemoryService(ctx)
-                        mem_svc.write_bulletin(
-                            ctx.settings.harness.workspace_dir,
-                            channel_id=gen_input.channel_id,
-                            source_type="session_transcript_range",
-                            source_id=session["session_key"],
-                            visibility=gen_input.visibility,
-                            scope=gen_input.scope,
-                            entities=gen_input.known_entities,
-                            content=draft,
-                        )
+                    await _generate_session_bulletin(ctx, session, messages, contact_to_name)
                 except Exception:
                     logger.exception(
                         "Bulletin generation failed for session %s",
