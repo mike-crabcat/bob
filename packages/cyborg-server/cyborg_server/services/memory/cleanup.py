@@ -305,3 +305,102 @@ def rewrite_entity_related(memory_dir: Path, rename: dict[str, str]) -> int:
                 md_file.write_text(serialize_frontmatter(fm, new_body), encoding="utf-8")
                 changed += 1
     return changed
+
+
+async def run_cleanup(
+    memory_dir: Path,
+    directory: ContactDirectory | None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """End-to-end cleanup of contact entity duplicates.
+
+    Steps:
+      1. Build renaming map
+      2. Merge duplicate entity bodies into canonical entity files
+      3. Delete the duplicate files
+      4. Rewrite every claim, bulletin, and entity Related Entities section
+      5. Enrich canonical contact entity frontmatter with contact_id/email/phone
+    """
+    rename, merge_into = build_renaming_map(memory_dir, directory)
+
+    merged = 0
+    deleted = 0
+    contact_dir = memory_dir / "entities" / "contact"
+
+    # Step 2 + 3: merge bodies, then delete
+    for dup_id, canon_id in merge_into.items():
+        if dry_run:
+            continue
+        dup_path = contact_dir / f"{dup_id}.md"
+        canon_path = contact_dir / f"{canon_id}.md"
+        if not dup_path.is_file() or not canon_path.is_file():
+            continue
+        dup_doc = _read_entity_doc(dup_path)
+        canon_doc = _read_entity_doc(canon_path)
+        if dup_doc and canon_doc:
+            merged_doc = merge_entity_docs(canon_doc, dup_doc)
+            canon_path.write_text(
+                serialize_frontmatter(
+                    {
+                        "entity_id": merged_doc.entity_id,
+                        "entity_type": merged_doc.entity_type,
+                        "display_name": merged_doc.display_name,
+                        "status": merged_doc.status,
+                        **merged_doc.extra_frontmatter,
+                    },
+                    merged_doc.body,
+                ),
+                encoding="utf-8",
+            )
+            merged += 1
+        dup_path.unlink()
+        deleted += 1
+
+    # Pure renames (no on-disk canonical target) — just rename the file
+    for old, new in rename.items():
+        if old in merge_into:
+            continue
+        if dry_run:
+            continue
+        old_path = contact_dir / f"{old}.md"
+        new_path = contact_dir / f"{new}.md"
+        if old_path.is_file() and not new_path.is_file():
+            raw = old_path.read_text(encoding="utf-8")
+            fm, body = parse_frontmatter(raw)
+            fm["entity_id"] = new
+            new_path.write_text(serialize_frontmatter(fm, body), encoding="utf-8")
+            old_path.unlink()
+            deleted += 1
+
+    # Step 4: rewrite refs
+    rewritten_claims = rewrite_claims(memory_dir, rename) if not dry_run else 0
+    rewritten_bulletins = rewrite_bulletin_entities(memory_dir, rename) if not dry_run else 0
+    rewritten_related = rewrite_entity_related(memory_dir, rename) if not dry_run else 0
+
+    # Step 5: enrich canonical entities with FK
+    enriched = 0
+    if directory is not None and not dry_run:
+        for md_file in contact_dir.glob("*.md"):
+            record = directory.get_by_canonical_id(md_file.stem)
+            if record is None:
+                continue
+            raw = md_file.read_text(encoding="utf-8")
+            fm, body = parse_frontmatter(raw)
+            fm["contact_id"] = record.uuid
+            if record.email:
+                fm["email"] = record.email
+            if record.phone_number:
+                fm["phone_number"] = record.phone_number
+            md_file.write_text(serialize_frontmatter(fm, body), encoding="utf-8")
+            enriched += 1
+
+    return {
+        "renamed": len(rename),
+        "merged": merged,
+        "deleted": deleted,
+        "rewritten_claims": rewritten_claims,
+        "rewritten_bulletins": rewritten_bulletins,
+        "rewritten_related": rewritten_related,
+        "enriched": enriched,
+    }

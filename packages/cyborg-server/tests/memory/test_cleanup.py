@@ -236,3 +236,44 @@ def test_rewrite_entity_related_renames_contact_refs(tmp_path):
     assert "contact-blair-nicol" not in body
     assert "contact-03f3902d" in body
     assert "contact-7c9f0fd7" in body
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_end_to_end(tmp_path):
+    from cyborg_server.services.memory.cleanup import run_cleanup
+
+    memory_dir = tmp_path / "memory"
+    # Three entities: canonical Blair, name-slug Blair, orphan Bob Sr x2
+    _write_contact_entity(memory_dir, "contact-03f3902d", "Blair Nicol")
+    _write_contact_entity(memory_dir, "contact-blair-nicol", "Blair Nicol")
+    _write_contact_entity(memory_dir, "bob-sr", "Bob Sr.")
+    _write_contact_entity(memory_dir, "contact-bob-sr", "Bob Sr.")
+    # A claim and bulletin referencing the doomed IDs
+    _write_claim(memory_dir, "claim-001", "contact-blair-nicol", "bob-sr")
+    _write_bulletin(memory_dir, "b-1", [{"id": "contact-blair-nicol"}])
+
+    directory = ContactDirectory([
+        ContactRecord("03f3902d-330b-4f15-bf2a-b1385a917677", "contact-03f3902d",
+                      "Blair Nicol", "+61401589328", ""),
+    ])
+
+    summary = await run_cleanup(memory_dir, directory, dry_run=False)
+
+    assert (memory_dir / "entities" / "contact" / "contact-03f3902d.md").is_file()
+    assert not (memory_dir / "entities" / "contact" / "contact-blair-nicol.md").is_file()
+    assert (memory_dir / "entities" / "contact" / "contact-bob-sr.md").is_file()
+    assert not (memory_dir / "entities" / "contact" / "bob-sr.md").is_file()
+    c1 = parse_frontmatter((memory_dir / "claims" / "claim-001.md").read_text())[0]
+    assert c1["subject_id"] == "contact-03f3902d"
+    assert c1["object_id"] == "contact-bob-sr"
+    b1 = parse_frontmatter((memory_dir / "bulletins" / "2026" / "06" / "b-1.md").read_text())[0]
+    assert b1["entities"]["contacts"][0]["id"] == "contact-03f3902d"
+    canon = parse_frontmatter(
+        (memory_dir / "entities" / "contact" / "contact-03f3902d.md").read_text()
+    )[0]
+    assert canon["contact_id"] == "03f3902d-330b-4f15-bf2a-b1385a917677"
+    assert canon["phone_number"] == "+61401589328"
+
+    assert summary["merged"] >= 2
+    assert summary["rewritten_claims"] >= 1
+    assert summary["rewritten_bulletins"] >= 1
