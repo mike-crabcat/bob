@@ -130,3 +130,88 @@ def merge_entity_docs(canonical: EntityDocument, duplicate: EntityDocument) -> E
         extra_frontmatter={**duplicate.extra_frontmatter, **canonical.extra_frontmatter},
         body="\n".join(sections) + "\n",
     )
+
+
+def build_renaming_map(
+    memory_dir: Path,
+    directory: ContactDirectory | None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Scan contact entities and compute (rename, merge_into) maps.
+
+    - rename: {old_id: new_id} — every reference to old_id should be rewritten to new_id
+    - merge_into: {dup_id: canonical_id} — dup_id's body should be merged into
+      canonical_id before deletion
+
+    For non-canonical IDs that match a DB contact by display_name, the new_id
+    is the canonical contact-{hex8}. For orphan duplicates that share a
+    display_name with no DB match, the lexicographically smallest `contact-`-
+    prefixed ID wins (or the smallest overall if neither has the prefix).
+    """
+    contact_dir = memory_dir / "entities" / "contact"
+    if not contact_dir.is_dir():
+        return {}, {}
+
+    rows: list[tuple[str, str]] = []
+    for md_file in sorted(contact_dir.glob("*.md")):
+        fm, _ = parse_frontmatter(md_file.read_text(encoding="utf-8"))
+        rows.append((md_file.stem, fm.get("display_name", "")))
+
+    rename: dict[str, str] = {}
+
+    # Step 1: non-canonical -> canonical via DB lookup
+    for entity_id, name in rows:
+        if is_canonical_contact_id(entity_id):
+            continue
+        if directory is None or not name:
+            continue
+        record = directory.get_by_name(name)
+        if record is not None:
+            rename[entity_id] = record.canonical_id
+
+    # Step 2: orphan duplicates (same display_name) — pick a winner
+    by_name: dict[str, list[str]] = {}
+    for entity_id, name in rows:
+        if not name:
+            continue
+        if entity_id in rename:
+            continue
+        by_name.setdefault(name, []).append(entity_id)
+
+    for name, ids in by_name.items():
+        if len(ids) < 2:
+            continue
+
+        def sort_key(eid: str) -> tuple[int, str]:
+            return (0 if eid.startswith("contact-") else 1, eid)
+
+        ids_sorted = sorted(ids, key=sort_key)
+        winner = ids_sorted[0]
+        for loser in ids_sorted[1:]:
+            rename[loser] = winner
+
+    # Step 3: merge_into — only the entries where the destination currently
+    # exists on disk (so we need to merge bodies before deleting).
+    existing_ids = {eid for eid, _ in rows}
+    merge_into: dict[str, str] = {}
+    for old, new in rename.items():
+        if new in existing_ids:
+            merge_into[old] = new
+
+    return rename, merge_into
+
+
+def _read_entity_doc(path: Path) -> EntityDocument | None:
+    if not path.is_file():
+        return None
+    fm, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    return EntityDocument(
+        entity_id=fm.get("entity_id", path.stem),
+        entity_type=fm.get("entity_type", ""),
+        display_name=fm.get("display_name", ""),
+        status=fm.get("status", "active"),
+        extra_frontmatter={
+            k: v for k, v in fm.items()
+            if k not in {"entity_id", "entity_type", "display_name", "status"}
+        },
+        body=body,
+    )
