@@ -215,3 +215,93 @@ def _read_entity_doc(path: Path) -> EntityDocument | None:
         },
         body=body,
     )
+
+
+def _rewrite_refs(value: str, rename: dict[str, str]) -> str:
+    return rename.get(value, value)
+
+
+def rewrite_claims(memory_dir: Path, rename: dict[str, str]) -> int:
+    """Rewrite subject_id/object_id in every claim file. Returns changed count."""
+    claims_dir = memory_dir / "claims"
+    if not claims_dir.is_dir():
+        return 0
+    changed = 0
+    for md_file in claims_dir.glob("*.md"):
+        raw = md_file.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(raw)
+        old_subj = fm.get("subject_id", "")
+        old_obj = fm.get("object_id")
+        new_subj = _rewrite_refs(old_subj, rename)
+        new_obj = _rewrite_refs(old_obj, rename) if isinstance(old_obj, str) else old_obj
+        if new_subj != old_subj or new_obj != old_obj:
+            fm["subject_id"] = new_subj
+            fm["object_id"] = new_obj
+            md_file.write_text(serialize_frontmatter(fm, body), encoding="utf-8")
+            changed += 1
+    return changed
+
+
+def rewrite_bulletin_entities(memory_dir: Path, rename: dict[str, str]) -> int:
+    """Rewrite entities.contacts[].id in every bulletin. Dedupe within each bulletin."""
+    bulletins_dir = memory_dir / "bulletins"
+    if not bulletins_dir.is_dir():
+        return 0
+    changed = 0
+    for md_file in bulletins_dir.rglob("*.md"):
+        raw = md_file.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(raw)
+        entities = fm.get("entities") or {}
+        contacts = entities.get("contacts") or []
+        if not isinstance(contacts, list):
+            continue
+        new_contacts: list[dict] = []
+        seen: set[str] = set()
+        local_changed = False
+        for entry in contacts:
+            if isinstance(entry, str):
+                entry = {"id": entry}
+            old_id = entry.get("id", "")
+            new_id = _rewrite_refs(old_id, rename)
+            if new_id != old_id:
+                local_changed = True
+            if new_id in seen:
+                local_changed = True
+                continue
+            seen.add(new_id)
+            new_entry = dict(entry)
+            new_entry["id"] = new_id
+            new_contacts.append(new_entry)
+        if local_changed:
+            entities["contacts"] = new_contacts
+            fm["entities"] = entities
+            md_file.write_text(serialize_frontmatter(fm, body), encoding="utf-8")
+            changed += 1
+    return changed
+
+
+def rewrite_entity_related(memory_dir: Path, rename: dict[str, str]) -> int:
+    """Rewrite Related Entities contact refs in every entity document."""
+    entities_dir = memory_dir / "entities"
+    if not entities_dir.is_dir():
+        return 0
+    changed = 0
+    for type_dir in entities_dir.iterdir():
+        if not type_dir.is_dir():
+            continue
+        for md_file in type_dir.glob("*.md"):
+            raw = md_file.read_text(encoding="utf-8")
+            fm, body = parse_frontmatter(raw)
+            new_body = body
+            for old, new in rename.items():
+                # only match as a bullet item to avoid partial replacements
+                new_body = re.sub(
+                    rf"(\s*-\s+){re.escape(old)}(\s*)$",
+                    rf"\g<1>{new}\g<2>",
+                    new_body,
+                    flags=re.MULTILINE,
+                )
+            if new_body != body:
+                md_file.write_text(serialize_frontmatter(fm, new_body), encoding="utf-8")
+                changed += 1
+    return changed
