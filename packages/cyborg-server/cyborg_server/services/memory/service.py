@@ -336,30 +336,95 @@ class MemoryService(BaseService):
     async def _update_entities_from_claims(
         self, llm: Any, memory_dir: Path, claims: list[Claim]
     ) -> int:
-        """Use LLM to update entity documents from claims."""
+        """Use LLM to update entity documents from claims — one call per entity.
+
+        Before grouping, claims with non-canonical contact subject_ids are
+        reconciled against the contacts DB so that contact-blair-nicol,
+        unresolved-contact-blair, etc. all merge into the canonical
+        contact-{hex8} entity when a DB match exists.
+        """
         if not claims:
             return 0
 
-        # Collect affected entity IDs (normalize to canonical form)
-        entity_ids = set()
-        for c in claims:
-            if c.subject_id and isinstance(c.subject_id, str):
-                entity_ids.add(normalize_entity_id(c.subject_id))
-            if c.object_id:
-                if isinstance(c.object_id, str):
-                    entity_ids.add(normalize_entity_id(c.object_id))
-                elif isinstance(c.object_id, list):
-                    for oid in c.object_id:
-                        if isinstance(oid, str):
-                            entity_ids.add(normalize_entity_id(oid))
+        from collections import defaultdict
+        from cyborg_server.services.memory.contact_directory import ContactDirectory
+        from cyborg_server.services.memory.reconcile import reconcile_contact_id
 
-        # Build list of all existing entity IDs for the LLM
+        directory = None
+        if self.ctx and hasattr(self.ctx, "db") and self.ctx.db:
+            directory = await ContactDirectory.load(self.ctx.db)
+        self._contact_dir_cache = directory
+
+        # Pre-compute display_name lookup from existing entity files so we can
+        # reconcile even when the claim doesn't carry a display_name itself.
+        existing_name_map = self._index_contact_display_names(memory_dir)
+
+        claims_by_entity: dict[str, list[Claim]] = defaultdict(list)
+        for c in claims:
+            if not (c.subject_id and isinstance(c.subject_id, str)):
+                continue
+            sid = normalize_entity_id(c.subject_id)
+            display_name = existing_name_map.get(sid, "")
+            canonical = reconcile_contact_id(sid, display_name, directory)
+            if canonical != sid:
+                c.subject_id = canonical
+            if isinstance(c.object_id, str):
+                oid = normalize_entity_id(c.object_id)
+                obj_canonical = reconcile_contact_id(
+                    oid, existing_name_map.get(oid, ""), directory
+                )
+                if obj_canonical != oid:
+                    c.object_id = obj_canonical
+            claims_by_entity[canonical].append(c)
+
+        # Pre-compute shared context
         all_existing_ids = self._list_all_entity_ids(memory_dir)
+        contact_ids = {eid for eid in claims_by_entity if eid.startswith("contact-")}
+        contact_name_map = await self._lookup_contact_names(contact_ids) if contact_ids else {}
+
+        wrote = 0
+        for entity_id, entity_claims in claims_by_entity.items():
+            wrote += await self._update_single_entity(
+                llm, memory_dir, entity_id, entity_claims,
+                all_existing_ids=all_existing_ids,
+                contact_name_map=contact_name_map,
+            )
+
+        return wrote
+
+    def _index_contact_display_names(self, memory_dir: Path) -> dict[str, str]:
+        """Return {entity_id: display_name} for every contact entity on disk."""
+        contact_dir = memory_dir / "entities" / "contact"
+        if not contact_dir.is_dir():
+            return {}
+        out: dict[str, str] = {}
+        for md_file in contact_dir.glob("*.md"):
+            try:
+                fm, _ = parse_frontmatter(md_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if fm.get("display_name"):
+                out[md_file.stem] = fm["display_name"]
+        return out
+
+    async def _update_single_entity(
+        self,
+        llm: Any,
+        memory_dir: Path,
+        entity_id: str,
+        claims: list[Claim],
+        *,
+        all_existing_ids: set[str],
+        contact_name_map: dict[str, str],
+    ) -> int:
+        """Update a single entity document from its claims."""
+        # Known IDs hint
         known_ids_hint = ""
-        matching_ids = {eid for eid in entity_ids if eid in all_existing_ids}
-        if matching_ids:
-            known_ids_hint = "\n\n## KNOWN ENTITY IDS (use these exactly, do not create new IDs for these)\n\n"
-            known_ids_hint += "\n".join(f"- {eid}" for eid in sorted(matching_ids))
+        if entity_id in all_existing_ids:
+            known_ids_hint = (
+                "\n\n## KNOWN ENTITY IDS (use these exactly, do not create new IDs for these)\n\n"
+                f"- {entity_id}"
+            )
 
         # Build claims summary with source bulletin IDs
         claims_lines = []
@@ -370,34 +435,29 @@ class MemoryService(BaseService):
             claims_lines.append(f"- [{c.type}] {c.subject_id} {c.predicate} {obj}  (from: {bids})")
             source_bids.update(c.source_bulletins or [])
 
-        # Build existing entity docs context
+        # Build existing entity doc context
         existing_lines = []
-        for eid in entity_ids:
-            entity = self._read_entity_raw(memory_dir, eid)
-            if entity:
-                existing_lines.append(f"[{eid}]\n{entity[:500]}")
+        entity_raw = self._read_entity_raw(memory_dir, entity_id)
+        if entity_raw:
+            existing_lines.append(f"[{entity_id}]\n{entity_raw[:500]}")
 
         user_prompt = "## NEW CLAIMS\n\n" + "\n".join(claims_lines)
         if existing_lines:
             user_prompt += "\n\n## EXISTING ENTITIES\n\n" + "\n\n".join(existing_lines)
         user_prompt += known_ids_hint
 
-        # Add valid source bulletin IDs so the LLM uses them in Source Bulletins sections
+        # Source bulletin IDs
         if source_bids:
             user_prompt += "\n\n## SOURCE BULLETIN IDS\n\n"
             user_prompt += "Use these exact IDs in Source Bulletins sections. Do not invent bulletin IDs:\n"
             for bid in sorted(source_bids):
                 user_prompt += f"- {bid}\n"
 
-        # Add contact name map so the LLM can set proper display_names
-        contact_ids_in_claims = {eid for eid in entity_ids if eid.startswith("contact-")}
-        if contact_ids_in_claims:
-            contact_name_map = await self._lookup_contact_names(contact_ids_in_claims)
-            if contact_name_map:
-                user_prompt += "\n\n## CONTACT NAME MAP\n\n"
-                user_prompt += "Use these display names for the corresponding contact IDs:\n"
-                for cid, name in sorted(contact_name_map.items()):
-                    user_prompt += f"- {cid}: {name}\n"
+        # Contact name map
+        if entity_id in contact_name_map:
+            user_prompt += "\n\n## CONTACT NAME MAP\n\n"
+            user_prompt += "Use these display names for the corresponding contact IDs:\n"
+            user_prompt += f"- {entity_id}: {contact_name_map[entity_id]}\n"
 
         response = await llm.chat(
             messages=[
@@ -416,7 +476,7 @@ class MemoryService(BaseService):
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             operations = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            logger.warning("Entity update: failed to parse LLM response")
+            logger.warning("Entity update: failed to parse LLM response for %s", entity_id)
             return 0
 
         if not isinstance(operations, list):
@@ -430,32 +490,49 @@ class MemoryService(BaseService):
             if action in ("write_entity", "create", "update"):
                 content = op.get("content", "")
                 if content:
-                    # The LLM returns the full entity document in content
                     try:
                         fm, body = parse_frontmatter(content)
                     except Exception:
                         logger.warning("Entity update: failed to parse frontmatter from LLM output")
                         fm = {}
                     if fm:
-                        entity_id = fm.get("entity_id", op.get("entity_id", ""))
-                        entity_type = fm.get("entity_type", op.get("entity_type", ""))
-                        if entity_id and entity_type:
-                            normalized = normalize_entity_id(entity_id, entity_type)
-                            if normalized != entity_id:
+                        eid = fm.get("entity_id", op.get("entity_id", ""))
+                        etype = fm.get("entity_type", op.get("entity_type", ""))
+                        if eid and etype:
+                            normalized = normalize_entity_id(eid, etype)
+                            if normalized != eid:
                                 fm["entity_id"] = normalized
                                 content = serialize_frontmatter(fm, body)
-                                # Remove old non-normalized file if it exists
-                                old_path = memory_dir / "entities" / entity_type / f"{entity_id}.md"
+                                old_path = memory_dir / "entities" / etype / f"{eid}.md"
                                 if old_path.is_file():
                                     old_path.unlink()
-                            entity_id = normalized
-                            entities_dir = memory_dir / "entities" / entity_type
+                            eid = normalized
+                            # If this is a contact and we have a canonical
+                            # entity_id from reconciliation that differs,
+                            # override the LLM's choice to avoid creating
+                            # name-slug / unresolved- duplicates.
+                            if (
+                                etype == "contact"
+                                and entity_id
+                                and entity_id != eid
+                                and entity_id.startswith("contact-")
+                            ):
+                                old_path = memory_dir / "entities" / etype / f"{eid}.md"
+                                fm["entity_id"] = entity_id
+                                content = serialize_frontmatter(fm, body)
+                                if old_path.is_file():
+                                    old_path.unlink()
+                                eid = entity_id
+                            # Enrich with contact_id/email/phone if canonical
+                            eid = self._enrich_contact_frontmatter_inplace(
+                                memory_dir, etype, eid, fm, body
+                            )
+                            entities_dir = memory_dir / "entities" / etype
                             entities_dir.mkdir(parents=True, exist_ok=True)
-                            path = entities_dir / f"{entity_id}.md"
+                            path = entities_dir / f"{eid}.md"
                             path.write_text(content, encoding="utf-8")
                             wrote += 1
                     else:
-                        # Fallback: use separate fields from op
                         entity = EntityDocument(
                             entity_id=op.get("entity_id", ""),
                             entity_type=op.get("entity_type", ""),
@@ -512,6 +589,38 @@ class MemoryService(BaseService):
             for md_file in type_dir.glob("*.md"):
                 result.add(md_file.stem)
         return result
+
+    def _enrich_contact_frontmatter_inplace(
+        self,
+        memory_dir: Path,
+        etype: str,
+        eid: str,
+        fm: dict,
+        body: str,
+    ) -> str:
+        """If etype is contact and eid is canonical contact-{hex8} and we have
+        a cached ContactDirectory, add contact_id/email/phone_number to fm.
+
+        Returns the (possibly updated) eid. Mutates *fm* in place. The caller
+        is responsible for serializing fm+body and writing to disk.
+        """
+        if etype != "contact" or not eid.startswith("contact-"):
+            return eid
+        import re as _re
+        if not _re.match(r"^contact-[a-f0-9]{8}$", eid):
+            return eid
+        cache = getattr(self, "_contact_dir_cache", None)
+        if cache is None:
+            return eid
+        record = cache.get_by_canonical_id(eid)
+        if record is None:
+            return eid
+        fm["contact_id"] = record.uuid
+        if record.email:
+            fm["email"] = record.email
+        if record.phone_number:
+            fm["phone_number"] = record.phone_number
+        return eid
 
     async def _lookup_contact_names(self, contact_ids: set[str]) -> dict[str, str]:
         """Look up display names for contact IDs from the database."""
