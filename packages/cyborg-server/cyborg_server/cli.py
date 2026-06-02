@@ -1816,6 +1816,43 @@ async def _memory_seed(dry_run: bool) -> None:
         await db.close()
 
 
+@memory_app.command("seed-email")
+def memory_seed_email(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without calling LLM")] = False,
+    thread_id: Annotated[Optional[str], typer.Option("--thread", help="Process a specific email thread by agentmail_thread_id")] = None,
+) -> None:
+    """Regenerate memory from email thread history using the bulletin generator."""
+    import asyncio
+    asyncio.run(_memory_seed_email(dry_run, thread_id))
+
+
+async def _memory_seed_email(dry_run: bool, thread_id: str | None) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory.seed_email import seed_from_email_history
+
+        workspace = settings.harness.workspace_dir
+        result = await seed_from_email_history(ctx, workspace, dry_run=dry_run, thread_id=thread_id)
+
+        typer.echo(f"\nSeed-email result:")
+        typer.echo(f"  Threads processed: {result.get('threads_processed', 0)}")
+        typer.echo(f"  Bulletins generated: {result.get('bulletins_generated', 0)}")
+        typer.echo(f"  Bulletins skipped: {result.get('bulletins_skipped', 0)}")
+        typer.echo(f"  Errors: {len(result.get('errors', []))}")
+    finally:
+        await db.close()
+
+
 @memory_app.command("rebuild")
 def memory_rebuild(
     all: Annotated[bool, typer.Option("--all", help="Rebuild all derived data from bulletins")] = False,
@@ -1882,6 +1919,56 @@ async def _memory_validate() -> None:
             typer.echo(f"Issues found ({len(result['issues'])}):")
             for issue in result["issues"]:
                 typer.echo(f"  - {issue}")
+    finally:
+        await db.close()
+
+
+@memory_app.command("cleanup-contacts")
+def memory_cleanup_contacts(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would change without writing")] = False,
+) -> None:
+    """Remove duplicate contact entities and rewire references to canonical IDs."""
+    import asyncio
+    asyncio.run(_memory_cleanup_contacts(dry_run))
+
+
+async def _memory_cleanup_contacts(dry_run: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+    from cyborg_server.services.memory.cleanup import run_cleanup, build_renaming_map
+    from cyborg_server.services.memory.contact_directory import ContactDirectory
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+
+    try:
+        workspace = settings.harness.workspace_dir
+        memory_dir = workspace / "memory"
+        directory = await ContactDirectory.load(db)
+
+        typer.echo(f"Loaded {len(directory.all_canonical_ids())} contacts from DB")
+
+        if dry_run:
+            rename, merge = build_renaming_map(memory_dir, directory)
+            typer.echo(f"\n[Dry run] Would rename {len(rename)} entities")
+            typer.echo(f"[Dry run] Would merge {len(merge)} duplicates into canonical entities")
+            for old, new in sorted(rename.items()):
+                typer.echo(f"  {old} -> {new}")
+            return
+
+        result = await run_cleanup(memory_dir, directory, dry_run=False)
+        typer.echo("\nCleanup result:")
+        typer.echo(f"  Renamed: {result['renamed']}")
+        typer.echo(f"  Merged:  {result['merged']}")
+        typer.echo(f"  Deleted: {result['deleted']}")
+        typer.echo(f"  Rewritten claims:     {result['rewritten_claims']}")
+        typer.echo(f"  Rewritten bulletins:  {result['rewritten_bulletins']}")
+        typer.echo(f"  Rewritten related:    {result['rewritten_related']}")
+        typer.echo(f"  Enriched with DB FK:  {result['enriched']}")
     finally:
         await db.close()
 

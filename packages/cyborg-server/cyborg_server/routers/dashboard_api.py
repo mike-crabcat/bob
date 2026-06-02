@@ -675,6 +675,74 @@ async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
     return {"ok": True, "updated": True}
 
 
+@router.get("/api/contacts/{contact_id}/entity")
+async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one("SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL", (contact_id,))
+    if not row:
+        return {"error": "contact not found"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
+    from cyborg_server.services.memory.service import MemoryService
+
+    settings = request.app.state.settings
+    ctx = AppContext(settings=settings, db=db)
+    entity_id = canonical_contact_id(contact_id)
+    svc = MemoryService(ctx)
+    entity = svc.read_entity(settings.harness.workspace_dir, entity_id)
+
+    if not entity:
+        return {"error": "not found"}
+
+    return {
+        "entity_id": entity.entity_id,
+        "entity_type": entity.entity_type,
+        "display_name": entity.display_name,
+        "status": entity.status,
+        "body": entity.body,
+        "related_entities": entity.related_entities,
+        "source_bulletins": entity.source_bulletins,
+    }
+
+
+@router.get("/api/contacts/{contact_id}/claims")
+async def get_contact_claims(request: Request, contact_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one("SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL", (contact_id,))
+    if not row:
+        return {"error": "contact not found"}
+
+    from cyborg_server.services.memory.claim_service import get_active_claims
+    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
+    from cyborg_server.services.memory.service import MemoryService
+
+    settings = request.app.state.settings
+    entity_id = canonical_contact_id(contact_id)
+    memory_dir = MemoryService._memory_dir(settings.harness.workspace_dir)
+    claims = get_active_claims(memory_dir, entity_id)
+
+    return [
+        {
+            "id": c.id,
+            "type": c.type,
+            "subject_id": c.subject_id,
+            "predicate": c.predicate,
+            "object_id": c.object_id,
+            "status": c.status,
+            "source_bulletins": c.source_bulletins,
+            "visibility": c.visibility,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "body": c.body,
+        }
+        for c in claims
+    ]
+
+
 @router.get("/api/calls/{call_id}")
 async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
     if not _check_auth(request):

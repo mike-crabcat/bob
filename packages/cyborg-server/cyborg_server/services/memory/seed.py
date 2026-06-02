@@ -226,7 +226,7 @@ async def seed_from_history(
                     continue
 
                 # Extract content from the response
-                _, body = parse_frontmatter(response)
+                _, body = parse_frontmatter(response.strip())
                 content = body.strip()
                 if content.startswith("# Update"):
                     content = content[len("# Update"):].strip()

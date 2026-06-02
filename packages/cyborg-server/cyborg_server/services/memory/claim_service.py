@@ -147,7 +147,7 @@ async def extract_claims_from_bulletin(
         if not isinstance(item, dict):
             continue
         claim = Claim(
-            id=f"claim-{bulletin.created_at.strftime('%Y-%m-%d')}-{len(claims) + 1:03d}",
+            id=f"claim-{bulletin.id}-{len(claims) + 1:03d}",
             type=item.get("type", "fact"),
             subject_id=normalize_entity_id(item.get("subject_id", "")),
             predicate=item.get("predicate", ""),

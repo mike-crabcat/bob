@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def tap_enabled() -> bool:
+    import os
+    return os.environ.get("CYBORG_ENABLE_TAP", "").lower() in ("1", "true", "yes")
+
+
 async def tap_dispatch(
     ctx: AppContext,
     *,

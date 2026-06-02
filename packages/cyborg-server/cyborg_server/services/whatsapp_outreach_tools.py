@@ -386,15 +386,16 @@ def make_outreach_reply_tools(
 
             # Tap: if LLM didn't use send_whatsapp_message, give it a second chance.
             if not message_was_sent[0] and llm_result.strip():
-                from cyborg_server.services.tap import tap_dispatch
-                llm_result = await tap_dispatch(
-                    ctx, messages=messages, tools=origin_tools,
-                    session_key=origin_session_key,
-                    send_tool_name="send_whatsapp_message",
-                    first_result=llm_result,
-                    call_category="outreach_result",
-                    dispatch_id=dispatch_id,
-                )
+                from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                if tap_enabled():
+                    llm_result = await tap_dispatch(
+                        ctx, messages=messages, tools=origin_tools,
+                        session_key=origin_session_key,
+                        send_tool_name="send_whatsapp_message",
+                        first_result=llm_result,
+                        call_category="outreach_result",
+                        dispatch_id=dispatch_id,
+                    )
 
             # Record in source session history
             await session_svc.add_message(

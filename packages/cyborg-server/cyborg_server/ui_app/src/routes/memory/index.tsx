@@ -129,7 +129,7 @@ function BulletinCard({ b, onOpen }: { b: Bulletin; onOpen: (path: string) => vo
         onClick={() => onOpen(bulletinPath)}
         className="flex flex-col min-w-0 flex-1 text-left"
       >
-        <span className="text-[11px] text-text truncate">{firstLine.slice(0, 100)}</span>
+        <span className="text-[11px] text-text truncate">{firstLine}</span>
         {b.participants && (
           <span className="text-[9px] text-muted/60">{b.participants}</span>
         )}
@@ -218,7 +218,7 @@ function DreamRunCard({ d, onOpen, onRedigest }: { d: DreamLog; onOpen: (path: s
                   const content = bulletinContent[slug];
                   // Strip the title line and metadata lines (lines starting with "- key: value"), keep the body
                   const body = content
-                    ? content.split("\n\n").slice(1).join("\n\n").trim().slice(0, 500)
+                    ? content.split("\n\n").slice(1).join("\n\n").trim()
                     : null;
                   return (
                     <div key={i} className="bg-surface/50 border border-border/50 rounded px-2 py-1">

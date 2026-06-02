@@ -11,6 +11,9 @@ from cyborg_server.services.patience_buffer import PatienceBuffer, PatienceBuffe
 
 logger = logging.getLogger(__name__)
 
+# Track sessions with an active dispatch to avoid queueing duplicate dispatches
+_dispatching_sessions: set[str] = set()
+
 
 def _patience_system_prompt(bot_name: str) -> str:
     return f"""\
@@ -53,8 +56,6 @@ async def submit_to_patience(
     buffer.add(item)
     buffer.cancel_timer()
 
-    loop = asyncio.get_running_loop()
-
     pending_count = len([i for i in buffer.items if i.item_type == "message"])
     typing_count = len([i for i in buffer.items if i.item_type == "typing"])
     logger.info(
@@ -62,22 +63,34 @@ async def submit_to_patience(
         item.item_type, session_key, item.sender_name, pending_count, typing_count,
     )
 
-    # Safety cap — force dispatch if buffer is too large
-    if len(buffer.items) >= max_pending_items:
-        logger.info("patience buffer cap hit for %s (%d items), forcing dispatch", session_key, len(buffer.items))
-        _fire_dispatch(buffer, dispatch_fn)
+    # If a dispatch is already in progress, just buffer the item — no evaluation needed.
+    # The in-progress dispatch will claim these messages via mark_dispatched.
+    if session_key in _dispatching_sessions:
+        logger.info("patience: dispatch in progress for %s, buffering silently", session_key)
+        return
+
+    # Safety cap — force dispatch if too many MESSAGES buffered (typing doesn't count)
+    if pending_count >= max_pending_items:
+        logger.info("patience buffer cap hit for %s (%d messages), forcing dispatch", session_key, pending_count)
+        await _dispatch_and_cleanup(session_key, dispatch_fn)
         return
 
     # Evaluate urgency with the fast LLM — it returns a recommended wait duration
     wait_seconds = await _evaluate_urgency(ctx, session_key, buffer, bot_name, model, max_context_messages)
 
-    # If new items arrived while we were evaluating, cancel and re-evaluate
+    # If new items arrived while we were evaluating, skip setting timer
     if buffer.last_activity > item.timestamp:
         logger.info("patience: new activity during evaluation for %s, skipping timer", session_key)
         return
 
+    # If a dispatch started while we were evaluating, back off
+    if session_key in _dispatching_sessions:
+        logger.info("patience: dispatch started during evaluation for %s, backing off", session_key)
+        return
+
     logger.info("patience: timer=%.1fs for %s", wait_seconds, session_key)
 
+    loop = asyncio.get_running_loop()
     buffer.timer_handle = loop.call_later(
         wait_seconds,
         lambda: asyncio.ensure_future(_timer_fired(session_key, dispatch_fn)),
@@ -88,17 +101,25 @@ async def _timer_fired(session_key: str, dispatch_fn: Callable[[], Coroutine]) -
     """Called when the patience timer expires."""
     buffer = PatienceBufferRegistry.get(session_key)
     buffer.timer_handle = None
+    if session_key in _dispatching_sessions:
+        logger.info("patience timer fired for %s but dispatch already in progress, skipping", session_key)
+        return
     logger.info("patience timer fired for %s, dispatching", session_key)
-    await dispatch_fn()
+    await _dispatch_and_cleanup(session_key, dispatch_fn)
 
 
-def _fire_dispatch(
-    buffer: PatienceBuffer,
-    dispatch_fn: Callable[[], Coroutine],
-) -> None:
-    """Immediately schedule the dispatch."""
-    buffer.cancel_timer()
-    asyncio.ensure_future(dispatch_fn())
+async def _dispatch_and_cleanup(session_key: str, dispatch_fn: Callable[[], Coroutine]) -> None:
+    """Run dispatch, track state, and clean up buffer afterward."""
+    _dispatching_sessions.add(session_key)
+    try:
+        await dispatch_fn()
+    finally:
+        _dispatching_sessions.discard(session_key)
+        # Clear buffer after dispatch — messages were claimed by mark_dispatched
+        buffer = PatienceBufferRegistry.get(session_key)
+        buffer.clear()
+        logger.info("patience: buffer cleared for %s after dispatch", session_key)
+
 
 
 async def _evaluate_urgency(
@@ -137,12 +158,10 @@ async def _evaluate_urgency(
         parsed = json.loads(result.strip())
         wait_seconds = float(parsed.get("wait_seconds", 10))
         reason = parsed.get("reason", "?")
-        # Clamp to reasonable range
         wait_seconds = max(0, min(wait_seconds, 60))
         logger.info("patience LLM decided %.0fs for %s (reason: %s)", wait_seconds, session_key, reason)
         return wait_seconds
     except (json.JSONDecodeError, AttributeError, ValueError, TypeError):
-        # Try to extract a number from raw text
         import re
         nums = re.findall(r'\d+\.?\d*', result)
         if nums:

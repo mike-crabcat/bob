@@ -426,7 +426,7 @@ class WhatsAppBridgeService(BaseService):
         from cyborg_server.services.tool_registry import build_common_tools
         from cyborg_server.services.group_tools import make_group_tools
 
-        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id)
 
         # Add group tools if this is a group session
         route_for_kind = await self.db.fetch_one(
@@ -898,12 +898,13 @@ class WhatsAppBridgeService(BaseService):
         from cyborg_server.services.tool_registry import build_common_tools
         from cyborg_server.services.group_tools import make_group_tools
 
-        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=route["contact_id"] if route else None)
         tools.extend(make_group_tools(self.ctx, session_key=session_key))
 
         wa_service = self
         chat_id = group_jid
         message_was_sent = [False]
+        sent_texts: list[str] = []
         sent_texts: list[str] = []
 
         async def _send_whatsapp_message(text: str) -> str:
@@ -1047,11 +1048,11 @@ class WhatsAppBridgeService(BaseService):
             payload={},
         )
         buffer = PatienceBufferRegistry.get(session_key)
-        buffer.add(item)
-        buffer.cancel_timer()
 
-        # Cancel existing timer — the next message will re-evaluate with the LLM.
-        # Typing just resets the clock; we don't set a new timer here.
+        # Keep only the latest typing event per sender to avoid buffer bloat
+        buffer.items = [i for i in buffer.items if i.item_type != "typing" or i.sender_jid != sender_jid]
+        buffer.add(item)
+
         logger.info("patience: typing indicator from %s in %s, buffer=%d messages + %d typing",
                      sender_name, session_key,
                      len([i for i in buffer.items if i.item_type == "message"]),
@@ -1422,7 +1423,7 @@ class WhatsAppBridgeService(BaseService):
         wa_service = self
 
         # Core tools (workspace, memory, docs, changelog, email_send, contact, phone, reflection, delegation)
-        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted)
+        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id)
 
         # Group-specific tools
         if chat_kind == "group":

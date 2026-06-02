@@ -421,7 +421,7 @@ class EmailPollingService(BaseService):
                 )
                 contact_id = new_id
                 is_trusted = False
-                logger.info("auto-seeded untrusted contact %s for email %s", contact_id, sender_email)
+                logger.debug("auto-seeded untrusted contact %s for email %s", contact_id, sender_email)
 
         if contact_id is not None and is_trusted:
             default_agenda = DEFAULT_AGENDA
@@ -472,7 +472,7 @@ class EmailPollingService(BaseService):
                     "size": len(content),
                     "path": str(dest),
                 })
-                logger.info("Saved attachment %s (%d bytes) to %s", filename, len(content), dest)
+                logger.debug("Saved attachment %s (%d bytes) to %s", filename, len(content), dest)
             except Exception:
                 logger.warning(
                     "Failed to download attachment %s from message %s",
@@ -514,7 +514,7 @@ class EmailPollingService(BaseService):
         """Dispatch an incoming email to the LLM with email reply tools."""
         settings = self._get_settings()
         if not settings.openai.enabled:
-            logger.info("No LLM provider configured, skipping dispatch for email thread %s", thread["id"])
+            logger.debug("No LLM provider configured, skipping dispatch for email thread %s", thread["id"])
             return
 
         prompt_parts: list[str] = []
@@ -633,14 +633,16 @@ class EmailPollingService(BaseService):
 
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
+        enriched_body = f"[Email from: {sender_name} <{sender_email}>]\n[Subject: {subject}]\n\n{body}"
         await SessionService(self.ctx).add_message(
-            session_key, "user", body, channel="email", dispatched=0,
+            session_key, "user", enriched_body, channel="email", dispatched=0,
+            sender_id=sender_email,
         )
 
         # Email-specific tools (reply/skip) + common tool set
         reply_sent = [False]
         tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"], reply_tracker=reply_sent)
-        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted))
+        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
 
         dispatch_id = str(uuid4())
 
@@ -669,16 +671,17 @@ class EmailPollingService(BaseService):
                 )
                 # Tap: if LLM didn't use email_reply, give it a second chance.
                 if not reply_sent[0] and result.strip():
-                    from cyborg_server.services.tap import tap_dispatch
-                    result = await tap_dispatch(
-                        self.ctx, messages=messages, tools=tools,
-                        session_key=session_key,
-                        send_tool_name="email_reply",
-                        first_result=result,
-                        call_category="email_incoming",
-                        dispatch_id=dispatch_id,
-                        contact_id=contact_id,
-                    )
+                    from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                    if tap_enabled():
+                        result = await tap_dispatch(
+                            self.ctx, messages=messages, tools=tools,
+                            session_key=session_key,
+                            send_tool_name="email_reply",
+                            first_result=result,
+                            call_category="email_incoming",
+                            dispatch_id=dispatch_id,
+                            contact_id=contact_id,
+                        )
                 await session_svc.add_message(session_key, "assistant", result, channel="email")
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("email.message.received", {
@@ -839,7 +842,7 @@ class EmailPollingService(BaseService):
 
         if count > 0:
             await self._recount_thread_messages(inbox["id"])
-            logger.info("Synced %d missing message(s) in inbox %s", count, inbox["id"])
+            logger.debug("Synced %d missing message(s) in inbox %s", count, inbox["id"])
 
         return count
 
