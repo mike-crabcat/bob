@@ -76,22 +76,47 @@ transcript_range_id: "<TRANSCRIPT_RANGE_ID>"
 
 # Contact and Entity Rules
 
-Contacts must be referenced by contact IDs only.
+Contacts must be referenced by canonical contact IDs only.
 
-If a contact ID is known, use it.
+## Mandatory: use the provided known_entities.contacts list
 
-If a person/contact is mentioned but no ID is available, include an unresolved contact reference.
+A `known_entities.contacts` list is provided in the input. Each entry has the form:
 
-Example:
+  { id: contact-XXXXXXXX, display_name: "Full Name" }
 
-contacts:
-  - id: unresolved-contact-session-123-001
-    matched_from: "Sarah"
-    resolution_status: needs_review
+RULES:
+
+1. If a person mentioned in the transcript appears (by full name OR unambiguously
+   by first name) in the known_entities.contacts list, you MUST use that entry's
+   `id` verbatim. Do not invent a different ID for that person.
+
+2. Do not invent `contact-{name-slug}` IDs (e.g. `contact-blair-nicol`,
+   `contact-helen-burnside`) for contacts that appear in known_entities. These
+   IDs break linkage to the contacts database.
+
+3. Do not invent `contact-unknown-{name}` or `contact-{first-name-only}` IDs for
+   contacts that appear in known_entities.
+
+4. The `unresolved-contact-*` pattern is allowed ONLY for a person who is
+   genuinely not in known_entities.contacts. If you previously generated an
+   unresolved- ID for someone and now see them in known_entities, switch to
+   the canonical id.
+
+5. When uncertain whether a mentioned person matches a known contact, prefer
+   the canonical ID over unresolved-. Use the matched_from field to record the
+   transcript label:
+
+   contacts:
+     - id: contact-03f3902d
+       matched_from: "Blair"
+       resolution_status: resolved
 
 Do not guess contact IDs.
 
-For non-contact entities, use known IDs if supplied.
+## Non-contact entities
+
+For non-contact entities (groups, channels, trips, locations, events, tasks,
+artifacts, decisions), use known IDs if supplied.
 
 If no known ID exists, propose a stable candidate ID using kebab case.
 
@@ -412,6 +437,7 @@ The retrieval system uses Related Entities for graph traversal. This section is 
 7. If claims conflict, prefer newer claims but note the conflict in the document body.
 8. Keep entity documents concise and focused on retrieval usefulness.
 9. Do not invent entity IDs that do not appear in the claims or existing documents.
+10. Each output entity must only contain information from claims where that entity is the subject_id. Never merge claims about different entities into one document.
 
 ---
 
