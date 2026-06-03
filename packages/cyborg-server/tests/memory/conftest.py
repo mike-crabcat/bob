@@ -6,9 +6,34 @@ from pathlib import Path
 import pytest
 
 from cyborg_server.database import Database
+from cyborg_server.context import AppContext
+from cyborg_server.config import Settings
+from cyborg_server.services.memory import MemoryService
 
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "cyborg_server" / "schemas"
+
+
+@pytest.fixture
+async def db():
+    """In-memory DB with schema applied (no seed data)."""
+    database = Database(db_path=Path(":memory:"), schema_dir=SCHEMA_DIR, pool_size=1)
+    await database.connect()
+    await database.apply_migrations()
+    yield database
+    await database.close()
+
+
+@pytest.fixture
+def workspace():
+    return Path("/tmp/cyborg-test-workspace")
+
+
+@pytest.fixture
+async def svc(db):
+    settings = Settings.from_env()
+    ctx = AppContext(db=db, settings=settings)
+    return MemoryService(ctx)
 
 
 @pytest.fixture

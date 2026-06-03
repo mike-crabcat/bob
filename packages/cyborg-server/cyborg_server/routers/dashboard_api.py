@@ -692,7 +692,7 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
     ctx = AppContext(settings=settings, db=db)
     entity_id = canonical_contact_id(contact_id)
     svc = MemoryService(ctx)
-    entity = svc.read_entity(settings.harness.workspace_dir, entity_id)
+    entity = await svc.read_entity(settings.harness.workspace_dir, entity_id)
 
     if not entity:
         return {"error": "not found"}
@@ -719,12 +719,10 @@ async def get_contact_claims(request: Request, contact_id: str) -> dict[str, Any
 
     from cyborg_server.services.memory.claim_service import get_active_claims
     from cyborg_server.services.memory.entity_resolver import canonical_contact_id
-    from cyborg_server.services.memory.service import MemoryService
 
     settings = request.app.state.settings
     entity_id = canonical_contact_id(contact_id)
-    memory_dir = MemoryService._memory_dir(settings.harness.workspace_dir)
-    claims = get_active_claims(memory_dir, entity_id)
+    claims = await get_active_claims(db, entity_id)
 
     return [
         {
@@ -908,56 +906,48 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     settings = request.app.state.settings
     workspace = settings.harness.workspace_dir
+    db = _db(request)
 
     from cyborg_server.context import AppContext
     from cyborg_server.services.memory import MemoryService
-    from cyborg_server.services.memory.models import ENTITY_TYPES, parse_frontmatter
 
-    ctx = AppContext(settings=settings, db=_db(request))
+    ctx = AppContext(settings=settings, db=db)
     svc = MemoryService(ctx)
-    memory_dir = svc._memory_dir(workspace)
 
-    # Build stats by scanning entity directories
-    categories: dict[str, int] = {}
-    total_entries = 0
-    recent: list[dict[str, Any]] = []
+    # Build stats from database
+    type_rows = await db.fetch_all(
+        "SELECT entity_type, COUNT(*) AS count FROM memory_entities GROUP BY entity_type"
+    )
+    categories = {r["entity_type"]: r["count"] for r in type_rows}
+    total_entries = sum(categories.values())
 
-    entities_dir = memory_dir / "entities"
-    if entities_dir.is_dir():
-        for type_dir in entities_dir.iterdir():
-            if not type_dir.is_dir():
-                continue
-            entity_type = type_dir.name
-            count = 0
-            for md_file in type_dir.glob("*.md"):
-                text = md_file.read_text(encoding="utf-8")
-                fm, body = parse_frontmatter(text)
-                count += 1
-                summary = ""
-                for line in body.splitlines():
-                    if line.strip() and not line.strip().startswith("#"):
-                        summary = line.strip()[:80]
-                        break
-                recent.append({
-                    "path": str(md_file.relative_to(workspace)),
-                    "wiki": "core",
-                    "category": entity_type,
-                    "slug": md_file.stem,
-                    "title": fm.get("display_name", ""),
-                    "summary": summary,
-                    "modified": md_file.stat().st_mtime,
-                })
-            if count > 0:
-                categories[entity_type] = count
-            total_entries += count
-
-    recent.sort(key=lambda e: e["modified"], reverse=True)
+    # Recent entries
+    recent_rows = await db.fetch_all(
+        "SELECT entity_id, entity_type, display_name, body, updated_at "
+        "FROM memory_entities ORDER BY updated_at DESC LIMIT 50"
+    )
+    recent = []
+    for r in recent_rows:
+        summary = ""
+        for line in (r["body"] or "").splitlines():
+            if line.strip() and not line.strip().startswith("#"):
+                summary = line.strip()[:80]
+                break
+        recent.append({
+            "path": r["entity_id"],
+            "wiki": "core",
+            "category": r["entity_type"],
+            "slug": r["entity_id"],
+            "title": r["display_name"] or "",
+            "summary": summary,
+            "modified": r["updated_at"],
+        })
 
     # Pipeline status
-    bulletins = svc.read_bulletins(workspace, skip_digested=True)
+    bulletins = await svc.read_bulletins(workspace, skip_digested=True)
     pending_bulletins = len(bulletins)
 
-    last_dream = await _db(request).fetch_one(
+    last_dream = await db.fetch_one(
         "SELECT created_at FROM memory_dream_log ORDER BY created_at DESC LIMIT 1"
     )
 
@@ -1066,17 +1056,21 @@ async def get_memory_bulletins(request: Request) -> dict[str, Any]:
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
-    bulletins = svc.read_bulletins(workspace, skip_digested=True)
+    bulletins = await svc.read_bulletins(workspace, skip_digested=True)
     result = []
     for b in bulletins:
+        entity_names = []
+        for cat, refs in (b.entities or {}).items():
+            for ref in refs:
+                name = getattr(ref, "display_name", None) or ""
+                if name:
+                    entity_names.append(name)
         result.append({
             "slug": b.id,
             "source_session": b.source_id,
             "source_type": b.source_type,
-            "time_window": "",
-            "participants": "",
-            "contact_ids": "",
-            "intended_category": "",
+            "channel_id": b.channel_id,
+            "participants": ", ".join(entity_names),
             "content": b.content,
             "created_at": b.created_at.timestamp() if hasattr(b.created_at, "timestamp") else 0,
         })
@@ -1144,7 +1138,7 @@ async def get_memory_category(request: Request, category: str) -> dict[str, Any]
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
-    entries = svc.browse_category(workspace, "core", category)
+    entries = await svc.browse_category(workspace, "core", category)
     for e in entries:
         e["path"] = f"memory/entities/{category}/{e['slug']}.md"
     return {"category": category, "entries": entries}
@@ -1159,24 +1153,13 @@ async def get_digested_bulletins(request: Request) -> dict[str, Any]:
     if not slugs:
         return {"bulletins": []}
 
-    settings = request.app.state.settings
-    workspace = settings.harness.workspace_dir
-
-    from cyborg_server.context import AppContext
-    from cyborg_server.services.memory import MemoryService
-
-    ctx = AppContext(settings=settings, db=_db(request))
-    svc = MemoryService(ctx)
-    memory_dir = svc._memory_dir(workspace)
-
-    results: list[dict[str, Any]] = []
-    for slug in slugs:
-        # Look in bulletins directory (date-organized)
-        for md_file in memory_dir.glob(f"bulletins/**/*.md"):
-            if md_file.stem == slug:
-                results.append({"slug": slug, "content": md_file.read_text(encoding="utf-8")})
-                break
-    return {"bulletins": results}
+    db = _db(request)
+    placeholders = ",".join("?" * len(slugs))
+    rows = await db.fetch_all(
+        f"SELECT id, content FROM memory_bulletins WHERE id IN ({placeholders}) AND digested = 1",
+        tuple(slugs),
+    )
+    return {"bulletins": [{"slug": r["id"], "content": r["content"]} for r in rows]}
 
 
 @router.post("/api/memory/redigest")
@@ -1198,7 +1181,7 @@ async def redigest_bulletin(request: Request) -> dict[str, Any]:
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
 
-    bulletin = svc.read_bulletin(workspace, slug)
+    bulletin = await svc.read_bulletin(workspace, slug)
     if not bulletin:
         return {"error": f"bulletin not found: {slug}"}
 
@@ -1218,7 +1201,7 @@ async def lint_memory_entries(request: Request) -> dict[str, Any]:
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
-    result = svc.validate(workspace)
+    result = await svc.validate(workspace)
     return {"valid": result["valid"], "issues": result["issues"], "linted": True}
 
 

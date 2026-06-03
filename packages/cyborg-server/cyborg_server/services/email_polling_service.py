@@ -617,7 +617,7 @@ class EmailPollingService(BaseService):
         from cyborg_server.services.session_service import SessionService
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         participants_prompt = await self._build_participants_prompt(session_key)
 
         # Load memory index for trusted sessions

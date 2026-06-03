@@ -1912,7 +1912,7 @@ async def _memory_validate() -> None:
         workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)
 
-        result = svc.validate(workspace)
+        result = await svc.validate(workspace)
         if result["valid"]:
             typer.echo("Memory is valid.")
         else:
@@ -1953,14 +1953,14 @@ async def _memory_cleanup_contacts(dry_run: bool) -> None:
         typer.echo(f"Loaded {len(directory.all_canonical_ids())} contacts from DB")
 
         if dry_run:
-            rename, merge = build_renaming_map(memory_dir, directory)
+            rename, merge = await build_renaming_map(db, directory)
             typer.echo(f"\n[Dry run] Would rename {len(rename)} entities")
             typer.echo(f"[Dry run] Would merge {len(merge)} duplicates into canonical entities")
             for old, new in sorted(rename.items()):
                 typer.echo(f"  {old} -> {new}")
             return
 
-        result = await run_cleanup(memory_dir, directory, dry_run=False)
+        result = await run_cleanup(db, directory, dry_run=False)
         typer.echo("\nCleanup result:")
         typer.echo(f"  Renamed: {result['renamed']}")
         typer.echo(f"  Merged:  {result['merged']}")

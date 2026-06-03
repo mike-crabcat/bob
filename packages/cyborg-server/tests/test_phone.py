@@ -34,14 +34,8 @@ def _mock_twilio():
     """Inject a fake twilio.rest module so lazy imports resolve without the real package."""
     mock_twilio = MagicMock()
     mock_twilio_rest = MagicMock()
-    patches = {}
-    try:
-        sys.modules.setdefault("twilio", mock_twilio)
-        sys.modules.setdefault("twilio.rest", mock_twilio_rest)
-        with patch.dict(sys.modules, {"twilio": mock_twilio, "twilio.rest": mock_twilio_rest}):
-            yield mock_twilio_rest.Client
-    finally:
-        pass
+    with patch.dict(sys.modules, {"twilio": mock_twilio, "twilio.rest": mock_twilio_rest}):
+        yield mock_twilio_rest.Client
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +51,7 @@ async def test_initiate_outbound_call_returns_expected_shape(ctx: AppContext):
     mock_call.sid = "CA_test_sid"
     mock_call.status = "ringing"
 
-    with patch("cyborg_server.routers.phone._run_warmup", new_callable=AsyncMock, return_value=True), \
-         _mock_twilio() as MockClient:
+    with _mock_twilio() as MockClient:
         MockClient.return_value.calls.create.return_value = mock_call
 
         result = await initiate_outbound_call(
@@ -84,7 +77,6 @@ async def test_initiate_outbound_call_returns_expected_shape(ctx: AppContext):
     # Verify _call_agendas was populated
     assert "CA_test_sid" in _call_agendas
     assert _call_agendas["CA_test_sid"]["agenda"] == "Test agenda"
-    assert _call_agendas["CA_test_sid"]["warmup_done"] is True
 
     # Cleanup
     _call_agendas.pop("CA_test_sid", None)
@@ -105,33 +97,6 @@ async def test_initiate_outbound_call_disabled(ctx: AppContext):
     assert result == {"error": "Phone subsystem is not enabled"}
 
 
-async def test_initiate_outbound_call_no_warmup(ctx: AppContext):
-    phone_settings = _make_phone_settings()
-    settings = _make_settings(phone_settings)
-
-    mock_call = MagicMock()
-    mock_call.sid = "CA_no_warmup"
-    mock_call.status = "ringing"
-
-    with patch("cyborg_server.routers.phone._run_warmup", new_callable=AsyncMock, return_value=False), \
-         _mock_twilio() as MockClient:
-        MockClient.return_value.calls.create.return_value = mock_call
-
-        result = await initiate_outbound_call(
-            db=ctx.db,
-            settings=settings,
-            phone_settings=phone_settings,
-            to_number="+61400123456",
-            agenda="No warmup",
-        )
-
-    assert result["call_sid"] == "CA_no_warmup"
-    assert _call_agendas["CA_no_warmup"]["warmup_done"] is False
-
-    # Cleanup
-    _call_agendas.pop("CA_no_warmup", None)
-
-
 async def test_initiate_outbound_call_passes_twilio_params(ctx: AppContext):
     phone_settings = _make_phone_settings(base_url="https://myserver.ngrok.io")
     settings = _make_settings(phone_settings)
@@ -140,8 +105,7 @@ async def test_initiate_outbound_call_passes_twilio_params(ctx: AppContext):
     mock_call.sid = "CA_params"
     mock_call.status = "ringing"
 
-    with patch("cyborg_server.routers.phone._run_warmup", new_callable=AsyncMock, return_value=True), \
-         _mock_twilio() as MockClient:
+    with _mock_twilio() as MockClient:
         mock_client = MockClient.return_value
         mock_client.calls.create.return_value = mock_call
 

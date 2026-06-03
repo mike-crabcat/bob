@@ -38,7 +38,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
         cid = channel_id or resolve_channel_id(session_key)
 
-        path = svc.write_bulletin(
+        bulletin_id = await svc.write_bulletin(
             workspace,
             channel_id=cid,
             source_type="manual",
@@ -46,7 +46,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             content=content,
             visibility=visibility,
         )
-        return json.dumps({"ok": True, "path": path, "queued": True})
+        return json.dumps({"ok": True, "bulletin_id": bulletin_id, "queued": True})
 
     @tool
     async def memory_read(
@@ -56,7 +56,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         Returns full markdown content of the entity document."""
         workspace = ctx.settings.harness.workspace_dir
 
-        entity = svc.read_entity(workspace, entity_id)
+        entity = await svc.read_entity(workspace, entity_id)
         if entity is None:
             return json.dumps({"error": f"Entity not found: {entity_id}"})
 
@@ -106,7 +106,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         Returns entity_id, display_name, and status for each."""
         workspace = ctx.settings.harness.workspace_dir
 
-        entities = svc.list_entities(workspace, entity_type)
+        entities = await svc.list_entities(workspace, entity_type)
         entries = [
             {
                 "entity_id": e.entity_id,
@@ -128,18 +128,17 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         Currently only depth=1 is supported."""
         workspace = ctx.settings.harness.workspace_dir
 
-        entity = svc.read_entity(workspace, entity_id)
+        entity = await svc.read_entity(workspace, entity_id)
         if entity is None:
             return json.dumps({"error": f"Entity not found: {entity_id}"})
 
-        # For depth 1, return direct related entities
         related: dict[str, list[dict]] = {}
         for cat, ids in entity.related_entities.items():
             if not ids:
                 continue
             cat_entries = []
-            for rid in ids[:20]:  # Cap per category
-                related_entity = svc.read_entity(workspace, rid)
+            for rid in ids[:20]:
+                related_entity = await svc.read_entity(workspace, rid)
                 if related_entity:
                     cat_entries.append({
                         "entity_id": related_entity.entity_id,

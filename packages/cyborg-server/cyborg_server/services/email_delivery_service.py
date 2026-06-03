@@ -213,7 +213,7 @@ class EmailDeliveryService(BaseService):
             session_key = thread["session_key"]
             logger.info("Dispatching send to LLM session=%s new_thread=%s", session_key, is_new_thread)
 
-            workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+            workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
             custom_agenda = CUSTOM_AGENDA_TEMPLATE.format(agenda=agenda) if is_new_thread and agenda else None
             system_parts = [p for p in (
                 workspace_prompt,

@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -349,14 +350,52 @@ async def call_status(request: Request) -> dict:
     form = await request.form()
     call_sid = form.get("CallSid", "")
     call_status = form.get("CallStatus", "")
-    logger.info("Call %s status: %s", call_sid, call_status)
+    call_duration = form.get("CallDuration", "")
+    logger.info("Call %s status: %s (duration=%s)", call_sid, call_status, call_duration)
 
-    # Clean up stored call data when call terminates
+    db = request.app.state.db
+
+    # Persist status to DB
     if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
+        if call_duration:
+            await db.execute(
+                """UPDATE phone_calls
+                   SET status = ?, completed_at = datetime('now'), duration_seconds = ?
+                   WHERE call_sid = ?""",
+                (call_status, int(call_duration), call_sid),
+            )
+        else:
+            await db.execute(
+                """UPDATE phone_calls
+                   SET status = ?, completed_at = datetime('now')
+                   WHERE call_sid = ?""",
+                (call_status, call_sid),
+            )
+        # Clean up stored call data
         call_data = _call_agendas.pop(call_sid, None)
-        if call_data and isinstance(call_data, str):
-            # Legacy format — just an agenda string
-            pass
+        if call_data and isinstance(call_data, dict):
+            # Finalize recording if transport captured audio
+            transport = call_data.get("_transport")
+            if transport and hasattr(transport, "finalize_recording"):
+                settings = request.app.state.settings
+                calls_dir = Path(settings.config_dir) / "harness" / "calls"
+                result = transport.finalize_recording(calls_dir, call_data.get("call_id", call_sid))
+                if result:
+                    rel_path, _ = result
+                    await db.execute(
+                        "UPDATE phone_calls SET recording_path = ? WHERE call_sid = ?",
+                        (str(calls_dir / rel_path), call_sid),
+                    )
+    elif call_status == "ringing":
+        await db.execute(
+            "UPDATE phone_calls SET status = 'ringing' WHERE call_sid = ?",
+            (call_sid,),
+        )
+    elif call_status == "in-progress":
+        await db.execute(
+            "UPDATE phone_calls SET status = 'active' WHERE call_sid = ?",
+            (call_sid,),
+        )
 
     return {"ok": True}
 
@@ -399,6 +438,27 @@ async def get_call(call_id: str, request: Request) -> dict:
         (call["id"],),
     )
     return {"call": dict(call), "exchanges": [dict(e) for e in exchanges]}
+
+
+@router.post("/calls/{call_id}/hangup")
+async def hangup_call(call_id: str, request: Request) -> dict:
+    """Hang up an active or ringing phone call via Twilio."""
+    db = request.app.state.db
+    call = await db.fetch_one(
+        "SELECT call_sid, status FROM phone_calls WHERE id = ? OR call_sid = ?",
+        (call_id, call_id),
+    )
+    if not call:
+        return {"error": "Call not found"}
+    if call["status"] not in ("active", "ringing"):
+        return {"error": f"Call is {call['status']}, cannot hang up"}
+
+    phone_settings = request.app.state.settings.phone
+    from twilio.rest import Client
+    client = Client(phone_settings.twilio_account_sid, phone_settings.twilio_auth_token)
+    client.calls(call["call_sid"]).update(status="completed")
+
+    return {"ok": True}
 
 
 @router.websocket("/media")
@@ -569,11 +629,9 @@ async def media_stream(websocket: WebSocket) -> None:
         # Finalize call record
         if transport and call_id:
             try:
-                result = transport.finalize_recording(
-                    websocket.app.state.settings.data_dir / "calls", call_id,
-                )
-                rec_path = result[0] if result else None
-                rec_size = result[1] if result else None
+                calls_dir = websocket.app.state.settings.config_dir / "harness" / "calls"
+                result = transport.finalize_recording(calls_dir, call_id)
+                rec_path = str(calls_dir / result[0]) if result else None
                 await db.execute(
                     """UPDATE phone_calls
                        SET status = 'completed', completed_at = datetime('now'),

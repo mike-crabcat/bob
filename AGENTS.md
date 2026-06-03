@@ -36,7 +36,7 @@ Note: There is an empty `data/cyborg.db` at the project root — this is a lefto
 
 ## Runtime paths
 
-The cyborg.db is at `/home/bob/.config/cyborg/cyborg.db`
+The cyborg.db is at `/home/bob/.local/share/cyborg/cyborg.db`
 Fetch logs for the running service using `journalctl` comand e.g. `journalctl --user -u cyborg.service --since "10 min ago"  # recent`
 The workspace directory is `/home/bob/.config/cyborg/harness`
 

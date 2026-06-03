@@ -156,14 +156,20 @@ async def _generate_session_bulletin(
         return None
 
     mem_svc = MemoryService(ctx)
-    mem_svc.write_bulletin(
+    await mem_svc.write_bulletin(
         ctx.settings.harness.workspace_dir,
         channel_id=gen_input.channel_id,
         source_type="session_transcript_range",
         source_id=session["session_key"],
-        visibility=gen_input.visibility,
-        scope=gen_input.scope,
+        session_id=data.get("session_id", session["session_key"]),
+        transcript_range_id=data.get("transcript_range_id", ""),
+        visibility=data.get("visibility", gen_input.visibility),
+        scope=data.get("scope", gen_input.scope),
         entities=data.get("entities", {}),
+        memory_types=data.get("memory_types", []),
+        confidence=data.get("confidence", "medium"),
+        requires_review=data.get("requires_review", False),
+        review_reasons=data.get("review_reasons", []),
         content=draft,
     )
     return data

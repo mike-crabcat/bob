@@ -413,7 +413,7 @@ class WhatsAppBridgeService(BaseService):
             session_key, "whatsapp",
             contact_id=contact_id, is_trusted=is_trusted,
         )
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         participants_prompt = await self._build_participants_prompt(session_key)
 
         system_content = "\n\n".join(
@@ -885,7 +885,7 @@ class WhatsAppBridgeService(BaseService):
             session_key, "whatsapp",
             contact_id=route["contact_id"] if route else None, is_trusted=is_trusted,
         )
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         participants_prompt = await self._build_participants_prompt(session_key)
 
         system_content = "\n\n".join(
@@ -1314,7 +1314,7 @@ class WhatsAppBridgeService(BaseService):
 
         # Build system prompt: workspace context + agenda + participants
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
 
         participants_prompt = await self._build_participants_prompt(session_key)
 

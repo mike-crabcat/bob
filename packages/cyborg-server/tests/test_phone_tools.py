@@ -76,8 +76,7 @@ async def test_make_phone_call_by_number(ctx: AppContext):
     mock_call.sid = "CA_tool_call"
     mock_call.status = "ringing"
 
-    with patch("cyborg_server.routers.phone._run_warmup", new_callable=AsyncMock, return_value=True), \
-         _mock_twilio() as MockClient:
+    with _mock_twilio() as MockClient:
         MockClient.return_value.calls.create.return_value = mock_call
 
         result = json.loads(await handler(agenda="Test call", phone_number="+61400222333"))
@@ -101,8 +100,7 @@ async def test_make_phone_call_by_contact_id(ctx: AppContext):
     mock_call.sid = "CA_contact_call"
     mock_call.status = "ringing"
 
-    with patch("cyborg_server.routers.phone._run_warmup", new_callable=AsyncMock, return_value=True), \
-         _mock_twilio() as MockClient:
+    with _mock_twilio() as MockClient:
         MockClient.return_value.calls.create.return_value = mock_call
 
         result = json.loads(await handler(agenda="Call Alice", contact_id="c1"))

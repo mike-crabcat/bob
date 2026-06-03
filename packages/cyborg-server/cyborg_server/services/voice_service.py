@@ -370,7 +370,7 @@ class VoiceService(BaseService):
                         lang_name = _LANGUAGE_NAMES.get(detected_lang, detected_lang)
                         voice_instructions += f"\n\nRespond in {lang_name}. Act as a language coach: suggest corrections to the user's grammar and phrasing when they make mistakes."
 
-                workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+                workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
                 messages = await build_chat_messages(
                     None, session_key,
                     db=self.db,
@@ -391,7 +391,6 @@ class VoiceService(BaseService):
                 async for chunk in dispatch.chat_stream_with_tools(
                     messages,
                     tools=tools,
-                    provider="openai",
                     model=settings.harness.default_model,
                     call_category="voice_chat",
                     session_key=session_key,

@@ -111,7 +111,7 @@ class TwilioTransport:
         self._record = record
         self._rec_start: float = 0.0
         self._rec_inbound: list[tuple[float, Any]] = []   # (timestamp, pcm_8k)
-        self._rec_outbound: list[tuple[float, Any]] = []   # (timestamp, (pcm, sr))
+        self._rec_outbound: list[tuple[float, Any, int]] = []   # (timestamp, pcm, sr)
 
     @property
     def stream_sid(self) -> str:
@@ -254,7 +254,6 @@ class TwilioTransport:
         # Add a small tail so the last chunk isn't cut off
         if self._rec_outbound:
             last_out_time = max(t for t, _, _ in self._rec_outbound)
-            # Estimate last outbound chunk duration
             last_pcm, last_sr = self._rec_outbound[-1][1], self._rec_outbound[-1][2]
             last_dur = len(last_pcm) / last_sr
             end = max(end, last_out_time + last_dur)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,10 +14,8 @@ from cyborg_server.services.memory.service import MemoryService
 @pytest.mark.asyncio
 async def test_update_entities_reconciles_name_slug_to_canonical(ctx, tmp_path):
     """A claim with subject_id contact-blair-nicol + display_name Blair Nicol
-    gets written to contact-03f3902d.md, not contact-blair-nicol.md."""
+    gets written to contact-03f3902d in the DB, not contact-blair-nicol."""
     workspace = tmp_path
-    memory_dir = workspace / "memory"
-    (memory_dir / "entities" / "contact").mkdir(parents=True)
 
     await ctx.db.execute(
         "INSERT INTO contacts (id, name, phone_number, email, created_at, updated_at) "
@@ -33,17 +30,10 @@ async def test_update_entities_reconciles_name_slug_to_canonical(ctx, tmp_path):
         ),
     )
 
-    # Pre-existing display_name index for the duplicate id
-    dup_path = memory_dir / "entities" / "contact" / "contact-blair-nicol.md"
-    dup_path.write_text(
-        "---\n"
-        "entity_id: contact-blair-nicol\n"
-        "entity_type: contact\n"
-        "display_name: Blair Nicol\n"
-        "status: active\n"
-        "---\n\n"
-        "# Blair Nicol\n",
-        encoding="utf-8",
+    # Pre-existing duplicate entity in DB
+    await ctx.db.execute(
+        "INSERT INTO memory_entities (entity_id, entity_type, display_name, status, body) "
+        "VALUES ('contact-blair-nicol', 'contact', 'Blair Nicol', 'active', '# Blair Nicol\n')",
     )
 
     claims = [
@@ -83,10 +73,12 @@ async def test_update_entities_reconciles_name_slug_to_canonical(ctx, tmp_path):
     llm.memory_model = "test"
 
     svc = MemoryService(ctx)
-    wrote = await svc._update_entities_from_claims(llm, memory_dir, claims)
+    wrote = await svc._update_entities_from_claims(llm, claims)
 
     assert wrote == 1
-    # The canonical entity should exist
-    assert (memory_dir / "entities" / "contact" / "contact-03f3902d.md").is_file()
-    # The non-canonical one should NOT
-    assert not (memory_dir / "entities" / "contact" / "contact-blair-nicol.md").is_file()
+    # The canonical entity should exist in DB (created by reconciliation)
+    canon = await ctx.db.fetch_one(
+        "SELECT * FROM memory_entities WHERE entity_id = 'contact-03f3902d'"
+    )
+    assert canon is not None
+    assert "Likes beer" in canon["body"]

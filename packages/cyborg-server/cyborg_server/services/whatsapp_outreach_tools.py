@@ -334,7 +334,7 @@ def make_outreach_reply_tools(
             origin_session_key, "whatsapp",
         )
 
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=db)
         system_content = "\n\n".join(
             p for p in (workspace_prompt, origin_agenda) if p
         )

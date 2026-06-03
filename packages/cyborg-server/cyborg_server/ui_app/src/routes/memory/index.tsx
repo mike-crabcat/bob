@@ -35,10 +35,8 @@ interface Bulletin {
   slug: string;
   source_session: string;
   source_type: string;
-  time_window: string;
+  channel_id: string;
   participants: string;
-  contact_ids: string;
-  intended_category: string;
   content: string;
   created_at: number;
 }
@@ -114,27 +112,33 @@ function ContentViewer({ path, onClose }: { path: string; onClose: () => void })
   );
 }
 
-function BulletinCard({ b, onOpen }: { b: Bulletin; onOpen: (path: string) => void }) {
-  const firstLine = b.content.split("\n")[0].replace(/^-\s*/, "");
-  const bulletinPath = `memory/core/bulletins/${b.slug}.md`;
+function BulletinCard({ b }: { b: Bulletin }) {
+  const [expanded, setExpanded] = useState(false);
+  const firstLine = b.content.split("\n")[0].replace(/^#\s*/, "").replace(/^-\s*/, "");
   return (
-    <div className="flex items-start gap-2 px-3 py-2 border-b border-border/50 hover:bg-surface/30 transition-colors">
-      <span className="text-[8px] text-warning/80 bg-warning/10 px-1 rounded shrink-0 mt-0.5">queued</span>
-      {b.intended_category && (
-        <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded shrink-0 mt-0.5">
-          → {b.intended_category}
-        </span>
-      )}
+    <div className="border-b border-border/50">
       <button
-        onClick={() => onOpen(bulletinPath)}
-        className="flex flex-col min-w-0 flex-1 text-left"
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-start gap-2 px-3 py-2 hover:bg-surface/30 transition-colors text-left"
       >
-        <span className="text-[11px] text-text truncate">{firstLine}</span>
-        {b.participants && (
-          <span className="text-[9px] text-muted/60">{b.participants}</span>
-        )}
+        <span className="text-[8px] text-warning/80 bg-warning/10 px-1 rounded shrink-0 mt-0.5">queued</span>
+        <div className="flex flex-col min-w-0 flex-1">
+          <span className="text-[11px] text-text truncate">{firstLine || b.slug}</span>
+          {b.participants && (
+            <span className="text-[9px] text-muted/60">{b.participants}</span>
+          )}
+        </div>
+        <span className="text-[9px] text-muted/50 shrink-0 mt-0.5">{relativeTimeEpoch(b.created_at)}</span>
       </button>
-      <span className="text-[9px] text-muted/50 shrink-0 mt-0.5">{relativeTimeEpoch(b.created_at)}</span>
+      {expanded && (
+        <div className="px-3 pb-2">
+          <div className="flex items-center gap-1.5 mb-1">
+            <span className="text-[8px] text-muted/50 font-mono">{b.slug}</span>
+            <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{b.source_type}</span>
+          </div>
+          <pre className="text-[10px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed max-h-48 overflow-y-auto">{b.content}</pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -502,7 +506,7 @@ function MemoryPage() {
             )}
           </div>
           {bulletins.map((b) => (
-            <BulletinCard key={b.slug} b={b} onOpen={setOpenPath} />
+            <BulletinCard key={b.slug} b={b} />
           ))}
         </div>
       )}

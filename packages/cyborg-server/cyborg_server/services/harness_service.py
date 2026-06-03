@@ -32,7 +32,7 @@ class HarnessService(BaseService):
         settings = self._get_settings()
         resolved_model = model or settings.harness.default_model
 
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         messages = await build_chat_messages(
             message, session_key,
             db=self.db,
@@ -74,7 +74,7 @@ class HarnessService(BaseService):
         settings = self._get_settings()
         resolved_model = model or settings.harness.default_model
 
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         messages = await build_chat_messages(
             message, session_key,
             db=self.db if session_key else None,

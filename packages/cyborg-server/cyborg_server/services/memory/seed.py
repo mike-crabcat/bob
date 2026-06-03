@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -118,16 +119,16 @@ async def seed_from_history(
         if not messages:
             continue
 
-        # Build transcript text
-        transcript_parts = []
+        # Build transcript lines (keep parallel with messages for timestamps)
+        transcript_parts: list[str] = []
+        transcript_msg_indices: list[int] = []
         participants_set: set[str] = set()
 
-        for msg in messages:
+        for msg_idx, msg in enumerate(messages):
             content = (msg["content"] or "").strip()
             if not content:
                 continue
 
-            # Add sender name for group chats
             sender = msg.get("sender_id", "")
             if sender:
                 participants_set.add(sender)
@@ -136,56 +137,66 @@ async def seed_from_history(
             timestamp = msg.get("created_at", "")
 
             if sender and role == "user":
-                # Try to resolve sender name
                 sender_name = known_contacts.get(canonical_contact_id(sender), sender)
                 transcript_parts.append(f"[{timestamp}] [{sender_name}]: {content}")
             else:
                 transcript_parts.append(f"[{timestamp}] [assistant]: {content}")
+            transcript_msg_indices.append(msg_idx)
 
-        transcript_text = "\n".join(transcript_parts)
-
-        # Skip if transcript is too short
-        if len(transcript_text.strip()) < 50:
+        if not transcript_parts:
             continue
 
-        # Split long transcripts into chunks instead of truncating
-        max_chunk_len = 8000
-        transcript_chunks: list[str] = []
-        if len(transcript_text) <= max_chunk_len:
-            transcript_chunks.append(transcript_text)
-        else:
-            lines = transcript_parts
-            chunk = ""
-            for line in lines:
-                if chunk and len(chunk) + len(line) + 1 > max_chunk_len:
-                    transcript_chunks.append(chunk)
-                    chunk = line
-                else:
-                    chunk = (chunk + "\n" + line) if chunk else line
-            if chunk:
-                transcript_chunks.append(chunk)
+        # Split by idle gaps (>15 min between consecutive messages)
+        idle_threshold = 15 * 60  # seconds
+        segments: list[list[str]] = []
+        seg_indices: list[list[int]] = []
+        current_seg: list[str] = [transcript_parts[0]]
+        current_idx: list[int] = [transcript_msg_indices[0]]
 
-        # Build generator input for each chunk
-        first_time = session["first_message"]
-        last_time = session["last_message"]
+        for j in range(1, len(transcript_parts)):
+            prev_t = messages[transcript_msg_indices[j - 1]]["created_at"]
+            curr_t = messages[transcript_msg_indices[j]]["created_at"]
+            try:
+                gap = (datetime.fromisoformat(curr_t) - datetime.fromisoformat(prev_t)).total_seconds()
+            except (ValueError, TypeError):
+                gap = 0
+            if gap > idle_threshold and current_seg:
+                segments.append(current_seg)
+                seg_indices.append(current_idx)
+                current_seg = [transcript_parts[j]]
+                current_idx = [transcript_msg_indices[j]]
+            else:
+                current_seg.append(transcript_parts[j])
+                current_idx.append(transcript_msg_indices[j])
+        if current_seg:
+            segments.append(current_seg)
+            seg_indices.append(current_idx)
+
         contact_ids = list(participants_set)
 
-        for chunk_idx, chunk_text in enumerate(transcript_chunks):
-            chunk_label = f"chunk-{chunk_idx + 1}" if len(transcript_chunks) > 1 else ""
+        for seg_idx, (seg_parts, seg_msg_indices) in enumerate(zip(segments, seg_indices)):
+            seg_label = f"segment-{seg_idx + 1}" if len(segments) > 1 else ""
+            seg_text = "\n".join(seg_parts)
+
+            if len(seg_text.strip()) < 50:
+                continue
+
+            seg_start = messages[seg_msg_indices[0]]["created_at"]
+            seg_end = messages[seg_msg_indices[-1]]["created_at"]
 
             if dry_run:
                 logger.info(
-                    "  Would generate bulletin for %s%s (%d chars transcript)",
-                    session_key, f" [{chunk_label}]" if chunk_label else "",
-                    len(chunk_text),
+                    "  Would generate bulletin for %s%s (%d messages, %d chars)",
+                    session_key, f" [{seg_label}]" if seg_label else "",
+                    len(seg_parts), len(seg_text),
                 )
                 continue
 
             gen_input = build_generator_input(
                 session_key=session_key,
-                transcript_start=first_time,
-                transcript_end=last_time,
-                transcript_text=chunk_text,
+                transcript_start=seg_start,
+                transcript_end=seg_end,
+                transcript_text=seg_text,
                 contact_ids=contact_ids,
                 known_entities=known_entities,
             )
@@ -198,7 +209,7 @@ async def seed_from_history(
                 if not is_valid:
                     logger.warning(
                         "  Invalid bulletin response for %s%s: %s",
-                        session_key, f" [{chunk_label}]" if chunk_label else "",
+                        session_key, f" [{seg_label}]" if seg_label else "",
                         data.get("error", ""),
                     )
                     # Try to salvage: check if response contains useful content despite format issues
@@ -220,7 +231,7 @@ async def seed_from_history(
                     bulletins_skipped += 1
                     logger.debug(
                         "  No bulletin for %s%s: %s",
-                        session_key, f" [{chunk_label}]" if chunk_label else "",
+                        session_key, f" [{seg_label}]" if seg_label else "",
                         data.get("reason", ""),
                     )
                     continue
@@ -233,18 +244,24 @@ async def seed_from_history(
 
                 # Write the bulletin
                 channel_id = resolve_channel_id(session_key)
-                path = svc.write_bulletin(
+                bulletin_id = await svc.write_bulletin(
                     workspace_dir,
                     channel_id=channel_id,
                     source_type="seed",
                     source_id=session_key,
+                    session_id=data.get("session_id", session_key),
+                    transcript_range_id=data.get("transcript_range_id", ""),
                     content=content,
                     visibility=data.get("visibility", "private"),
                     scope=data.get("scope", []),
                     entities=data.get("entities", {}),
+                    memory_types=data.get("memory_types", []),
+                    confidence=data.get("confidence", "medium"),
+                    requires_review=data.get("requires_review", False),
+                    review_reasons=data.get("review_reasons", []),
                 )
                 bulletins_generated += 1
-                logger.info("  Bulletin written: %s", path)
+                logger.info("  Bulletin written: %s", bulletin_id)
 
             except Exception as exc:
                 logger.exception("Error generating bulletin for %s", session_key)

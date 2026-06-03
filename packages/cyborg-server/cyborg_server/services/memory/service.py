@@ -1,59 +1,75 @@
-"""MemoryService v6 — channel-centric memory system."""
+"""MemoryService v6 — SQLite-backed channel-centric memory system."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from cyborg_server.services.base import BaseService, utcnow
 from cyborg_server.services.memory.models import (
     ENTITY_CATEGORIES,
-    ENTITY_TYPES,
     Bulletin,
     Claim,
     EntityDocument,
     EntityRef,
-    QueryContext,
     parse_frontmatter,
     serialize_frontmatter,
 )
-from cyborg_server.services.memory.channels import (
-    derive_channel_type,
-    resolve_channel_id,
-)
 from cyborg_server.services.memory.claim_service import (
     extract_claims_from_bulletin,
-    get_active_claims,
-    get_all_claims,
-    read_claim,
     write_claim,
 )
 from cyborg_server.services.memory.entity_resolver import (
     canonical_contact_id,
-    load_aliases,
     normalize_entity_id,
-    resolve_contact,
 )
-from cyborg_server.services.memory.index_service import (
-    build_memory_index_text,
-    rebuild_all as rebuild_indexes,
-)
-from cyborg_server.services.memory.prompts import (
-    ENTITY_UPDATE_PROMPT,
-    MEMORY_INDEX_HEADER,
-)
+from cyborg_server.services.memory.prompts import ENTITY_UPDATE_PROMPT
 
 logger = logging.getLogger(__name__)
 
+_RELATED_ENTITIES_RE = re.compile(
+    r"## Related Entities\n+(.*?)(?=\n## |\Z)", re.DOTALL
+)
+
+
+def _parse_related_from_body(body: str) -> dict[str, list[str]]:
+    """Extract related entity IDs from the Related Entities section in body text."""
+    m = _RELATED_ENTITIES_RE.search(body)
+    if not m:
+        return {}
+    section = m.group(1)
+    result: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        line = line.strip()
+        if not line or line.endswith(": []") or line.endswith(":"):
+            continue
+        cat, _, rest = line.partition(":")
+        cat = cat.strip()
+        if not rest.strip():
+            continue
+        # Parse bracket list: [id1, id2] or bare id
+        val = rest.strip()
+        if val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1].strip()
+            if inner:
+                ids = [x.strip().strip("\"'") for x in inner.split(",") if x.strip()]
+            else:
+                ids = []
+        else:
+            ids = [val]
+        if ids:
+            result[cat] = ids
+    return result
+
 
 class MemoryService(BaseService):
-    """Reads and writes v6 memory: bulletins, claims, entities."""
+    """Reads and writes v6 memory via SQLite: bulletins, claims, entities."""
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
@@ -66,62 +82,84 @@ class MemoryService(BaseService):
 
     @staticmethod
     def ensure_memory_structure(workspace_dir: Path) -> None:
-        """Create v6 memory directory structure."""
-        memory_dir = MemoryService._memory_dir(workspace_dir)
-        if not memory_dir.is_dir():
-            memory_dir.mkdir(parents=True, exist_ok=True)
-
-        subdirs = (
-            ["bulletins", "claims", "aliases", "indexes", "summaries", "policies"]
-            + [f"entities/{t}" for t in ENTITY_TYPES]
-        )
-        for sub in subdirs:
-            (memory_dir / sub).mkdir(parents=True, exist_ok=True)
+        """No-op — tables are created by schema migrations."""
 
     # ── Bulletins ─────────────────────────────────────────────────
 
-    def write_bulletin(
+    async def write_bulletin(
         self,
         workspace_dir: Path,
         *,
         channel_id: str,
         source_type: str,
         source_id: str = "",
+        session_id: str = "",
+        transcript_range_id: str = "",
         visibility: str = "private",
         scope: list[str] | None = None,
         entities: dict[str, list] | None = None,
+        memory_types: list[str] | None = None,
+        confidence: str = "medium",
+        requires_review: bool = False,
+        review_reasons: list[str] | None = None,
         content: str,
     ) -> str:
-        """Write an immutable bulletin to the date-organized store."""
-        memory_dir = self._memory_dir(workspace_dir)
+        """Write an immutable bulletin to the database."""
         now = utcnow()
-
-        # Generate bulletin ID
         date_str = now.strftime("%Y-%m-%d")
-        slug = f"bulletin-{date_str}-{uuid.uuid4().hex[:6]}"
+        bulletin_id = f"bulletin-{date_str}-{uuid.uuid4().hex[:6]}"
 
-        # Date-organized path
-        month_dir = memory_dir / "bulletins" / now.strftime("%Y") / now.strftime("%m")
-        month_dir.mkdir(parents=True, exist_ok=True)
+        await self.db.execute(
+            "INSERT INTO memory_bulletins "
+            "(id, created_at, channel_id, source_type, source_id, session_id, "
+            "transcript_range_id, visibility, scope, memory_types, confidence, "
+            "requires_review, review_reasons, content) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                bulletin_id,
+                now.isoformat(),
+                channel_id,
+                source_type,
+                source_id,
+                session_id,
+                transcript_range_id,
+                visibility,
+                json.dumps(scope or []),
+                json.dumps(memory_types or []),
+                confidence,
+                1 if requires_review else 0,
+                json.dumps(review_reasons or []),
+                content,
+            ),
+        )
 
-        fm = {
-            "id": slug,
-            "created_at": now.isoformat(),
-            "channel_id": channel_id,
-            "source_type": source_type,
-            "source_id": source_id,
-            "visibility": visibility,
-            "scope": scope or [],
-            "entities": entities or {},
-        }
+        # Insert entity refs
+        if entities:
+            params = []
+            for cat, refs in entities.items():
+                for ref in refs:
+                    if isinstance(ref, str):
+                        params.append((bulletin_id, cat, ref, None, "known", None))
+                    elif isinstance(ref, dict):
+                        params.append((
+                            bulletin_id, cat,
+                            ref.get("id", str(ref)),
+                            ref.get("display_name"),
+                            ref.get("resolution_status", "known"),
+                            ref.get("role"),
+                        ))
+            if params:
+                await self.db.execute_many(
+                    "INSERT OR IGNORE INTO memory_bulletin_entities "
+                    "(bulletin_id, category, entity_id, display_name, resolution_status, role) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    params,
+                )
 
-        body = f"# Update\n\n{content}"
-        path = month_dir / f"{slug}.md"
-        path.write_text(serialize_frontmatter(fm, body), encoding="utf-8")
-        logger.info("Bulletin written: %s", slug)
-        return str(path.relative_to(workspace_dir))
+        logger.info("Bulletin written: %s", bulletin_id)
+        return bulletin_id
 
-    def read_bulletins(
+    async def read_bulletins(
         self,
         workspace_dir: Path,
         *,
@@ -129,64 +167,72 @@ class MemoryService(BaseService):
         from_date: str | None = None,
         skip_digested: bool = False,
     ) -> list[Bulletin]:
-        """Read bulletins from the date-organized store."""
-        memory_dir = self._memory_dir(workspace_dir)
-        bulletins_dir = memory_dir / "bulletins"
-        if not bulletins_dir.is_dir():
+        """Read bulletins from the database."""
+        query = "SELECT * FROM memory_bulletins"
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if skip_digested:
+            conditions.append("digested = 0")
+        if from_date:
+            conditions.append("created_at >= ?")
+            params.append(from_date)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = await self.db.fetch_all(query, tuple(params))
+        if not rows:
             return []
 
+        bulletin_ids = [r["id"] for r in rows]
+        # Fetch all entity refs for these bulletins
+        placeholders = ",".join("?" * len(bulletin_ids))
+        ref_rows = await self.db.fetch_all(
+            f"SELECT * FROM memory_bulletin_entities WHERE bulletin_id IN ({placeholders})",
+            tuple(bulletin_ids),
+        )
+        refs_by_id: dict[str, list[dict]] = defaultdict(list)
+        for r in ref_rows:
+            refs_by_id[r["bulletin_id"]].append(r)
+
         results: list[Bulletin] = []
-        files = sorted(bulletins_dir.rglob("*.md"), reverse=True)
-
-        for md_file in files:
-            if len(results) >= limit:
-                break
-            fm, body = parse_frontmatter(md_file.read_text(encoding="utf-8"))
-            if not fm or not fm.get("id"):
-                continue
-            if skip_digested and fm.get("digested"):
-                continue
-            # Extract content (strip # Update header)
-            content = body.strip()
-            if content.startswith("# Update"):
-                content = content[len("# Update"):].strip()
-
-            # Parse entity refs
-            raw_entities = fm.get("entities", {})
-            entities: dict[str, list[EntityRef]] = {}
-            for cat in ENTITY_CATEGORIES:
-                raw_list = raw_entities.get(cat, [])
-                if isinstance(raw_list, list):
-                    parsed: list[EntityRef] = []
-                    for r in raw_list:
-                        if isinstance(r, str):
-                            parsed.append(EntityRef(id=r))
-                        elif isinstance(r, dict):
-                            parsed.append(EntityRef(
-                                id=r.get("id", str(r)),
-                                display_name=r.get("display_name"),
-                                resolution_status=r.get("resolution_status", "known"),
-                                role=r.get("role"),
-                            ))
-                    entities[cat] = parsed
-
+        for row in rows:
+            entity_refs = refs_by_id.get(row["id"], [])
+            entities: dict[str, list[EntityRef]] = {cat: [] for cat in ENTITY_CATEGORIES}
+            for ref in entity_refs:
+                entities.setdefault(ref["category"], []).append(EntityRef(
+                    id=ref["entity_id"],
+                    display_name=ref["display_name"],
+                    resolution_status=ref["resolution_status"] or "known",
+                    role=ref["role"],
+                ))
             results.append(Bulletin(
-                id=fm["id"],
-                created_at=datetime.fromisoformat(fm["created_at"]) if "created_at" in fm else datetime.now(),
-                channel_id=fm.get("channel_id", ""),
-                source_type=fm.get("source_type", ""),
-                source_id=fm.get("source_id", ""),
-                visibility=fm.get("visibility", "private"),
-                scope=fm.get("scope", []),
+                id=row["id"],
+                created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
+                channel_id=row["channel_id"] or "",
+                source_type=row["source_type"] or "",
+                source_id=row["source_id"] or "",
+                visibility=row["visibility"] or "channel",
+                scope=json.loads(row["scope"]) if row["scope"] else [],
                 entities=entities,
-                content=content,
+                content=row["content"] or "",
             ))
-
         return results
 
-    def read_bulletin(self, workspace_dir: Path, bulletin_id: str) -> Bulletin | None:
+    async def read_bulletin(self, workspace_dir: Path, bulletin_id: str) -> Bulletin | None:
         """Read a specific bulletin by ID."""
-        bulletins = self.read_bulletins(workspace_dir, limit=1000)
+        bulletins = await self.read_bulletins(workspace_dir, limit=1)
+        row = await self.db.fetch_one(
+            "SELECT * FROM memory_bulletins WHERE id = ?",
+            (bulletin_id,),
+        )
+        if not row:
+            return None
+        # Reuse read_bulletins logic for a single ID
+        bulletins = await self.read_bulletins(workspace_dir, limit=1000)
         for b in bulletins:
             if b.id == bulletin_id:
                 return b
@@ -194,75 +240,114 @@ class MemoryService(BaseService):
 
     # ── Entities ──────────────────────────────────────────────────
 
-    def write_entity(self, workspace_dir: Path, entity: EntityDocument) -> str:
-        """Write an entity document to disk."""
-        memory_dir = self._memory_dir(workspace_dir)
-        entity_dir = memory_dir / "entities" / entity.entity_type
-        entity_dir.mkdir(parents=True, exist_ok=True)
+    async def write_entity(self, workspace_dir: Path, entity: EntityDocument) -> str:
+        """Write an entity document to the database."""
+        now = utcnow()
+        status = entity.status if entity.status in ("active", "archived") else "active"
 
-        fm = {
-            "entity_id": entity.entity_id,
-            "entity_type": entity.entity_type,
-            "display_name": entity.display_name,
-            "status": entity.status,
-            **entity.extra_frontmatter,
-        }
+        await self.db.execute(
+            "INSERT OR REPLACE INTO memory_entities "
+            "(entity_id, entity_type, display_name, status, extra_frontmatter, "
+            "body, source_bulletins, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entity.entity_id,
+                entity.entity_type,
+                entity.display_name,
+                status,
+                json.dumps(entity.extra_frontmatter),
+                entity.body,
+                json.dumps(entity.source_bulletins),
+                now.isoformat(),
+            ),
+        )
 
-        path = entity_dir / f"{entity.entity_id}.md"
-        path.write_text(serialize_frontmatter(fm, entity.body), encoding="utf-8")
+        # Update relations — parse from body if not in related_entities
+        relations = entity.related_entities
+        if not any(relations.values()):
+            relations = _parse_related_from_body(entity.body)
+
+        await self.db.execute(
+            "DELETE FROM memory_entity_relations WHERE source_entity_id = ?",
+            (entity.entity_id,),
+        )
+        if relations:
+            params = []
+            for cat, ids in relations.items():
+                for target_id in ids:
+                    if target_id:
+                        params.append((entity.entity_id, cat, target_id))
+            if params:
+                await self.db.execute_many(
+                    "INSERT OR IGNORE INTO memory_entity_relations "
+                    "(source_entity_id, category, target_entity_id) VALUES (?, ?, ?)",
+                    params,
+                )
+
+        # Update aliases
+        await self.db.execute(
+            "DELETE FROM memory_aliases WHERE entity_id = ?",
+            (entity.entity_id,),
+        )
+        alias_params = []
+        if entity.display_name:
+            alias_params.append((entity.display_name, entity.entity_id))
+            alias_params.append((entity.display_name.lower(), entity.entity_id))
+        if alias_params:
+            await self.db.execute_many(
+                "INSERT OR IGNORE INTO memory_aliases (alias, entity_id) VALUES (?, ?)",
+                alias_params,
+            )
+
         logger.info("Entity written: %s/%s", entity.entity_type, entity.entity_id)
-        return str(path.relative_to(workspace_dir))
+        return entity.entity_id
 
-    def read_entity(self, workspace_dir: Path, entity_id: str) -> EntityDocument | None:
+    async def read_entity(self, workspace_dir: Path, entity_id: str) -> EntityDocument | None:
         """Read an entity document by ID."""
-        memory_dir = self._memory_dir(workspace_dir)
-        entities_dir = memory_dir / "entities"
-        if not entities_dir.is_dir():
+        row = await self.db.fetch_one(
+            "SELECT * FROM memory_entities WHERE entity_id = ?",
+            (entity_id,),
+        )
+        if not row:
             return None
 
-        for type_dir in entities_dir.iterdir():
-            if not type_dir.is_dir():
-                continue
-            path = type_dir / f"{entity_id}.md"
-            if path.is_file():
-                text = path.read_text(encoding="utf-8")
-                fm, body = parse_frontmatter(text)
-                return EntityDocument(
-                    entity_id=fm.get("entity_id", entity_id),
-                    entity_type=fm.get("entity_type", type_dir.name),
-                    display_name=fm.get("display_name", ""),
-                    status=fm.get("status", "active"),
-                    extra_frontmatter={
-                        k: v for k, v in fm.items()
-                        if k not in {"entity_id", "entity_type", "display_name", "status"}
-                    },
-                    body=body,
-                    source_bulletins=[],  # Parsed from body if needed
-                )
-        return None
+        # Load relations
+        rel_rows = await self.db.fetch_all(
+            "SELECT category, target_entity_id FROM memory_entity_relations "
+            "WHERE source_entity_id = ?",
+            (entity_id,),
+        )
+        related: dict[str, list[str]] = {cat: [] for cat in ENTITY_CATEGORIES}
+        for r in rel_rows:
+            related.setdefault(r["category"], []).append(r["target_entity_id"])
 
-    def list_entities(self, workspace_dir: Path, entity_type: str) -> list[EntityDocument]:
+        return EntityDocument(
+            entity_id=row["entity_id"],
+            entity_type=row["entity_type"],
+            display_name=row["display_name"] or "",
+            status=row["status"] or "active",
+            extra_frontmatter=json.loads(row["extra_frontmatter"]) if row["extra_frontmatter"] else {},
+            body=row["body"] or "",
+            related_entities=related,
+            source_bulletins=json.loads(row["source_bulletins"]) if row["source_bulletins"] else [],
+        )
+
+    async def list_entities(self, workspace_dir: Path, entity_type: str) -> list[EntityDocument]:
         """List all entities of a given type."""
-        memory_dir = self._memory_dir(workspace_dir)
-        type_dir = memory_dir / "entities" / entity_type
-        if not type_dir.is_dir():
-            return []
-
+        rows = await self.db.fetch_all(
+            "SELECT * FROM memory_entities WHERE entity_type = ? ORDER BY entity_id",
+            (entity_type,),
+        )
         results = []
-        for md_file in sorted(type_dir.glob("*.md")):
-            text = md_file.read_text(encoding="utf-8")
-            fm, body = parse_frontmatter(text)
+        for row in rows:
             results.append(EntityDocument(
-                entity_id=fm.get("entity_id", md_file.stem),
+                entity_id=row["entity_id"],
                 entity_type=entity_type,
-                display_name=fm.get("display_name", ""),
-                status=fm.get("status", "active"),
-                extra_frontmatter={
-                    k: v for k, v in fm.items()
-                    if k not in {"entity_id", "entity_type", "display_name", "status"}
-                },
-                body=body,
-                source_bulletins=[],
+                display_name=row["display_name"] or "",
+                status=row["status"] or "active",
+                extra_frontmatter=json.loads(row["extra_frontmatter"]) if row["extra_frontmatter"] else {},
+                body=row["body"] or "",
+                source_bulletins=json.loads(row["source_bulletins"]) if row["source_bulletins"] else [],
             ))
         return results
 
@@ -270,34 +355,26 @@ class MemoryService(BaseService):
 
     async def process_bulletin(self, workspace_dir: Path, bulletin: Bulletin) -> dict[str, Any]:
         """Process a single bulletin: extract claims, update entities."""
-        memory_dir = self._memory_dir(workspace_dir)
-
-        # Step 1: Extract claims
         from cyborg_server.services.llm_dispatch import LLMDispatchService
         llm = LLMDispatchService(self.ctx)
 
         claims = await extract_claims_from_bulletin(llm, bulletin)
         wrote_claims = 0
         for claim in claims:
-            write_claim(memory_dir, claim)
+            await write_claim(self.db, claim)
             wrote_claims += 1
 
-        # Step 2: Update entity documents from claims
-        entity_ops = await self._update_entities_from_claims(llm, memory_dir, claims)
-
-        # Step 3: Rebuild indexes
-        index_counts = rebuild_indexes(memory_dir)
+        entity_ops = await self._update_entities_from_claims(llm, claims)
 
         return {
             "bulletin_id": bulletin.id,
             "claims_extracted": wrote_claims,
             "entity_ops": entity_ops,
-            "indexes": index_counts,
         }
 
     async def run_dream(self, workspace_dir: Path) -> dict[str, Any]:
         """Process all pending (undigested) bulletins through the dream pipeline."""
-        bulletins = self.read_bulletins(workspace_dir, skip_digested=True)
+        bulletins = await self.read_bulletins(workspace_dir, skip_digested=True)
         if not bulletins:
             return {"status": "empty", "bulletins_processed": 0}
 
@@ -319,8 +396,7 @@ class MemoryService(BaseService):
                 "entity_ops": result.get("entity_ops", 0),
                 "content_preview": (bulletin.content or "")[:120],
             })
-            # Mark bulletin as digested
-            self._mark_digested(workspace_dir, bulletin)
+            await self._mark_digested(bulletin)
 
         elapsed = datetime.now().timestamp() - start
         return {
@@ -334,19 +410,12 @@ class MemoryService(BaseService):
         }
 
     async def _update_entities_from_claims(
-        self, llm: Any, memory_dir: Path, claims: list[Claim]
+        self, llm: Any, claims: list[Claim]
     ) -> int:
-        """Use LLM to update entity documents from claims — one call per entity.
-
-        Before grouping, claims with non-canonical contact subject_ids are
-        reconciled against the contacts DB so that contact-blair-nicol,
-        unresolved-contact-blair, etc. all merge into the canonical
-        contact-{hex8} entity when a DB match exists.
-        """
+        """Use LLM to update entity documents from claims — one call per entity."""
         if not claims:
             return 0
 
-        from collections import defaultdict
         from cyborg_server.services.memory.contact_directory import ContactDirectory
         from cyborg_server.services.memory.reconcile import reconcile_contact_id
 
@@ -355,9 +424,7 @@ class MemoryService(BaseService):
             directory = await ContactDirectory.load(self.ctx.db)
         self._contact_dir_cache = directory
 
-        # Pre-compute display_name lookup from existing entity files so we can
-        # reconcile even when the claim doesn't carry a display_name itself.
-        existing_name_map = self._index_contact_display_names(memory_dir)
+        existing_name_map = await self._index_contact_display_names()
 
         claims_by_entity: dict[str, list[Claim]] = defaultdict(list)
         for c in claims:
@@ -377,40 +444,30 @@ class MemoryService(BaseService):
                     c.object_id = obj_canonical
             claims_by_entity[canonical].append(c)
 
-        # Pre-compute shared context
-        all_existing_ids = self._list_all_entity_ids(memory_dir)
+        all_existing_ids = await self._list_all_entity_ids()
         contact_ids = {eid for eid in claims_by_entity if eid.startswith("contact-")}
         contact_name_map = await self._lookup_contact_names(contact_ids) if contact_ids else {}
 
         wrote = 0
         for entity_id, entity_claims in claims_by_entity.items():
             wrote += await self._update_single_entity(
-                llm, memory_dir, entity_id, entity_claims,
+                llm, entity_id, entity_claims,
                 all_existing_ids=all_existing_ids,
                 contact_name_map=contact_name_map,
             )
 
         return wrote
 
-    def _index_contact_display_names(self, memory_dir: Path) -> dict[str, str]:
-        """Return {entity_id: display_name} for every contact entity on disk."""
-        contact_dir = memory_dir / "entities" / "contact"
-        if not contact_dir.is_dir():
-            return {}
-        out: dict[str, str] = {}
-        for md_file in contact_dir.glob("*.md"):
-            try:
-                fm, _ = parse_frontmatter(md_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if fm.get("display_name"):
-                out[md_file.stem] = fm["display_name"]
-        return out
+    async def _index_contact_display_names(self) -> dict[str, str]:
+        """Return {entity_id: display_name} for every contact entity."""
+        rows = await self.db.fetch_all(
+            "SELECT entity_id, display_name FROM memory_entities WHERE entity_type = 'contact'"
+        )
+        return {r["entity_id"]: r["display_name"] for r in rows if r["display_name"]}
 
     async def _update_single_entity(
         self,
         llm: Any,
-        memory_dir: Path,
         entity_id: str,
         claims: list[Claim],
         *,
@@ -418,7 +475,6 @@ class MemoryService(BaseService):
         contact_name_map: dict[str, str],
     ) -> int:
         """Update a single entity document from its claims."""
-        # Known IDs hint
         known_ids_hint = ""
         if entity_id in all_existing_ids:
             known_ids_hint = (
@@ -426,7 +482,6 @@ class MemoryService(BaseService):
                 f"- {entity_id}"
             )
 
-        # Build claims summary with source bulletin IDs
         claims_lines = []
         source_bids: set[str] = set()
         for c in claims:
@@ -435,9 +490,8 @@ class MemoryService(BaseService):
             claims_lines.append(f"- [{c.type}] {c.subject_id} {c.predicate} {obj}  (from: {bids})")
             source_bids.update(c.source_bulletins or [])
 
-        # Build existing entity doc context
         existing_lines = []
-        entity_raw = self._read_entity_raw(memory_dir, entity_id)
+        entity_raw = await self._read_entity_raw(entity_id)
         if entity_raw:
             existing_lines.append(f"[{entity_id}]\n{entity_raw[:500]}")
 
@@ -446,14 +500,12 @@ class MemoryService(BaseService):
             user_prompt += "\n\n## EXISTING ENTITIES\n\n" + "\n\n".join(existing_lines)
         user_prompt += known_ids_hint
 
-        # Source bulletin IDs
         if source_bids:
             user_prompt += "\n\n## SOURCE BULLETIN IDS\n\n"
             user_prompt += "Use these exact IDs in Source Bulletins sections. Do not invent bulletin IDs:\n"
             for bid in sorted(source_bids):
                 user_prompt += f"- {bid}\n"
 
-        # Contact name map
         if entity_id in contact_name_map:
             user_prompt += "\n\n## CONTACT NAME MAP\n\n"
             user_prompt += "Use these display names for the corresponding contact IDs:\n"
@@ -490,124 +542,93 @@ class MemoryService(BaseService):
             if action in ("write_entity", "create", "update"):
                 content = op.get("content", "")
                 if content:
-                    try:
-                        fm, body = parse_frontmatter(content)
-                    except Exception:
-                        logger.warning("Entity update: failed to parse frontmatter from LLM output")
-                        fm = {}
-                    if fm:
-                        eid = fm.get("entity_id", op.get("entity_id", ""))
-                        etype = fm.get("entity_type", op.get("entity_type", ""))
-                        if eid and etype:
-                            normalized = normalize_entity_id(eid, etype)
-                            if normalized != eid:
-                                fm["entity_id"] = normalized
-                                content = serialize_frontmatter(fm, body)
-                                old_path = memory_dir / "entities" / etype / f"{eid}.md"
-                                if old_path.is_file():
-                                    old_path.unlink()
-                            eid = normalized
-                            # If this is a contact and we have a canonical
-                            # entity_id from reconciliation that differs,
-                            # override the LLM's choice to avoid creating
-                            # name-slug / unresolved- duplicates.
-                            if (
-                                etype == "contact"
-                                and entity_id
-                                and entity_id != eid
-                                and entity_id.startswith("contact-")
-                            ):
-                                old_path = memory_dir / "entities" / etype / f"{eid}.md"
-                                fm["entity_id"] = entity_id
-                                content = serialize_frontmatter(fm, body)
-                                if old_path.is_file():
-                                    old_path.unlink()
-                                eid = entity_id
-                            # Enrich with contact_id/email/phone if canonical
-                            eid = self._enrich_contact_frontmatter_inplace(
-                                memory_dir, etype, eid, fm, body
-                            )
-                            entities_dir = memory_dir / "entities" / etype
-                            entities_dir.mkdir(parents=True, exist_ok=True)
-                            path = entities_dir / f"{eid}.md"
-                            path.write_text(content, encoding="utf-8")
-                            wrote += 1
-                    else:
-                        entity = EntityDocument(
-                            entity_id=op.get("entity_id", ""),
-                            entity_type=op.get("entity_type", ""),
-                            display_name=op.get("display_name", ""),
-                            status=op.get("status", "active"),
-                            extra_frontmatter=op.get("extra_frontmatter", {}),
-                            body=op.get("body", content),
-                            related_entities=op.get("related_entities", {}),
-                            source_bulletins=op.get("source_bulletins", []),
-                        )
-                        if entity.entity_id and entity.entity_type:
-                            entity.entity_id = normalize_entity_id(entity.entity_id, entity.entity_type)
-                            entities_dir = memory_dir / "entities" / entity.entity_type
-                            entities_dir.mkdir(parents=True, exist_ok=True)
-                            path = entities_dir / f"{entity.entity_id}.md"
-                            fm_out = {
-                                "entity_id": entity.entity_id,
-                                "entity_type": entity.entity_type,
-                                "display_name": entity.display_name,
-                                "status": entity.status,
-                                **entity.extra_frontmatter,
-                            }
-                            path.write_text(serialize_frontmatter(fm_out, entity.body), encoding="utf-8")
-                            wrote += 1
-
+                    entity = self._parse_entity_from_llm_output(
+                        op, entity_id, content
+                    )
+                    if entity and entity.entity_id and entity.entity_type:
+                        await self.write_entity(Path("."), entity)
+                        wrote += 1
         return wrote
 
-    def _read_entity_raw(self, memory_dir: Path, entity_id: str) -> str | None:
-        """Read raw entity file text by scanning entity directories.
-
-        Tries the exact ID first, then the normalized form.
-        """
-        entities_dir = memory_dir / "entities"
-        if not entities_dir.is_dir():
+    def _parse_entity_from_llm_output(
+        self, op: dict, canonical_entity_id: str, content: str
+    ) -> EntityDocument | None:
+        """Parse an entity document from LLM output, handling frontmatter."""
+        try:
+            fm, body = parse_frontmatter(content)
+        except Exception:
+            logger.warning("Entity update: failed to parse frontmatter from LLM output")
             return None
-        for candidate in (entity_id, normalize_entity_id(entity_id)):
-            for type_dir in entities_dir.iterdir():
-                if not type_dir.is_dir():
-                    continue
-                path = type_dir / f"{candidate}.md"
-                if path.is_file():
-                    return path.read_text(encoding="utf-8")
-        return None
 
-    def _list_all_entity_ids(self, memory_dir: Path) -> set[str]:
-        """List all entity IDs across all entity type directories."""
-        entities_dir = memory_dir / "entities"
-        if not entities_dir.is_dir():
-            return set()
-        result = set()
-        for type_dir in entities_dir.iterdir():
-            if not type_dir.is_dir():
-                continue
-            for md_file in type_dir.glob("*.md"):
-                result.add(md_file.stem)
-        return result
+        if not fm:
+            return EntityDocument(
+                entity_id=op.get("entity_id", ""),
+                entity_type=op.get("entity_type", ""),
+                display_name=op.get("display_name", ""),
+                status=op.get("status", "active"),
+                extra_frontmatter=op.get("extra_frontmatter", {}),
+                body=op.get("body", content),
+                related_entities=op.get("related_entities", {}),
+                source_bulletins=op.get("source_bulletins", []),
+            )
+
+        eid = fm.get("entity_id", op.get("entity_id", ""))
+        etype = fm.get("entity_type", op.get("entity_type", ""))
+        if not eid or not etype:
+            return None
+
+        # Normalize
+        normalized = normalize_entity_id(eid, etype)
+        if normalized != eid:
+            fm["entity_id"] = normalized
+            eid = normalized
+
+        # Override LLM's entity_id with canonical if reconciled
+        if (
+            etype == "contact"
+            and canonical_entity_id
+            and canonical_entity_id != eid
+            and canonical_entity_id.startswith("contact-")
+        ):
+            fm["entity_id"] = canonical_entity_id
+            eid = canonical_entity_id
+
+        # Enrich with contact data
+        eid = self._enrich_contact_frontmatter_inplace(etype, eid, fm)
+
+        extra = {k: v for k, v in fm.items()
+                 if k not in {"entity_id", "entity_type", "display_name", "status"}}
+
+        return EntityDocument(
+            entity_id=eid,
+            entity_type=etype,
+            display_name=fm.get("display_name", ""),
+            status=fm.get("status", "active"),
+            extra_frontmatter=extra,
+            body=body,
+            source_bulletins=op.get("source_bulletins", []),
+        )
+
+    async def _read_entity_raw(self, entity_id: str) -> str | None:
+        """Read raw entity body text."""
+        row = await self.db.fetch_one(
+            "SELECT body FROM memory_entities WHERE entity_id = ?",
+            (entity_id,),
+        )
+        return row["body"] if row else None
+
+    async def _list_all_entity_ids(self) -> set[str]:
+        """List all entity IDs."""
+        rows = await self.db.fetch_all("SELECT entity_id FROM memory_entities")
+        return {r["entity_id"] for r in rows}
 
     def _enrich_contact_frontmatter_inplace(
-        self,
-        memory_dir: Path,
-        etype: str,
-        eid: str,
-        fm: dict,
-        body: str,
+        self, etype: str, eid: str, fm: dict
     ) -> str:
-        """If etype is contact and eid is canonical contact-{hex8} and we have
-        a cached ContactDirectory, add contact_id/email/phone_number to fm.
-
-        Returns the (possibly updated) eid. Mutates *fm* in place. The caller
-        is responsible for serializing fm+body and writing to disk.
-        """
+        """Enrich contact frontmatter with data from ContactDirectory cache."""
         if etype != "contact" or not eid.startswith("contact-"):
             return eid
-        import re as _re
-        if not _re.match(r"^contact-[a-f0-9]{8}$", eid):
+        if not re.match(r"^contact-[a-f0-9]{8}$", eid):
             return eid
         cache = getattr(self, "_contact_dir_cache", None)
         if cache is None:
@@ -624,56 +645,50 @@ class MemoryService(BaseService):
 
     async def _lookup_contact_names(self, contact_ids: set[str]) -> dict[str, str]:
         """Look up display names for contact IDs from the database."""
-        if not contact_ids or not self.ctx or not hasattr(self.ctx, 'db') or not self.ctx.db:
+        if not contact_ids:
             return {}
-        try:
-            result = {}
-            for cid in contact_ids:
-                # Extract hex8 from contact-{hex8}
-                hex8 = cid.removeprefix("contact-")[:8]
-                row = await self.ctx.db.fetch_one(
-                    "SELECT name FROM contacts WHERE id LIKE ? LIMIT 1",
-                    (f"{hex8}%",),
-                )
-                if row and row["name"]:
-                    result[cid] = row["name"]
-            return result
-        except Exception:
-            return {}
+        result = {}
+        for cid in contact_ids:
+            hex8 = cid.removeprefix("contact-")[:8]
+            row = await self.db.fetch_one(
+                "SELECT name FROM contacts WHERE id LIKE ? LIMIT 1",
+                (f"{hex8}%",),
+            )
+            if row and row["name"]:
+                result[cid] = row["name"]
+        return result
 
     # ── Retrieval ─────────────────────────────────────────────────
 
     async def search_entries(
         self, workspace_dir: Path, query: str, entity_type: str = ""
     ) -> dict[str, Any]:
-        """Search memory using entity documents and graph traversal."""
-        memory_dir = self._memory_dir(workspace_dir)
+        """Search memory using entity documents."""
+        if entity_type:
+            rows = await self.db.fetch_all(
+                "SELECT entity_id, entity_type, display_name, substr(body, 1, 500) AS body_preview "
+                "FROM memory_entities WHERE entity_type = ?",
+                (entity_type,),
+            )
+        else:
+            rows = await self.db.fetch_all(
+                "SELECT entity_id, entity_type, display_name, substr(body, 1, 500) AS body_preview "
+                "FROM memory_entities"
+            )
 
-        # Collect entity documents
-        all_entries: list[dict[str, str]] = []
-        entities_dir = memory_dir / "entities"
-        if entities_dir.is_dir():
-            type_dirs = [entities_dir / entity_type] if entity_type else [
-                d for d in entities_dir.iterdir() if d.is_dir()
-            ]
-            for type_dir in type_dirs:
-                if not type_dir.is_dir():
-                    continue
-                for md_file in type_dir.glob("*.md"):
-                    text = md_file.read_text(encoding="utf-8")
-                    fm, body = parse_frontmatter(text)
-                    all_entries.append({
-                        "entity_id": fm.get("entity_id", md_file.stem),
-                        "entity_type": fm.get("entity_type", type_dir.name),
-                        "display_name": fm.get("display_name", ""),
-                        "body": body[:500],
-                        "path": str(md_file.relative_to(workspace_dir)),
-                    })
-
-        if not all_entries:
+        if not rows:
             return {"abstract": "No memory entries found.", "results": []}
 
-        # Build catalog for LLM
+        all_entries = [
+            {
+                "entity_id": r["entity_id"],
+                "entity_type": r["entity_type"],
+                "display_name": r["display_name"],
+                "body": r["body_preview"] or "",
+            }
+            for r in rows
+        ]
+
         catalog_lines = []
         for i, entry in enumerate(all_entries):
             catalog_lines.append(
@@ -720,21 +735,19 @@ class MemoryService(BaseService):
                     "entity_id": entry["entity_id"],
                     "entity_type": entry["entity_type"],
                     "display_name": entry["display_name"],
-                    "path": entry["path"],
+                    "path": entry["entity_id"],
                     "relevance": item.get("relevance", "") if isinstance(item, dict) else "",
                 })
 
         return {"abstract": parsed.get("abstract", ""), "results": results}
 
-    def build_memory_index(self, workspace_dir: Path) -> str:
+    async def build_memory_index(self, workspace_dir: Path) -> str:
         """Build compact memory index for system prompt injection."""
-        return build_memory_index_text(self._memory_dir(workspace_dir))
-
-    # ── Reflection ────────────────────────────────────────────────
+        return await build_memory_index_text_db(self.db)
 
     # ── Person/Contact helpers ────────────────────────────────────
 
-    def ensure_person_entry(
+    async def ensure_person_entry(
         self,
         workspace_dir: Path,
         *,
@@ -746,7 +759,7 @@ class MemoryService(BaseService):
     ) -> str | None:
         """Create a minimal contact entity document if one doesn't exist."""
         canonical_id = canonical_contact_id(contact_id)
-        existing = self.read_entity(workspace_dir, canonical_id)
+        existing = await self.read_entity(workspace_dir, canonical_id)
         if existing:
             return canonical_id
 
@@ -768,10 +781,10 @@ class MemoryService(BaseService):
             extra_frontmatter={"contact_source": "contacts_db", "contact_id": contact_id},
             body=body,
         )
-        self.write_entity(workspace_dir, entity)
+        await self.write_entity(workspace_dir, entity)
         return canonical_id
 
-    def find_person_entry(
+    async def find_person_entry(
         self,
         workspace_dir: Path,
         *,
@@ -781,7 +794,7 @@ class MemoryService(BaseService):
         """Find a contact entity by ID. Returns full content or None."""
         if contact_id:
             canonical_id = canonical_contact_id(contact_id)
-            entity = self.read_entity(workspace_dir, canonical_id)
+            entity = await self.read_entity(workspace_dir, canonical_id)
             if entity:
                 return serialize_frontmatter(
                     {"entity_id": entity.entity_id, "entity_type": entity.entity_type,
@@ -794,19 +807,13 @@ class MemoryService(BaseService):
 
     async def rebuild(self, workspace_dir: Path, *, entity_id: str | None = None, all: bool = False) -> dict[str, Any]:
         """Rebuild derived data from bulletins."""
-        memory_dir = self._memory_dir(workspace_dir)
-
         if all:
-            # Clear derived data
-            for derived in ["claims", "indexes", "aliases"]:
-                derived_dir = memory_dir / derived
-                if derived_dir.is_dir():
-                    for f in derived_dir.glob("*"):
-                        if f.is_file():
-                            f.unlink()
+            await self.db.execute("DELETE FROM memory_claims")
+            await self.db.execute("DELETE FROM memory_entity_relations")
+            await self.db.execute("DELETE FROM memory_aliases")
+            await self.db.execute("UPDATE memory_bulletins SET digested = 0")
 
-            # Re-process all bulletins
-            bulletins = self.read_bulletins(workspace_dir, limit=10000)
+            bulletins = await self.read_bulletins(workspace_dir, limit=10000)
             total_claims = 0
             for bulletin in bulletins:
                 result = await self.process_bulletin(workspace_dir, bulletin)
@@ -814,51 +821,32 @@ class MemoryService(BaseService):
 
             return {"status": "completed", "bulletins_processed": len(bulletins), "claims": total_claims}
 
-        if entity_id:
-            # Rebuild indexes only
-            counts = rebuild_indexes(memory_dir)
-            return {"status": "completed", "indexes": counts}
-
         return {"status": "no_op"}
 
     # ── Validation ────────────────────────────────────────────────
 
-    def validate(self, workspace_dir: Path) -> dict[str, Any]:
-        """Validate memory structure: check frontmatter, dangling refs."""
-        memory_dir = self._memory_dir(workspace_dir)
+    async def validate(self, workspace_dir: Path) -> dict[str, Any]:
+        """Validate memory data: check for missing fields."""
         issues: list[str] = []
-
-        # Check all entity docs have required fields
-        entities_dir = memory_dir / "entities"
-        if entities_dir.is_dir():
-            for type_dir in entities_dir.iterdir():
-                if not type_dir.is_dir():
-                    continue
-                for md_file in type_dir.glob("*.md"):
-                    text = md_file.read_text(encoding="utf-8")
-                    fm, _ = parse_frontmatter(text)
-                    for field in ["entity_id", "entity_type", "display_name"]:
-                        if not fm.get(field):
-                            issues.append(f"{md_file.name}: missing {field}")
-
+        rows = await self.db.fetch_all(
+            "SELECT entity_id FROM memory_entities WHERE display_name = '' OR entity_type = ''"
+        )
+        for r in rows:
+            issues.append(f"{r['entity_id']}: missing display_name or entity_type")
         return {"valid": len(issues) == 0, "issues": issues}
 
     # ── Legacy compatibility ──────────────────────────────────────
 
-    def browse_category(self, workspace_dir: Path, wiki: str, category: str) -> list[dict[str, Any]]:
+    async def browse_category(self, workspace_dir: Path, wiki: str, category: str) -> list[dict[str, Any]]:
         """Legacy: browse entities by type (category maps to entity_type)."""
         return [
-            {
-                "slug": e.entity_id,
-                "title": e.display_name,
-                "modified": 0,
-            }
-            for e in self.list_entities(workspace_dir, category)
+            {"slug": e.entity_id, "title": e.display_name, "modified": 0}
+            for e in await self.list_entities(workspace_dir, category)
         ]
 
-    def read_entry(self, workspace_dir: Path, wiki: str, category: str, slug: str) -> str | None:
+    async def read_entry(self, workspace_dir: Path, wiki: str, category: str, slug: str) -> str | None:
         """Legacy: read an entity by wiki/category/slug."""
-        entity = self.read_entity(workspace_dir, slug)
+        entity = await self.read_entity(workspace_dir, slug)
         if entity:
             return serialize_frontmatter(
                 {"entity_id": entity.entity_id, "entity_type": entity.entity_type,
@@ -867,7 +855,7 @@ class MemoryService(BaseService):
             )
         return None
 
-    def write_entry(self, workspace_dir: Path, wiki: str, category: str, slug: str, title: str, content: str) -> str:
+    async def write_entry(self, workspace_dir: Path, wiki: str, category: str, slug: str, title: str, content: str) -> str:
         """Legacy: write an entity. Category maps to entity_type."""
         entity = EntityDocument(
             entity_id=slug,
@@ -875,79 +863,86 @@ class MemoryService(BaseService):
             display_name=title,
             body=content,
         )
-        return self.write_entity(workspace_dir, entity)
+        return await self.write_entity(workspace_dir, entity)
 
-    def list_recent_entries(self, workspace_dir: Path, wiki_names: list[str], limit: int = 50) -> dict[str, Any]:
+    async def list_recent_entries(self, workspace_dir: Path, wiki_names: list[str], limit: int = 50) -> dict[str, Any]:
         """Legacy: list recent entity documents."""
-        memory_dir = self._memory_dir(workspace_dir)
-        entities_dir = memory_dir / "entities"
-        all_entries: list[dict] = []
-
-        if entities_dir.is_dir():
-            for type_dir in entities_dir.iterdir():
-                if not type_dir.is_dir():
-                    continue
-                for md_file in type_dir.glob("*.md"):
-                    text = md_file.read_text(encoding="utf-8")
-                    fm, body = parse_frontmatter(text)
-                    summary = ""
-                    for line in body.splitlines():
-                        if line.strip() and not line.strip().startswith("#"):
-                            summary = line.strip()[:80]
-                            break
-                    all_entries.append({
-                        "path": str(md_file.relative_to(workspace_dir)),
-                        "wiki": "core",
-                        "category": type_dir.name,
-                        "slug": md_file.stem,
-                        "title": fm.get("display_name", ""),
-                        "summary": summary,
-                        "modified": md_file.stat().st_mtime,
-                    })
-
-        all_entries.sort(key=lambda e: e["modified"], reverse=True)
+        rows = await self.db.fetch_all(
+            "SELECT entity_id, entity_type, display_name, body, updated_at "
+            "FROM memory_entities ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        )
+        entries = []
+        for r in rows:
+            summary = ""
+            for line in (r["body"] or "").splitlines():
+                if line.strip() and not line.strip().startswith("#"):
+                    summary = line.strip()[:80]
+                    break
+            entries.append({
+                "path": r["entity_id"],
+                "wiki": "core",
+                "category": r["entity_type"],
+                "slug": r["entity_id"],
+                "title": r["display_name"] or "",
+                "summary": summary,
+                "modified": r["updated_at"],
+            })
         return {
-            "stats": {"total_entries": len(all_entries)},
-            "recent": all_entries[:limit],
+            "stats": {"total_entries": len(rows)},
+            "recent": entries,
         }
 
     @staticmethod
-    def _build_memory_index_static(workspace_dir: Path, wiki_names: list[str]) -> str:
+    async def _build_memory_index_static(workspace_dir: Path, wiki_names: list[str]) -> str:
         """Build a compact memory index without a service instance."""
-        return build_memory_index_text(workspace_dir.expanduser() / "memory")
+        return ""  # Requires db access — use build_memory_index_text_db instead
 
     def rebuild_wiki_index(self, workspace_dir: Path, wiki_name: str) -> None:
-        """Legacy: no-op, indexes are rebuilt as needed."""
-        pass
-
-    # ── Config compatibility ──────────────────────────────────────
+        """Legacy: no-op, indexes are maintained by write operations."""
 
     async def resolve_accessible_wikis(self, workspace_dir: Path, session_key: str | None = None) -> list[str]:
-        """Legacy: returns ['core']."""
         return ["core"]
 
     async def resolve_writable_wikis(self, workspace_dir: Path, session_key: str | None = None) -> list[str]:
-        """Legacy: returns ['core']."""
         return ["core"]
 
     def validate_wiki_category(self, workspace_dir: Path, wiki: str, category: str) -> bool:
-        """Legacy: always True."""
         return True
 
     def move_to_digested(self, workspace_dir: Path, bulletin_paths: list[Path]) -> None:
-        """Legacy: no-op, bulletins are immutable."""
-        pass
+        """Legacy: no-op."""
 
-    def _mark_digested(self, workspace_dir: Path, bulletin: Bulletin) -> None:
-        """Add digested: true to a bulletin's frontmatter."""
-        memory_dir = self._memory_dir(workspace_dir)
-        bulletin_dir = memory_dir / "bulletins"
-        for md_file in bulletin_dir.rglob("*.md"):
-            if bulletin.id in md_file.name:
-                raw = md_file.read_text(encoding="utf-8")
-                fm, body = parse_frontmatter(raw)
-                if fm and not fm.get("digested"):
-                    fm["digested"] = True
-                    new_raw = serialize_frontmatter(fm, body)
-                    md_file.write_text(new_raw, encoding="utf-8")
-                return
+    async def _mark_digested(self, bulletin: Bulletin) -> None:
+        """Mark a bulletin as digested."""
+        await self.db.execute(
+            "UPDATE memory_bulletins SET digested = 1 WHERE id = ?",
+            (bulletin.id,),
+        )
+
+
+async def build_memory_index_text_db(db: Any) -> str:
+    """Build a compact memory index from the database for system prompt injection."""
+    rows = await db.fetch_all(
+        "SELECT entity_type, entity_id, display_name, substr(body, 1, 80) AS body_preview "
+        "FROM memory_entities ORDER BY entity_type, entity_id"
+    )
+    if not rows:
+        return ""
+
+    by_type: dict[str, list[str]] = {}
+    for r in rows:
+        entry_str = r["display_name"] or r["entity_id"]
+        preview = (r["body_preview"] or "").split("\n")
+        summary = ""
+        for line in preview:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                summary = stripped[:80]
+                break
+        if summary:
+            entry_str += f" — {summary}"
+        by_type.setdefault(r["entity_type"], []).append(entry_str)
+
+    lines = [f"**{t}**: " + ", ".join(entries) for t, entries in sorted(by_type.items())]
+    return "\n".join(lines)
