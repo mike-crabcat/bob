@@ -181,36 +181,35 @@ async def rewrite_claims(db: Any, rename: dict[str, str]) -> int:
 
 
 async def rewrite_bulletin_entities(db: Any, rename: dict[str, str]) -> int:
-    """Rewrite entity_id in bulletin entity refs. Dedupe within each bulletin."""
+    """Rewrite entity_id in entity↔bulletin join rows. Dedupe within each bulletin."""
     changed = 0
     for old, new in rename.items():
-        # Find bulletins with the old entity_id
+        # Find bulletins linked to the old entity_id
         rows = await db.fetch_all(
-            "SELECT DISTINCT bulletin_id FROM memory_bulletin_entities WHERE entity_id = ?",
+            "SELECT bulletin_id FROM memory_entity_bulletins WHERE entity_id = ?",
             (old,),
         )
         if not rows:
             continue
 
-        # Check for duplicates after rename
         for r in rows:
             bid = r["bulletin_id"]
-            # Check if new already exists for this bulletin
+            # Check if new already linked to this bulletin
             existing = await db.fetch_one(
-                "SELECT 1 FROM memory_bulletin_entities WHERE bulletin_id = ? AND entity_id = ? LIMIT 1",
-                (bid, new),
+                "SELECT 1 FROM memory_entity_bulletins WHERE entity_id = ? AND bulletin_id = ? LIMIT 1",
+                (new, bid),
             )
             if existing:
                 # Delete the old one (new already exists)
                 await db.execute(
-                    "DELETE FROM memory_bulletin_entities WHERE bulletin_id = ? AND entity_id = ?",
-                    (bid, old),
+                    "DELETE FROM memory_entity_bulletins WHERE entity_id = ? AND bulletin_id = ?",
+                    (old, bid),
                 )
             else:
                 # Rename
                 await db.execute(
-                    "UPDATE memory_bulletin_entities SET entity_id = ? WHERE bulletin_id = ? AND entity_id = ?",
-                    (new, bid, old),
+                    "UPDATE memory_entity_bulletins SET entity_id = ? WHERE entity_id = ? AND bulletin_id = ?",
+                    (new, old, bid),
                 )
             changed += 1
     return changed

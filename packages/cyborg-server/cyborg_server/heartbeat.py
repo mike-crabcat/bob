@@ -114,85 +114,94 @@ class EmailSyncTask:
 _last_call_cleanup: datetime | None = None
 
 
-async def _generate_session_bulletin(
-    ctx: AppContext,
-    session: dict,
-    messages: list[dict],
-    contact_to_name: dict[str, str],
-) -> dict | None:
-    """Generate a single bulletin for an idle session.
-
-    Returns the validated bulletin data dict if one was written, else None.
-    Loads the full contacts DB as ``known_entities`` so the LLM uses canonical
-    contact IDs rather than inventing name-slug / unresolved- variants.
-    """
-    from cyborg_server.services.memory import MemoryService
-    from cyborg_server.services.memory.bulletin_generator import (
-        build_generator_input,
-        generate_bulletin,
-        validate_draft_bulletin,
-    )
-    from cyborg_server.services.memory.contact_directory import ContactDirectory
-    from cyborg_server.services.llm_dispatch import LLMDispatchService
-
-    transcript_text = "\n".join(
-        f"[{m.get('sender_id', m['role'])}] {m['content'][:500]}"
-        for m in messages[-50:]
-    )
-
-    directory = await ContactDirectory.load(ctx.db)
-    gen_input = build_generator_input(
-        session_key=session["session_key"],
-        transcript_start=session["active_from"],
-        transcript_end=session["last_message_at"],
-        transcript_text=transcript_text,
-        contact_ids=list(contact_to_name.keys()),
-        known_entities=directory.as_known_entities(),
-    )
-    llm = LLMDispatchService(ctx)
-    draft = await generate_bulletin(llm, gen_input)
-    is_valid, data = validate_draft_bulletin(draft)
-    if not is_valid or not data.get("create_bulletin"):
-        return None
-
-    mem_svc = MemoryService(ctx)
-    await mem_svc.write_bulletin(
-        ctx.settings.harness.workspace_dir,
-        channel_id=gen_input.channel_id,
-        source_type="session_transcript_range",
-        source_id=session["session_key"],
-        session_id=data.get("session_id", session["session_key"]),
-        transcript_range_id=data.get("transcript_range_id", ""),
-        visibility=data.get("visibility", gen_input.visibility),
-        scope=data.get("scope", gen_input.scope),
-        entities=data.get("entities", {}),
-        memory_types=data.get("memory_types", []),
-        confidence=data.get("confidence", "medium"),
-        requires_review=data.get("requires_review", False),
-        review_reasons=data.get("review_reasons", []),
-        content=draft,
-    )
-    return data
-
-
 class SessionIdleSummaryTask:
-    """Detect idle sessions and generate summaries for their active periods."""
+    """Detect idle sessions and generate memory bulletins."""
 
     name = "session_idle_summary"
 
-    async def run(self, ctx: AppContext) -> None:
-        from cyborg_server.services.session_summary_service import SessionSummaryService
+    async def _find_idle_sessions(
+        self, db: Database, idle_threshold_minutes: float
+    ) -> list[dict]:
+        rows = await db.fetch_all(
+            """
+            SELECT
+                sm.session_key,
+                MAX(sm.created_at) AS last_message_at,
+                COALESCE(
+                    (SELECT MAX(session_range_end) FROM memory_bulletins
+                     WHERE source_type = 'session' AND source_id = sm.session_key
+                       AND session_range_end != ''),
+                    '1970-01-01'
+                ) AS active_from,
+                COUNT(*) AS message_count
+            FROM session_messages sm
+            WHERE sm.created_at > COALESCE(
+                (SELECT MAX(session_range_end) FROM memory_bulletins
+                 WHERE source_type = 'session' AND source_id = sm.session_key
+                   AND session_range_end != ''),
+                '1970-01-01'
+            )
+            GROUP BY sm.session_key
+            HAVING MAX(sm.created_at) < datetime('now', '-' || ? || ' minutes')
+            """,
+            (idle_threshold_minutes,),
+        )
+        return [dict(r) for r in rows] if rows else []
 
-        service = SessionSummaryService(ctx)
+    async def _get_messages_for_period(
+        self, db: Database, session_key: str, active_from: str, active_to: str
+    ) -> list[dict]:
+        rows = await db.fetch_all(
+            """SELECT role, content, sender_id, created_at FROM session_messages
+               WHERE session_key = ? AND created_at > ? AND created_at <= ?
+                 AND role IN ('user', 'assistant')
+               ORDER BY created_at ASC""",
+            (session_key, active_from, active_to),
+        )
+        return [dict(r) for r in rows] if rows else []
+
+    async def _get_participant_name_map(
+        self, db: Database, session_key: str
+    ) -> dict[str, str]:
+        rows = await db.fetch_all(
+            """SELECT contact_id, identifier, display_name FROM session_participants
+               WHERE session_key = ?""",
+            (session_key,),
+        )
+        result: dict[str, str] = {}
+        for r in rows:
+            name = r["display_name"]
+            if not name:
+                continue
+            if r["contact_id"]:
+                result[r["contact_id"]] = name
+        return result
+
+    async def run(self, ctx: AppContext) -> None:
         idle_threshold = ctx.settings.session_summary_idle_minutes
-        idle_sessions = await service.find_idle_sessions(idle_threshold)
+        idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
 
         if not idle_sessions:
             return
 
+        from cyborg_server.services.memory import MemoryService
+        from cyborg_server.services.memory.bulletin_generator import (
+            build_generator_input,
+            generate_bulletins,
+        )
+        from cyborg_server.services.memory.channels import (
+            derive_visibility,
+            resolve_channel_id,
+        )
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        mem_svc = MemoryService(ctx)
+        llm = LLMDispatchService(ctx)
+
         for session in idle_sessions:
             try:
-                messages = await service.get_messages_for_period(
+                messages = await self._get_messages_for_period(
+                    ctx.db,
                     session["session_key"],
                     session["active_from"],
                     session["last_message_at"],
@@ -200,57 +209,67 @@ class SessionIdleSummaryTask:
                 if not messages:
                     continue
 
-                participants = await service.get_participants_for_period(
-                    session["session_key"],
-                    session["active_from"],
-                    session["last_message_at"],
-                )
-                name_map = await service.get_participant_name_map(
-                    session["session_key"],
-                )
-                contact_to_name, identifier_to_name = name_map
-                result = await service.generate_summary(
-                    messages, participants,
-                    session["active_from"], session["last_message_at"],
-                    contact_to_name=contact_to_name,
-                    identifier_to_name=identifier_to_name,
-                )
-                await service.store_summary(
-                    session_key=session["session_key"],
-                    active_from=session["active_from"],
-                    active_to=session["last_message_at"],
-                    summary_text=result["summary_text"],
-                    topics=result["topics"],
-                    participants=participants,
-                    message_count=session["message_count"],
-                    model_used=ctx.settings.openai.default_model,
+                contact_to_name = await self._get_participant_name_map(
+                    ctx.db, session["session_key"],
                 )
 
-                # Generate bulletin directly from transcript
-                try:
-                    await _generate_session_bulletin(ctx, session, messages, contact_to_name)
-                except Exception:
-                    logger.exception(
-                        "Bulletin generation failed for session %s",
-                        session["session_key"],
-                    )
+                gen_input = build_generator_input(
+                    session_key=session["session_key"],
+                    messages=[
+                        {
+                            "sender_contact_id": m.get("sender_id", "assistant"),
+                            "timestamp": m.get("created_at", ""),
+                            "content": (m.get("content") or "")[:500],
+                        }
+                        for m in messages[-50:]
+                    ],
+                    participants=[
+                        {"id": cid, "name": name}
+                        for cid, name in contact_to_name.items()
+                    ],
+                )
+
+                bulletin_texts = await generate_bulletins(llm, gen_input)
+                if not bulletin_texts:
+                    continue
+
+                channel_id = resolve_channel_id(session["session_key"])
+                visibility = derive_visibility(session["session_key"])
+
+                for text in bulletin_texts:
+                    try:
+                        await mem_svc.write_bulletin(
+                            ctx.settings.harness.workspace_dir,
+                            channel_id=channel_id,
+                            source_type="session",
+                            source_id=session["session_key"],
+                            content=text,
+                            visibility=visibility,
+                            occurred_at=session["last_message_at"],
+                            session_range_start=session["active_from"],
+                            session_range_end=session["last_message_at"],
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to write bulletin for session %s",
+                            session["session_key"],
+                        )
+
                 logger.info(
-                    "Session summary generated for %s (%d messages)",
-                    session["session_key"], session["message_count"],
+                    "Generated %d bulletin(s) for session %s (%d messages)",
+                    len(bulletin_texts), session["session_key"], session["message_count"],
                 )
             except Exception:
                 logger.exception(
-                    "Failed to generate summary for session %s",
+                    "Failed to process session %s",
                     session["session_key"],
                 )
 
-        # After all summaries, run the memory dream to curate bulletins
+        # Run the memory dream to curate bulletins into claims and entities
         try:
-            from cyborg_server.services.memory import MemoryService
             from uuid import uuid4
             import json as _json
 
-            mem_svc = MemoryService(ctx)
             result = await mem_svc.run_dream(ctx.settings.harness.workspace_dir)
             if result["status"] != "empty":
                 await ctx.db.execute(

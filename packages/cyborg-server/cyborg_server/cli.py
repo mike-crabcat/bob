@@ -1853,6 +1853,41 @@ async def _memory_seed_email(dry_run: bool, thread_id: str | None) -> None:
         await db.close()
 
 
+@memory_app.command("seed-manual")
+def memory_seed_manual(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without writing")] = False,
+) -> None:
+    """Replay memory_write tool calls from LLM logs as bulletins."""
+    import asyncio
+    asyncio.run(_memory_seed_manual(dry_run))
+
+
+async def _memory_seed_manual(dry_run: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory.seed_manual import seed_manual_bulletins
+
+        workspace = settings.harness.workspace_dir
+        result = await seed_manual_bulletins(ctx, workspace, dry_run=dry_run)
+
+        typer.echo(f"\nSeed-manual result:")
+        typer.echo(f"  Log rows scanned: {result.get('log_rows_scanned', 0)}")
+        typer.echo(f"  Bulletins generated: {result.get('bulletins_generated', 0)}")
+        typer.echo(f"  Errors: {len(result.get('errors', []))}")
+    finally:
+        await db.close()
+
+
 @memory_app.command("rebuild")
 def memory_rebuild(
     all: Annotated[bool, typer.Option("--all", help="Rebuild all derived data from bulletins")] = False,

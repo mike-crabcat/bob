@@ -17,7 +17,6 @@ from cyborg_server.services.memory.models import (
     Bulletin,
     Claim,
     EntityDocument,
-    EntityRef,
     parse_frontmatter,
     serialize_frontmatter,
 )
@@ -93,68 +92,35 @@ class MemoryService(BaseService):
         channel_id: str,
         source_type: str,
         source_id: str = "",
-        session_id: str = "",
-        transcript_range_id: str = "",
-        visibility: str = "private",
-        scope: list[str] | None = None,
-        entities: dict[str, list] | None = None,
-        memory_types: list[str] | None = None,
-        confidence: str = "medium",
-        requires_review: bool = False,
-        review_reasons: list[str] | None = None,
         content: str,
+        visibility: str = "private",
+        occurred_at: str | None = None,
+        session_range_start: str = "",
+        session_range_end: str = "",
     ) -> str:
-        """Write an immutable bulletin to the database."""
+        """Write an immutable plain-text bulletin to the database."""
         now = utcnow()
         date_str = now.strftime("%Y-%m-%d")
         bulletin_id = f"bulletin-{date_str}-{uuid.uuid4().hex[:6]}"
+        ts = occurred_at or now.isoformat()
 
         await self.db.execute(
             "INSERT INTO memory_bulletins "
-            "(id, created_at, channel_id, source_type, source_id, session_id, "
-            "transcript_range_id, visibility, scope, memory_types, confidence, "
-            "requires_review, review_reasons, content) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, created_at, channel_id, source_type, source_id, visibility, content, "
+            " session_range_start, session_range_end) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 bulletin_id,
-                now.isoformat(),
+                ts,
                 channel_id,
                 source_type,
                 source_id,
-                session_id,
-                transcript_range_id,
                 visibility,
-                json.dumps(scope or []),
-                json.dumps(memory_types or []),
-                confidence,
-                1 if requires_review else 0,
-                json.dumps(review_reasons or []),
                 content,
+                session_range_start,
+                session_range_end,
             ),
         )
-
-        # Insert entity refs
-        if entities:
-            params = []
-            for cat, refs in entities.items():
-                for ref in refs:
-                    if isinstance(ref, str):
-                        params.append((bulletin_id, cat, ref, None, "known", None))
-                    elif isinstance(ref, dict):
-                        params.append((
-                            bulletin_id, cat,
-                            ref.get("id", str(ref)),
-                            ref.get("display_name"),
-                            ref.get("resolution_status", "known"),
-                            ref.get("role"),
-                        ))
-            if params:
-                await self.db.execute_many(
-                    "INSERT OR IGNORE INTO memory_bulletin_entities "
-                    "(bulletin_id, category, entity_id, display_name, resolution_status, role) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    params,
-                )
 
         logger.info("Bulletin written: %s", bulletin_id)
         return bulletin_id
@@ -187,28 +153,8 @@ class MemoryService(BaseService):
         if not rows:
             return []
 
-        bulletin_ids = [r["id"] for r in rows]
-        # Fetch all entity refs for these bulletins
-        placeholders = ",".join("?" * len(bulletin_ids))
-        ref_rows = await self.db.fetch_all(
-            f"SELECT * FROM memory_bulletin_entities WHERE bulletin_id IN ({placeholders})",
-            tuple(bulletin_ids),
-        )
-        refs_by_id: dict[str, list[dict]] = defaultdict(list)
-        for r in ref_rows:
-            refs_by_id[r["bulletin_id"]].append(r)
-
         results: list[Bulletin] = []
         for row in rows:
-            entity_refs = refs_by_id.get(row["id"], [])
-            entities: dict[str, list[EntityRef]] = {cat: [] for cat in ENTITY_CATEGORIES}
-            for ref in entity_refs:
-                entities.setdefault(ref["category"], []).append(EntityRef(
-                    id=ref["entity_id"],
-                    display_name=ref["display_name"],
-                    resolution_status=ref["resolution_status"] or "known",
-                    role=ref["role"],
-                ))
             results.append(Bulletin(
                 id=row["id"],
                 created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
@@ -216,27 +162,27 @@ class MemoryService(BaseService):
                 source_type=row["source_type"] or "",
                 source_id=row["source_id"] or "",
                 visibility=row["visibility"] or "channel",
-                scope=json.loads(row["scope"]) if row["scope"] else [],
-                entities=entities,
                 content=row["content"] or "",
             ))
         return results
 
     async def read_bulletin(self, workspace_dir: Path, bulletin_id: str) -> Bulletin | None:
         """Read a specific bulletin by ID."""
-        bulletins = await self.read_bulletins(workspace_dir, limit=1)
         row = await self.db.fetch_one(
             "SELECT * FROM memory_bulletins WHERE id = ?",
             (bulletin_id,),
         )
         if not row:
             return None
-        # Reuse read_bulletins logic for a single ID
-        bulletins = await self.read_bulletins(workspace_dir, limit=1000)
-        for b in bulletins:
-            if b.id == bulletin_id:
-                return b
-        return None
+        return Bulletin(
+            id=row["id"],
+            created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
+            channel_id=row["channel_id"] or "",
+            source_type=row["source_type"] or "",
+            source_id=row["source_id"] or "",
+            visibility=row["visibility"] or "channel",
+            content=row["content"] or "",
+        )
 
     # ── Entities ──────────────────────────────────────────────────
 
@@ -297,6 +243,13 @@ class MemoryService(BaseService):
             await self.db.execute_many(
                 "INSERT OR IGNORE INTO memory_aliases (alias, entity_id) VALUES (?, ?)",
                 alias_params,
+            )
+
+        # Update entity↔bulletin join rows
+        if entity.source_bulletins:
+            await self.db.execute_many(
+                "INSERT OR IGNORE INTO memory_entity_bulletins (entity_id, bulletin_id) VALUES (?, ?)",
+                [(entity.entity_id, bid) for bid in entity.source_bulletins],
             )
 
         logger.info("Entity written: %s/%s", entity.entity_type, entity.entity_id)
@@ -364,12 +317,18 @@ class MemoryService(BaseService):
             await write_claim(self.db, claim)
             wrote_claims += 1
 
-        entity_ops = await self._update_entities_from_claims(llm, claims)
+        entity_result = await self._update_entities_from_claims(llm, claims)
 
         return {
             "bulletin_id": bulletin.id,
             "claims_extracted": wrote_claims,
-            "entity_ops": entity_ops,
+            "claims": [
+                {"id": c.id, "type": c.type, "subject_id": c.subject_id,
+                 "predicate": c.predicate, "object_id": c.object_id, "body": c.body}
+                for c in claims
+            ],
+            "entity_ops": entity_result["count"],
+            "entities_updated": entity_result["entity_ids"],
         }
 
     async def run_dream(self, workspace_dir: Path) -> dict[str, Any]:
@@ -392,8 +351,9 @@ class MemoryService(BaseService):
             ops_detail.append({
                 "bulletin": bulletin.id,
                 "source": bulletin.source_id or "",
-                "claims": result["claims_extracted"],
+                "claims": result.get("claims", result["claims_extracted"]),
                 "entity_ops": result.get("entity_ops", 0),
+                "entities_updated": result.get("entities_updated", []),
                 "content_preview": (bulletin.content or "")[:120],
             })
             await self._mark_digested(bulletin)
@@ -411,10 +371,10 @@ class MemoryService(BaseService):
 
     async def _update_entities_from_claims(
         self, llm: Any, claims: list[Claim]
-    ) -> int:
+    ) -> dict[str, Any]:
         """Use LLM to update entity documents from claims — one call per entity."""
         if not claims:
-            return 0
+            return {"count": 0, "entity_ids": []}
 
         from cyborg_server.services.memory.contact_directory import ContactDirectory
         from cyborg_server.services.memory.reconcile import reconcile_contact_id
@@ -449,14 +409,17 @@ class MemoryService(BaseService):
         contact_name_map = await self._lookup_contact_names(contact_ids) if contact_ids else {}
 
         wrote = 0
+        entity_ids: list[str] = []
         for entity_id, entity_claims in claims_by_entity.items():
-            wrote += await self._update_single_entity(
+            result = await self._update_single_entity(
                 llm, entity_id, entity_claims,
                 all_existing_ids=all_existing_ids,
                 contact_name_map=contact_name_map,
             )
+            wrote += result["count"]
+            entity_ids.extend(result["entity_ids"])
 
-        return wrote
+        return {"count": wrote, "entity_ids": entity_ids}
 
     async def _index_contact_display_names(self) -> dict[str, str]:
         """Return {entity_id: display_name} for every contact entity."""
@@ -473,8 +436,8 @@ class MemoryService(BaseService):
         *,
         all_existing_ids: set[str],
         contact_name_map: dict[str, str],
-    ) -> int:
-        """Update a single entity document from its claims."""
+    ) -> dict[str, Any]:
+        """Update a single entity document from new bulletins and claims."""
         known_ids_hint = ""
         if entity_id in all_existing_ids:
             known_ids_hint = (
@@ -482,29 +445,51 @@ class MemoryService(BaseService):
                 f"- {entity_id}"
             )
 
+        # Collect new bulletin IDs from claims
+        new_bulletin_ids: set[str] = set()
         claims_lines = []
-        source_bids: set[str] = set()
         for c in claims:
             obj = c.object_id if isinstance(c.object_id, str) else (str(c.object_id) if c.object_id else "")
-            bids = ", ".join(c.source_bulletins) if c.source_bulletins else ""
-            claims_lines.append(f"- [{c.type}] {c.subject_id} {c.predicate} {obj}  (from: {bids})")
-            source_bids.update(c.source_bulletins or [])
+            claims_lines.append(f"- [{c.type}] {c.subject_id} {c.predicate} {obj}")
+            new_bulletin_ids.update(c.source_bulletins or [])
 
-        existing_lines = []
-        entity_raw = await self._read_entity_raw(entity_id)
-        if entity_raw:
-            existing_lines.append(f"[{entity_id}]\n{entity_raw[:500]}")
+        # Fetch new bulletin content
+        bulletin_lines = []
+        if new_bulletin_ids:
+            rows = await self.db.fetch_all(
+                "SELECT id, content FROM memory_bulletins WHERE id IN ("
+                + ",".join("?" for _ in new_bulletin_ids) + ")",
+                tuple(new_bulletin_ids),
+            )
+            for row in rows:
+                bulletin_lines.append(f"[{row['id']}]\n{row['content']}")
 
-        user_prompt = "## NEW CLAIMS\n\n" + "\n".join(claims_lines)
-        if existing_lines:
-            user_prompt += "\n\n## EXISTING ENTITIES\n\n" + "\n\n".join(existing_lines)
+        # Read full existing entity body (no truncation)
+        existing_raw = await self._read_entity_raw(entity_id)
+
+        # Read existing source_bulletins for accumulation
+        existing_source_bids: set[str] = set()
+        existing_row = await self.db.fetch_one(
+            "SELECT source_bulletins FROM memory_entities WHERE entity_id = ?",
+            (entity_id,),
+        )
+        if existing_row and existing_row["source_bulletins"]:
+            existing_source_bids = set(json.loads(existing_row["source_bulletins"]))
+
+        # Accumulated bulletin IDs (deterministic, not from LLM)
+        accumulated_bids = sorted(existing_source_bids | new_bulletin_ids)
+
+        # Build prompt
+        user_prompt = ""
+        if bulletin_lines:
+            user_prompt += "## NEW BULLETINS\n\n" + "\n\n".join(bulletin_lines) + "\n\n"
+
+        user_prompt += "## NEW CLAIMS\n\n" + "\n".join(claims_lines)
+
+        if existing_raw:
+            user_prompt += f"\n\n## EXISTING ENTITY\n\n{existing_raw}"
+
         user_prompt += known_ids_hint
-
-        if source_bids:
-            user_prompt += "\n\n## SOURCE BULLETIN IDS\n\n"
-            user_prompt += "Use these exact IDs in Source Bulletins sections. Do not invent bulletin IDs:\n"
-            for bid in sorted(source_bids):
-                user_prompt += f"- {bid}\n"
 
         if entity_id in contact_name_map:
             user_prompt += "\n\n## CONTACT NAME MAP\n\n"
@@ -529,12 +514,13 @@ class MemoryService(BaseService):
             operations = json.loads(text)
         except (json.JSONDecodeError, ValueError):
             logger.warning("Entity update: failed to parse LLM response for %s", entity_id)
-            return 0
+            return {"count": 0, "entity_ids": []}
 
         if not isinstance(operations, list):
-            return 0
+            return {"count": 0, "entity_ids": []}
 
         wrote = 0
+        written_ids: list[str] = []
         for op in operations:
             if not isinstance(op, dict):
                 continue
@@ -546,9 +532,12 @@ class MemoryService(BaseService):
                         op, entity_id, content
                     )
                     if entity and entity.entity_id and entity.entity_type:
+                        # Stamp accumulated bulletin IDs (code, not LLM)
+                        entity.source_bulletins = accumulated_bids
                         await self.write_entity(Path("."), entity)
                         wrote += 1
-        return wrote
+                        written_ids.append(entity.entity_id)
+        return {"count": wrote, "entity_ids": written_ids}
 
     def _parse_entity_from_llm_output(
         self, op: dict, canonical_entity_id: str, content: str
@@ -809,7 +798,9 @@ class MemoryService(BaseService):
         """Rebuild derived data from bulletins."""
         if all:
             await self.db.execute("DELETE FROM memory_claims")
+            await self.db.execute("DELETE FROM memory_claim_bulletins")
             await self.db.execute("DELETE FROM memory_entity_relations")
+            await self.db.execute("DELETE FROM memory_entity_bulletins")
             await self.db.execute("DELETE FROM memory_aliases")
             await self.db.execute("UPDATE memory_bulletins SET digested = 0")
 

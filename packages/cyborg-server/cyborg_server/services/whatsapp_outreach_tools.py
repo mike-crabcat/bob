@@ -40,11 +40,13 @@ def make_whatsapp_outreach_tools(
         contact_id: str,
         message: str,
         objective: str,
+        media_path: str = "",
     ) -> str:
         """Send a WhatsApp message to a contact (not the current chat).
         The 'objective' describes the specific outcome you need from this conversation,
         e.g. "Find out if John can meet on Thursday and what time works." The target
-        session will be instructed to work toward this objective and report back when complete."""
+        session will be instructed to work toward this objective and report back when complete.
+        Optionally attach an image or media file by providing media_path."""
         from cyborg_server.exceptions import ConflictError
         from cyborg_server.models import SessionRouteCreate, SessionRouteKind
         from cyborg_server.services.session_route_service import SessionRouteService
@@ -70,7 +72,20 @@ def make_whatsapp_outreach_tools(
 
         # Convert phone to JID and send
         jid = _phone_to_jid(phone)
-        request_id = await wa_service.send_message(jid, message)
+        if media_path:
+            from cyborg_server.services.whatsapp_bridge_service import _prepare_media
+            workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
+            resolved = (workspace / media_path).resolve()
+            if not str(resolved).startswith(str(workspace)):
+                return json.dumps({"ok": False, "error": "Media path escapes workspace"})
+            if not resolved.is_file():
+                return json.dumps({"ok": False, "error": f"Media file not found: {media_path}"})
+            prepared = await _prepare_media(str(resolved))
+            if prepared is None:
+                return json.dumps({"ok": False, "error": "Failed to prepare media for sending"})
+            request_id = await wa_service.send_media(jid, prepared, caption=message)
+        else:
+            request_id = await wa_service.send_message(jid, message)
 
         # Derive session key for the target contact
         phone_digits = re.sub(r"\D", "", phone)

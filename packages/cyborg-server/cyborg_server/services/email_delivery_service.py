@@ -124,6 +124,7 @@ class EmailDeliveryService(BaseService):
         cc: list[str] | None = None,
         agenda: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        origin_session_key: str | None = None,
     ) -> dict[str, Any]:
         """Send a new email, create thread, persist message, and prime LLM context.
 
@@ -173,6 +174,7 @@ class EmailDeliveryService(BaseService):
             subject=subject,
             contact_id=contact_id,
             agenda=agenda,
+            origin_session_key=origin_session_key,
         )
 
         # Persist agenda to session_agendas immediately (not waiting for lazy migration)

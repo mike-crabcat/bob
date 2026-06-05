@@ -1451,11 +1451,23 @@ class WhatsAppBridgeService(BaseService):
         message_was_sent = [False]
         sent_texts: list[str] = []
 
-        async def _send_whatsapp_message(text: str) -> str:
-            """Send a reply message to the WhatsApp chat."""
+        async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
+            if media_path:
+                workspace = settings.harness.workspace_dir.expanduser().resolve()
+                resolved = (workspace / media_path).resolve()
+                if not str(resolved).startswith(str(workspace)):
+                    return "Error: path escapes workspace"
+                if not resolved.is_file():
+                    return f"Error: file not found: {media_path}"
+                prepared = await _prepare_media(str(resolved))
+                if prepared is None:
+                    return "Error: failed to prepare media for sending"
+                sent_texts.append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
+                request_id = await wa_service.send_media(chat_id, prepared, caption=text)
+                return f"Media sent (request_id={request_id})"
             sent_texts.append(text)
             request_id = await wa_service.send_message(chat_id, text)
             return f"Message sent (request_id={request_id})"
@@ -1464,44 +1476,15 @@ class WhatsAppBridgeService(BaseService):
             name="send_whatsapp_message",
             description=(
                 "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent."
-            ),
-            parameters={"text": {"type": "string", "description": "The message text to send."}},
-            required=["text"],
-            handler=_send_whatsapp_message,
-        ))
-
-        async def _send_whatsapp_media(workspace_path: str, caption: str = "") -> str:
-            """Send an image or media file to the current WhatsApp chat."""
-            workspace = settings.harness.workspace_dir.expanduser().resolve()
-            resolved = (workspace / workspace_path).resolve()
-            if not str(resolved).startswith(str(workspace)):
-                return f"Error: path escapes workspace"
-            if not resolved.is_file():
-                return f"Error: file not found: {workspace_path}"
-            prepared = await _prepare_media(str(resolved))
-            if prepared is None:
-                return "Error: failed to prepare media for sending"
-            message_was_sent[0] = True
-            if caption:
-                sent_texts.append(f"[Image: {caption}]")
-            else:
-                sent_texts.append(f"[Image: {resolved.name}]")
-            request_id = await wa_service.send_media(chat_id, prepared, caption=caption)
-            return f"Media sent (request_id={request_id})"
-
-        tools.append(Tool(
-            name="send_whatsapp_media",
-            description=(
-                "Send an image or media file to the current WhatsApp chat. "
-                "Provide a path relative to the workspace directory."
+                "You MUST call this tool to deliver your response — your text output will NOT be sent. "
+                "Optionally attach an image or media file by providing media_path."
             ),
             parameters={
-                "workspace_path": {"type": "string", "description": "Path to the image file, relative to the workspace directory."},
-                "caption": {"type": "string", "description": "Optional caption for the image."},
+                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided)."},
+                "media_path": {"type": "string", "description": "Optional path to an image or media file, relative to the workspace directory."},
             },
-            required=["workspace_path"],
-            handler=_send_whatsapp_media,
+            required=["text"],
+            handler=_send_whatsapp_message,
         ))
 
         dispatch_id = str(uuid4())

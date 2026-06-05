@@ -401,12 +401,9 @@ async def get_contact_claims(
 
     from cyborg_server.services.memory.claim_service import get_active_claims
     from cyborg_server.services.memory.entity_resolver import canonical_contact_id
-    from cyborg_server.services.memory.service import MemoryService
 
-    settings = request.app.state.settings
     entity_id = canonical_contact_id(str(contact_id))
-    memory_dir = MemoryService._memory_dir(settings.harness.workspace_dir)
-    claims = get_active_claims(memory_dir, entity_id)
+    claims = await get_active_claims(database, entity_id)
 
     return [
         {

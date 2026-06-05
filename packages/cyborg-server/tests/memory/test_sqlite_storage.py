@@ -13,27 +13,14 @@ from cyborg_server.services.memory.models import (
 
 
 async def test_write_and_read_bulletin(svc, workspace):
-    """Round-trip: write a bulletin with all typed fields, read it back."""
+    """Round-trip: write a bulletin, read it back."""
     bid = await svc.write_bulletin(
         workspace,
         channel_id="channel-whatsapp-group-123",
-        source_type="session_transcript_range",
+        source_type="session",
         source_id="session-abc",
-        session_id="agent:main:whatsapp:group:123",
-        transcript_range_id="range-202606011000",
         visibility="group",
-        scope=["group-bali-travellers"],
-        entities={
-            "contacts": [
-                {"id": "contact-7c9f0fd7", "display_name": "Blair Nicol", "resolution_status": "known"},
-            ],
-            "channels": [{"id": "channel-whatsapp-group-123"}],
-        },
-        memory_types=["decision", "task"],
-        confidence="high",
-        requires_review=True,
-        review_reasons=["contains booking details"],
-        content="Group decided to stay in Seminyak. Michael will compare villas.",
+        content="{{contact:7c9f0fd7|Blair}} decided to stay in Seminyak. {{contact:abc123|Michael}} will compare villas.",
     )
 
     assert bid.startswith("bulletin-")
@@ -43,9 +30,7 @@ async def test_write_and_read_bulletin(svc, workspace):
     b = bulletins[0]
     assert b.channel_id == "channel-whatsapp-group-123"
     assert b.visibility == "group"
-    assert b.scope == ["group-bali-travellers"]
-    assert "contact-7c9f0fd7" in [r.id for r in b.entities.get("contacts", [])]
-    assert b.content == "Group decided to stay in Seminyak. Michael will compare villas."
+    assert "Seminyak" in b.content
 
 
 async def test_bulletin_digested_filter(svc, workspace):
@@ -174,31 +159,23 @@ async def test_fk_cascade_delete_entity(svc, workspace):
 
 
 async def test_fk_cascade_delete_bulletin(svc, workspace):
-    """Deleting a bulletin cascades to entity refs."""
+    """Deleting a bulletin removes it from read results."""
     await svc.write_bulletin(
         workspace,
         channel_id="ch1",
         source_type="test",
-        content="test",
-        entities={"contacts": [{"id": "contact-abc"}]},
+        content="test bulletin to delete",
     )
     bulletins = await svc.read_bulletins(workspace)
+    assert len(bulletins) == 1
     bid = bulletins[0].id
-
-    # Verify entity ref exists
-    refs = await svc.db.fetch_all(
-        "SELECT * FROM memory_bulletin_entities WHERE bulletin_id = ?", (bid,)
-    )
-    assert len(refs) == 1
 
     # Delete
     await svc.db.execute("DELETE FROM memory_bulletins WHERE id = ?", (bid,))
 
-    # Verify cascade
-    refs = await svc.db.fetch_all(
-        "SELECT * FROM memory_bulletin_entities WHERE bulletin_id = ?", (bid,)
-    )
-    assert len(refs) == 0
+    # Verify it's gone
+    bulletins = await svc.read_bulletins(workspace)
+    assert len(bulletins) == 0
 
 
 async def test_claim_crud(svc, workspace):
@@ -278,8 +255,8 @@ async def test_check_constraints(db):
     """CHECK constraints reject invalid values."""
     with pytest.raises(Exception):
         await db.execute(
-            "INSERT INTO memory_bulletins (id, created_at, visibility) VALUES (?, ?, ?)",
-            ("test", "2026-01-01", "invalid"),
+            "INSERT INTO memory_bulletins (id, created_at, channel_id, source_type, visibility, content) VALUES (?, ?, ?, ?, ?, ?)",
+            ("test", "2026-01-01", "ch1", "test", "invalid", "content"),
         )
 
     with pytest.raises(Exception):

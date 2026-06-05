@@ -50,7 +50,11 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     # Load memory index from SQLite
     if db is not None:
         from cyborg_server.services.memory.service import build_memory_index_text_db
-        memory_index = await build_memory_index_text_db(db)
+        # TODO: The full memory index dump was ~22KB+ and mostly artifact noise.
+        # The memory tools (search/read/browse/write/graph) still work — agents
+        # discover entities on demand rather than via a prompt dump that probably
+        # didn't help anyway. Re-enable if we build a compact, useful index.
+        # memory_index = await build_memory_index_text_db(db)
         memory_section = (
             "## Memory\n\n"
             "You have persistent memory with these tools:\n"
@@ -62,8 +66,8 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             "\n"
             "Entity types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.\n"
         )
-        if memory_index:
-            memory_section += "\n" + memory_index
+        # if memory_index:
+        #     memory_section += "\n" + memory_index
         parts.append(memory_section)
 
     # Append grounding rules to reduce hallucinated tool claims

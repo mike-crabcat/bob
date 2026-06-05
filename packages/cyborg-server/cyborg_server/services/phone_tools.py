@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 def make_phone_tools(
     ctx: AppContext,
+    *,
+    session_key: str | None = None,
 ) -> list:
     """Create phone call tools for the LLM agent.
 
@@ -72,6 +74,7 @@ def make_phone_tools(
             to_number=to_number,
             agenda=agenda,
             app_state=None,
+            origin_session_key=session_key,
         )
 
         if "error" in result:

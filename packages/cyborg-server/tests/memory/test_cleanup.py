@@ -180,16 +180,16 @@ async def test_rewrite_bulletin_entities_renames_contact_refs(db):
     )
     # Insert entity refs
     await db.execute(
-        "INSERT INTO memory_bulletin_entities (bulletin_id, category, entity_id) "
-        "VALUES ('b-1', 'contacts', 'contact-blair-nicol')",
+        "INSERT INTO memory_entity_bulletins (entity_id, bulletin_id) "
+        "VALUES ('contact-blair-nicol', 'b-1')",
     )
     await db.execute(
-        "INSERT INTO memory_bulletin_entities (bulletin_id, category, entity_id) "
-        "VALUES ('b-1', 'contacts', 'contact-03f3902d')",
+        "INSERT INTO memory_entity_bulletins (entity_id, bulletin_id) "
+        "VALUES ('contact-03f3902d', 'b-1')",
     )
     await db.execute(
-        "INSERT INTO memory_bulletin_entities (bulletin_id, category, entity_id) "
-        "VALUES ('b-2', 'contacts', 'contact-mike')",
+        "INSERT INTO memory_entity_bulletins (entity_id, bulletin_id) "
+        "VALUES ('contact-mike', 'b-2')",
     )
 
     rename = {"contact-blair-nicol": "contact-03f3902d",
@@ -198,12 +198,12 @@ async def test_rewrite_bulletin_entities_renames_contact_refs(db):
 
     assert count == 2
     refs = await db.fetch_all(
-        "SELECT entity_id FROM memory_bulletin_entities WHERE bulletin_id = 'b-1' ORDER BY entity_id",
+        "SELECT entity_id FROM memory_entity_bulletins WHERE bulletin_id = 'b-1' ORDER BY entity_id",
     )
     ids = [r["entity_id"] for r in refs]
     assert ids.count("contact-03f3902d") == 1
     refs2 = await db.fetch_all(
-        "SELECT entity_id FROM memory_bulletin_entities WHERE bulletin_id = 'b-2'",
+        "SELECT entity_id FROM memory_entity_bulletins WHERE bulletin_id = 'b-2'",
     )
     assert refs2[0]["entity_id"] == "contact-7c9f0fd7"
 
@@ -253,8 +253,8 @@ async def test_run_cleanup_end_to_end(db):
         "VALUES ('b-1', 'ch1', 'test', 'body', '2026-01-01')",
     )
     await db.execute(
-        "INSERT INTO memory_bulletin_entities (bulletin_id, category, entity_id) "
-        "VALUES ('b-1', 'contacts', 'contact-blair-nicol')",
+        "INSERT INTO memory_entity_bulletins (entity_id, bulletin_id) "
+        "VALUES ('contact-blair-nicol', 'b-1')",
     )
 
     directory = ContactDirectory([
@@ -280,7 +280,7 @@ async def test_run_cleanup_end_to_end(db):
     assert c1["object_id"] == "contact-bob-sr"
     # Bulletin entity ref rewritten
     brefs = await db.fetch_all(
-        "SELECT entity_id FROM memory_bulletin_entities WHERE bulletin_id = 'b-1'",
+        "SELECT entity_id FROM memory_entity_bulletins WHERE bulletin_id = 'b-1'",
     )
     assert brefs[0]["entity_id"] == "contact-03f3902d"
     # Canon enriched with FK

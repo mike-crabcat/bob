@@ -29,6 +29,9 @@ router = APIRouter(tags=["phone"])
 # and the LLM phone tool. Previously lived on app.state.
 _call_agendas: dict[str, dict] = {}
 
+# Track which call IDs have already had their result dispatched to the origin session.
+_result_dispatched: set[str] = set()
+
 
 def _build_phone_context() -> str:
     return (
@@ -241,6 +244,7 @@ async def initiate_outbound_call(
     to_number: str,
     agenda: str,
     app_state: Any | None = None,
+    origin_session_key: str | None = None,
 ) -> dict:
     """Initiate an outbound phone call via Twilio.
 
@@ -271,12 +275,13 @@ async def initiate_outbound_call(
         "phone_number": to_number,
         "call_id": call_id,
         "session_key": session_key,
+        "origin_session_key": origin_session_key,
     }
 
     await db.execute(
-        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at)
-           VALUES (?, ?, ?, 'outbound', 'ringing', ?, datetime('now'))""",
-        (call_id, call.sid, to_number, agenda),
+        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at, origin_session_key)
+           VALUES (?, ?, ?, 'outbound', 'ringing', ?, datetime('now'), ?)""",
+        (call_id, call.sid, to_number, agenda, origin_session_key),
     )
 
     logger.info("Initiated call %s to %s", call.sid, to_number)
@@ -344,6 +349,62 @@ async def twiml_webhook(request: Request) -> PlainTextResponse:
     return PlainTextResponse(twiml, media_type="application/xml")
 
 
+async def _maybe_dispatch_call_result(
+    db: Any,
+    settings: Any,
+    app_state: Any,
+    call_sid: str,
+    call_status: str,
+    call_data: dict | None = None,
+    call_id_override: str | None = None,
+) -> None:
+    """Dispatch call result to originating session if applicable. Guards against double-dispatch."""
+    # Look up the call record to get origin_session_key and call_id
+    if call_sid:
+        call_row = await db.fetch_one(
+            "SELECT id, origin_session_key, agenda FROM phone_calls WHERE call_sid = ?",
+            (call_sid,),
+        )
+    elif call_id_override:
+        call_row = await db.fetch_one(
+            "SELECT id, origin_session_key, agenda FROM phone_calls WHERE id = ?",
+            (call_id_override,),
+        )
+    else:
+        return
+
+    if not call_row or not call_row["origin_session_key"]:
+        return
+
+    call_id = call_row["id"]
+    if call_id in _result_dispatched:
+        return
+    _result_dispatched.add(call_id)
+
+    origin_session_key = call_row["origin_session_key"]
+    agenda = call_row["agenda"] or ""
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.phone_call_result_service import dispatch_call_result
+
+    ctx = AppContext(db=db, settings=settings)
+    wa_service = getattr(app_state, "whatsapp_bridge_service", None)
+
+    asyncio.create_task(dispatch_call_result(
+        ctx,
+        call_id=call_id,
+        origin_session_key=origin_session_key,
+        agenda=agenda,
+        status=call_status,
+        wa_service=wa_service,
+    ))
+
+    logger.info(
+        "Dispatching call result for %s (status=%s) to origin session %s",
+        call_id, call_status, origin_session_key,
+    )
+
+
 @router.post("/status")
 async def call_status(request: Request) -> dict:
     """Handle call status callbacks from Twilio."""
@@ -386,6 +447,15 @@ async def call_status(request: Request) -> dict:
                         "UPDATE phone_calls SET recording_path = ? WHERE call_sid = ?",
                         (str(calls_dir / rel_path), call_sid),
                     )
+
+        # Dispatch call result to originating session if applicable
+        await _maybe_dispatch_call_result(
+            db=db,
+            settings=request.app.state.settings,
+            app_state=request.app.state,
+            call_sid=call_sid,
+            call_status=call_status,
+        )
     elif call_status == "ringing":
         await db.execute(
             "UPDATE phone_calls SET status = 'ringing' WHERE call_sid = ?",
@@ -490,6 +560,7 @@ async def media_stream(websocket: WebSocket) -> None:
     hello_task: asyncio.Task | None = None
     first_utterance_done = False
     media_count = 0
+    pipeline_was_active = False
 
     try:
         while True:
@@ -569,6 +640,7 @@ async def media_stream(websocket: WebSocket) -> None:
 
                 if processing_lock.locked():
                     # Pipeline running — check for barge-in
+                    pipeline_was_active = True
                     if transport._has_speech and transport.is_speaking:
                         logger.info("Barge-in detected at media chunk %d", media_count)
                         transport.interrupt()
@@ -579,6 +651,12 @@ async def media_stream(websocket: WebSocket) -> None:
                         transport.reset_interrupt()
                 else:
                     # Pipeline idle — normal utterance detection
+                    if pipeline_was_active:
+                        # Pipeline just finished — reset silence detector to
+                        # avoid false triggers from noise/echo accumulated
+                        # during TTS playback
+                        transport.clear_buffer()
+                        pipeline_was_active = False
                     if transport.is_utterance_complete():
                         logger.info("Utterance complete after %d media chunks", media_count)
                         first_utterance_done = True
@@ -645,6 +723,18 @@ async def media_stream(websocket: WebSocket) -> None:
                 })
             except Exception:
                 logger.warning("Failed to finalize call record", exc_info=True)
+
+        # Dispatch call result to originating session if applicable
+        if call_id:
+            await _maybe_dispatch_call_result(
+                db=db,
+                settings=websocket.app.state.settings,
+                app_state=websocket.app.state,
+                call_sid="",
+                call_status="completed",
+                call_id_override=call_id,
+            )
+
         logger.info("Twilio Media Stream disconnected")
 
 

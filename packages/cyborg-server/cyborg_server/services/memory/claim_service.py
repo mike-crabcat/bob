@@ -34,6 +34,13 @@ async def write_claim(db: Any, claim: Claim) -> str:
             claim.body,
         ),
     )
+    # Write claim↔bulletin join rows
+    if claim.source_bulletins:
+        await db.execute_many(
+            "INSERT OR IGNORE INTO memory_claim_bulletins (claim_id, bulletin_id) VALUES (?, ?)",
+            [(claim.id, bid) for bid in claim.source_bulletins],
+        )
+
     logger.info("Claim written: %s", claim.id)
     return claim.id
 
@@ -94,14 +101,7 @@ async def extract_claims_from_bulletin(
         lines = [f"- {c.subject_id} {c.predicate} {c.object_id or ''} ({c.status})" for c in existing_claims[:50]]
         existing_context = "\n\n## Existing Claims\n\n" + "\n".join(lines)
 
-    from cyborg_server.services.memory.models import serialize_frontmatter
-    bulletin_text = serialize_frontmatter({
-        "id": bulletin.id,
-        "channel_id": bulletin.channel_id,
-        "visibility": bulletin.visibility,
-        "scope": bulletin.scope,
-        "entities": bulletin.entities,
-    }, bulletin.content)
+    bulletin_text = f"[Bulletin: {bulletin.id}]\nChannel: {bulletin.channel_id}\nVisibility: {bulletin.visibility}\n\n{bulletin.content}"
 
     user_prompt = f"## Bulletin\n\n{bulletin_text}{existing_context}"
 
@@ -130,22 +130,24 @@ async def extract_claims_from_bulletin(
 
     from cyborg_server.services.memory.entity_resolver import normalize_entity_id
 
+    valid_types = {"fact", "preference", "constraint", "decision", "task",
+                   "availability", "booking", "artifact", "relationship", "private_note"}
+
     claims = []
-    now = datetime.now()
     for item in items:
         if not isinstance(item, dict):
             continue
+        raw_type = item.get("type", "fact")
         claim = Claim(
             id=f"claim-{bulletin.id}-{len(claims) + 1:03d}",
-            type=item.get("type", "fact"),
+            type=raw_type if raw_type in valid_types else "fact",
             subject_id=normalize_entity_id(item.get("subject_id", "")),
             predicate=item.get("predicate", ""),
             object_id=normalize_entity_id(item["object_id"]) if isinstance(item.get("object_id"), str) else item.get("object_id"),
             status="active",
             source_bulletins=[bulletin.id],
             visibility=bulletin.visibility,
-            scope=bulletin.scope,
-            created_at=now,
+            created_at=bulletin.created_at,
             superseded_by=[],
             body=item.get("body", ""),
         )

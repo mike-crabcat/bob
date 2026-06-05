@@ -73,9 +73,9 @@ async def test_update_entities_reconciles_name_slug_to_canonical(ctx, tmp_path):
     llm.memory_model = "test"
 
     svc = MemoryService(ctx)
-    wrote = await svc._update_entities_from_claims(llm, claims)
+    result = await svc._update_entities_from_claims(llm, claims)
 
-    assert wrote == 1
+    assert result["count"] == 1
     # The canonical entity should exist in DB (created by reconciliation)
     canon = await ctx.db.fetch_one(
         "SELECT * FROM memory_entities WHERE entity_id = 'contact-03f3902d'"

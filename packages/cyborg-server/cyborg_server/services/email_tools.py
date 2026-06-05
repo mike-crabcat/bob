@@ -41,7 +41,7 @@ def make_email_tools(ctx: AppContext, thread_id: str, inbox_id: str, *, reply_tr
     return [email_reply, email_skip]
 
 
-def make_email_send_tools(ctx: AppContext) -> list[Tool]:
+def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) -> list[Tool]:
     """Create email_send tool for initiating new email threads. Not bound to a specific thread."""
 
     @tool
@@ -69,6 +69,7 @@ def make_email_send_tools(ctx: AppContext) -> list[Tool]:
                 subject=subject,
                 text=body,
                 agenda=agenda,
+                origin_session_key=session_key,
             )
             return json.dumps({"ok": True, "thread_id": result.get("thread_id", "")})
         except Exception as e:

@@ -55,7 +55,7 @@ def build_common_tools(
     _extend(make_memory_tools(ctx, session_key=session_key))
     _extend(make_docs_tools(ctx, session_key=session_key))
     _extend(make_changelog_tools(ctx, session_key=session_key))
-    _extend(make_email_send_tools(ctx))
+    _extend(make_email_send_tools(ctx, session_key=session_key))
     _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
 
     # Trust-escalated tools
@@ -68,6 +68,6 @@ def build_common_tools(
     # Phone subsystem — adds contact + phone tools when enabled
     if ctx.settings.phone.enabled:
         _extend(make_contact_tools(ctx))
-        _extend(make_phone_tools(ctx))
+        _extend(make_phone_tools(ctx, session_key=session_key))
 
     return tools
