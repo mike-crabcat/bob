@@ -2,6 +2,32 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## [Unreleased] - 2026-05-31
+
+### Added
+- Add entity-centric memory system (v3) replacing wiki/category model: channel-based architecture with bulletin generation from session transcripts, entity resolution, claim extraction, and graph-based entity relationships
+- Add memory bulletin generator that converts session transcript ranges into structured draft bulletins with channel, visibility, scope, and entity metadata
+- Add memory claim service for extracting knowledge claims from bulletins and linking them to entities
+- Add memory entity resolver for mapping contact references, channels, and topics to entity IDs
+- Add memory index service for building searchable text indexes from entity directories
+- Add memory CLI commands: `seed` (regenerate from session history), `rebuild` (rebuild indexes from bulletins), `validate` (check structure), `query` (natural language search)
+- Add frontend error reporting: unhandled exceptions and promise rejections are POSTed to a backend endpoint for centralized logging
+- Add live tool call tracking in call detail view: WebSocket events show running tools with pulse indicator and output display
+- Add `log_id` to `llm.call.running` and `llm.call.tool_completed` WebSocket events for precise call tracking
+
+### Changed
+- Replace wiki/category memory tools with entity-centric tools: `memory_search`, `memory_read`, `memory_browse`, `memory_write`, `memory_graph` with entity types (contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions)
+- Replace memory_prompts and people_updates in session summaries with direct bulletin generation from transcripts via the heartbeat task
+- Simplify session summary LLM prompt to focus on summary and topics only, removing memory extraction responsibilities
+- Switch dashboard session call tool count from counting offered tools (`tools_json`) to counting actual executed tool calls (`function_call` entries in `messages_json`)
+- Fix active call tracking in session view to remove only the specific completed call by `log_id` instead of clearing all running calls
+- Deduplicate live running calls in session timeline so DB-recorded running calls don't appear alongside WebSocket-tracked calls
+- Update memory dashboard dream log display to show per-bulletin breakdown with claims and entity ops instead of category/slug pairs
+- Simplify memory prompt in workspace assembler to reference new entity-based tools and omit inline wiki documentation
+
+### Fixed
+- Fix animated GIF sending via WhatsApp: preserve GIF animation by passing files under the bridge payload limit as-is, and add frame-dropping resize for oversized animated GIFs instead of flattening to static JPEG
+
 ## [Unreleased] - 2026-05-30
 
 ### Added

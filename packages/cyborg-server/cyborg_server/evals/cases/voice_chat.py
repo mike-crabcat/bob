@@ -4,7 +4,7 @@ from cyborg_server.evals.case import JudgeCriteria, StructuralCheck
 from cyborg_server.evals.registry import eval_case
 
 
-def _build_voice_messages(
+async def _build_voice_messages(
     ctx,
     user_text: str,
     *,
@@ -13,7 +13,7 @@ def _build_voice_messages(
     """Build messages matching production voice_service message assembly."""
     from cyborg_server.services.prompt_assembler import load_workspace_prompt
 
-    workspace = load_workspace_prompt(ctx.settings.harness.workspace_dir)
+    workspace = await load_workspace_prompt(ctx.settings.harness.workspace_dir, db=getattr(ctx, 'db', None))
 
     voice_instructions = (
         "You are participating in a live voice conversation. "
@@ -56,7 +56,7 @@ def _build_voice_messages(
 async def voice_chat_concise(ctx):
     from cyborg_server.services.llm_dispatch import LLMDispatchService
 
-    messages = _build_voice_messages(ctx, "Hey, how are you doing today?")
+    messages = await _build_voice_messages(ctx, "Hey, how are you doing today?")
 
     dispatch = LLMDispatchService(ctx)
     response = await dispatch.chat(messages, call_category="eval")
@@ -81,7 +81,7 @@ async def voice_chat_concise(ctx):
 async def voice_chat_agenda(ctx):
     from cyborg_server.services.llm_dispatch import LLMDispatchService
 
-    messages = _build_voice_messages(
+    messages = await _build_voice_messages(
         ctx,
         "I need to set up a team sync sometime soon.",
         voice_instructions_extra=(
@@ -115,7 +115,7 @@ async def voice_chat_agenda(ctx):
 async def voice_chat_language_coach(ctx):
     from cyborg_server.services.llm_dispatch import LLMDispatchService
 
-    messages = _build_voice_messages(
+    messages = await _build_voice_messages(
         ctx,
         "Bonjour, je voudrais practise mon francais.",
         voice_instructions_extra=(

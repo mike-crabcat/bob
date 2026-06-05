@@ -138,22 +138,20 @@ class EntityRef:
 
 @dataclass(slots=True)
 class Bulletin:
-    """An immutable source record produced from a channel transcript.
+    """An immutable plain-text memory note.
 
-    Bulletins capture raw observations from a single information source and
-    serve as the provenance anchor for all downstream claims and entity
-    documents.
+    Bulletins are simple factual observations. Contacts are referenced inline
+    using ``{{contact:ID|Name}}`` tags. All entity resolution and claim
+    extraction happens downstream in the dream pipeline.
 
     Attributes:
-        id: Unique bulletin identifier (e.g. ``bult-20260531-a1b2c3``).
+        id: Unique bulletin identifier (e.g. ``bulletin-20260531-a1b2c3``).
         created_at: When the bulletin was generated.
         channel_id: The channel this bulletin was sourced from.
-        source_type: Origin type (``"session"``, ``"email"``, ``"import"``, etc.).
-        source_id: Identifier for the specific source (e.g. session ID).
+        source_type: Origin type (``"session"``, ``"manual"``, ``"seed"``, etc.).
+        source_id: Identifier for the specific source (e.g. session key).
         visibility: Who can see this bulletin.
-        scope: Scoping tags for access control.
-        entities: Entity references organised by category.
-        content: The markdown body (everything after frontmatter).
+        content: Plain-text bulletin body with contact tags.
     """
 
     id: str
@@ -162,8 +160,6 @@ class Bulletin:
     source_type: str
     source_id: str
     visibility: str = "channel"
-    scope: list[str] = field(default_factory=list)
-    entities: dict[str, list[EntityRef]] = field(default_factory=_empty_entity_dict)
     content: str = ""
 
 
@@ -249,38 +245,24 @@ class QueryContext:
 
 
 @dataclass(slots=True)
-class BulletinGeneratorInput:
-    """Structured input for the bulletin generation prompt.
+class BulletinMessage:
+    """A single message in the bulletin generator input."""
 
-    This bundles everything the LLM needs to produce a ``Bulletin`` from a
-    session transcript.
+    sender_contact_id: str
+    timestamp: str
+    content: str
+
+
+@dataclass(slots=True)
+class BulletinGeneratorInput:
+    """Compact input for the bulletin generation prompt.
 
     Attributes:
-        session_id: The session this transcript comes from.
-        transcript_range_id: Identifier for the specific transcript chunk.
-        transcript_start_time: Start of the transcript window.
-        transcript_end_time: End of the transcript window.
-        channel_id: Channel the session belongs to.
-        channel_type: Type of channel (``"whatsapp"``, ``"email"``, etc.).
-        source_type: Origin of the data (``"session"``, ``"email"``, etc.).
-        actor_contact_id: Contact ID of the primary actor, if known.
-        visibility: Default visibility for generated bulletins.
-        scope: Scope tags for the generated bulletins.
-        known_entities: Entity references the generator should be aware of,
-            organised by category with dicts containing ``id`` and
-            ``display_name``.
-        transcript: The raw transcript text.
+        session_key: The session this transcript comes from.
+        messages: Messages with sender contact IDs and timestamps.
+        participants: Contact ID/name pairs for group context.
     """
 
-    session_id: str
-    transcript_range_id: str
-    transcript_start_time: datetime
-    transcript_end_time: datetime
-    channel_id: str
-    channel_type: str
-    source_type: str
-    actor_contact_id: str | None = None
-    visibility: str = "channel"
-    scope: list[str] = field(default_factory=list)
-    known_entities: dict[str, list[dict]] = field(default_factory=lambda: _empty_entity_dict())
-    transcript: str = ""
+    session_key: str
+    messages: list[BulletinMessage] = field(default_factory=list)
+    participants: list[dict[str, str]] = field(default_factory=list)

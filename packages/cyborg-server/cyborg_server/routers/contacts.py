@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from cyborg_server.database import Database
 from cyborg_server.dependencies import get_database
@@ -345,3 +345,78 @@ async def clear_default_contact(
     )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{contact_id}/entity")
+async def get_contact_entity(
+    contact_id: UUID,
+    request: Request,
+    database: Database = Depends(get_database),
+) -> dict[str, Any]:
+    """Get the entity document for a contact from the memory system."""
+    row = await database.fetch_one(
+        "SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL",
+        (str(contact_id),),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
+    from cyborg_server.services.memory.service import MemoryService
+
+    settings = request.app.state.settings
+    ctx = AppContext(settings=settings, db=database)
+    entity_id = canonical_contact_id(str(contact_id))
+    svc = MemoryService(ctx)
+    entity = svc.read_entity(settings.harness.workspace_dir, entity_id)
+
+    if not entity:
+        raise HTTPException(status_code=404, detail="No entity document found for this contact")
+
+    return {
+        "entity_id": entity.entity_id,
+        "entity_type": entity.entity_type,
+        "display_name": entity.display_name,
+        "status": entity.status,
+        "body": entity.body,
+        "related_entities": entity.related_entities,
+        "source_bulletins": entity.source_bulletins,
+    }
+
+
+@router.get("/{contact_id}/claims")
+async def get_contact_claims(
+    contact_id: UUID,
+    request: Request,
+    database: Database = Depends(get_database),
+) -> list[dict[str, Any]]:
+    """Get active claims for a contact from the memory system."""
+    row = await database.fetch_one(
+        "SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL",
+        (str(contact_id),),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    from cyborg_server.services.memory.claim_service import get_active_claims
+    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
+
+    entity_id = canonical_contact_id(str(contact_id))
+    claims = await get_active_claims(database, entity_id)
+
+    return [
+        {
+            "id": c.id,
+            "type": c.type,
+            "subject_id": c.subject_id,
+            "predicate": c.predicate,
+            "object_id": c.object_id,
+            "status": c.status,
+            "source_bulletins": c.source_bulletins,
+            "visibility": c.visibility,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "body": c.body,
+        }
+        for c in claims
+    ]

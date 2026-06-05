@@ -65,3 +65,4 @@ async def test_notification_dispatch_no_pending(ctx: AppContext):
     """NotificationDispatchTask completes without error when no notifications exist."""
     task = NotificationDispatchTask()
     await task.run(ctx)
+

@@ -251,6 +251,9 @@ def configure_logging(settings: Settings | None = None) -> None:
         file_handler.setFormatter(StructuredFormatter())
         root_logger.addHandler(file_handler)
 
+    # Quieten noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 # ============================================================================
 # Database Log Handler

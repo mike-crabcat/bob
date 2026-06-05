@@ -3,17 +3,27 @@ import { useQuery } from "@tanstack/react-query";
 import { useWSConnected } from "@/hooks/use-live-data";
 import { SessionList } from "@/components/home/session-list";
 import { LLMChart } from "@/components/home/llm-chart";
-import { SummaryCards } from "@/components/home/summary-cards";
+import { BulletinCards } from "@/components/home/bulletin-cards";
 import { fetchAPI } from "@/lib/api";
+
+interface CostByCategory {
+  category: string;
+  cost: number;
+  call_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
 
 interface HomeSnapshot {
   active_sessions: SessionItem[];
   chart_buckets: ChartBucket[];
   chart_categories: string[];
-  recent_summaries: SummaryItem[];
+  recent_bulletins: BulletinItem[];
   active_dispatches: DispatchItem[];
   project_stats: Record<string, number>;
   task_stats: Record<string, number>;
+  cost_by_category: CostByCategory[];
+  total_cost_24h: number;
 }
 
 export interface SessionItem {
@@ -31,12 +41,11 @@ export interface ChartBucket {
   [category: string]: string | number;
 }
 
-export interface SummaryItem {
+export interface BulletinItem {
   id: string;
-  session_key: string;
-  summary_text: string;
-  topics: string[];
-  participants: string[];
+  channel_id: string;
+  source_type: string;
+  content: string;
   created_at: string;
 }
 
@@ -70,14 +79,47 @@ function HomePage() {
         <LLMChart buckets={home?.chart_buckets ?? []} categories={home?.chart_categories ?? []} />
       </section>
 
+      {home && home.cost_by_category && home.cost_by_category.length > 0 && (
+        <section>
+          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">
+            estimated cost · 24h
+            <span className="text-text ml-2">${home.total_cost_24h.toFixed(2)}</span>
+          </h2>
+          <div className="bg-surface border border-border p-2">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-muted text-[10px] uppercase">
+                  <th className="text-left pb-1">category</th>
+                  <th className="text-right pb-1">calls</th>
+                  <th className="text-right pb-1">prompt</th>
+                  <th className="text-right pb-1">completion</th>
+                  <th className="text-right pb-1">cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {home.cost_by_category.map((c) => (
+                  <tr key={c.category} className="border-t border-border">
+                    <td className="py-0.5">{c.category.replace(/_/g, " ")}</td>
+                    <td className="text-right tabular-nums">{c.call_count}</td>
+                    <td className="text-right tabular-nums">{fmtTokens(c.prompt_tokens)}</td>
+                    <td className="text-right tabular-nums">{fmtTokens(c.completion_tokens)}</td>
+                    <td className="text-right tabular-nums">${c.cost.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       <section>
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">sessions</h2>
         <SessionList sessions={home?.active_sessions?.slice(0, 8) ?? []} />
       </section>
 
       <section>
-        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">summaries</h2>
-        <SummaryCards summaries={home?.recent_summaries ?? []} />
+        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">bulletins</h2>
+        <BulletinCards bulletins={home?.recent_bulletins ?? []} />
       </section>
 
       <section>
@@ -91,6 +133,12 @@ function HomePage() {
       </section>
     </div>
   );
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+  return String(n);
 }
 
 function StatBox({ label, value }: { label: string; value: number }) {

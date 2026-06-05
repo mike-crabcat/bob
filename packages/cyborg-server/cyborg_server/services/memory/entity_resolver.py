@@ -109,6 +109,12 @@ def load_aliases(memory_dir: Path) -> dict[str, str]:
     return raw
 
 
+async def load_aliases_db(db: Any) -> dict[str, str]:
+    """Load aliases from the memory_aliases table."""
+    rows = await db.fetch_all("SELECT alias, entity_id FROM memory_aliases")
+    return {r["alias"]: r["entity_id"] for r in rows}
+
+
 def load_entity_map(memory_dir: Path) -> dict[str, dict[str, str]]:
     """Load the entity map index from memory/indexes/entity-map.yml.
 
@@ -121,3 +127,17 @@ def load_entity_map(memory_dir: Path) -> dict[str, dict[str, str]]:
     if not isinstance(raw, dict):
         return {}
     return raw
+
+
+async def load_entity_map_db(db: Any) -> dict[str, dict[str, str]]:
+    """Load entity map from the memory_entities table."""
+    rows = await db.fetch_all(
+        "SELECT entity_id, entity_type, display_name FROM memory_entities"
+    )
+    return {
+        r["entity_id"]: {
+            "entity_type": r["entity_type"],
+            "display_name": r["display_name"] or "",
+        }
+        for r in rows
+    }

@@ -19,7 +19,7 @@ _cached_prompt: tuple[Any, str] | None = None  # (mtime_hash, content)
 _cached_mtime: dict[str, float] = {}
 
 
-def load_workspace_prompt(workspace_dir: Path) -> str:
+async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     """Load and concatenate workspace files. Cached until any file changes."""
     global _cached_prompt, _cached_mtime
 
@@ -47,14 +47,14 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
 
-    # Load memory index
-    from cyborg_server.services.memory import MemoryService
-    MemoryService.ensure_memory_structure(workspace_dir)
-    memory_dir = workspace_dir / "memory"
-    if memory_dir.is_dir():
-        # Build entity-based index
-        from cyborg_server.services.memory.index_service import build_memory_index_text
-        memory_index = build_memory_index_text(memory_dir)
+    # Load memory index from SQLite
+    if db is not None:
+        from cyborg_server.services.memory.service import build_memory_index_text_db
+        # TODO: The full memory index dump was ~22KB+ and mostly artifact noise.
+        # The memory tools (search/read/browse/write/graph) still work — agents
+        # discover entities on demand rather than via a prompt dump that probably
+        # didn't help anyway. Re-enable if we build a compact, useful index.
+        # memory_index = await build_memory_index_text_db(db)
         memory_section = (
             "## Memory\n\n"
             "You have persistent memory with these tools:\n"
@@ -66,8 +66,8 @@ def load_workspace_prompt(workspace_dir: Path) -> str:
             "\n"
             "Entity types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.\n"
         )
-        if memory_index:
-            memory_section += "\n" + memory_index
+        # if memory_index:
+        #     memory_section += "\n" + memory_index
         parts.append(memory_section)
 
     # Append grounding rules to reduce hallucinated tool claims

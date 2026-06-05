@@ -40,11 +40,13 @@ def make_whatsapp_outreach_tools(
         contact_id: str,
         message: str,
         objective: str,
+        media_path: str = "",
     ) -> str:
         """Send a WhatsApp message to a contact (not the current chat).
         The 'objective' describes the specific outcome you need from this conversation,
         e.g. "Find out if John can meet on Thursday and what time works." The target
-        session will be instructed to work toward this objective and report back when complete."""
+        session will be instructed to work toward this objective and report back when complete.
+        Optionally attach an image or media file by providing media_path."""
         from cyborg_server.exceptions import ConflictError
         from cyborg_server.models import SessionRouteCreate, SessionRouteKind
         from cyborg_server.services.session_route_service import SessionRouteService
@@ -70,7 +72,20 @@ def make_whatsapp_outreach_tools(
 
         # Convert phone to JID and send
         jid = _phone_to_jid(phone)
-        request_id = await wa_service.send_message(jid, message)
+        if media_path:
+            from cyborg_server.services.whatsapp_bridge_service import _prepare_media
+            workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
+            resolved = (workspace / media_path).resolve()
+            if not str(resolved).startswith(str(workspace)):
+                return json.dumps({"ok": False, "error": "Media path escapes workspace"})
+            if not resolved.is_file():
+                return json.dumps({"ok": False, "error": f"Media file not found: {media_path}"})
+            prepared = await _prepare_media(str(resolved))
+            if prepared is None:
+                return json.dumps({"ok": False, "error": "Failed to prepare media for sending"})
+            request_id = await wa_service.send_media(jid, prepared, caption=message)
+        else:
+            request_id = await wa_service.send_message(jid, message)
 
         # Derive session key for the target contact
         phone_digits = re.sub(r"\D", "", phone)
@@ -334,7 +349,7 @@ def make_outreach_reply_tools(
             origin_session_key, "whatsapp",
         )
 
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=db)
         system_content = "\n\n".join(
             p for p in (workspace_prompt, origin_agenda) if p
         )
@@ -386,15 +401,16 @@ def make_outreach_reply_tools(
 
             # Tap: if LLM didn't use send_whatsapp_message, give it a second chance.
             if not message_was_sent[0] and llm_result.strip():
-                from cyborg_server.services.tap import tap_dispatch
-                llm_result = await tap_dispatch(
-                    ctx, messages=messages, tools=origin_tools,
-                    session_key=origin_session_key,
-                    send_tool_name="send_whatsapp_message",
-                    first_result=llm_result,
-                    call_category="outreach_result",
-                    dispatch_id=dispatch_id,
-                )
+                from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                if tap_enabled():
+                    llm_result = await tap_dispatch(
+                        ctx, messages=messages, tools=origin_tools,
+                        session_key=origin_session_key,
+                        send_tool_name="send_whatsapp_message",
+                        first_result=llm_result,
+                        call_category="outreach_result",
+                        dispatch_id=dispatch_id,
+                    )
 
             # Record in source session history
             await session_svc.add_message(

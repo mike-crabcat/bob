@@ -16,7 +16,7 @@ from cyborg_server.services.workspace_tools import make_workspace_tools
 from cyborg_server.services.memory_tools import make_memory_tools
 from cyborg_server.services.docs_tools import make_docs_tools
 from cyborg_server.services.changelog_tools import make_changelog_tools
-from cyborg_server.services.email_tools import make_email_send_tools
+from cyborg_server.services.email_tools import make_email_send_tools, make_email_thread_tools
 from cyborg_server.services.contact_tools import make_contact_tools
 from cyborg_server.services.phone_tools import make_phone_tools
 from cyborg_server.services.reflection_service import make_reflection_tools
@@ -33,6 +33,7 @@ def build_common_tools(
     *,
     session_key: str,
     is_trusted: bool = False,
+    contact_id: str | None = None,
 ) -> list[Tool]:
     """Build the standard tool set shared across dispatch channels.
 
@@ -54,7 +55,8 @@ def build_common_tools(
     _extend(make_memory_tools(ctx, session_key=session_key))
     _extend(make_docs_tools(ctx, session_key=session_key))
     _extend(make_changelog_tools(ctx, session_key=session_key))
-    _extend(make_email_send_tools(ctx))
+    _extend(make_email_send_tools(ctx, session_key=session_key))
+    _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
 
     # Trust-escalated tools
     if is_trusted:
@@ -66,6 +68,6 @@ def build_common_tools(
     # Phone subsystem — adds contact + phone tools when enabled
     if ctx.settings.phone.enabled:
         _extend(make_contact_tools(ctx))
-        _extend(make_phone_tools(ctx))
+        _extend(make_phone_tools(ctx, session_key=session_key))
 
     return tools

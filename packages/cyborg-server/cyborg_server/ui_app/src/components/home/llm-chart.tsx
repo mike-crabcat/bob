@@ -2,21 +2,22 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend } from "recharts";
 import { useRef, useState, useEffect } from "react";
 import type { ChartBucket } from "@/routes";
 
-const CATEGORY_COLORS: Record<string, string> = {
-  whatsapp_incoming: "#22c55e",
-  email_incoming: "#3b82f6",
-  session_summary: "#d4a574",
-  voice: "#a855f7",
-  other: "#71717a",
-};
+const PALETTE = [
+  "#22c55e", "#3b82f6", "#f59e0b", "#a855f7", "#ef4444",
+  "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
+  "#14b8a6", "#e11d48", "#eab308", "#8b5cf6", "#10b981",
+  "#0ea5e9", "#d946ef", "#65a30d", "#fb923c", "#818cf8",
+];
+
+function categoryColor(cat: string): string {
+  let h = 0;
+  for (let i = 0; i < cat.length; i++) h = (h * 31 + cat.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
 
 interface Props {
   buckets: ChartBucket[];
   categories: string[];
-}
-
-function categoryColor(cat: string): string {
-  return CATEGORY_COLORS[cat] ?? "#71717a";
 }
 
 function categoryLabel(cat: string): string {
@@ -50,7 +51,7 @@ export function LLMChart({ buckets, categories }: Props) {
   return (
     <div ref={ref} className="bg-surface border border-border p-2">
       {w > 0 && (
-        <BarChart width={w} height={130} data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+        <BarChart width={w} height={195} data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
           <XAxis
             dataKey="time"
             tick={{ fontSize: 9, fill: "#71717a" }}

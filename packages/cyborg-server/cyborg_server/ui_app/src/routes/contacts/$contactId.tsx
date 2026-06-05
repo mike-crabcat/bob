@@ -30,11 +30,45 @@ interface ContactSession {
   last_active: string;
 }
 
+interface EntityDocument {
+  entity_id: string;
+  entity_type: string;
+  display_name: string;
+  status: string;
+  body: string;
+  related_entities: Record<string, string[]>;
+  source_bulletins: string[];
+}
+
+interface Claim {
+  id: string;
+  type: string;
+  subject_id: string;
+  predicate: string;
+  object_id: string | null;
+  status: string;
+  source_bulletins: string[];
+  visibility: string;
+  created_at: string | null;
+  body: string;
+}
+
 const CHANNEL_COLORS: Record<string, string> = {
   whatsapp: "text-whatsapp",
   email: "text-email",
   voice: "text-voice",
   other: "text-muted",
+};
+
+const CLAIM_COLORS: Record<string, string> = {
+  fact: "bg-blue-900/40 text-blue-300",
+  preference: "bg-purple-900/40 text-purple-300",
+  constraint: "bg-orange-900/40 text-orange-300",
+  decision: "bg-green-900/40 text-green-300",
+  task: "bg-yellow-900/40 text-yellow-300",
+  availability: "bg-cyan-900/40 text-cyan-300",
+  relationship: "bg-pink-900/40 text-pink-300",
+  private_note: "bg-gray-900/40 text-gray-300",
 };
 
 function ContactDetailPage() {
@@ -45,10 +79,31 @@ function ContactDetailPage() {
   const [editPhone, setEditPhone] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [editTrusted, setEditTrusted] = useState(false);
+  const [expandedClaim, setExpandedClaim] = useState<string | null>(null);
 
   const { data: detail } = useQuery<ContactDetail>({
     queryKey: ["contact-detail", contactId],
     queryFn: () => fetchAPI<ContactDetail>(`/contacts/${contactId}`),
+  });
+
+  const { data: entity } = useQuery<EntityDocument | undefined>({
+    queryKey: ["contact-entity", contactId],
+    queryFn: async () => {
+      const res = await fetchAPI<EntityDocument | { error: string }>(`/contacts/${contactId}/entity`);
+      if (res && "error" in res) return undefined;
+      return res as EntityDocument;
+    },
+    retry: false,
+  });
+
+  const { data: claims } = useQuery<Claim[] | undefined>({
+    queryKey: ["contact-claims", contactId],
+    queryFn: async () => {
+      const res = await fetchAPI<Claim[] | { error: string }>(`/contacts/${contactId}/claims`);
+      if (res && "error" in res) return undefined;
+      return res as Claim[];
+    },
+    retry: false,
   });
 
   const mutation = useMutation({
@@ -209,6 +264,49 @@ function ContactDetailPage() {
               {g.is_admin && <span className="text-[10px] text-accent">admin</span>}
             </div>
           ))}
+        </section>
+      )}
+
+      {entity && (
+        <section>
+          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">entity document</h2>
+          <div className="text-xs text-text bg-surface border border-border p-2 whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-y-auto">
+            {entity.body}
+          </div>
+        </section>
+      )}
+
+      {claims && claims.length > 0 && (
+        <section>
+          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">claims ({claims.length})</h2>
+          <div className="flex flex-col gap-1">
+            {claims.map((c) => (
+              <div
+                key={c.id}
+                onClick={() => setExpandedClaim(expandedClaim === c.id ? null : c.id)}
+                className="bg-surface border border-border px-2 py-1.5 cursor-pointer hover:border-accent/30 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${CLAIM_COLORS[c.type] ?? "bg-gray-900/40 text-gray-300"}`}>
+                    {c.type}
+                  </span>
+                  <span className="text-xs text-text flex-1 truncate">
+                    {c.predicate} {c.object_id && <span className="text-muted">&rarr; {c.object_id}</span>}
+                  </span>
+                  {c.created_at && (
+                    <span className="text-[10px] text-muted shrink-0">
+                      {new Date(c.created_at).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
+                {expandedClaim === c.id && c.body && (
+                  <div className="mt-1 text-[11px] text-muted border-t border-border pt-1">
+                    {c.body}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </section>
       )}
     </div>

@@ -105,6 +105,7 @@ async def resolve_or_create_email_thread(
     subject: str | None = None,
     contact_id: str | None = None,
     agenda: str | None = None,
+    origin_session_key: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Find or create an ``email_threads`` record and session route.
 
@@ -118,6 +119,12 @@ async def resolve_or_create_email_thread(
         (inbox["id"], agentmail_thread_id),
     )
     if existing is not None:
+        # If we have an origin_session_key and the existing row doesn't, update it
+        if origin_session_key and not existing.get("origin_session_key"):
+            await db.execute(
+                "UPDATE email_threads SET origin_session_key = ? WHERE id = ?",
+                (origin_session_key, existing["id"]),
+            )
         return existing, False
 
     session_key = _build_session_key(agentmail_thread_id)
@@ -144,10 +151,10 @@ async def resolve_or_create_email_thread(
         """
         INSERT INTO email_threads (
             id, inbox_id, agentmail_thread_id, subject,
-            contact_id, session_key, agenda,
+            contact_id, session_key, agenda, origin_session_key,
             message_count, last_message_at, is_active,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?)
         """,
         (
             thread_id,
@@ -157,6 +164,7 @@ async def resolve_or_create_email_thread(
             contact_id,
             session_key,
             agenda,
+            origin_session_key,
             now_iso,
             now_iso,
             now_iso,
@@ -421,7 +429,7 @@ class EmailPollingService(BaseService):
                 )
                 contact_id = new_id
                 is_trusted = False
-                logger.info("auto-seeded untrusted contact %s for email %s", contact_id, sender_email)
+                logger.debug("auto-seeded untrusted contact %s for email %s", contact_id, sender_email)
 
         if contact_id is not None and is_trusted:
             default_agenda = DEFAULT_AGENDA
@@ -472,7 +480,7 @@ class EmailPollingService(BaseService):
                     "size": len(content),
                     "path": str(dest),
                 })
-                logger.info("Saved attachment %s (%d bytes) to %s", filename, len(content), dest)
+                logger.debug("Saved attachment %s (%d bytes) to %s", filename, len(content), dest)
             except Exception:
                 logger.warning(
                     "Failed to download attachment %s from message %s",
@@ -514,7 +522,7 @@ class EmailPollingService(BaseService):
         """Dispatch an incoming email to the LLM with email reply tools."""
         settings = self._get_settings()
         if not settings.openai.enabled:
-            logger.info("No LLM provider configured, skipping dispatch for email thread %s", thread["id"])
+            logger.debug("No LLM provider configured, skipping dispatch for email thread %s", thread["id"])
             return
 
         prompt_parts: list[str] = []
@@ -617,7 +625,7 @@ class EmailPollingService(BaseService):
         from cyborg_server.services.session_service import SessionService
         from cyborg_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
-        workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         participants_prompt = await self._build_participants_prompt(session_key)
 
         # Load memory index for trusted sessions
@@ -625,22 +633,49 @@ class EmailPollingService(BaseService):
         if is_trusted:
             from cyborg_server.services.memory import MemoryService
             mem_svc = MemoryService(self.ctx)
-            memory_prompt = mem_svc.build_memory_index(
+            memory_prompt = await mem_svc.build_memory_index(
                 settings.harness.workspace_dir
             )
 
         system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.", memory_prompt) if p)
 
+        # If this thread was initiated from another session, inject outreach prompt + result tool
+        origin_session_key = thread.get("origin_session_key")
+        if origin_session_key:
+            origin_prompt = (
+                "\n\n## Active Thread Task\n"
+                "This email thread was initiated on behalf of another session. "
+                f"- Objective: {thread.get('agenda', 'unknown')}\n\n"
+                "Your goal is to achieve the objective through this email conversation. "
+                "When you have the information needed or the task is complete, "
+                "call the finish_email_thread tool to relay the result back."
+            )
+            system_content += origin_prompt
+
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
+        enriched_body = f"[Email from: {sender_name} <{sender_email}>]\n[Subject: {subject}]\n\n{body}"
         await SessionService(self.ctx).add_message(
-            session_key, "user", body, channel="email", dispatched=0,
+            session_key, "user", enriched_body, channel="email", dispatched=0,
+            sender_id=sender_email,
         )
 
         # Email-specific tools (reply/skip) + common tool set
         reply_sent = [False]
         tools = make_email_tools(self.ctx, thread["agentmail_thread_id"], inbox["id"], reply_tracker=reply_sent)
-        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted))
+        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
+
+        # If this thread was initiated from another session, inject the finish_email_thread tool
+        if origin_session_key:
+            from cyborg_server.services.email_thread_result_tools import make_email_thread_result_tools
+            wa_service = getattr(self.ctx, "_wa_service", None)
+            tools.extend(make_email_thread_result_tools(
+                self.ctx,
+                thread_id=thread["agentmail_thread_id"],
+                origin_session_key=origin_session_key,
+                agenda=thread.get("agenda") or "",
+                wa_service=wa_service,
+            ))
 
         dispatch_id = str(uuid4())
 
@@ -669,16 +704,17 @@ class EmailPollingService(BaseService):
                 )
                 # Tap: if LLM didn't use email_reply, give it a second chance.
                 if not reply_sent[0] and result.strip():
-                    from cyborg_server.services.tap import tap_dispatch
-                    result = await tap_dispatch(
-                        self.ctx, messages=messages, tools=tools,
-                        session_key=session_key,
-                        send_tool_name="email_reply",
-                        first_result=result,
-                        call_category="email_incoming",
-                        dispatch_id=dispatch_id,
-                        contact_id=contact_id,
-                    )
+                    from cyborg_server.services.tap import tap_dispatch, tap_enabled
+                    if tap_enabled():
+                        result = await tap_dispatch(
+                            self.ctx, messages=messages, tools=tools,
+                            session_key=session_key,
+                            send_tool_name="email_reply",
+                            first_result=result,
+                            call_category="email_incoming",
+                            dispatch_id=dispatch_id,
+                            contact_id=contact_id,
+                        )
                 await session_svc.add_message(session_key, "assistant", result, channel="email")
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("email.message.received", {
@@ -839,7 +875,7 @@ class EmailPollingService(BaseService):
 
         if count > 0:
             await self._recount_thread_messages(inbox["id"])
-            logger.info("Synced %d missing message(s) in inbox %s", count, inbox["id"])
+            logger.debug("Synced %d missing message(s) in inbox %s", count, inbox["id"])
 
         return count
 

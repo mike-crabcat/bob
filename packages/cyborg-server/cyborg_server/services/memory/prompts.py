@@ -1,251 +1,51 @@
 from __future__ import annotations
 
 BULLETIN_GENERATION_PROMPT = """\
-You are a Bulletin Generator for the Agent Memory System.
+You are a memory extraction agent. Given a conversation transcript, identify \
+distinct pieces of information worth remembering long-term and express each as \
+a single plain-text bulletin.
 
-Your job is to read a bounded session transcript range and produce a single memory bulletin.
+## Rules
 
-A bulletin is an immutable source record created from a session range. It should capture only information that is worth remembering.
+1. Each bulletin must be self-contained: a reader who sees only this one \
+bulletin must understand WHO did WHAT, with enough context (dates, amounts, \
+locations, reasons) that the fact stands on its own. Do not split a single \
+memory across multiple bulletins if any part would be meaningless without the rest.
+2. Reference people using the contact tag format: {{contact:ID|Name}}
+   - Use the exact contact IDs and names from the provided participant list.
+   - Do not invent contact IDs.
+3. Include the exact timestamp from the message in ISO format, e.g. (2026-05-31T14:22:00).
+4. Do NOT include conversational noise: greetings, jokes, acknowledgements, \
+emoji reactions, casual chatter.
+5. Produce 0 to N bulletins. If nothing is worth remembering, return [].
+6. Use conservative wording: a suggestion is not a decision, a mention is not \
+a task, a possible plan is not a confirmed booking.
 
-Do not update entity documents.
-Do not update claims files.
-Do not invent contact IDs.
-Do not invent facts not supported by the transcript.
-Do not include conversational noise.
-Do not broaden privacy scope.
+## Memory-worthy categories
 
-The bulletin you produce will later be processed by the memory ingestion pipeline.
-
----
-
-# Inputs
-
-You will receive:
-
-1. session_id
-2. channel_id
-3. transcript_range_id
-4. transcript_start_time
-5. transcript_end_time
-6. actor_contact_id, if known
-7. channel visibility and scope
-8. known entity hints, if available
-9. transcript text
-
----
-
-# Memory-Worthiness Rules
-
-Create a bulletin only if the transcript contains one or more of:
-
-- decision made
-- task assigned
-- task completed
-- plan changed
-- preference expressed
-- constraint identified
-- booking confirmed
-- artifact created or modified
-- important location mentioned
-- trip detail added
-- availability changed
+- decisions made
+- tasks assigned or completed
+- plan changes
+- preferences or constraints expressed
+- bookings confirmed
+- important locations or dates
+- trip details
+- availability changes
 - relationship between entities clarified
-- private note or sensitive preference worth remembering
 
-Do not create memory from:
+## Output format
 
-- greetings
-- acknowledgements
-- jokes with no lasting relevance
-- emoji-only reactions
-- casual chatter
-- duplicate confirmations
-- unsupported guesses
-- temporary wording that does not affect future state
-
-If there is nothing worth remembering, output exactly:
-
----
-create_bulletin: false
-reason: "No durable memory-worthy information found."
-session_id: "<SESSION_ID>"
-transcript_range_id: "<TRANSCRIPT_RANGE_ID>"
----
-
----
-
-# Contact and Entity Rules
-
-Contacts must be referenced by contact IDs only.
-
-If a contact ID is known, use it.
-
-If a person/contact is mentioned but no ID is available, include an unresolved contact reference.
+Return a JSON array of strings. Each string is one plain-text bulletin.
+Return [] if nothing is memory-worthy.
 
 Example:
-
-contacts:
-  - id: unresolved-contact-session-123-001
-    matched_from: "Sarah"
-    resolution_status: needs_review
-
-Do not guess contact IDs.
-
-For non-contact entities, use known IDs if supplied.
-
-If no known ID exists, propose a stable candidate ID using kebab case.
-
-Examples:
-
-trips:
-  - id: trip-bali-2026
-    label: "Bali 2026"
-    resolution_status: proposed
-
-locations:
-  - id: location-seminyak
-    label: "Seminyak"
-    resolution_status: proposed
-
-All relationship references must use IDs, not names.
-
----
-
-# Distinction Rules
-
-A suggestion is not a decision.
-
-A mention is not a task.
-
-A possible plan is not a confirmed booking.
-
-A preference is not a constraint.
-
-Use conservative wording when the transcript is ambiguous.
-
----
-
-# Privacy Rules
-
-Set visibility and scope from the session/channel context unless the transcript clearly requires stricter handling.
-
-If sensitive personal information appears, mark:
-
-visibility: private
-sensitivity: personal
-requires_review: true
-
-Never broaden visibility beyond the source context.
-
----
-
-# Bulletin Output Format
-
-If memory-worthy information exists, output exactly one markdown bulletin using this format:
-
----
-create_bulletin: true
-
-id: pending
-
-session_id: "<SESSION_ID>"
-
-transcript_range_id: "<TRANSCRIPT_RANGE_ID>"
-
-created_at: "<TRANSCRIPT_END_TIME>"
-
-channel_id: "<CHANNEL_ID>"
-
-source_type: "session_transcript_range"
-
-visibility: "<VISIBILITY>"
-
-scope:
-  - "<SCOPE_ID>"
-
-entities:
-  contacts: []
-  groups: []
-  channels:
-    - id: "<CHANNEL_ID>"
-  trips: []
-  locations: []
-  events: []
-  tasks: []
-  artifacts: []
-  decisions: []
-
-memory_types: []
-
-confidence: high | medium | low
-
-requires_review: true | false
-
-review_reasons: []
----
-
-# Update
-
-Write a short factual summary of what changed or was learned.
-
-# Extracted Memory
-
-## Decisions
-
-- Use only if a decision was actually made.
-
-## Tasks
-
-- Include owner ID if known.
-- Include due date if stated.
-- Include status if known.
-
-## Preferences
-
-- Include durable preferences only.
-
-## Constraints
-
-- Include constraints relevant to future planning.
-
-## Artifacts
-
-- Include files created, modified, or discussed.
-- Include workspace path if known.
-- Include why the artifact exists.
-
-## Trip Details
-
-- Include trip dates, locations, travellers, bookings, or planning changes.
-
-## Other Facts
-
-- Include other durable facts worth remembering.
-
-# Proposed Claims
-
-- Write atomic claim-like statements.
-- Use IDs where possible.
-- Keep each claim independently understandable.
-
-# Source Notes
-
-Briefly explain which transcript details support this bulletin.
-
-Do not quote large parts of the transcript.
-
----
-
-# Transcript
-
-The transcript range follows.
-
-<TRANSCRIPT_TEXT>"""
+["{{contact:abc123|Mike}} decided to book the Seminyak villa for the Bali trip, budget $200/night, checking 3 options by Friday (2026-05-31T14:22:00)"]
+"""
 
 CLAIM_EXTRACTION_PROMPT = """\
 You are a Claim Extraction Agent for the Agent Memory System.
 
-Your job is to read a validated bulletin and extract atomic claims from it.
+Your job is to read a bulletin and extract atomic claims from it.
 
 Claims are the fundamental unit of memory. Each claim captures a single atomic fact, preference, constraint, decision, task, availability, booking, artifact detail, relationship, or private note.
 
@@ -273,10 +73,10 @@ Claims are the fundamental unit of memory. Each claim captures a single atomic f
    - body: a human-readable sentence stating the claim
    - status: "active" for new claims
    - source_bulletin_id: the bulletin this claim was extracted from
-4. Use entity IDs exactly as they appear in the bulletin. Do not invent new IDs.
+4. Use entity IDs from contact tags in the bulletin (e.g. {{contact:abc123|Mike}} -> contact-abc123).
 5. Do not merge multiple facts into one claim. Split them.
 6. Do not infer facts not supported by the bulletin text.
-7. Preserve the visibility and scope from the bulletin on each claim.
+7. Preserve the visibility from the bulletin on each claim.
 
 ---
 
@@ -292,15 +92,14 @@ Each claim in the output JSON array must be an object with these fields:
   "body": "Bali 2026 currently prefers Seminyak for accommodation.",
   "status": "active",
   "source_bulletin_id": "bulletin-2026-06-01-001",
-  "visibility": "group",
-  "scope": ["group-bali-travellers"]
+  "visibility": "group"
 }
 
 ---
 
 # Examples
 
-A bulletin stating "The group decided to stay in Seminyak" should produce:
+A bulletin "{{contact:abc123|Mike}} decided to stay in Seminyak" should produce:
 
 [
   {
@@ -311,12 +110,11 @@ A bulletin stating "The group decided to stay in Seminyak" should produce:
     "body": "Bali 2026 accommodation search should focus on Seminyak.",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
-    "visibility": "group",
-    "scope": ["group-bali-travellers"]
+    "visibility": "group"
   }
 ]
 
-A bulletin stating "Michael will compare the villas" should produce:
+A bulletin "{{contact:7f3a91|Michael}} will compare the villas" should produce:
 
 [
   {
@@ -327,8 +125,7 @@ A bulletin stating "Michael will compare the villas" should produce:
     "body": "task-compare-villas is owned by contact-7f3a91.",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
-    "visibility": "group",
-    "scope": ["group-bali-travellers"]
+    "visibility": "group"
   },
   {
     "type": "task",
@@ -338,8 +135,7 @@ A bulletin stating "Michael will compare the villas" should produce:
     "body": "task-compare-villas is open.",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
-    "visibility": "group",
-    "scope": ["group-bali-travellers"]
+    "visibility": "group"
   }
 ]
 
@@ -354,9 +150,11 @@ Do not include any text outside the JSON array."""
 ENTITY_UPDATE_PROMPT = """\
 You are an Entity Update Agent for the Agent Memory System.
 
-Your job is to read new and changed claims along with the current entity documents they affect, and produce updated entity documents.
+Your job is to read new bulletin content and extracted claims, merge them with \
+the existing entity document, and produce an updated entity document.
 
-Entity documents are derived summaries optimized for retrieval, current-state understanding, graph traversal, and human readability.
+Entity documents are derived summaries optimized for retrieval, current-state \
+understanding, graph traversal, and human readability.
 
 ---
 
@@ -375,7 +173,6 @@ Every entity document must be a markdown file with:
    - Current State: what is happening now, prioritized over history
    - Related Entities: MANDATORY section with all typed lists
    - Timeline: recent events and changes
-   - Source Bulletins: list of bulletin IDs that contributed to this document
 
 ---
 
@@ -406,20 +203,22 @@ The retrieval system uses Related Entities for graph traversal. This section is 
 1. Use canonical IDs for all entity references. Never use display names in IDs or references.
 2. Prioritize current state over full history. The Summary and Current State sections should reflect the latest information.
 3. The Timeline section should contain recent entries, not an exhaustive history.
-4. Source Bulletins should list bulletin IDs referenced in the entity document.
-5. When creating a new entity document, populate all required sections.
-6. When updating an existing entity document, merge new information with existing content. Preserve existing structure unless new claims contradict it.
-7. If claims conflict, prefer newer claims but note the conflict in the document body.
-8. Keep entity documents concise and focused on retrieval usefulness.
-9. Do not invent entity IDs that do not appear in the claims or existing documents.
+4. When creating a new entity document, populate all required sections.
+5. When updating an existing entity document, merge new information with existing content. Preserve existing structure unless new claims contradict it.
+6. If claims conflict, prefer newer claims but note the conflict in the document body.
+7. Keep entity documents concise and focused on retrieval usefulness. When a document grows long, summarize or remove stale historical details while preserving current state and recent timeline entries.
+8. Do not invent entity IDs that do not appear in the claims or existing documents.
+9. Each output entity must only contain information relevant to that entity. Never merge information about different entities into one document.
+10. Synthesize from the bulletin content directly — bulletins contain the actual knowledge, claims are structured relationship data.
 
 ---
 
 # Input
 
 You will receive:
-1. A list of new/changed claims (JSON array)
-2. Current entity documents affected by those claims (markdown strings, if they exist)
+1. ## NEW BULLETINS — the raw bulletin content being digested (the primary source of knowledge)
+2. ## NEW CLAIMS — structured claims extracted from those bulletins (relationship data)
+3. ## EXISTING ENTITY — the current entity document to update (if one exists)
 
 ---
 

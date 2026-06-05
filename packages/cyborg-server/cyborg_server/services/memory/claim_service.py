@@ -5,96 +5,89 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from cyborg_server.services.memory.models import Claim, Bulletin, parse_frontmatter, serialize_frontmatter
-from cyborg_server.services.memory.prompts import CLAIM_EXTRACTION_PROMPT
-from cyborg_server.services.memory.entity_resolver import normalize_entity_id
+from cyborg_server.services.memory.models import Claim, Bulletin
 
 logger = logging.getLogger(__name__)
 
 
-def claim_path(memory_dir: Path, claim_id: str) -> Path:
-    return memory_dir / "claims" / f"{claim_id}.md"
-
-
-def write_claim(memory_dir: Path, claim: Claim) -> str:
-    """Write a claim to disk."""
-    claims_dir = memory_dir / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-
-    fm = {
-        "id": claim.id,
-        "type": claim.type,
-        "subject_id": claim.subject_id,
-        "predicate": claim.predicate,
-        "object_id": claim.object_id,
-        "status": claim.status,
-        "source_bulletins": claim.source_bulletins,
-        "visibility": claim.visibility,
-        "scope": claim.scope,
-        "created_at": claim.created_at.isoformat(),
-        "superseded_by": claim.superseded_by,
-    }
-
-    body = f"# Claim\n\n{claim.body}"
-    path = claim_path(memory_dir, claim.id)
-    path.write_text(serialize_frontmatter(fm, body), encoding="utf-8")
-    return str(path)
-
-
-def read_claim(memory_dir: Path, claim_id: str) -> Claim | None:
-    """Read a claim from disk."""
-    path = claim_path(memory_dir, claim_id)
-    if not path.is_file():
-        return None
-    fm, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-    if not fm:
-        return None
-    return Claim(
-        id=fm.get("id", claim_id),
-        type=fm.get("type", "fact"),
-        subject_id=fm.get("subject_id", ""),
-        predicate=fm.get("predicate", ""),
-        object_id=fm.get("object_id"),
-        status=fm.get("status", "active"),
-        source_bulletins=fm.get("source_bulletins", []),
-        visibility=fm.get("visibility", "private"),
-        scope=fm.get("scope", []),
-        created_at=datetime.fromisoformat(fm["created_at"]) if "created_at" in fm else datetime.now(),
-        superseded_by=fm.get("superseded_by", []),
-        body=body.strip().removeprefix("# Claim").strip(),
+async def write_claim(db: Any, claim: Claim) -> str:
+    """Write a claim to the database."""
+    await db.execute(
+        "INSERT OR REPLACE INTO memory_claims "
+        "(id, type, subject_id, predicate, object_id, status, "
+        "source_bulletins, visibility, scope, created_at, superseded_by, body) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            claim.id,
+            claim.type,
+            claim.subject_id,
+            claim.predicate,
+            claim.object_id,
+            claim.status,
+            json.dumps(claim.source_bulletins),
+            claim.visibility,
+            json.dumps(claim.scope),
+            claim.created_at.isoformat(),
+            json.dumps(claim.superseded_by),
+            claim.body,
+        ),
     )
+    # Write claim↔bulletin join rows
+    if claim.source_bulletins:
+        await db.execute_many(
+            "INSERT OR IGNORE INTO memory_claim_bulletins (claim_id, bulletin_id) VALUES (?, ?)",
+            [(claim.id, bid) for bid in claim.source_bulletins],
+        )
+
+    logger.info("Claim written: %s", claim.id)
+    return claim.id
 
 
-def get_active_claims(memory_dir: Path, entity_id: str) -> list[Claim]:
+async def read_claim(db: Any, claim_id: str) -> Claim | None:
+    """Read a claim from the database."""
+    row = await db.fetch_one(
+        "SELECT * FROM memory_claims WHERE id = ?",
+        (claim_id,),
+    )
+    if not row:
+        return None
+    return _row_to_claim(row)
+
+
+async def get_active_claims(db: Any, entity_id: str) -> list[Claim]:
     """Get all active claims for a given entity (as subject or object)."""
-    claims_dir = memory_dir / "claims"
-    if not claims_dir.is_dir():
-        return []
-
-    results = []
-    for md_file in claims_dir.glob("*.md"):
-        claim = read_claim(memory_dir, md_file.stem)
-        if claim and claim.status == "active":
-            if claim.subject_id == entity_id or claim.object_id == entity_id:
-                results.append(claim)
-    return results
+    rows = await db.fetch_all(
+        "SELECT * FROM memory_claims "
+        "WHERE status = 'active' AND (subject_id = ? OR object_id = ?)",
+        (entity_id, entity_id),
+    )
+    return [_row_to_claim(r) for r in rows]
 
 
-def get_all_claims(memory_dir: Path) -> list[Claim]:
+async def get_all_claims(db: Any) -> list[Claim]:
     """Get all claims."""
-    claims_dir = memory_dir / "claims"
-    if not claims_dir.is_dir():
-        return []
+    rows = await db.fetch_all("SELECT * FROM memory_claims")
+    return [_row_to_claim(r) for r in rows]
 
-    results = []
-    for md_file in claims_dir.glob("*.md"):
-        claim = read_claim(memory_dir, md_file.stem)
-        if claim:
-            results.append(claim)
-    return results
+
+def _row_to_claim(row: dict) -> Claim:
+    """Convert a database row to a Claim dataclass."""
+    return Claim(
+        id=row["id"],
+        type=row["type"],
+        subject_id=row["subject_id"],
+        predicate=row["predicate"],
+        object_id=row["object_id"],
+        status=row["status"],
+        source_bulletins=json.loads(row["source_bulletins"]) if row["source_bulletins"] else [],
+        visibility=row["visibility"],
+        scope=json.loads(row["scope"]) if row["scope"] else [],
+        created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
+        superseded_by=json.loads(row["superseded_by"]) if row["superseded_by"] else [],
+        body=row["body"] or "",
+    )
 
 
 async def extract_claims_from_bulletin(
@@ -108,13 +101,7 @@ async def extract_claims_from_bulletin(
         lines = [f"- {c.subject_id} {c.predicate} {c.object_id or ''} ({c.status})" for c in existing_claims[:50]]
         existing_context = "\n\n## Existing Claims\n\n" + "\n".join(lines)
 
-    bulletin_text = serialize_frontmatter({
-        "id": bulletin.id,
-        "channel_id": bulletin.channel_id,
-        "visibility": bulletin.visibility,
-        "scope": bulletin.scope,
-        "entities": bulletin.entities,
-    }, bulletin.content)
+    bulletin_text = f"[Bulletin: {bulletin.id}]\nChannel: {bulletin.channel_id}\nVisibility: {bulletin.visibility}\n\n{bulletin.content}"
 
     user_prompt = f"## Bulletin\n\n{bulletin_text}{existing_context}"
 
@@ -141,25 +128,32 @@ async def extract_claims_from_bulletin(
     if not isinstance(items, list):
         return []
 
+    from cyborg_server.services.memory.entity_resolver import normalize_entity_id
+
+    valid_types = {"fact", "preference", "constraint", "decision", "task",
+                   "availability", "booking", "artifact", "relationship", "private_note"}
+
     claims = []
-    now = datetime.now()
     for item in items:
         if not isinstance(item, dict):
             continue
+        raw_type = item.get("type", "fact")
         claim = Claim(
-            id=f"claim-{bulletin.created_at.strftime('%Y-%m-%d')}-{len(claims) + 1:03d}",
-            type=item.get("type", "fact"),
+            id=f"claim-{bulletin.id}-{len(claims) + 1:03d}",
+            type=raw_type if raw_type in valid_types else "fact",
             subject_id=normalize_entity_id(item.get("subject_id", "")),
             predicate=item.get("predicate", ""),
             object_id=normalize_entity_id(item["object_id"]) if isinstance(item.get("object_id"), str) else item.get("object_id"),
             status="active",
             source_bulletins=[bulletin.id],
             visibility=bulletin.visibility,
-            scope=bulletin.scope,
-            created_at=now,
+            created_at=bulletin.created_at,
             superseded_by=[],
             body=item.get("body", ""),
         )
         claims.append(claim)
 
     return claims
+
+
+from cyborg_server.services.memory.prompts import CLAIM_EXTRACTION_PROMPT

@@ -207,6 +207,17 @@ class WhatsAppBridgeSettings:
 
 
 @dataclass(slots=True)
+class PatienceSettings:
+    """Configuration for the patience dispatch system."""
+
+    enabled: bool = False
+    model: str = "gpt-5.4-mini"
+    bot_name: str = "Bot"
+    max_pending_items: int = 20
+    max_context_messages: int = 10
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -228,6 +239,7 @@ class Settings:
     openai: OpenAISettings = field(default_factory=OpenAISettings)
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
+    patience: PatienceSettings = field(default_factory=PatienceSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
@@ -373,6 +385,14 @@ class Settings:
             media_dir=_env_path("CYBORG_WHATSAPP_BRIDGE_MEDIA_DIR", Path("~/.local/share/cyborg/whatsappbridge/media")),
         )
 
+        patience = PatienceSettings(
+            enabled=os.getenv("CYBORG_PATIENCE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
+            model=os.getenv("CYBORG_PATIENCE_MODEL", "gpt-5.4-mini"),
+            bot_name=os.getenv("CYBORG_SELF_NAME", "Bob"),
+            max_pending_items=int(os.getenv("CYBORG_PATIENCE_MAX_PENDING", "20")),
+            max_context_messages=int(os.getenv("CYBORG_PATIENCE_MAX_CONTEXT", "10")),
+        )
+
         return cls(
             host=host,
             port=port,
@@ -395,6 +415,7 @@ class Settings:
             openai=openai_llm,
             harness=harness,
             whatsapp_bridge=whatsapp_bridge,
+            patience=patience,
         )
 
     def ensure_directories(self) -> None:

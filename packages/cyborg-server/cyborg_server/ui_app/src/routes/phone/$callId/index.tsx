@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchAPI } from "@/lib/api";
 
 interface CallDetail {
@@ -62,6 +62,7 @@ function StatusBadge({ status }: { status: string }) {
 
 function CallDetailPage() {
   const { callId } = Route.useParams();
+  const queryClient = useQueryClient();
   const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 
   const { data } = useQuery<{
@@ -79,12 +80,18 @@ function CallDetailPage() {
     },
   });
 
+  const hangupMutation = useMutation({
+    mutationFn: () => fetchAPI(`/phone/calls/${encodeURIComponent(callId)}/hangup`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["phone-call", callId] }),
+  });
+
   if (!data) {
     return <div className="p-4 text-muted text-center text-xs">loading...</div>;
   }
 
   const { call, exchanges } = data;
-  const sessionKey = `bobvoice:chat:phone:${call.id}`;
+
+  const sessionKey = `agent:main:phone:call:${call.id}`;
 
   const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] || "";
   const recordingUrl = `${base}/api/phone/recording/${callId}?secret=${encodeURIComponent(secret)}`;
@@ -112,6 +119,16 @@ function CallDetailPage() {
           <span>{call.exchange_count} exchanges</span>
         </div>
       </div>
+
+      {(call.status === "active" || call.status === "ringing") && (
+        <button
+          onClick={() => hangupMutation.mutate()}
+          disabled={hangupMutation.isPending}
+          className="w-full py-2 text-xs font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded"
+        >
+          {hangupMutation.isPending ? "hanging up..." : "hang up"}
+        </button>
+      )}
 
       {call.agenda && (
         <section>

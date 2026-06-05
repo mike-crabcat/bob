@@ -124,6 +124,7 @@ class EmailDeliveryService(BaseService):
         cc: list[str] | None = None,
         agenda: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        origin_session_key: str | None = None,
     ) -> dict[str, Any]:
         """Send a new email, create thread, persist message, and prime LLM context.
 
@@ -173,6 +174,7 @@ class EmailDeliveryService(BaseService):
             subject=subject,
             contact_id=contact_id,
             agenda=agenda,
+            origin_session_key=origin_session_key,
         )
 
         # Persist agenda to session_agendas immediately (not waiting for lazy migration)
@@ -213,7 +215,7 @@ class EmailDeliveryService(BaseService):
             session_key = thread["session_key"]
             logger.info("Dispatching send to LLM session=%s new_thread=%s", session_key, is_new_thread)
 
-            workspace_prompt = load_workspace_prompt(settings.harness.workspace_dir)
+            workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
             custom_agenda = CUSTOM_AGENDA_TEMPLATE.format(agenda=agenda) if is_new_thread and agenda else None
             system_parts = [p for p in (
                 workspace_prompt,

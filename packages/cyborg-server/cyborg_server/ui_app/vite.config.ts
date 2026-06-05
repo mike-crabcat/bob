@@ -32,6 +32,7 @@ export default defineConfig({
       "/phone": {
         target: "http://127.0.0.1:8420",
         changeOrigin: true,
+        ws: true,
       },
     },
   },

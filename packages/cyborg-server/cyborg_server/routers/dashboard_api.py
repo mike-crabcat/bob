@@ -172,40 +172,74 @@ async def get_home(request: Request) -> dict[str, Any]:
                 chart_buckets.append(entry)
         chart_categories = sorted(categories)
 
-    # Recent summaries
-    recent_summaries: list[dict[str, Any]] = []
-    summaries_table = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_summaries'"
+    # Recent bulletins
+    recent_bulletins: list[dict[str, Any]] = []
+    bulletins_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_bulletins'"
     )
-    if summaries_table:
-        summary_rows = await db.fetch_all(
-            """SELECT id, session_key, summary_text, topics, participants,
-                      active_from, active_to, created_at
-               FROM session_summaries
+    if bulletins_table:
+        b_rows = await db.fetch_all(
+            """SELECT id, channel_id, source_type, content, created_at
+               FROM memory_bulletins
                ORDER BY created_at DESC
-               LIMIT 3"""
+               LIMIT 5"""
         )
-        for row in summary_rows:
-            recent_summaries.append({
+        for row in b_rows:
+            recent_bulletins.append({
                 "id": row["id"],
-                "session_key": row["session_key"],
-                "summary_text": row["summary_text"],
-                "topics": json.loads(row["topics"]) if row["topics"] else [],
-                "participants": json.loads(row["participants"]) if row["participants"] else [],
-                "active_from": row["active_from"],
-                "active_to": row["active_to"],
+                "channel_id": row["channel_id"],
+                "source_type": row["source_type"],
+                "content": row["content"],
                 "created_at": _utc(row["created_at"]),
             })
 
-    # Recent activity
-    recent_activities: list[dict[str, Any]] = []
+    # Estimated 24h costs by call category
+    cost_by_category: list[dict[str, Any]] = []
+    total_cost_24h = 0.0
+    if log_exists:
+        cost_rows = await db.fetch_all(
+            """SELECT call_category, model,
+                      SUM(COALESCE(prompt_tokens, 0)) as total_prompt_tokens,
+                      SUM(COALESCE(completion_tokens, 0)) as total_completion_tokens,
+                      SUM(COALESCE(cached_tokens, 0)) as total_cached_tokens,
+                      COUNT(*) as call_count
+               FROM llm_call_log
+               WHERE created_at >= datetime('now', '-24 hours')
+               GROUP BY call_category, model
+               ORDER BY call_category, model"""
+        )
+        # Pricing per 1M tokens (input, output)
+        _PRICING: dict[str, tuple[float, float]] = {
+            "gpt-5.4-mini": (1.50, 6.00),
+        }
+        category_totals: dict[str, dict[str, Any]] = {}
+        for row in cost_rows:
+            cat = row["call_category"] or "other"
+            model = row["model"] or "gpt-5.4-mini"
+            prompt = row["total_prompt_tokens"] or 0
+            completion = row["total_completion_tokens"] or 0
+            cached = row["total_cached_tokens"] or 0
+            rate_in, rate_out = _PRICING.get(model, _PRICING.get("gpt-5.4-mini", (1.50, 6.00)))
+            cost = ((prompt - cached) * rate_in + cached * rate_in * 0.5 + completion * rate_out) / 1_000_000
+            cost = max(cost, 0)
+            if cat not in category_totals:
+                category_totals[cat] = {"category": cat, "cost": 0.0, "call_count": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            category_totals[cat]["cost"] += cost
+            category_totals[cat]["call_count"] += row["call_count"] or 0
+            category_totals[cat]["prompt_tokens"] += prompt
+            category_totals[cat]["completion_tokens"] += completion
+        cost_by_category = sorted(category_totals.values(), key=lambda x: x["cost"], reverse=True)
+        total_cost_24h = round(sum(c["cost"] for c in cost_by_category), 4)
+        for c in cost_by_category:
+            c["cost"] = round(c["cost"], 4)
 
     return {
         "active_sessions": active_sessions,
         "chart_buckets": chart_buckets,
         "chart_categories": chart_categories,
-        "recent_summaries": recent_summaries,
-        "recent_activities": recent_activities[:15],
+        "recent_bulletins": recent_bulletins,
+        "cost_by_category": cost_by_category,
+        "total_cost_24h": total_cost_24h,
     }
 
 
@@ -425,29 +459,6 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
             })
 
     summaries: list[dict[str, Any]] = []
-    summaries_table = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_summaries'"
-    )
-    if summaries_table:
-        s_rows = await db.fetch_all(
-            """SELECT id, active_from, active_to, summary_text, topics,
-                      participants, memory_prompts, message_count, created_at
-               FROM session_summaries WHERE session_key = ?
-               ORDER BY active_to DESC""",
-            (session_key,),
-        )
-        for row in s_rows:
-            summaries.append({
-                "id": row["id"],
-                "active_from": row["active_from"],
-                "active_to": row["active_to"],
-                "summary_text": row["summary_text"],
-                "topics": json.loads(row["topics"]) if row["topics"] else [],
-                "participants": json.loads(row["participants"]) if row["participants"] else [],
-                "memory_prompts": json.loads(row["memory_prompts"]) if row["memory_prompts"] else [],
-                "message_count": row["message_count"],
-                "created_at": _utc(row["created_at"]),
-            })
 
     agenda_row = await db.fetch_one(
         "SELECT agenda FROM session_agendas WHERE session_key = ?", (session_key,)
@@ -675,6 +686,72 @@ async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
     return {"ok": True, "updated": True}
 
 
+@router.get("/api/contacts/{contact_id}/entity")
+async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one("SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL", (contact_id,))
+    if not row:
+        return {"error": "contact not found"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
+    from cyborg_server.services.memory.service import MemoryService
+
+    settings = request.app.state.settings
+    ctx = AppContext(settings=settings, db=db)
+    entity_id = canonical_contact_id(contact_id)
+    svc = MemoryService(ctx)
+    entity = await svc.read_entity(settings.harness.workspace_dir, entity_id)
+
+    if not entity:
+        return {"error": "not found"}
+
+    return {
+        "entity_id": entity.entity_id,
+        "entity_type": entity.entity_type,
+        "display_name": entity.display_name,
+        "status": entity.status,
+        "body": entity.body,
+        "related_entities": entity.related_entities,
+        "source_bulletins": entity.source_bulletins,
+    }
+
+
+@router.get("/api/contacts/{contact_id}/claims")
+async def get_contact_claims(request: Request, contact_id: str) -> Any:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one("SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL", (contact_id,))
+    if not row:
+        return {"error": "contact not found"}
+
+    from cyborg_server.services.memory.claim_service import get_active_claims
+    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
+
+    settings = request.app.state.settings
+    entity_id = canonical_contact_id(contact_id)
+    claims = await get_active_claims(db, entity_id)
+
+    return [
+        {
+            "id": c.id,
+            "type": c.type,
+            "subject_id": c.subject_id,
+            "predicate": c.predicate,
+            "object_id": c.object_id,
+            "status": c.status,
+            "source_bulletins": c.source_bulletins,
+            "visibility": c.visibility,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "body": c.body,
+        }
+        for c in claims
+    ]
+
+
 @router.get("/api/calls/{call_id}")
 async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
     if not _check_auth(request):
@@ -840,56 +917,48 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     settings = request.app.state.settings
     workspace = settings.harness.workspace_dir
+    db = _db(request)
 
     from cyborg_server.context import AppContext
     from cyborg_server.services.memory import MemoryService
-    from cyborg_server.services.memory.models import ENTITY_TYPES, parse_frontmatter
 
-    ctx = AppContext(settings=settings, db=_db(request))
+    ctx = AppContext(settings=settings, db=db)
     svc = MemoryService(ctx)
-    memory_dir = svc._memory_dir(workspace)
 
-    # Build stats by scanning entity directories
-    categories: dict[str, int] = {}
-    total_entries = 0
-    recent: list[dict[str, Any]] = []
+    # Build stats from database
+    type_rows = await db.fetch_all(
+        "SELECT entity_type, COUNT(*) AS count FROM memory_entities GROUP BY entity_type"
+    )
+    categories = {r["entity_type"]: r["count"] for r in type_rows}
+    total_entries = sum(categories.values())
 
-    entities_dir = memory_dir / "entities"
-    if entities_dir.is_dir():
-        for type_dir in entities_dir.iterdir():
-            if not type_dir.is_dir():
-                continue
-            entity_type = type_dir.name
-            count = 0
-            for md_file in type_dir.glob("*.md"):
-                text = md_file.read_text(encoding="utf-8")
-                fm, body = parse_frontmatter(text)
-                count += 1
-                summary = ""
-                for line in body.splitlines():
-                    if line.strip() and not line.strip().startswith("#"):
-                        summary = line.strip()[:80]
-                        break
-                recent.append({
-                    "path": str(md_file.relative_to(workspace)),
-                    "wiki": "core",
-                    "category": entity_type,
-                    "slug": md_file.stem,
-                    "title": fm.get("display_name", ""),
-                    "summary": summary,
-                    "modified": md_file.stat().st_mtime,
-                })
-            if count > 0:
-                categories[entity_type] = count
-            total_entries += count
-
-    recent.sort(key=lambda e: e["modified"], reverse=True)
+    # Recent entries
+    recent_rows = await db.fetch_all(
+        "SELECT entity_id, entity_type, display_name, body, updated_at "
+        "FROM memory_entities ORDER BY updated_at DESC LIMIT 50"
+    )
+    recent = []
+    for r in recent_rows:
+        summary = ""
+        for line in (r["body"] or "").splitlines():
+            if line.strip() and not line.strip().startswith("#"):
+                summary = line.strip()[:80]
+                break
+        recent.append({
+            "path": r["entity_id"],
+            "wiki": "core",
+            "category": r["entity_type"],
+            "slug": r["entity_id"],
+            "title": r["display_name"] or "",
+            "summary": summary,
+            "modified": r["updated_at"],
+        })
 
     # Pipeline status
-    bulletins = svc.read_bulletins(workspace, skip_digested=True)
+    bulletins = await svc.read_bulletins(workspace, skip_digested=True)
     pending_bulletins = len(bulletins)
 
-    last_dream = await _db(request).fetch_one(
+    last_dream = await db.fetch_one(
         "SELECT created_at FROM memory_dream_log ORDER BY created_at DESC LIMIT 1"
     )
 
@@ -998,17 +1067,14 @@ async def get_memory_bulletins(request: Request) -> dict[str, Any]:
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
-    bulletins = svc.read_bulletins(workspace, skip_digested=True)
+    bulletins = await svc.read_bulletins(workspace, skip_digested=True)
     result = []
     for b in bulletins:
         result.append({
             "slug": b.id,
             "source_session": b.source_id,
             "source_type": b.source_type,
-            "time_window": "",
-            "participants": "",
-            "contact_ids": "",
-            "intended_category": "",
+            "channel_id": b.channel_id,
             "content": b.content,
             "created_at": b.created_at.timestamp() if hasattr(b.created_at, "timestamp") else 0,
         })
@@ -1076,10 +1142,136 @@ async def get_memory_category(request: Request, category: str) -> dict[str, Any]
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
-    entries = svc.browse_category(workspace, "core", category)
+    entries = await svc.browse_category(workspace, "core", category)
     for e in entries:
         e["path"] = f"memory/entities/{category}/{e['slug']}.md"
     return {"category": category, "entries": entries}
+
+
+@router.get("/api/memory/entities")
+async def get_memory_entities(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    entity_type = request.query_params.get("type", "").strip()
+
+    query = (
+        "SELECT e.entity_id, e.entity_type, e.display_name, e.status, e.updated_at, "
+        "(SELECT COUNT(*) FROM memory_claims c WHERE c.subject_id = e.entity_id AND c.status = 'active') as claim_count "
+        "FROM memory_entities e"
+    )
+    params: list[str] = []
+    if entity_type:
+        query += " WHERE e.entity_type = ?"
+        params.append(entity_type)
+    query += " ORDER BY e.updated_at DESC"
+
+    rows = await db.fetch_all(query, tuple(params))
+    entities = [
+        {
+            "entity_id": r["entity_id"],
+            "entity_type": r["entity_type"],
+            "display_name": r["display_name"] or "",
+            "status": r["status"] or "active",
+            "updated_at": _utc(r["updated_at"]),
+            "claim_count": r["claim_count"],
+        }
+        for r in rows
+    ]
+    return {"entities": entities}
+
+
+@router.get("/api/memory/entities/{entity_id:path}")
+async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    settings = request.app.state.settings
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory.service import MemoryService
+    from cyborg_server.services.memory.claim_service import get_active_claims
+
+    ctx = AppContext(settings=settings, db=db)
+    svc = MemoryService(ctx)
+    entity = await svc.read_entity(settings.harness.workspace_dir, entity_id)
+
+    if not entity:
+        return {"error": "not found"}
+
+    claims = await get_active_claims(db, entity_id)
+
+    return {
+        "entity_id": entity.entity_id,
+        "entity_type": entity.entity_type,
+        "display_name": entity.display_name,
+        "status": entity.status,
+        "extra_frontmatter": entity.extra_frontmatter,
+        "body": entity.body,
+        "related_entities": entity.related_entities,
+        "source_bulletins": entity.source_bulletins,
+        "claims": [
+            {
+                "id": c.id,
+                "type": c.type,
+                "subject_id": c.subject_id,
+                "predicate": c.predicate,
+                "object_id": c.object_id,
+                "status": c.status,
+                "source_bulletins": c.source_bulletins,
+                "visibility": c.visibility,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "body": c.body,
+            }
+            for c in claims
+        ],
+    }
+
+
+@router.get("/api/memory/claims")
+async def get_memory_claims(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+
+    conditions: list[str] = []
+    params: list[str] = []
+
+    claim_type = request.query_params.get("type", "").strip()
+    if claim_type:
+        conditions.append("type = ?")
+        params.append(claim_type)
+    subject_id = request.query_params.get("subject_id", "").strip()
+    if subject_id:
+        conditions.append("subject_id = ?")
+        params.append(subject_id)
+    status = request.query_params.get("status", "").strip()
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+
+    query = "SELECT * FROM memory_claims"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT 200"
+
+    rows = await db.fetch_all(query, tuple(params))
+    claims = [
+        {
+            "id": r["id"],
+            "type": r["type"],
+            "subject_id": r["subject_id"],
+            "predicate": r["predicate"],
+            "object_id": r["object_id"],
+            "status": r["status"],
+            "source_bulletins": json.loads(r["source_bulletins"]) if r["source_bulletins"] else [],
+            "visibility": r["visibility"],
+            "created_at": _utc(r["created_at"]),
+            "body": r["body"] or "",
+        }
+        for r in rows
+    ]
+    return {"claims": claims}
 
 
 @router.post("/api/memory/digested")
@@ -1091,24 +1283,13 @@ async def get_digested_bulletins(request: Request) -> dict[str, Any]:
     if not slugs:
         return {"bulletins": []}
 
-    settings = request.app.state.settings
-    workspace = settings.harness.workspace_dir
-
-    from cyborg_server.context import AppContext
-    from cyborg_server.services.memory import MemoryService
-
-    ctx = AppContext(settings=settings, db=_db(request))
-    svc = MemoryService(ctx)
-    memory_dir = svc._memory_dir(workspace)
-
-    results: list[dict[str, Any]] = []
-    for slug in slugs:
-        # Look in bulletins directory (date-organized)
-        for md_file in memory_dir.glob(f"bulletins/**/*.md"):
-            if md_file.stem == slug:
-                results.append({"slug": slug, "content": md_file.read_text(encoding="utf-8")})
-                break
-    return {"bulletins": results}
+    db = _db(request)
+    placeholders = ",".join("?" * len(slugs))
+    rows = await db.fetch_all(
+        f"SELECT id, content FROM memory_bulletins WHERE id IN ({placeholders}) AND digested = 1",
+        tuple(slugs),
+    )
+    return {"bulletins": [{"slug": r["id"], "content": r["content"]} for r in rows]}
 
 
 @router.post("/api/memory/redigest")
@@ -1130,7 +1311,7 @@ async def redigest_bulletin(request: Request) -> dict[str, Any]:
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
 
-    bulletin = svc.read_bulletin(workspace, slug)
+    bulletin = await svc.read_bulletin(workspace, slug)
     if not bulletin:
         return {"error": f"bulletin not found: {slug}"}
 
@@ -1150,7 +1331,7 @@ async def lint_memory_entries(request: Request) -> dict[str, Any]:
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
-    result = svc.validate(workspace)
+    result = await svc.validate(workspace)
     return {"valid": result["valid"], "issues": result["issues"], "linted": True}
 
 

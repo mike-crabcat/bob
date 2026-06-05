@@ -224,6 +224,14 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			})
 		}
 		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeGroupSync, payload))
+
+	case whatsapp.ChatPresenceEvent:
+		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeChatPresence, wsproto.ChatPresencePayload{
+			ChatJID:   evt.ChatJID,
+			SenderJID: evt.SenderJID,
+			Media:     evt.Media,
+			Timestamp: evt.Timestamp,
+		}))
 	}
 }
 
@@ -260,6 +268,16 @@ func (b *Bridge) handleClientMessage(env wsproto.Envelope) {
 			return
 		}
 		b.handlePairingRequest(payload)
+
+	case wsproto.TypeSubscribePresence:
+		var payload wsproto.SubscribePresencePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			b.log.Warn("invalid subscribe_presence payload", "error", err)
+			return
+		}
+		if err := b.wa.SubscribePresence(payload.ChatJID); err != nil {
+			b.log.Warn("failed to subscribe presence", "chat_id", payload.ChatJID, "error", err)
+		}
 	}
 }
 
