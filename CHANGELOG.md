@@ -2,6 +2,32 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-06-06
+
+### Added
+- Add embedding-based semantic search using OpenAI text-embedding-3-small and sqlite-vec: entities are embedded at write time and queries like "what type of car does david have" now find results via cosine similarity when FTS5 keyword search fails
+- Add bulletin detail page at `/memory/bulletins/{id}` showing source session/type, full text, and all claims extracted from that bulletin
+- Add person entity rendering on contact detail page with rendered body display and "view in memory" link
+- Add claim type registry (`claim_types.py`) with type-specific render templates that generate human-readable entity views from claims
+- Add `render_entity()` function that deterministically renders entity claims into structured text using per-type templates (person, group, event, trip, etc.)
+- Add FTS5 index built from rendered entity templates instead of raw claim data, improving keyword search relevance
+- Add `rebuild_embeddings()` method for batch embedding all entities and `sqlite-vec` extension loading in database connection pool
+- Add schema migrations 314–322: FTS5 index, claim types registry, claims v2 (claim_type_key replacing type/predicate/body), entity type renames, template-based FTS, and embedding vectors table
+- Add file_path validation during claim extraction: file entities without a file_path claim are dropped automatically
+
+### Changed
+- Rename entity types: contact→person (slug-based IDs like `person-mike-cleaver`), artifact→file (requires file_path) and thing (physical objects with thing_type)
+- Replace entity body documents with claim-only model: entities have no body column, all content is derived from claims via render templates
+- Replace LLM-powered entity update with deterministic claim extraction: claims are the source of truth, entity views are generated on demand
+- Add name-slug fallback for contact-to-person entity lookup when contact_id claim is missing
+- Pre-map `{{contact:HEX8|Name}}` tags to `{{person-slug|Name}}` before LLM extraction so the LLM never sees raw contact IDs
+- Update dashboard search to try embedding similarity when FTS5 returns no results
+- Update memory recall tool with hybrid retrieval: exact ID → alias → embedding similarity → FTS5
+- Update memory documentation to reflect current architecture
+
+### Removed
+- Remove social_relation claim type from registry, templates, and database (LLM over-generated it, producing noise)
+
 ## 2026-06-05
 
 ### Added
