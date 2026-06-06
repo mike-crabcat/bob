@@ -696,26 +696,54 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
         return {"error": "contact not found"}
 
     from cyborg_server.context import AppContext
-    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
     from cyborg_server.services.memory.service import MemoryService
 
     settings = request.app.state.settings
     ctx = AppContext(settings=settings, db=db)
-    entity_id = canonical_contact_id(contact_id)
     svc = MemoryService(ctx)
-    entity = await svc.read_entity(settings.harness.workspace_dir, entity_id)
 
+    # Find person entity: try contact_id claim first, then name-slug match
+    entity_id: str | None = None
+    hex8 = str(contact_id)[:8]
+    claim_row = await db.fetch_one(
+        "SELECT subject_id FROM memory_claims "
+        "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active' LIMIT 1",
+        (hex8,),
+    )
+    if claim_row:
+        entity_id = claim_row["subject_id"]
+    else:
+        # Fallback: derive slug from contact name and look up person-{slug}
+        import re
+        name_row = await db.fetch_one("SELECT name FROM contacts WHERE id = ?", (contact_id,))
+        if name_row and name_row["name"]:
+            slug = re.sub(r"[^a-z0-9\-]", "", name_row["name"].strip().lower().replace(" ", "-"))
+            entity_id = f"person-{slug}"
+
+    if not entity_id:
+        return {"error": "not found"}
+
+    entity = await svc.read_entity(settings.harness.workspace_dir, entity_id)
     if not entity:
         return {"error": "not found"}
+
+    # Render entity claims
+    from cyborg_server.services.memory.claim_service import get_active_claims
+    from cyborg_server.services.memory.claim_types import render_entity
+
+    claims = await get_active_claims(db, entity.entity_id)
+    claim_dicts = [
+        {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
+        for c in claims
+    ]
+    rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts)
 
     return {
         "entity_id": entity.entity_id,
         "entity_type": entity.entity_type,
         "display_name": entity.display_name,
         "status": entity.status,
-        "body": entity.body,
-        "related_entities": entity.related_entities,
-        "source_bulletins": entity.source_bulletins,
+        "rendered": rendered,
     }
 
 
@@ -729,24 +757,40 @@ async def get_contact_claims(request: Request, contact_id: str) -> Any:
         return {"error": "contact not found"}
 
     from cyborg_server.services.memory.claim_service import get_active_claims
-    from cyborg_server.services.memory.entity_resolver import canonical_contact_id
 
-    settings = request.app.state.settings
-    entity_id = canonical_contact_id(contact_id)
+    # Find person entity: try contact_id claim first, then name-slug match
+    entity_id: str | None = None
+    hex8 = str(contact_id)[:8]
+    claim_row = await db.fetch_one(
+        "SELECT subject_id FROM memory_claims "
+        "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active' LIMIT 1",
+        (hex8,),
+    )
+    if claim_row:
+        entity_id = claim_row["subject_id"]
+    else:
+        import re
+        name_row = await db.fetch_one("SELECT name FROM contacts WHERE id = ?", (contact_id,))
+        if name_row and name_row["name"]:
+            slug = re.sub(r"[^a-z0-9\-]", "", name_row["name"].strip().lower().replace(" ", "-"))
+            entity_id = f"person-{slug}"
+
+    if not entity_id:
+        return []
+
     claims = await get_active_claims(db, entity_id)
 
     return [
         {
             "id": c.id,
-            "type": c.type,
+            "claim_type_key": c.claim_type_key,
             "subject_id": c.subject_id,
-            "predicate": c.predicate,
             "object_id": c.object_id,
+            "value": c.value,
             "status": c.status,
             "source_bulletins": c.source_bulletins,
             "visibility": c.visibility,
             "created_at": c.created_at.isoformat() if c.created_at else None,
-            "body": c.body,
         }
         for c in claims
     ]
@@ -934,23 +978,19 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
 
     # Recent entries
     recent_rows = await db.fetch_all(
-        "SELECT entity_id, entity_type, display_name, body, updated_at "
-        "FROM memory_entities ORDER BY updated_at DESC LIMIT 50"
+        "SELECT e.entity_id, e.entity_type, e.display_name, e.updated_at, "
+        " (SELECT COUNT(*) FROM memory_claims c WHERE c.subject_id = e.entity_id AND c.status = 'active') AS claim_count "
+        "FROM memory_entities e ORDER BY e.updated_at DESC LIMIT 50"
     )
     recent = []
     for r in recent_rows:
-        summary = ""
-        for line in (r["body"] or "").splitlines():
-            if line.strip() and not line.strip().startswith("#"):
-                summary = line.strip()[:80]
-                break
         recent.append({
             "path": r["entity_id"],
             "wiki": "core",
             "category": r["entity_type"],
             "slug": r["entity_id"],
             "title": r["display_name"] or "",
-            "summary": summary,
+            "summary": f"{r['claim_count']} claims",
             "modified": r["updated_at"],
         })
 
@@ -1081,6 +1121,56 @@ async def get_memory_bulletins(request: Request) -> dict[str, Any]:
     return {"bulletins": result}
 
 
+@router.get("/api/memory/bulletins/{bulletin_id}")
+async def get_memory_bulletin_detail(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    bulletin_id = request.path_params["bulletin_id"]
+
+    row = await db.fetch_one(
+        "SELECT id, created_at, channel_id, source_type, source_id, visibility, content, "
+        "digested, session_range_start, session_range_end FROM memory_bulletins WHERE id = ?",
+        (bulletin_id,),
+    )
+    if not row:
+        return {"error": "not found"}
+
+    # Find claims that reference this bulletin
+    claim_rows = await db.fetch_all(
+        "SELECT id, claim_type_key, subject_id, object_id, value, status, visibility, created_at "
+        "FROM memory_claims WHERE source_bulletins LIKE ?",
+        (f'%"{bulletin_id}"%',),
+    )
+    claims = [
+        {
+            "id": r["id"],
+            "claim_type_key": r["claim_type_key"],
+            "subject_id": r["subject_id"],
+            "object_id": r["object_id"],
+            "value": r["value"],
+            "status": r["status"],
+            "visibility": r["visibility"],
+            "created_at": r["created_at"],
+        }
+        for r in claim_rows
+    ]
+
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "channel_id": row["channel_id"],
+        "source_type": row["source_type"],
+        "source_id": row["source_id"],
+        "visibility": row["visibility"],
+        "content": row["content"],
+        "digested": bool(row["digested"]),
+        "session_range_start": row["session_range_start"],
+        "session_range_end": row["session_range_end"],
+        "claims": claims,
+    }
+
+
 @router.get("/api/memory/dreams")
 async def get_memory_dreams(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
@@ -1170,6 +1260,38 @@ async def get_memory_entities(request: Request) -> dict[str, Any]:
     query += " ORDER BY e.updated_at DESC"
 
     rows = await db.fetch_all(query, tuple(params))
+
+    # Build a summary per entity from key claims
+    summary_keys = {
+        "file": "file_path",
+        "thing": "thing_type",
+        "task": "task_status",
+        "location": "location_type",
+        "transport": "transport_type",
+        "trip": "destination",
+        "decision": "rationale",
+        "event": "location",
+        "tripstop": "stay",
+    }
+
+    entity_ids = [r["entity_id"] for r in rows]
+    summaries: dict[str, str] = {}
+    if entity_ids:
+        placeholders = ",".join("?" for _ in entity_ids)
+        claim_rows = await db.fetch_all(
+            f"SELECT subject_id, claim_type_key, value, object_id FROM memory_claims "
+            f"WHERE subject_id IN ({placeholders}) AND status = 'active'",
+            tuple(entity_ids),
+        )
+        for cr in claim_rows:
+            eid = cr["subject_id"]
+            if eid in summaries:
+                continue
+            etype = next((r["entity_type"] for r in rows if r["entity_id"] == eid), "")
+            key = summary_keys.get(etype, "")
+            if key and cr["claim_type_key"] == key:
+                summaries[eid] = cr["value"] or cr["object_id"] or ""
+
     entities = [
         {
             "entity_id": r["entity_id"],
@@ -1178,6 +1300,7 @@ async def get_memory_entities(request: Request) -> dict[str, Any]:
             "status": r["status"] or "active",
             "updated_at": _utc(r["updated_at"]),
             "claim_count": r["claim_count"],
+            "summary": summaries.get(r["entity_id"], ""),
         }
         for r in rows
     ]
@@ -1204,27 +1327,31 @@ async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str
 
     claims = await get_active_claims(db, entity_id)
 
+    from cyborg_server.services.memory.claim_types import render_entity
+
+    claim_dicts = [
+        {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
+        for c in claims
+    ]
+    rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts)
+
     return {
         "entity_id": entity.entity_id,
         "entity_type": entity.entity_type,
         "display_name": entity.display_name,
         "status": entity.status,
-        "extra_frontmatter": entity.extra_frontmatter,
-        "body": entity.body,
-        "related_entities": entity.related_entities,
-        "source_bulletins": entity.source_bulletins,
+        "rendered": rendered,
         "claims": [
             {
                 "id": c.id,
-                "type": c.type,
+                "claim_type_key": c.claim_type_key,
                 "subject_id": c.subject_id,
-                "predicate": c.predicate,
                 "object_id": c.object_id,
+                "value": c.value,
                 "status": c.status,
                 "source_bulletins": c.source_bulletins,
                 "visibility": c.visibility,
                 "created_at": c.created_at.isoformat() if c.created_at else None,
-                "body": c.body,
             }
             for c in claims
         ],
@@ -1242,7 +1369,7 @@ async def get_memory_claims(request: Request) -> dict[str, Any]:
 
     claim_type = request.query_params.get("type", "").strip()
     if claim_type:
-        conditions.append("type = ?")
+        conditions.append("claim_type_key = ?")
         params.append(claim_type)
     subject_id = request.query_params.get("subject_id", "").strip()
     if subject_id:
@@ -1262,15 +1389,14 @@ async def get_memory_claims(request: Request) -> dict[str, Any]:
     claims = [
         {
             "id": r["id"],
-            "type": r["type"],
+            "claim_type_key": r["claim_type_key"],
             "subject_id": r["subject_id"],
-            "predicate": r["predicate"],
             "object_id": r["object_id"],
+            "value": r["value"],
             "status": r["status"],
             "source_bulletins": json.loads(r["source_bulletins"]) if r["source_bulletins"] else [],
             "visibility": r["visibility"],
             "created_at": _utc(r["created_at"]),
-            "body": r["body"] or "",
         }
         for r in rows
     ]

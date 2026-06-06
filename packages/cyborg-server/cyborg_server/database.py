@@ -41,6 +41,14 @@ class Database:
         for _ in range(self.pool_size):
             connection = await aiosqlite.connect(self.db_path.as_posix())
             connection.row_factory = aiosqlite.Row
+            # Load sqlite-vec extension for vector similarity search
+            try:
+                import sqlite_vec
+                await connection.enable_load_extension(True)
+                await connection.load_extension(sqlite_vec.loadable_path())
+                await connection.enable_load_extension(False)
+            except ImportError:
+                pass
             await connection.execute("PRAGMA foreign_keys = ON;")
             await connection.execute("PRAGMA journal_mode = WAL;")
             await connection.execute("PRAGMA busy_timeout = 5000;")

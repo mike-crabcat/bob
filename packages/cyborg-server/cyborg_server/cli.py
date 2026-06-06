@@ -1917,8 +1917,7 @@ async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
         workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)
 
-        mode = "full" if full else "patch"
-        result = await svc.rebuild(workspace, entity_id=entity_id, all=all, mode=mode)
+        result = await svc.rebuild(workspace, entity_id=entity_id, all=all)
         typer.echo(f"Rebuild result: {json.dumps(result, indent=2)}")
     finally:
         await db.close()

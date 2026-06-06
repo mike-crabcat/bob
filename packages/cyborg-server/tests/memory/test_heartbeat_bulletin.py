@@ -112,7 +112,6 @@ async def test_ensure_group_entity_creates_entity(svc, db, workspace):
     assert entity is not None
     assert entity.entity_type == "group"
     assert entity.display_name == "Bali Trip Chat"
-    assert "12036342829458@g.us" in entity.extra_frontmatter.get("whatsapp_jid", "")
 
     # Verify whatsappgroups.memory_entity_id is set
     row = await db.fetch_one("SELECT memory_entity_id FROM whatsappgroups WHERE id = 'wg-1'")

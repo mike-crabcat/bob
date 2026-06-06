@@ -1,4 +1,4 @@
-"""Agent Memory System v6 — channel-centric architecture."""
+"""Agent Memory System v7 — claim-centric architecture."""
 
 from cyborg_server.services.memory.service import MemoryService
 

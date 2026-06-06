@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { fetchAPI } from "@/lib/api";
@@ -67,11 +67,10 @@ interface DreamOp {
 
 interface ClaimSummary {
   id: string;
-  type: string;
+  claim_type_key: string;
   subject_id: string;
-  predicate: string;
   object_id: string | null;
-  body: string;
+  value: string | null;
 }
 
 interface EntityListItem {
@@ -81,6 +80,7 @@ interface EntityListItem {
   status: string;
   updated_at: string;
   claim_count: number;
+  summary: string;
 }
 
 interface EntityDetail {
@@ -88,39 +88,59 @@ interface EntityDetail {
   entity_type: string;
   display_name: string;
   status: string;
-  extra_frontmatter: Record<string, unknown>;
-  body: string;
-  related_entities: Record<string, string[]>;
-  source_bulletins: string[];
+  rendered: string;
   claims: ClaimDetail[];
+  source_bulletins?: string[];
 }
 
 interface ClaimDetail {
   id: string;
-  type: string;
+  claim_type_key: string;
   subject_id: string;
-  predicate: string;
   object_id: string | null;
+  value: string | null;
   status: string;
   source_bulletins: string[];
   visibility: string;
   created_at: string | null;
-  body: string;
 }
 
 // ── Claim colors ───────────────────────────────────────────────────────────
 
 const CLAIM_COLORS: Record<string, string> = {
-  fact: "bg-blue-900/40 text-blue-300",
-  preference: "bg-purple-900/40 text-purple-300",
-  constraint: "bg-orange-900/40 text-orange-300",
+  spouse: "bg-pink-900/40 text-pink-300",
+  parent: "bg-pink-900/40 text-pink-300",
+  child: "bg-pink-900/40 text-pink-300",
+  sibling: "bg-pink-900/40 text-pink-300",
+  home_address: "bg-cyan-900/40 text-cyan-300",
+  workplace: "bg-cyan-900/40 text-cyan-300",
+  job: "bg-cyan-900/40 text-cyan-300",
+  food_preference: "bg-orange-900/40 text-orange-300",
+  drink_preference: "bg-orange-900/40 text-orange-300",
+  interest: "bg-purple-900/40 text-purple-300",
+  personality: "bg-purple-900/40 text-purple-300",
+  language: "bg-blue-900/40 text-blue-300",
+  birthday: "bg-blue-900/40 text-blue-300",
+  alias: "bg-gray-900/40 text-gray-300",
+  contact_id: "bg-gray-900/40 text-gray-300",
+  member: "bg-green-900/40 text-green-300",
+  destination: "bg-green-900/40 text-green-300",
+  start_date: "bg-blue-900/40 text-blue-300",
+  end_date: "bg-blue-900/40 text-blue-300",
+  task_status: "bg-yellow-900/40 text-yellow-300",
+  owner: "bg-yellow-900/40 text-yellow-300",
+  due_date: "bg-yellow-900/40 text-yellow-300",
+  description: "bg-gray-900/40 text-gray-300",
+  location: "bg-cyan-900/40 text-cyan-300",
+  transport_type: "bg-cyan-900/40 text-cyan-300",
   decision: "bg-green-900/40 text-green-300",
-  task: "bg-yellow-900/40 text-yellow-300",
-  availability: "bg-cyan-900/40 text-cyan-300",
-  relationship: "bg-pink-900/40 text-pink-300",
-  private_note: "bg-gray-900/40 text-gray-300",
-  booking: "bg-teal-900/40 text-teal-300",
-  artifact: "bg-indigo-900/40 text-indigo-300",
+  rationale: "bg-green-900/40 text-green-300",
+  purpose: "bg-indigo-900/40 text-indigo-300",
+  name: "bg-blue-900/40 text-blue-300",
+  stop: "bg-teal-900/40 text-teal-300",
+  file_path: "bg-amber-900/40 text-amber-300",
+  file_ref: "bg-amber-900/40 text-amber-300",
+  thing_type: "bg-lime-900/40 text-lime-300",
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -167,7 +187,14 @@ function BulletinCard({ b }: { b: Bulletin }) {
       >
         <span className="text-[8px] text-warning/80 bg-warning/10 px-1 rounded shrink-0 mt-0.5">queued</span>
         <div className="flex flex-col min-w-0 flex-1">
-          <span className="text-[11px] text-text truncate">{firstLine || b.slug}</span>
+          <Link
+            to="/memory/bulletins/$bulletinId"
+            params={{ bulletinId: b.slug }}
+            onClick={(e) => e.stopPropagation()}
+            className="text-[11px] text-text hover:text-accent truncate"
+          >
+            {firstLine || b.slug}
+          </Link>
           {b.participants && (
             <span className="text-[9px] text-muted/60">{b.participants}</span>
           )}
@@ -177,7 +204,7 @@ function BulletinCard({ b }: { b: Bulletin }) {
       {expanded && (
         <div className="px-3 pb-2">
           <div className="flex items-center gap-1.5 mb-1">
-            <span className="text-[8px] text-muted/50 font-mono">{b.slug}</span>
+            <Link to="/memory/bulletins/$bulletinId" params={{ bulletinId: b.slug }} className="text-[8px] text-accent/60 font-mono hover:underline">{b.slug}</Link>
             <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{b.source_type}</span>
           </div>
           <pre className="text-[10px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed max-h-48 overflow-y-auto">{b.content}</pre>
@@ -282,7 +309,7 @@ function DreamRunCard({
                   return (
                     <div key={i} className="bg-surface/50 border border-border/50 rounded px-2 py-1.5">
                       <div className="flex items-center gap-1.5 mb-1">
-                        <span className="text-[8px] text-muted/50 font-mono">{op.bulletin}</span>
+                        <Link to="/memory/bulletins/$bulletinId" params={{ bulletinId: op.bulletin }} className="text-[8px] text-accent/60 font-mono hover:underline">{op.bulletin}</Link>
                         <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{claimCount} claims</span>
                         <span className="text-[8px] text-success/60 bg-success/5 px-1 rounded">{op.entity_ops} entity ops</span>
                         {op.source && (
@@ -309,11 +336,12 @@ function DreamRunCard({
                           <span className="text-[8px] text-muted/40 uppercase tracking-wide">extracted claims</span>
                           {claimList.map((c, ci) => (
                             <div key={ci} className="flex items-center gap-1.5 pl-1">
-                              <span className={`text-[8px] px-1 rounded ${CLAIM_COLORS[c.type] ?? "bg-gray-900/40 text-gray-300"}`}>
-                                {c.type}
+                              <span className={`text-[8px] px-1 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
+                                {c.claim_type_key}
                               </span>
                               <span className="text-[10px] text-text truncate">
-                                {c.subject_id} {c.predicate} {c.object_id && <span className="text-muted">&rarr; {c.object_id}</span>}
+                                {c.subject_id}
+                                {c.object_id ? ` → ${c.object_id}` : c.value ? ` → ${c.value}` : ""}
                               </span>
                             </div>
                           ))}
@@ -377,14 +405,14 @@ function EntityDetailView({
   const [fetchedBulletins, setFetchedBulletins] = useState(false);
 
   const fetchBulletins = async () => {
-    if (fetchedBulletins || entity.source_bulletins.length === 0) return;
+    if (fetchedBulletins || !(entity.source_bulletins?.length)) return;
     try {
       const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] ?? "";
       const base = import.meta.env.BASE_URL.replace(/\/$/, "");
       const res = await fetch(`${base}/api/memory/digested?secret=${encodeURIComponent(secret)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slugs: entity.source_bulletins }),
+        body: JSON.stringify({ slugs: entity.source_bulletins ?? [] }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -401,7 +429,7 @@ function EntityDetailView({
     fetchBulletins();
   }, [entity.entity_id]);
 
-  const hasRelated = Object.values(entity.related_entities).some(ids => ids && ids.length > 0);
+  const hasRelated = false;
 
   return (
     <div className="flex flex-col h-full">
@@ -415,12 +443,11 @@ function EntityDetailView({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {/* Body */}
-        {entity.body && (
+        {/* Rendered body */}
+        {entity.rendered && (
           <div className="px-3 py-2 border-b border-border">
-            <span className="text-[9px] text-muted/50 uppercase tracking-wide">body</span>
-            <pre className="mt-1 text-[11px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed max-h-72 overflow-y-auto">
-              {entity.body}
+            <pre className="text-[11px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed">
+              {entity.rendered}
             </pre>
           </div>
         )}
@@ -430,30 +457,64 @@ function EntityDetailView({
           <div className="px-3 py-2 border-b border-border">
             <span className="text-[9px] text-muted/50 uppercase tracking-wide">claims ({entity.claims.length})</span>
             <div className="mt-1 flex flex-col gap-1">
-              {entity.claims.map((c) => (
-                <div
-                  key={c.id}
-                  onClick={() => setExpandedClaim(expandedClaim === c.id ? null : c.id)}
-                  className="bg-surface/50 border border-border/50 px-2 py-1 cursor-pointer hover:border-accent/30 transition-colors rounded"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className={`text-[9px] px-1 rounded ${CLAIM_COLORS[c.type] ?? "bg-gray-900/40 text-gray-300"}`}>
-                      {c.type}
-                    </span>
-                    <span className="text-[11px] text-text truncate flex-1">
-                      {c.predicate} {c.object_id && <span className="text-muted/60">&rarr; {c.object_id}</span>}
-                    </span>
-                    {c.created_at && (
-                      <span className="text-[9px] text-muted/40 shrink-0">{new Date(c.created_at).toLocaleDateString()}</span>
+              {entity.claims.map((c) => {
+                const isSubject = c.subject_id === entity.entity_id;
+                const otherEntity = isSubject ? c.object_id : c.subject_id;
+                const dir = isSubject ? "→" : "←";
+                return (
+                  <div
+                    key={c.id}
+                    onClick={() => setExpandedClaim(expandedClaim === c.id ? null : c.id)}
+                    className="bg-surface/50 border border-border/50 px-2 py-1 cursor-pointer hover:border-accent/30 transition-colors rounded"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[9px] px-1 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
+                        {c.claim_type_key}
+                      </span>
+                      <span className="text-[11px] text-text truncate flex-1">
+                        {otherEntity ? (
+                          <>
+                            <span className="text-muted/60 mr-1">{dir}</span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onNavigateEntity(otherEntity); }}
+                              className="text-accent hover:underline"
+                            >
+                              {otherEntity}
+                            </button>
+                          </>
+                        ) : c.value ? (
+                          <>{dir} {c.value}</>
+                        ) : ""}
+                      </span>
+                      {c.created_at && (
+                        <span className="text-[9px] text-muted/40 shrink-0">{new Date(c.created_at).toLocaleDateString()}</span>
+                      )}
+                    </div>
+                    {expandedClaim === c.id && (
+                      <div className="mt-1 text-[10px] text-muted border-t border-border/30 pt-1 flex flex-col gap-0.5">
+                        <div>
+                          <span className="text-muted/50">from:</span>{" "}
+                          <button onClick={(e) => { e.stopPropagation(); onNavigateEntity(c.subject_id); }} className="text-accent hover:underline">{c.subject_id}</button>
+                        </div>
+                        {c.object_id && (
+                          <div>
+                            <span className="text-muted/50">to:</span>{" "}
+                            <button onClick={(e) => { e.stopPropagation(); onNavigateEntity(c.object_id!); }} className="text-accent hover:underline">{c.object_id}</button>
+                          </div>
+                        )}
+                        {c.value && (
+                          <div>
+                            <span className="text-muted/50">value:</span> {c.value}
+                          </div>
+                        )}
+                        <div>
+                          <span className="text-muted/50">vis:</span> {c.visibility}
+                        </div>
+                      </div>
                     )}
                   </div>
-                  {expandedClaim === c.id && c.body && (
-                    <div className="mt-1 text-[10px] text-muted border-t border-border/30 pt-1">
-                      {c.body}
-                    </div>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -486,14 +547,21 @@ function EntityDetailView({
         )}
 
         {/* Source bulletins */}
-        {entity.source_bulletins.length > 0 && (
+        {(entity.source_bulletins?.length ?? 0) > 0 && (
           <div className="px-3 py-2">
-            <span className="text-[9px] text-muted/50 uppercase tracking-wide">source bulletins ({entity.source_bulletins.length})</span>
+            <span className="text-[9px] text-muted/50 uppercase tracking-wide">source bulletins ({entity.source_bulletins?.length ?? 0})</span>
             <div className="mt-1 flex flex-col gap-1">
-              {entity.source_bulletins.map((slug) => (
+              {(entity.source_bulletins ?? []).map((slug) => (
                 <details key={slug}>
-                  <summary className="text-[9px] text-muted/50 font-mono cursor-pointer hover:text-muted/70">
-                    {slug}
+                  <summary className="text-[9px] font-mono cursor-pointer hover:text-muted/70">
+                    <Link
+                      to="/memory/bulletins/$bulletinId"
+                      params={{ bulletinId: slug }}
+                      className="text-accent/60 hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {slug}
+                    </Link>
                   </summary>
                   <pre className="mt-1 text-[10px] text-text/80 whitespace-pre-wrap break-words font-mono leading-relaxed max-h-32 overflow-y-auto bg-surface/50 border border-border/30 rounded px-1.5 py-1">
                     {bulletinContent[slug] || "loading..."}
@@ -751,7 +819,7 @@ function MemoryPage() {
                       <span className="text-[8px] text-accent/60 bg-accent/10 px-1 rounded shrink-0">{e.entity_type}</span>
                       <div className="flex flex-col min-w-0 flex-1">
                         <span className="text-[11px] text-text truncate">{e.display_name || e.entity_id}</span>
-                        <span className="text-[9px] text-muted/40 font-mono truncate">{e.entity_id}</span>
+                        <span className="text-[9px] text-muted/40 font-mono truncate">{e.summary || e.entity_id}</span>
                       </div>
                       {e.claim_count > 0 && (
                         <span className="text-[8px] text-muted/50 shrink-0">{e.claim_count} claims</span>
@@ -859,7 +927,7 @@ function MemoryPage() {
                       onClick={() => {
                         // Try to navigate to entity if it looks like an entity_id
                         const slug = r.path.split("/").pop()?.replace(".md", "") || "";
-                        if (slug.startsWith("contact-") || slug.startsWith("group-") || slug.startsWith("trip-")) {
+                        if (slug.startsWith("person-") || slug.startsWith("contact-") || slug.startsWith("group-") || slug.startsWith("trip-") || slug.startsWith("file-") || slug.startsWith("thing-")) {
                           navigateToEntity(slug);
                         }
                       }}
