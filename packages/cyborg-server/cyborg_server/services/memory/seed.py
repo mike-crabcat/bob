@@ -139,7 +139,7 @@ async def seed_from_history(
             segments.append(current_seg)
 
         participants = [
-            {"id": cid, "name": known_contacts.get(canonical_contact_id(cid), cid)}
+            {"id": canonical_contact_id(cid), "name": known_contacts.get(canonical_contact_id(cid), cid)}
             for cid in participants_set
         ]
 
@@ -174,6 +174,7 @@ async def seed_from_history(
 
             try:
                 bulletin_texts = await generate_bulletins(llm, gen_input)
+                first_msg_ts = seg_msgs[0].get("created_at", "") if seg_msgs else None
                 last_msg_ts = seg_msgs[-1].get("created_at", "") if seg_msgs else None
                 for text in bulletin_texts:
                     await svc.write_bulletin(
@@ -184,6 +185,8 @@ async def seed_from_history(
                         content=text,
                         visibility=visibility,
                         occurred_at=last_msg_ts,
+                        session_range_start=first_msg_ts or "",
+                        session_range_end=last_msg_ts or "",
                     )
                     bulletins_generated += 1
 

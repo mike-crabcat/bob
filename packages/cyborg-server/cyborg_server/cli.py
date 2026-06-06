@@ -1892,13 +1892,14 @@ async def _memory_seed_manual(dry_run: bool) -> None:
 def memory_rebuild(
     all: Annotated[bool, typer.Option("--all", help="Rebuild all derived data from bulletins")] = False,
     entity_id: Annotated[Optional[str], typer.Option("--entity", help="Rebuild indexes for a specific entity")] = None,
+    full: Annotated[bool, typer.Option("--full", help="Use full-document mode instead of patches")] = False,
 ) -> None:
     """Rebuild memory indexes and derived data from bulletins."""
     import asyncio
-    asyncio.run(_memory_rebuild(all, entity_id))
+    asyncio.run(_memory_rebuild(all, entity_id, full))
 
 
-async def _memory_rebuild(all: bool, entity_id: str | None) -> None:
+async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
     from cyborg_server.config import Settings
     from cyborg_server.context import AppContext
     from cyborg_server.database import Database
@@ -1916,7 +1917,8 @@ async def _memory_rebuild(all: bool, entity_id: str | None) -> None:
         workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)
 
-        result = await svc.rebuild(workspace, entity_id=entity_id, all=all)
+        mode = "full" if full else "patch"
+        result = await svc.rebuild(workspace, entity_id=entity_id, all=all, mode=mode)
         typer.echo(f"Rebuild result: {json.dumps(result, indent=2)}")
     finally:
         await db.close()
@@ -1954,6 +1956,34 @@ async def _memory_validate() -> None:
             typer.echo(f"Issues found ({len(result['issues'])}):")
             for issue in result["issues"]:
                 typer.echo(f"  - {issue}")
+    finally:
+        await db.close()
+
+
+@memory_app.command("reindex")
+def memory_reindex() -> None:
+    """Rebuild the FTS search index from existing entity data (no LLM calls)."""
+    import asyncio
+    asyncio.run(_memory_reindex())
+
+
+async def _memory_reindex() -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+        svc = MemoryService(ctx)
+        count = await svc.rebuild_fts()
+        typer.echo(f"FTS index rebuilt: {count} entities indexed.")
     finally:
         await db.close()
 

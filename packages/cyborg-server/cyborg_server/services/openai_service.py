@@ -131,6 +131,7 @@ class OpenAIService(BaseService):
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        stream_result: StreamResult | None = None,
     ) -> str:
         """Non-streaming chat completion via Responses API."""
         resolved_model = model or self._get_settings().openai.default_model
@@ -155,6 +156,13 @@ class OpenAIService(BaseService):
             usage = getattr(response, "usage", None)
 
             cached_tokens = self._extract_cached_tokens(usage)
+
+            if stream_result is not None:
+                stream_result.prompt_tokens = usage.input_tokens if usage else None
+                stream_result.completion_tokens = usage.output_tokens if usage else None
+                stream_result.total_tokens = usage.total_tokens if usage else None
+                stream_result.cached_tokens = cached_tokens
+                stream_result.latency_seconds = elapsed
 
             logger.info(
                 "OpenAI chat: model=%s latency=%.2fs "

@@ -64,8 +64,8 @@ async def create_contact(
     """Create a new contact."""
     contact_id = uuid4()
     now = datetime.now(timezone.utc).isoformat()
-    normalized_phone = _normalize_phone_number(payload.phone_number)
-    
+    normalized_phone = _normalize_phone_number(payload.phone_number) if payload.phone_number else None
+
     try:
         await database.execute(
             """

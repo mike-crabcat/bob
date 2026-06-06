@@ -1114,7 +1114,10 @@ async def get_memory_dreams(request: Request) -> dict[str, Any]:
                 pass
             claims_extracted = 0
             if isinstance(operations, list):
-                claims_extracted = sum(op.get("claims", 0) for op in operations)
+                claims_extracted = sum(
+                    len(op["claims"]) if isinstance(op.get("claims"), list) else op.get("claims", 0)
+                    for op in operations
+                )
             dreams.append({
                 "id": row["id"],
                 "bulletins_processed": row["bulletins_processed"],

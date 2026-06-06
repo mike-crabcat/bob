@@ -2,7 +2,45 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
-## [Unreleased] - 2026-05-31
+## 2026-06-05
+
+### Added
+- Add patience system for LLM-driven message batching with WhatsApp typing awareness: buffers incoming messages, subscribes to contact presence, and dispatches only when the user stops typing
+- Add ContactDirectory service for loading and querying contacts DB with `as_known_entities()` for bulletin generator context
+- Add contact ID reconciliation for mapping non-canonical contact IDs (name slugs, unresolved variants) to canonical UUIDs during entity updates
+- Add entity cleanup pipeline: merge duplicate contact entities, build renaming maps, rewrite claims/bulletins/entity relations, and run orchestrated cleanup via CLI
+- Add email thread tools (`email_thread_read`, `email_thread_search`) for LLM function calling with trust-scoped access control
+- Add email memory seeding from email thread history with seed_email CLI command
+- Add phone call result service for surfacing call outcomes back to originating sessions
+- Add email thread result tools for surfacing email outcomes back to originating sessions
+- Add generic thread result service for linking communication threads to their origin sessions
+- Add contact entity and claims API endpoints (dashboard and REST) for viewing memory data per contact
+- Add contact detail page in dashboard UI showing entity document and claims
+- Add phone call hangup endpoint via Twilio API
+- Add phone call status persistence (ringing, active, completed, duration, recording path) to database
+- Add schema migrations 307–313: memory tables in SQLite, phone/email origin session links, simplified bulletins, entity-bulletin links, session range tracking, drop session summaries table
+- Add SQLite-backed memory storage replacing file-based bulletin/claim/entity persistence
+- Add manual bulletin seeding via CLI (`seed_manual`) for ad-hoc memory injection
+
+### Changed
+- Simplify bulletin model from structured metadata (entities, scope, session tracking) to plain-text notes with inline `{{contact:ID|Name}}` tags
+- Simplify bulletin generator input from verbose structured transcript to compact message list with sender contact IDs and timestamps
+- Replace session summary service with bulletin-based idle session processing in heartbeat task
+- Replace summary cards with bulletin cards in dashboard home view
+- Update memory dashboard route with enhanced entity browsing and claim visualization
+- Migrate memory service from file-based YAML storage to SQLite with related entity parsing from body text
+- Gate tap dispatch behind `tap_enabled()` check instead of unconditionally running on every non-tool response
+- Update WhatsApp bridge to subscribe to contact presence for patience system integration
+- Strengthen bulletin generator prompt to forbid inventing IDs for known contacts
+- Pass known entities from ContactDirectory to bulletin generator for canonical ID enforcement
+- Add email polling integration with patience gate for coordinated message processing
+- Update memory CLI with new seed commands and cleanup orchestration
+
+### Fixed
+- Fix phone call recording finalization on call completion with proper path persistence
+- Fix phone call status transitions to persist all intermediate states (ringing, in-progress) to database
+
+## 2026-05-31
 
 ### Added
 - Add entity-centric memory system (v3) replacing wiki/category model: channel-based architecture with bulletin generation from session transcripts, entity resolution, claim extraction, and graph-based entity relationships
@@ -28,7 +66,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 ### Fixed
 - Fix animated GIF sending via WhatsApp: preserve GIF animation by passing files under the bridge payload limit as-is, and add frame-dropping resize for oversized animated GIFs instead of flattening to static JPEG
 
-## [Unreleased] - 2026-05-30
+## 2026-05-30
 
 ### Added
 - Add multimodal image support: Go bridge downloads incoming WhatsApp images to disk and forwards metadata to the Python server, which stores image references in message metadata and reconstructs OpenAI `input_image` content parts in the prompt for GPT-5.5 vision
@@ -45,7 +83,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 - Fix contact detail page: update dashboard API and React component to query new group tables instead of removed whatsapp_groups column
 - Fix LLM dispatch and OpenAI service logging to handle multimodal message content (list of content parts) without crashing
 
-## [Unreleased] - 2026-05-28
+## 2026-05-28
 
 ### Added
 - Add subagent system with Claude Code CLI integration, replacing skill-specific delegation with a generic async subagent service that spawns Claude processes and tracks status, cost, and results
@@ -70,7 +108,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 - Backfill missing chat_id on all existing WhatsApp DM routes from metadata sender_jid
 - Fix subagent sessions displaying as "whatsapp" channel in dashboard by checking subagent: prefix before :whatsapp: in channel parser
 
-## [Unreleased] - 2026-05-24
+## 2026-05-24
 
 ### Added
 - Add centralized tool registry with `build_common_tools()` replacing duplicated tool assembly across WhatsApp and email dispatchers

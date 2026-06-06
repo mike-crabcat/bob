@@ -73,10 +73,25 @@ Claims are the fundamental unit of memory. Each claim captures a single atomic f
    - body: a human-readable sentence stating the claim
    - status: "active" for new claims
    - source_bulletin_id: the bulletin this claim was extracted from
-4. Use entity IDs from contact tags in the bulletin (e.g. {{contact:abc123|Mike}} -> contact-abc123).
-5. Do not merge multiple facts into one claim. Split them.
-6. Do not infer facts not supported by the bulletin text.
-7. Preserve the visibility from the bulletin on each claim.
+4. Do not merge multiple facts into one claim. Split them.
+5. Do not infer facts not supported by the bulletin text.
+6. Preserve the visibility from the bulletin on each claim.
+
+---
+
+# Contact Resolution (CRITICAL)
+
+You will receive a ## Known Contacts section listing all real contacts with their canonical IDs.
+
+You MUST:
+- Resolve EVERY person name or reference in the bulletin to a canonical contact ID from the roster.
+- Match by full name, first name, or nickname. Be flexible with name variations.
+- Use entity IDs from contact tags in the bulletin (e.g. {{contact:abc123|Mike}} -> contact-abc123) if they match a known contact.
+- If a contact tag contains an ID NOT in the roster, ignore the tag and resolve the name against the roster instead.
+- For any person mentioned who is NOT in the roster, use the format: contact:new:{Full Name}
+  Example: contact:new:Sarah Smith
+
+NEVER invent contact IDs. Use only IDs from the roster or the contact:new: format.
 
 ---
 
@@ -99,7 +114,10 @@ Each claim in the output JSON array must be an object with these fields:
 
 # Examples
 
-A bulletin "{{contact:abc123|Mike}} decided to stay in Seminyak" should produce:
+Known Contacts:
+- contact-7f3a91: Michael Cleaver
+
+A bulletin "{{contact:7f3a91|Michael}} decided to stay in Seminyak" should produce:
 
 [
   {
@@ -114,25 +132,15 @@ A bulletin "{{contact:abc123|Mike}} decided to stay in Seminyak" should produce:
   }
 ]
 
-A bulletin "{{contact:7f3a91|Michael}} will compare the villas" should produce:
+A bulletin "Blair said she'll handle the bookings" with no Blair in the roster should produce:
 
 [
   {
     "type": "task",
-    "subject_id": "task-compare-villas",
+    "subject_id": "task-handle-bookings",
     "predicate": "owner",
-    "object_id": "contact-7f3a91",
-    "body": "task-compare-villas is owned by contact-7f3a91.",
-    "status": "active",
-    "source_bulletin_id": "bulletin-2026-06-01-001",
-    "visibility": "group"
-  },
-  {
-    "type": "task",
-    "subject_id": "task-compare-villas",
-    "predicate": "status",
-    "object_id": "open",
-    "body": "task-compare-villas is open.",
+    "object_id": "contact:new:Blair",
+    "body": "task-handle-bookings is owned by contact:new:Blair.",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
     "visibility": "group"
@@ -236,6 +244,80 @@ Return a JSON array of entity document write operations. Each operation must be:
 The content field must contain the complete entity document including frontmatter and all sections.
 
 If no entity updates are needed, return an empty array."""
+
+ENTITY_PATCH_PROMPT = """\
+You are an Entity Update Agent for the Agent Memory System.
+
+Your job is to read new bulletin content and extracted claims, then produce \
+targeted patches to update the existing entity document.
+
+You do NOT output the full entity document. Instead, you output a list of \
+search/replace patch operations that modify only the parts that need changing.
+
+---
+
+# Entity Document Sections
+
+Entity documents have these sections in order:
+1. Summary — brief description of the entity
+2. Current State — what is happening now, prioritized over history
+3. Timeline — recent events and changes
+
+Related Entities are managed automatically — do NOT output them.
+
+---
+
+# Patch Operations
+
+Return a JSON array of operations. Each operation is one of:
+
+## patch — search/replace an existing text fragment
+{
+  "action": "patch",
+  "search": "exact text from the existing entity to find",
+  "replace": "the replacement text"
+}
+- The search string must match an exact fragment of the existing document.
+- Use this to update Summary, Current State, or any existing text.
+
+## append — add content to the end of a section
+{
+  "action": "append",
+  "section": "Timeline",
+  "content": "- 2026-06-05: new event happened"
+}
+- section must be one of: Summary, Current State, Timeline
+- Adds the content after the last existing content in that section.
+
+## create — create a brand new entity (only when no existing entity)
+{
+  "action": "create",
+  "entity_id": "task-new-task",
+  "entity_type": "task",
+  "display_name": "New Task",
+  "content": "## Summary\\nBrief description.\\n\\n## Current State\\nDetails.\\n\\n## Timeline\\n- 2026-06-05: Created."
+}
+- Use ONLY for entities that do not yet exist.
+- content must contain all three sections.
+
+---
+
+# Rules
+
+1. Use canonical IDs for all entity references. Never use display names in IDs.
+2. When updating, prefer patching the specific text that changed — not rewriting entire sections.
+3. If claims conflict, prefer newer claims and note the conflict in the text.
+4. Keep documents concise. When sections grow long, summarize older history.
+5. Do not invent entity IDs that do not appear in the claims or existing documents.
+6. Synthesize from bulletin content directly — bulletins contain the actual knowledge.
+7. If no entity changes are needed, return an empty array.
+
+---
+
+# Output
+
+Return a JSON array of patch operations.
+Return [] if no changes are needed."""
 
 RETRIEVAL_AGENT_PROMPT = """\
 You are a memory retrieval agent operating against the Agent Memory System.

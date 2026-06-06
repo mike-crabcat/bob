@@ -1070,6 +1070,8 @@ class WhatsAppBridgeService(BaseService):
 
         if command == "/patience":
             await self._cmd_patience(args, session_key, chat_id)
+        elif command == "/bulletin":
+            await self._cmd_bulletin(args, session_key, chat_id, chat_kind)
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -1097,6 +1099,41 @@ class WhatsAppBridgeService(BaseService):
 
         status = "enabled — waiting for silence before responding" if enabled else "disabled — responding immediately"
         await self.send_message(chat_id, f"Patience {status}")
+
+    async def _cmd_bulletin(self, args: str, session_key: str, chat_id: str, chat_kind: str) -> None:
+        """Generate bulletins for the current session on demand."""
+        from cyborg_server.services.memory import MemoryService
+
+        settings = self._get_settings()
+        workspace = settings.harness.workspace_dir
+        svc = MemoryService(self.ctx)
+
+        try:
+            result = await svc.generate_session_bulletins(
+                workspace, session_key, run_dream=True,
+            )
+        except Exception as exc:
+            logger.exception("/bulletin failed for %s", session_key)
+            await self.send_message(chat_id, f"/bulletin error: {exc}")
+            return
+
+        status = result.get("status", "unknown")
+        if status == "empty":
+            reason = result.get("reason", "no data")
+            await self.send_message(chat_id, f"/bulletin: nothing to process ({reason})")
+            return
+
+        n = result.get("bulletins_generated", 0)
+        msgs = result.get("messages_processed", 0)
+        dream = result.get("dream", {})
+        claims = dream.get("claims_extracted", 0) if isinstance(dream, dict) else 0
+        entities = dream.get("entity_ops", 0) if isinstance(dream, dict) else 0
+
+        await self.send_message(
+            chat_id,
+            f"/bulletin: {n} bulletin(s) from {msgs} messages | "
+            f"dream: {claims} claims, {entities} entity ops",
+        )
 
     async def _on_message(self, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type", "")
@@ -1329,6 +1366,23 @@ class WhatsAppBridgeService(BaseService):
             if entry:
                 person_context = f"## Person Profile\n\n{entry}"
 
+        # Inject group entity hint for group sessions
+        group_memory_hint = ""
+        if chat_kind == "group":
+            group_row = await self.db.fetch_one(
+                "SELECT wg.memory_entity_id FROM whatsappgroups wg "
+                "JOIN session_routes sr ON sr.chat_id = wg.whatsapp_jid "
+                "WHERE sr.session_key = ? AND wg.deleted_at IS NULL",
+                (session_key,),
+            )
+            if group_row and group_row["memory_entity_id"]:
+                eid = group_row["memory_entity_id"]
+                group_memory_hint = (
+                    "## Group Memory\n\n"
+                    f"This is a WhatsApp group with accumulated memory entity `{eid}`.\n"
+                    f"Use `memory_read('{eid}')` or `memory_graph('{eid}')` to look up group knowledge."
+                )
+
         # Handle shared contacts — auto-seed into contacts table
         shared_contacts = payload.get("contacts", [])
         contacts_block = ""
@@ -1410,7 +1464,7 @@ class WhatsAppBridgeService(BaseService):
                 )
 
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, outreach_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, outreach_prompt) if p
         )
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)

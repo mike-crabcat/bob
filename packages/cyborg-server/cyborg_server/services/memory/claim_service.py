@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from cyborg_server.services.memory.models import Claim, Bulletin
 
 logger = logging.getLogger(__name__)
+
+_NEW_CONTACT_RE = re.compile(r"^contact:new:(.+)$")
+_NEW_CONTACT_ALT_RE = re.compile(r"^contact-new[:\-](.+)$")
+_NON_CANONICAL_CONTACT_RE = re.compile(r"^contact-([a-z][a-z\-]{1,80})$")
 
 
 async def write_claim(db: Any, claim: Claim) -> str:
@@ -90,10 +96,46 @@ def _row_to_claim(row: dict) -> Claim:
     )
 
 
+async def _ensure_contact(db: Any, name: str, created_cache: dict[str, str]) -> str | None:
+    """Create a name-only contact if needed. Returns canonical contact-{hex8} ID.
+
+    Uses created_cache to deduplicate within a single extraction batch.
+    """
+    # Check batch cache first
+    cached = created_cache.get(name.lower())
+    if cached:
+        return cached
+
+    # Check if a contact with this name already exists
+    existing = await db.fetch_one(
+        "SELECT id FROM contacts WHERE name = ? AND deleted_at IS NULL LIMIT 1",
+        (name,),
+    )
+    if existing:
+        canonical = f"contact-{str(existing['id'])[:8]}"
+        created_cache[name.lower()] = canonical
+        return canonical
+
+    contact_id = str(uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
+        "VALUES (?, ?, NULL, ?, ?)",
+        (contact_id, name, now, now),
+    )
+    canonical = f"contact-{contact_id[:8]}"
+    created_cache[name.lower()] = canonical
+    return canonical
+
+
 async def extract_claims_from_bulletin(
     llm: Any,
     bulletin: Bulletin,
     existing_claims: list[Claim] | None = None,
+    known_group_entity_id: str | None = None,
+    contact_roster: str = "",
+    group_members: str = "",
+    db: Any = None,
 ) -> list[Claim]:
     """Use LLM to extract atomic claims from a bulletin."""
     existing_context = ""
@@ -101,9 +143,23 @@ async def extract_claims_from_bulletin(
         lines = [f"- {c.subject_id} {c.predicate} {c.object_id or ''} ({c.status})" for c in existing_claims[:50]]
         existing_context = "\n\n## Existing Claims\n\n" + "\n".join(lines)
 
+    group_hint = ""
+    if known_group_entity_id:
+        group_hint = (
+            f"\n\n## Group Context\n\n"
+            f"This bulletin originates from a group session. "
+            f"Use `subject_id: {known_group_entity_id}` for any claims about the group itself."
+        )
+
+    roster_section = ""
+    if contact_roster:
+        roster_section = "\n\n## Known Contacts\n\n" + contact_roster
+    if group_members:
+        roster_section += "\n\n## Group Members\n\n" + group_members
+
     bulletin_text = f"[Bulletin: {bulletin.id}]\nChannel: {bulletin.channel_id}\nVisibility: {bulletin.visibility}\n\n{bulletin.content}"
 
-    user_prompt = f"## Bulletin\n\n{bulletin_text}{existing_context}"
+    user_prompt = f"## Bulletin\n\n{bulletin_text}{roster_section}{existing_context}{group_hint}"
 
     response = await llm.chat(
         messages=[
@@ -153,7 +209,59 @@ async def extract_claims_from_bulletin(
         )
         claims.append(claim)
 
+    # Resolve contact:new:{Name} markers to real contacts
+    if db is not None:
+        await _resolve_new_contacts(db, claims)
+
     return claims
+
+
+async def _resolve_new_contacts(db: Any, claims: list[Claim]) -> None:
+    """Resolve non-canonical contact IDs to real canonical IDs.
+
+    Handles these LLM output patterns:
+    - contact:new:Full Name  (correct format)
+    - contact-new:Full Name  (alternate colon)
+    - contact-slug-name      (LLM-invented slug, e.g. contact-max)
+
+    Deduplicates contact creation via a batch cache.
+    """
+    created_cache: dict[str, str] = {}
+
+    for claim in claims:
+        for attr in ("subject_id", "object_id"):
+            val = getattr(claim, attr)
+            if not isinstance(val, str) or not val.startswith("contact-"):
+                continue
+
+            # Pattern 1: contact:new:Full Name (correct)
+            m = _NEW_CONTACT_RE.match(val)
+            if m:
+                name = m.group(1).strip()
+                canonical_id = await _ensure_contact(db, name, created_cache)
+                if canonical_id:
+                    setattr(claim, attr, canonical_id)
+                continue
+
+            # Pattern 2: contact-new:Full Name (alternate colon/dash)
+            m = _NEW_CONTACT_ALT_RE.match(val)
+            if m:
+                name = m.group(1).strip()
+                canonical_id = await _ensure_contact(db, name, created_cache)
+                if canonical_id:
+                    setattr(claim, attr, canonical_id)
+                continue
+
+            # Pattern 3: contact-slug-name (non-canonical, LLM-invented)
+            # Only if it doesn't look like a canonical hex8 ID
+            m = _NON_CANONICAL_CONTACT_RE.match(val)
+            if m:
+                # Convert slug to display name: contact-max-parry -> Max Parry
+                slug = m.group(1)
+                name = " ".join(part.capitalize() for part in slug.split("-"))
+                canonical_id = await _ensure_contact(db, name, created_cache)
+                if canonical_id:
+                    setattr(claim, attr, canonical_id)
 
 
 from cyborg_server.services.memory.prompts import CLAIM_EXTRACTION_PROMPT
