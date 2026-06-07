@@ -2,6 +2,44 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-06-07
+
+### Added
+- Add `POST /api/v1/email/poll` endpoint for on-demand email inbox polling with `force=True` to bypass the interval check
+- Add `/email` slash command skill for triggering immediate email inbox check
+- Add entity reconciliation system with LLM-driven consistency checking, per-type rules, and human-in-the-loop conflict resolution via questions
+- Add `supplement_entity` pipeline to gap-fill missing claims from related bulletins after dream processing
+- Add `memory_correct` tool supporting `remove_entity`, `remove_claim`, and `set_truth` actions for agent-driven memory correction
+- Add `truth` claim type for user-stated facts and corrections that override inference, with migration of legacy `purpose` answer claims
+- Add `memory reconcile` and `memory supplement` CLI commands for manual entity consistency repair and gap-filling
+- Add memory questions API endpoints and QA tab in dashboard for surfacing and resolving open reconciliation questions
+- Add stats tab to memory dashboard showing entity distribution, pipeline status, and claim counts
+- Add `rm`, `mv`, and `find` workspace tools for file deletion, move/rename, and content search
+- Add `LLMCallStalenessTask` heartbeat to detect and mark LLM calls stuck in "running" status after 30 minutes
+- Add orphan claims rendering in entity detail display for claims not covered by the entity template
+- Add tool args and output display to live tool call cards in session call detail view
+- Add `on_iteration_complete` callback to OpenAI tool-call loops for persisting intermediate messages to LLM call logs
+
+### Changed
+- Trigger memory dream immediately on bulletin write with 2-second debounce instead of waiting for the heartbeat cycle
+- Run supplement and reconciliation automatically after each dream cycle for all touched entities
+- Add pagination to email inbox polling for handling >50 unread messages
+- Replace `list_files` workspace tool with `ls` (non-recursive, single-directory listing)
+- Replace memory "lint" button with the new QA questions workflow
+- Increase claim extraction `max_tokens` from 2000 to 4000
+- Simplify trip entity model: remove destination/date claims at trip level, rely on tripstop-level data instead
+- Strengthen transport entity extraction rules: require transport entities for all flights/trains/buses with route details
+- Add explicit timeouts (300s read, 30s connect) to OpenAI client
+- Include tool args and output summary in `llm.call.tool_completed` WebSocket events
+
+### Fixed
+- Fix backfilled emails never dispatched: poll now re-dispatches messages that were imported via sync but never reached the LLM
+- Fix emails stuck unread in AgentMail: deduplicated messages are now marked as read even when processing is skipped
+
+### Removed
+- Remove dream trigger from `SessionIdleSummaryTask` heartbeat (moved to debounced bulletin-write trigger)
+- Remove `/api/memory/lint` endpoint and its corresponding UI button
+
 ## 2026-06-06
 
 ### Added
