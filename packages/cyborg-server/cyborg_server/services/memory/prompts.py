@@ -66,7 +66,9 @@ Every claim references entities by ID. You MUST follow these ID conventions:
   For new people NOT in the Known Entities section, use `person:new:Full Name`.
 - **group-SLUG**: Chat groups or teams. e.g. group-bali-gang
 - **trip-SLUG**: Trips. e.g. trip-bali-2026
-- **tripstop-SLUG**: A stop within a trip. e.g. tripstop-ubud-days4-6
+- **tripstop-SLUG**: A stop within a trip. Include location AND date range for uniqueness. \
+e.g. tripstop-ubud-days4-6, tripstop-paris-june12-14, tripstop-paris-june14-16. \
+Each distinct stay (different hotel or different dates at same city) MUST be a separate entity.
 - **transport-SLUG**: A transport leg. e.g. transport-flight-qz541
 - **location-SLUG**: A place. e.g. location-villa-sunset
 - **event-SLUG**: An event. e.g. event-dinner-aug5
@@ -107,6 +109,15 @@ When in doubt, do NOT create a person entity.
    path, do NOT create a file entity — skip it. Vague values like "workspace", "project", or \
    "new file" are NOT valid paths. No valid path = no file entity.
 8. thing entities are physical objects and animals only. Not for abstract concepts.
+9. When a bulletin describes flights, trains, buses, ferries, or other transport with specific \
+routes, times, flight numbers, or booking references, you MUST create transport entities and \
+extract all details as claims. Create ONE transport entity per journey direction (e.g. one for \
+outbound, one for return). Use the overall origin as departure_location and final destination as \
+arrival_location. Put the individual flight legs, connection details, and intermediate stops in a \
+truth claim. Include departure_time, transport_type, and duration as scalar claims. \
+NEVER skip transport data — it is as important as person or trip data.
+Example: Perth→KUL→LHR→Geneva becomes ONE entity with departure_location=Perth PER, \
+arrival_location=Geneva GVA, and a truth claim listing the connection details.
 
 ---
 
@@ -142,6 +153,30 @@ Return a JSON array of claim objects. Example:
     "claim_type_key": "spouse",
     "subject_id": "person-mike-cleaver",
     "object_id": "person:new:Blair",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "transport_type",
+    "subject_id": "transport-flight-mh124",
+    "value": "flight",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "departure_location",
+    "subject_id": "transport-flight-mh124",
+    "value": "Perth PER",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "arrival_location",
+    "subject_id": "transport-flight-mh124",
+    "value": "Kuala Lumpur KUL",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
     "visibility": "group"

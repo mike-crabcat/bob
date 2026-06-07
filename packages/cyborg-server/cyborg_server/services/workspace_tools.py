@@ -44,45 +44,36 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
     """
 
     @tool
-    async def list_files(
+    async def ls(
         path: str = "",
-        depth: int = 1,
     ) -> str:
-        """List files and directories in the workspace. Paths are relative to the workspace root ('/'). Depth controls recursion (1=immediate, 2=one level deeper)."""
+        """List files and directories in a single workspace directory (non-recursive). Path is relative to the workspace root ('/')."""
         workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
         target = _resolve_path(ctx, path) if path else workspace
         if not target.is_dir():
             return json.dumps({"error": f"'{path}' is not a directory"})
 
         entries: list[dict] = []
+        try:
+            children = sorted(target.iterdir())
+        except PermissionError:
+            return json.dumps({"error": f"permission denied: '{path}'"})
 
-        def _walk(dir_path: Path, prefix: str, current_depth: int) -> None:
+        for child in children:
             if len(entries) >= _MAX_LIST_ENTRIES:
-                return
-            try:
-                children = sorted(dir_path.iterdir())
-            except PermissionError:
-                return
-            for child in children:
-                if len(entries) >= _MAX_LIST_ENTRIES:
-                    entries.append({"name": "...", "type": "truncated"})
-                    return
-                name = f"{prefix}{child.name}" if prefix else child.name
-                entry: dict = {
-                    "name": name,
-                    "type": "dir" if child.is_dir() else "file",
-                }
-                if child.is_file():
-                    try:
-                        entry["size_bytes"] = child.stat().st_size
-                    except OSError:
-                        pass
-                entries.append(entry)
-                if child.is_dir() and current_depth < depth:
-                    _walk(child, f"{name}/", current_depth + 1)
+                entries.append({"name": "...", "type": "truncated"})
+                break
+            entry: dict = {
+                "name": child.name,
+                "type": "dir" if child.is_dir() else "file",
+            }
+            if child.is_file():
+                try:
+                    entry["size_bytes"] = child.stat().st_size
+                except OSError:
+                    pass
+            entries.append(entry)
 
-        prefix = f"{path}/" if path else ""
-        _walk(target, prefix, 1)
         return json.dumps(entries)
 
     @tool
@@ -159,6 +150,112 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         return json.dumps({"ok": True, "path": path, "bytes": len(content.encode("utf-8"))})
 
     @tool
+    async def rm(
+        path: str,
+        recursive: bool = False,
+    ) -> str:
+        """Delete a file or directory in the workspace. Path is relative to the workspace root ('/'). Set recursive=true to delete non-empty directories."""
+        workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
+        resolved = _resolve_path(ctx, path)
+        if resolved == workspace:
+            return "Error: cannot delete workspace root"
+        if not resolved.exists():
+            return f"Error: '{path}' does not exist"
+        if resolved.is_file():
+            resolved.unlink()
+            logger.info("Workspace delete: %s", path)
+            return json.dumps({"ok": True, "path": path})
+        if resolved.is_dir():
+            if not recursive and any(resolved.iterdir()):
+                return f"Error: '{path}' is a non-empty directory (set recursive=true to delete)"
+            shutil.rmtree(resolved)
+            logger.info("Workspace delete (recursive): %s", path)
+            return json.dumps({"ok": True, "path": path})
+        return f"Error: '{path}' is not a file or directory"
+
+    @tool
+    async def mv(
+        source: str,
+        destination: str,
+    ) -> str:
+        """Move or rename a file or directory in the workspace. Paths are relative to the workspace root ('/'). Creates destination parent directories if needed."""
+        src = _resolve_path(ctx, source)
+        dst = _resolve_path(ctx, destination)
+        if not src.exists():
+            return f"Error: '{source}' does not exist"
+        if dst.exists():
+            return f"Error: '{destination}' already exists"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        logger.info("Workspace move: %s -> %s", source, destination)
+        return json.dumps({"ok": True, "from": source, "to": destination})
+
+    @tool
+    async def find(
+        query: str = "",
+        pattern: str = "",
+        path: str = "",
+    ) -> str:
+        """Search workspace files. Use 'pattern' to find files by name (e.g. '*.py', 'test_*'), 'query' to search file contents, or both. At least one is required. Optional 'path' scopes the search to a subdirectory."""
+        if not query and not pattern:
+            return "Error: provide at least one of 'query' or 'pattern'"
+
+        workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
+        search_root = _resolve_path(ctx, path) if path else workspace
+        if not search_root.is_dir():
+            return json.dumps({"error": f"'{path}' is not a directory"})
+
+        _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache"}
+        _MAX_RESULTS = 20
+
+        results: list[dict] = []
+
+        def _matches_name(file_path: Path) -> bool:
+            if not pattern:
+                return True
+            from fnmatch import fnmatch
+            return fnmatch(file_path.name, pattern)
+
+        def _walk(dir_path: Path) -> None:
+            if len(results) >= _MAX_RESULTS:
+                return
+            try:
+                children = sorted(dir_path.iterdir())
+            except PermissionError:
+                return
+            for child in children:
+                if len(results) >= _MAX_RESULTS:
+                    return
+                if child.is_dir():
+                    if child.name not in _SKIP_DIRS:
+                        _walk(child)
+                elif child.is_file() and _matches_name(child):
+                    if not query:
+                        results.append({"path": str(child.relative_to(workspace))})
+                    else:
+                        try:
+                            raw = child.read_bytes()
+                            if b"\x00" in raw[:8192]:
+                                continue
+                            text = raw.decode("utf-8", errors="replace")
+                        except OSError:
+                            continue
+                        for i, line in enumerate(text.splitlines(), 1):
+                            if query.lower() in line.lower():
+                                results.append({
+                                    "path": str(child.relative_to(workspace)),
+                                    "line": i,
+                                    "text": line.strip()[:200],
+                                })
+                                if len(results) >= _MAX_RESULTS:
+                                    return
+
+        _walk(search_root)
+        if not results:
+            return json.dumps({"results": [], "message": "no matches found"})
+        return json.dumps({"results": results})
+
+    @tool
     async def run_script(
         path: str,
         args: list[str] = [],
@@ -212,7 +309,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         from cyborg_server.services.skill_loader import load_skill
         return load_skill(ctx.settings.harness.workspace_dir, skill_name)
 
-    tools = [list_files, read_file, read_image, write_file, run_script, use_skill]
+    tools = [ls, read_file, read_image, write_file, rm, mv, find, run_script, use_skill]
 
     if session_key:
         @tool

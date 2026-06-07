@@ -199,10 +199,11 @@ class EmailPollingService(BaseService):
             )
         return self._client
 
-    async def poll_all_inboxes(self) -> int:
+    async def poll_all_inboxes(self, *, force: bool = False) -> int:
         """Poll all active email inboxes for new messages.
 
-        Only polls inboxes where last_polled_at is older than poll_interval_seconds.
+        Only polls inboxes where last_polled_at is older than poll_interval_seconds,
+        unless force=True which skips the interval check.
         Returns total new messages processed.
         """
         settings = self._get_settings()
@@ -217,7 +218,7 @@ class EmailPollingService(BaseService):
 
         total = 0
         for inbox in inboxes:
-            if not self._should_poll(inbox, settings.agentmail.poll_interval_seconds):
+            if not force and not self._should_poll(inbox, settings.agentmail.poll_interval_seconds):
                 continue
             try:
                 total += await self.poll_inbox(inbox)
@@ -244,29 +245,38 @@ class EmailPollingService(BaseService):
         agentmail_inbox_id = inbox["agentmail_inbox_id"]
 
         now = utcnow()
-        messages_data = await self.client.list_messages(
-            agentmail_inbox_id,
-            limit=50,
-            labels=["unread"],
-        )
-
-        messages = messages_data.get("messages", []) if isinstance(messages_data, dict) else []
         count = 0
-        for message in messages:
-            try:
-                # The list endpoint omits body fields; fetch the full message.
-                full_message = await self.client.get_message(
-                    inbox["agentmail_inbox_id"],
-                    message["message_id"],
-                )
-                processed = await self.process_incoming_message(inbox, full_message)
-                if processed:
-                    count += 1
-            except Exception:
-                logger.exception(
-                    "Failed to process message %s in inbox %s",
-                    message.get("message_id", "?"), inbox_id,
-                )
+        page_token: str | None = None
+
+        while True:
+            messages_data = await self.client.list_messages(
+                agentmail_inbox_id,
+                limit=50,
+                labels=["unread"],
+                page_token=page_token,
+            )
+
+            messages = messages_data.get("messages", []) if isinstance(messages_data, dict) else []
+            for message in messages:
+                try:
+                    # The list endpoint omits body fields; fetch the full message.
+                    full_message = await self.client.get_message(
+                        inbox["agentmail_inbox_id"],
+                        message["message_id"],
+                    )
+                    processed = await self.process_incoming_message(inbox, full_message)
+                    if processed:
+                        count += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to process message %s in inbox %s",
+                        message.get("message_id", "?"), inbox_id,
+                    )
+
+            next_token = messages_data.get("next_page_token") if isinstance(messages_data, dict) else None
+            if not next_token:
+                break
+            page_token = next_token
 
         # Update last_polled_at
         await self.db.execute(
@@ -294,10 +304,43 @@ class EmailPollingService(BaseService):
 
         # Dedup check
         existing = await self.db.fetch_one(
-            "SELECT id FROM email_messages WHERE agentmail_message_id = ?",
+            "SELECT id, thread_id FROM email_messages WHERE agentmail_message_id = ?",
             (agentmail_message_id,),
         )
         if existing is not None:
+            # Already processed — mark as read in AgentMail if needed
+            if not backfill:
+                try:
+                    await self.client.update_message(
+                        inbox["agentmail_inbox_id"],
+                        agentmail_message_id,
+                        remove_labels=["unread"],
+                    )
+                except Exception:
+                    pass
+
+                # Re-dispatch if this message was backfilled but never reached the LLM
+                thread_id = existing["thread_id"]
+                session_key_row = await self.db.fetch_one(
+                    "SELECT session_key FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
+                    (thread_id,),
+                )
+                if session_key_row:
+                    dispatched = await self.db.fetch_one(
+                        "SELECT id FROM session_messages WHERE session_key = ? LIMIT 1",
+                        (session_key_row["session_key"],),
+                    )
+                    if not dispatched:
+                        logger.info("Re-dispatching undelivered message %s for thread %s", agentmail_message_id[:30], thread_id[:8])
+                        thread_row = await self.db.fetch_one(
+                            "SELECT * FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
+                            (thread_id,),
+                        )
+                        if thread_row:
+                            asyncio.create_task(self._dispatch_email_safe(
+                                thread_row, message, inbox,
+                                is_new_thread=False,
+                            ))
             return False
 
         thread_id = message.get("thread_id", agentmail_message_id)

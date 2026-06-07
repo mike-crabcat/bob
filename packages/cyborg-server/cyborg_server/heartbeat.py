@@ -180,27 +180,6 @@ class SessionIdleSummaryTask:
                     session["session_key"],
                 )
 
-        # Run the memory dream to curate bulletins into claims and entities
-        try:
-            from uuid import uuid4
-            import json as _json
-
-            result = await svc.run_dream(workspace)
-            if result["status"] != "empty":
-                await ctx.db.execute(
-                    "INSERT INTO memory_dream_log "
-                    "(id, bulletins_processed, entries_created, bulletin_slugs, "
-                    "operations_json, raw_response, duration_seconds, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(uuid4()), result["bulletins_processed"],
-                     result.get("entity_ops", 0),
-                     _json.dumps(result.get("bulletin_slugs", [])),
-                     _json.dumps(result.get("operations", [])),
-                     None, result.get("duration_seconds"), result["status"]),
-                )
-        except Exception:
-            logger.exception("Memory dream process failed")
-
 
 class CallCleanupTask:
     """Delete old phone call recordings and database records."""
@@ -245,3 +224,21 @@ class CallCleanupTask:
 
         _last_call_cleanup = now
         logger.info("Cleaned up %d old phone call(s)", len(old_calls))
+
+
+class LLMCallStalenessTask:
+    """Mark LLM calls stuck in 'running' status as failed."""
+
+    name = "llm_call_staleness"
+
+    STALE_MINUTES = 30
+
+    async def run(self, ctx: AppContext) -> None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=self.STALE_MINUTES)).isoformat()
+        count = await ctx.db.execute(
+            "UPDATE llm_call_log SET status = 'failed', error_message = 'Stale running call — timed out' "
+            "WHERE status = 'running' AND created_at < ?",
+            (cutoff,),
+        )
+        if count:
+            logger.warning("Marked %d stale LLM call(s) as failed", count)

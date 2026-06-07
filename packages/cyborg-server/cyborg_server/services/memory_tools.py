@@ -99,4 +99,144 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             "rendered": rendered,
         })
 
-    return [recall, find, note, memory_write, memory_read]
+    @tool
+    async def memory_correct(
+        action: str,
+        entity_id: str = "",
+        claim_type_key: str = "",
+        value: str = "",
+        reason: str = "",
+    ) -> str:
+        """Correct or remove wrong memory data. Actions:
+        - "remove_entity": Archive an entity and supersede all its claims. Use for hallucinated/incorrect entities.
+        - "remove_claim": Supersede a specific claim on an entity. Requires entity_id, claim_type_key, and value.
+        - "set_truth": Write a truth claim on an entity (user-stated correction that overrides inference).
+        Always provide a reason explaining why the correction is needed."""
+        from cyborg_server.services.memory.claim_service import write_claim
+        from cyborg_server.services.memory.models import Claim
+        from datetime import datetime
+        import uuid
+
+        if not reason:
+            return json.dumps({"error": "reason is required for all corrections"})
+
+        if action == "remove_entity":
+            if not entity_id:
+                return json.dumps({"error": "entity_id is required for remove_entity"})
+            # Check entity exists
+            row = await ctx.db.fetch_one(
+                "SELECT entity_id, entity_type FROM memory_entities WHERE entity_id = ? AND status = 'active'",
+                (entity_id,),
+            )
+            if not row:
+                return json.dumps({"error": f"Entity not found or already archived: {entity_id}"})
+
+            # Archive the entity
+            await ctx.db.execute(
+                "UPDATE memory_entities SET status = 'archived' WHERE entity_id = ?",
+                (entity_id,),
+            )
+            # Supersede all active claims
+            claims = await ctx.db.fetch_all(
+                "SELECT id FROM memory_claims WHERE subject_id = ? AND status = 'active'",
+                (entity_id,),
+            )
+            for c in claims:
+                await ctx.db.execute(
+                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
+                    (c["id"],),
+                )
+            # Also remove claims referencing this entity as object_id
+            ref_claims = await ctx.db.fetch_all(
+                "SELECT id FROM memory_claims WHERE object_id = ? AND status = 'active'",
+                (entity_id,),
+            )
+            for c in ref_claims:
+                await ctx.db.execute(
+                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
+                    (c["id"],),
+                )
+            # Write a truth claim to prevent re-creation
+            truth_claim = Claim(
+                id=f"claim-correct-{uuid.uuid4().hex[:8]}",
+                claim_type_key="truth",
+                subject_id=entity_id,
+                value=f"[removed] {reason}",
+                status="active",
+                source_bulletins=[],
+                created_at=datetime.now(),
+            )
+            await write_claim(ctx.db, truth_claim)
+
+            logger.info("Entity removed via memory_correct: %s (%d claims, %d refs) — %s",
+                       entity_id, len(claims), len(ref_claims), reason)
+            return json.dumps({
+                "ok": True,
+                "action": "remove_entity",
+                "entity_id": entity_id,
+                "claims_archived": len(claims),
+                "references_removed": len(ref_claims),
+            })
+
+        elif action == "remove_claim":
+            if not entity_id or not claim_type_key:
+                return json.dumps({"error": "entity_id and claim_type_key required for remove_claim"})
+            # Find matching active claims
+            params: list = [entity_id, claim_type_key]
+            extra = ""
+            if value:
+                extra = " AND (value = ? OR object_id = ?)"
+                params.extend([value, value])
+            rows = await ctx.db.fetch_all(
+                f"SELECT id FROM memory_claims WHERE subject_id = ? AND claim_type_key = ? AND status = 'active'{extra}",
+                tuple(params),
+            )
+            if not rows:
+                return json.dumps({"error": f"No matching active claim found"})
+            for r in rows:
+                await ctx.db.execute(
+                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
+                    (r["id"],),
+                )
+            # Write truth claim
+            truth_claim = Claim(
+                id=f"claim-correct-{uuid.uuid4().hex[:8]}",
+                claim_type_key="truth",
+                subject_id=entity_id,
+                value=f"[removed {claim_type_key}] {reason}",
+                status="active",
+                source_bulletins=[],
+                created_at=datetime.now(),
+            )
+            await write_claim(ctx.db, truth_claim)
+            return json.dumps({
+                "ok": True,
+                "action": "remove_claim",
+                "entity_id": entity_id,
+                "claims_removed": len(rows),
+            })
+
+        elif action == "set_truth":
+            if not entity_id or not value:
+                return json.dumps({"error": "entity_id and value required for set_truth"})
+            claim = Claim(
+                id=f"claim-correct-{uuid.uuid4().hex[:8]}",
+                claim_type_key="truth",
+                subject_id=entity_id,
+                value=value,
+                status="active",
+                source_bulletins=[],
+                created_at=datetime.now(),
+            )
+            await write_claim(ctx.db, claim)
+            return json.dumps({
+                "ok": True,
+                "action": "set_truth",
+                "entity_id": entity_id,
+                "claim_id": claim.id,
+            })
+
+        else:
+            return json.dumps({"error": f"Unknown action: {action}. Use remove_entity, remove_claim, or set_truth."})
+
+    return [recall, find, note, memory_write, memory_read, memory_correct]

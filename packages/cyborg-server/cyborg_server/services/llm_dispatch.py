@@ -167,6 +167,8 @@ class LLMDispatchService(BaseService):
                 "session_key": session_key,
                 "call_category": call_category,
                 "tool_name": name,
+                "tool_args": args,
+                "tool_output": result_summary,
             }
             if log_id:
                 payload["log_id"] = log_id
@@ -439,6 +441,12 @@ class LLMDispatchService(BaseService):
         try:
             stream_result = StreamResult()
 
+            async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
+                await _record_log(self.db, log_id=log_id,
+                    messages_json=json.dumps(_sanitize_for_json(msgs)),
+                    status="running",
+                )
+
             result = await service.chat_with_tools(
                 messages=messages,
                 tools=openai_tools,
@@ -447,6 +455,7 @@ class LLMDispatchService(BaseService):
                 max_iterations=max_iterations,
                 stream_result=stream_result,
                 on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
+                on_iteration_complete=_on_iteration,
             )
             elapsed = time.monotonic() - t0
 
@@ -541,6 +550,12 @@ class LLMDispatchService(BaseService):
         accumulated = ""
         ttft: float | None = None
 
+        async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
+            await _record_log(self.db, log_id=log_id,
+                messages_json=json.dumps(_sanitize_for_json(msgs)),
+                status="running",
+            )
+
         try:
             async for chunk in service.chat_stream_with_tools(
                 messages=messages,
@@ -549,6 +564,7 @@ class LLMDispatchService(BaseService):
                 model=resolved_model,
                 max_iterations=max_iterations,
                 on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
+                on_iteration_complete=_on_iteration,
             ):
                 if chunk:
                     if ttft is None:

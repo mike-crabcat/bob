@@ -6,6 +6,7 @@ Rendered views are generated from claims via templates (no LLM).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from cyborg_server.services.base import BaseService, utcnow
+from cyborg_server.services.memory.claim_types import ENTITY_REF_CLAIM_KEYS
 from cyborg_server.services.memory.models import (
     Bulletin,
     Claim,
@@ -64,6 +66,8 @@ class MemoryService(BaseService):
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
+        self._dream_task: asyncio.Task | None = None
+        self._recon_task: asyncio.Task | None = None
 
     # ── Bulletins ─────────────────────────────────────────────────
 
@@ -105,7 +109,167 @@ class MemoryService(BaseService):
         )
 
         logger.info("Bulletin written: %s", bulletin_id)
+        self._schedule_dream(workspace_dir)
         return bulletin_id
+
+    def _schedule_dream(self, workspace_dir: Path) -> None:
+        """Debounced dream trigger — runs dream 2s after last bulletin write."""
+        if self._dream_task and not self._dream_task.done():
+            self._dream_task.cancel()
+
+        async def _run() -> None:
+            await asyncio.sleep(2)
+            try:
+                result = await self.run_dream(workspace_dir)
+                if result["status"] != "empty":
+                    logger.info(
+                        "Immediate dream processed %d bulletin(s)",
+                        result["bulletins_processed"],
+                    )
+                    import json as _json
+                    await self.db.execute(
+                        "INSERT INTO memory_dream_log "
+                        "(id, bulletins_processed, entries_created, bulletin_slugs, "
+                        "operations_json, raw_response, duration_seconds, status) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), result["bulletins_processed"],
+                         result.get("entity_ops", 0),
+                         _json.dumps(result.get("bulletin_slugs", [])),
+                         _json.dumps(result.get("operations", [])),
+                         None, result.get("duration_seconds"), result["status"]),
+                    )
+            except Exception:
+                logger.exception("Immediate dream failed")
+
+        self._dream_task = asyncio.create_task(_run())
+
+    def _schedule_reconciliation(self, entity_ids: list[str]) -> None:
+        """Debounced supplement + reconciliation — runs 2s after last dream completes."""
+        if self._recon_task and not self._recon_task.done():
+            self._recon_task.cancel()
+
+        async def _run() -> None:
+            await asyncio.sleep(2)
+            if not entity_ids:
+                return
+            try:
+                from cyborg_server.services.memory.reconciliation import reconcile_entity
+                from cyborg_server.services.llm_dispatch import LLMDispatchService
+                llm = LLMDispatchService(self.ctx)
+
+                # Phase 1: supplement — gap-fill from related bulletins
+                workspace = self.ctx.settings.harness.workspace_dir
+                for eid in entity_ids:
+                    result = await self.supplement_entity(workspace, entity_id=eid)
+                    if result.get("claims_added"):
+                        logger.info(
+                            "Supplemented %s: %d claims added from %d bulletins",
+                            eid, result["claims_added"], result["bulletins_scanned"],
+                        )
+
+                # Phase 2: reconcile — consistency check on now-complete data
+                for eid in entity_ids:
+                    result = await reconcile_entity(
+                        self.db, llm, eid,
+                        update_fts_fn=self._update_entity_fts,
+                    )
+                    if result.get("operations_applied") or result.get("questions_raised"):
+                        logger.info(
+                            "Reconciled %s: %d ops, %d questions",
+                            eid,
+                            len(result.get("operations_applied", [])),
+                            len(result.get("questions_raised", [])),
+                        )
+            except Exception:
+                logger.exception("Supplement/reconciliation failed")
+
+        self._recon_task = asyncio.create_task(_run())
+
+    async def reconcile_entities(
+        self, workspace_dir: Path, *, entity_ids: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Manually trigger reconciliation for specific or all active entities."""
+        from cyborg_server.services.memory.reconciliation import reconcile_entity
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        llm = LLMDispatchService(self.ctx)
+        if entity_ids is None:
+            rows = await self.db.fetch_all(
+                "SELECT entity_id FROM memory_entities WHERE status = 'active'"
+            )
+            entity_ids = [r["entity_id"] for r in rows]
+
+        results = []
+        for eid in entity_ids:
+            result = await reconcile_entity(
+                self.db, llm, eid,
+                update_fts_fn=self._update_entity_fts,
+            )
+            results.append(result)
+
+        return {
+            "entities_checked": len(results),
+            "total_issues": sum(len(r.get("issues", [])) for r in results),
+            "total_ops": sum(len(r.get("operations_applied", [])) for r in results),
+            "total_questions": sum(len(r.get("questions_raised", [])) for r in results),
+            "details": results,
+        }
+
+    async def answer_question(
+        self, workspace_dir: Path, question_id: str, answer: str,
+    ) -> dict[str, Any]:
+        """Answer a reconciliation question and queue the entity for re-reconciliation."""
+        row = await self.db.fetch_one(
+            "SELECT id, entity_id, question FROM memory_questions WHERE id = ? AND status = 'open'",
+            (question_id,),
+        )
+        if not row:
+            return {"status": "not_found"}
+
+        entity_id = row["entity_id"]
+        now = datetime.now().isoformat()
+
+        await self.db.execute(
+            "UPDATE memory_questions SET status = 'answered', answer = ?, answered_at = ? WHERE id = ?",
+            (answer, now, question_id),
+        )
+
+        # Write answer as a truth claim on the entity so reconciliation can use it
+        claim = Claim(
+            id=f"claim-answer-{uuid.uuid4().hex[:8]}",
+            claim_type_key="truth",
+            subject_id=entity_id,
+            value=f"[Q: {row['question']}] {answer}",
+            status="active",
+            source_bulletins=[],
+            created_at=datetime.now(),
+        )
+        await write_claim(self.db, claim)
+
+        await self.db.execute(
+            "UPDATE memory_questions SET answer_claim_id = ? WHERE id = ?",
+            (claim.id, question_id),
+        )
+
+        # Queue entity for re-reconciliation
+        self._schedule_reconciliation([entity_id])
+
+        return {"status": "answered", "question_id": question_id, "claim_id": claim.id}
+
+    async def dismiss_question(self, question_id: str) -> dict[str, Any]:
+        """Dismiss a question without answering it."""
+        row = await self.db.fetch_one(
+            "SELECT id FROM memory_questions WHERE id = ? AND status = 'open'",
+            (question_id,),
+        )
+        if not row:
+            return {"status": "not_found"}
+
+        await self.db.execute(
+            "UPDATE memory_questions SET status = 'dismissed', answered_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), question_id),
+        )
+        return {"status": "dismissed", "question_id": question_id}
 
     async def read_bulletins(
         self,
@@ -519,6 +683,15 @@ class MemoryService(BaseService):
             await self._mark_digested(bulletin)
 
         elapsed = datetime.now().timestamp() - start
+
+        # Schedule reconciliation for all touched entities
+        all_entity_ids: set[str] = set()
+        for op in ops_detail:
+            for eid in op.get("entities_updated", []):
+                all_entity_ids.add(eid)
+        if all_entity_ids:
+            self._schedule_reconciliation(list(all_entity_ids))
+
         return {
             "status": "completed",
             "bulletins_processed": len(bulletins),
@@ -1021,6 +1194,250 @@ class MemoryService(BaseService):
             total_claims += result["claims_extracted"]
 
         return {"status": "completed", "entity_id": entity_id, "bulletins_processed": len(relevant), "claims": total_claims}
+
+    # ── Supplement (gap-fill) ────────────────────────────────────────
+
+    async def _collect_related_bulletins(self, entity_id: str) -> list[str]:
+        """Collect bulletin IDs from an entity and its related entities.
+
+        Walks ENTITY_REF_CLAIM_KEYS to find parent trip, sibling tripstops,
+        linked transports, locations etc. Also follows the chain two hops
+        (e.g. tripstop → trip → sibling tripstop bulletins).
+        Includes bulletins from the same source threads as any related bulletin.
+        """
+        # Directly-linked bulletins
+        rows = await self.db.fetch_all(
+            "SELECT bulletin_id FROM memory_entity_bulletins WHERE entity_id = ?",
+            (entity_id,),
+        )
+        bulletin_ids: set[str] = {r["bulletin_id"] for r in rows}
+
+        # Also pull bulletin IDs from claim source_bulletins JSON arrays
+        claim_src_rows = await self.db.fetch_all(
+            "SELECT source_bulletins FROM memory_claims "
+            "WHERE status = 'active' AND subject_id = ? AND source_bulletins IS NOT NULL",
+            (entity_id,),
+        )
+        for r in claim_src_rows:
+            try:
+                bids = json.loads(r["source_bulletins"]) if r["source_bulletins"] else []
+                bulletin_ids.update(bids)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Walk entity-ref claims to find related entities
+        claims = await self.db.fetch_all(
+            "SELECT claim_type_key, value, object_id FROM memory_claims "
+            "WHERE status = 'active' AND subject_id = ? AND claim_type_key IN ({})".format(
+                ",".join("?" for _ in ENTITY_REF_CLAIM_KEYS)
+            ),
+            (entity_id,) + tuple(ENTITY_REF_CLAIM_KEYS),
+        )
+        related_ids: set[str] = set()
+        for c in claims:
+            ref = c["object_id"] or c["value"] or ""
+            if ref and ref.startswith(("trip", "tripstop", "transport", "location", "event")):
+                related_ids.add(ref)
+
+        # Also find entities that reference this entity (reverse direction)
+        reverse_claims = await self.db.fetch_all(
+            "SELECT subject_id FROM memory_claims "
+            "WHERE status = 'active' AND (object_id = ? OR value = ?) AND claim_type_key IN ({})".format(
+                ",".join("?" for _ in ENTITY_REF_CLAIM_KEYS)
+            ),
+            (entity_id, entity_id) + tuple(ENTITY_REF_CLAIM_KEYS),
+        )
+        for c in reverse_claims:
+            related_ids.add(c["subject_id"])
+
+        # Second hop: from related entities, find their related entities too
+        if related_ids:
+            hop2_placeholders = ",".join("?" for _ in related_ids)
+            hop2_claims = await self.db.fetch_all(
+                "SELECT claim_type_key, value, object_id FROM memory_claims "
+                "WHERE status = 'active' AND subject_id IN ({}) AND claim_type_key IN ({})".format(
+                    hop2_placeholders,
+                    ",".join("?" for _ in ENTITY_REF_CLAIM_KEYS),
+                ),
+                tuple(related_ids) + tuple(ENTITY_REF_CLAIM_KEYS),
+            )
+            for c in hop2_claims:
+                ref = c["object_id"] or c["value"] or ""
+                if ref and ref.startswith(("trip", "tripstop", "transport", "location", "event")):
+                    related_ids.add(ref)
+
+        # Collect bulletins from all related entities
+        if related_ids:
+            placeholders = ",".join("?" for _ in related_ids)
+            rows2 = await self.db.fetch_all(
+                f"SELECT DISTINCT bulletin_id FROM memory_entity_bulletins WHERE entity_id IN ({placeholders})",
+                tuple(related_ids),
+            )
+            bulletin_ids.update(r["bulletin_id"] for r in rows2)
+
+        return sorted(bulletin_ids)
+
+    async def supplement_entity(self, workspace_dir: Path, entity_id: str) -> dict[str, Any]:
+        """Re-extract from source bulletins and only write missing claims.
+
+        Scans bulletins from the entity itself plus related entities
+        (parent trip, sibling tripstops, linked transports/locations).
+        Uses a dedicated supplement prompt that allows inference from
+        related data (unlike the strict extraction prompt).
+        Non-destructive: existing claims are never modified or removed.
+        """
+        bulletin_ids = await self._collect_related_bulletins(entity_id)
+        if not bulletin_ids:
+            return {"status": "no_op", "reason": "no linked bulletins"}
+
+        # Load current active claims for dedup
+        current_rows = await self.db.fetch_all(
+            "SELECT subject_id, claim_type_key, value, object_id FROM memory_claims "
+            "WHERE status = 'active' AND subject_id = ?",
+            (entity_id,),
+        )
+        existing: set[tuple[str, str, str]] = set()
+        current_lines: list[str] = []
+        for r in current_rows:
+            val = r["value"] or r["object_id"] or ""
+            existing.add((r["subject_id"], r["claim_type_key"], val))
+            current_lines.append(f"- {r['claim_type_key']}: {val}")
+
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+        from cyborg_server.services.memory.claim_service import write_claim
+        from cyborg_server.services.memory.claim_types import get_claim_types_for_entity
+
+        llm = LLMDispatchService(self.ctx)
+
+        # Load entity info
+        entity_row = await self.db.fetch_one(
+            "SELECT entity_type, display_name FROM memory_entities WHERE entity_id = ? AND status = 'active'",
+            (entity_id,),
+        )
+        if not entity_row:
+            return {"status": "no_op", "reason": "entity not found"}
+
+        entity_type = entity_row["entity_type"]
+        claim_types = get_claim_types_for_entity(entity_type)
+
+        bulletins = await self.read_bulletins(workspace_dir, limit=10000, oldest_first=True)
+        bulletin_set = set(bulletin_ids)
+        relevant = [b for b in bulletins if b.id in bulletin_set]
+        if not relevant:
+            return {"status": "no_op", "reason": "bulletins not found"}
+
+        # Build bulletin text
+        bulletin_texts = []
+        for b in relevant:
+            bulletin_texts.append(f"[{b.id}] {b.content}")
+        all_bulletin_text = "\n\n".join(bulletin_texts)
+
+        # Build claim type list for this entity
+        ct_lines = [f"  - {ct.key}: {ct.description}" for ct in claim_types]
+
+        current_claims_str = "\n".join(current_lines) if current_lines else "(none)"
+
+        prompt = (
+            f"You are a Memory Supplement Agent. You review bulletins and identify claims that are "
+            f"missing for a specific entity. Unlike initial extraction, you MAY infer entity claims "
+            f"from related information (e.g. a transport departure implies a tripstop departure date, "
+            f"a hotel check-in implies a tripstop arrival).\n\n"
+            f"## Entity: {entity_id} ({entity_type})\n\n"
+            f"Display name: {entity_row['display_name']}\n\n"
+            f"## Current Claims\n\n{current_claims_str}\n\n"
+            f"## Available Claim Types\n\n" + "\n".join(ct_lines) + "\n\n"
+            f"## Source Bulletins\n\n{all_bulletin_text}\n\n"
+            f"## Task\n\n"
+            f"Identify claims from the bulletins that should belong to {entity_id} but are missing "
+            f"from the current claims. You may infer dates and relationships from related data "
+            f"(transport bookings, hotel confirmations, etc.).\n\n"
+            f"IMPORTANT: Placeholder values containing '??' (e.g. '2026-06-??') are incomplete guesses. "
+            f"If a bulletin provides a concrete value for a claim that currently has a placeholder, "
+            f"include the corrected claim in your output — it is NOT considered already present.\n\n"
+            f"Return a JSON array of missing claims:\n```json\n"
+            f'[\n  {{"claim_type_key": "key", "value": "scalar", "object_id": null}},\n'
+            f'  {{"claim_type_key": "key", "value": null, "object_id": "entity-ref"}}\n'
+            f"]\n```\n\n"
+            f"Use value for scalar data (dates, text) and object_id for entity references. "
+            f"Never set both. If no claims are missing, return [].\n"
+            f"Return ONLY the JSON array."
+        )
+
+        response = await llm.chat(
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"What claims are missing for {entity_id}?"},
+            ],
+            model=llm.memory_model,
+            call_category="memory_supplement",
+            temperature=0.1,
+            max_tokens=1000,
+        )
+
+        try:
+            text = response.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            items = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Supplement: failed to parse LLM response for %s", entity_id)
+            return {"status": "completed", "entity_id": entity_id, "bulletins_scanned": len(relevant), "claims_added": 0, "added": []}
+
+        if not isinstance(items, list):
+            items = []
+
+        total_added = 0
+        added_claims: list[dict] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ctk = item.get("claim_type_key", "")
+            val = item.get("value")
+            obj = item.get("object_id")
+            if not ctk:
+                continue
+            claim_val = val or obj or ""
+            key = (entity_id, ctk, claim_val)
+            if key in existing:
+                # Allow upgrading placeholder values (containing '??')
+                is_placeholder = any(
+                    "??" in (r["value"] or r["object_id"] or "")
+                    for r in current_rows
+                    if r["claim_type_key"] == ctk
+                )
+                if not is_placeholder:
+                    continue
+            # Skip entity-ref claims — supplement should not infer relationships.
+            # Entity-ref claims (parent, child, partner, etc.) must come from
+            # explicit extraction, not supplement inference.
+            if ctk in ENTITY_REF_CLAIM_KEYS and obj:
+                continue
+            claim = Claim(
+                id=f"claim-suppl-{uuid.uuid4().hex[:8]}",
+                claim_type_key=ctk,
+                subject_id=entity_id,
+                value=val,
+                object_id=obj,
+                status="active",
+                source_bulletins=[],
+                created_at=datetime.now(),
+            )
+            await write_claim(self.db, claim)
+            existing.add(key)
+            total_added += 1
+            added_claims.append({"claim_type_key": ctk, "value": val, "object_id": obj})
+
+        if total_added:
+            await self._update_entity_fts(entity_id)
+
+        return {
+            "status": "completed",
+            "entity_id": entity_id,
+            "bulletins_scanned": len(relevant),
+            "claims_added": total_added,
+            "added": added_claims,
+        }
 
     # ── Validation ────────────────────────────────────────────────
 

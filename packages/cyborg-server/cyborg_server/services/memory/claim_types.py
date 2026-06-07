@@ -59,9 +59,6 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("address", ["location"], "Street address or directions", 'location-villa-sunset → "Jl. Kayu Aya No. 50"'),
     ("associated_contact", ["location"], "Person who lives there or owns it", "location-mike-house → person-mike-cleaver"),
     # Trip
-    ("destination", ["trip"], "Overall destination", 'trip-bali-2026 → "Bali, Indonesia"'),
-    ("start_date", ["trip"], "When the trip begins", 'trip-bali-2026 → "2026-08-01"'),
-    ("end_date", ["trip"], "When the trip ends", 'trip-bali-2026 → "2026-08-10"'),
     ("stop", ["trip"], "TripStop that is part of this trip", "trip-bali-2026 → tripstop-bali-day1-3"),
     # TripStop
     ("transport_to", ["tripstop"], "Transport for getting there", "tripstop-bali-day1-3 → transport-flight-qz541"),
@@ -91,12 +88,25 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     # Cross-cutting
     ("file_ref", ["person", "group", "location", "trip", "tripstop", "transport", "event", "task", "file", "thing", "decision"],
      "Links to a file entity (object_id must be a file-* entity ID). Not for notes, actions, or non-file entity references", "trip-bali-2026 → file-villa-spreadsheet"),
+    ("truth", ["person", "group", "location", "trip", "tripstop", "transport", "event", "task", "file", "thing", "decision"],
+     "User-stated fact, correction, or answer. Ground truth from the user that overrides inference.", 'trip-mike-holiday-june-2026 → "Yes, split Paris into two stops"'),
 ]
 
 for _key, _types, _desc, _ex in _RAW_TYPES:
     CLAIM_TYPE_REGISTRY[_key] = ClaimType(key=_key, applicable_types=_types, description=_desc, example=_ex)
 
 del _RAW_TYPES
+
+# Claim types where object_id is an entity reference (not a scalar value).
+# Used by render_entity_full to decide which claims to expand recursively.
+ENTITY_REF_CLAIM_KEYS: frozenset[str] = frozenset({
+    "spouse", "parent", "child", "sibling", "grandparent", "grandchild",
+    "member", "location", "organizer", "attendee", "associated_trip",
+    "parent_location", "associated_contact", "stop",
+    "transport_to", "transport_from", "stay",
+    "departure_location", "arrival_location",
+    "owner", "related_entity", "decider", "file_ref",
+})
 
 
 def get_claim_types_for_entity(entity_type: str) -> list[ClaimType]:
@@ -143,6 +153,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("personality", "Personality"),
         ("contact_id", "Contact ID"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "group": [
         ("alias", "Also known as"),
@@ -150,6 +161,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("vibe", "Vibe"),
         ("member", "Members"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "event": [
         ("name", "Event"),
@@ -161,6 +173,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("recurrence", "Recurrence"),
         ("associated_trip", "Trip"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "location": [
         ("alias", "Also known as"),
@@ -169,15 +182,14 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("parent_location", "Part of"),
         ("associated_contact", "Associated with"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "trip": [
-        ("destination", "Destination"),
-        ("start_date", "Dates"),
-        ("end_date", "End date"),
         ("purpose", "Purpose"),
         ("member", "Members"),
         ("stop", "Stops"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "tripstop": [
         ("stay", "Staying at"),
@@ -186,6 +198,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("transport_to", "Getting there"),
         ("transport_from", "Leaving via"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "transport": [
         ("transport_type", "Type"),
@@ -194,6 +207,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("departure_location", "From"),
         ("arrival_location", "To"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "task": [
         ("name", "Task"),
@@ -203,6 +217,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("due_date", "Due"),
         ("related_entity", "Related to"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "file": [
         ("name", "File"),
@@ -211,6 +226,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("owner", "Owner"),
         ("related_entity", "Related to"),
         ("file_ref", "Related files"),
+        ("truth", "User truth"),
     ],
     "thing": [
         ("name", "Thing"),
@@ -220,12 +236,14 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("location", "Location"),
         ("related_entity", "Related to"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
     "decision": [
         ("decider", "Decided by"),
         ("rationale", "Rationale"),
         ("related_entity", "About"),
         ("file_ref", "Files"),
+        ("truth", "User truth"),
     ],
 }
 
@@ -244,12 +262,17 @@ ENTITY_TYPE_DESCRIPTIONS: dict[str, str] = {
         "Not abstract locations like 'the cloud' or 'the internet'."
     ),
     "trip": (
-        "A planned or completed trip/holiday. Has a destination and dates. "
-        "Contains tripstops (individual legs/stops within the trip)."
+        "A planned or completed trip/holiday. Contains tripstops (individual legs/stops within the trip). "
+        "The trip-level start_date/end_date cover the overall trip window. "
+        "Do NOT set destination on the trip — destinations come from the individual tripstop stay locations."
     ),
     "tripstop": (
         "A stop or leg within a trip. Each tripstop is a segment of the overall trip, "
-        "with its own arrival/departure and optionally a stay location."
+        "with its own arrival/departure and optionally a stay location. "
+        "CRITICAL: each distinct stay (different hotel, different city, or different date range "
+        "at the same city) MUST be its own separate tripstop entity. Two nights in different "
+        "hotels within Paris are two tripstops, not one. Include location and date range in the "
+        "slug for uniqueness (e.g. tripstop-paris-june12-14, tripstop-paris-june14-16)."
     ),
     "transport": (
         "A transport leg: a flight, a drive, a train ride, a boat trip. "
@@ -310,6 +333,20 @@ def render_entity(
             lines.append(f"{label}:")
             for v in values:
                 lines.append(f"  - {v}")
+
+    # Append orphan claims (claim types not in the template)
+    template_keys = {ck for ck, _ in template}
+    orphan_keys = [k for k in by_type if k not in template_keys]
+    if orphan_keys:
+        lines.append("Orphan claims:")
+        for k in sorted(orphan_keys):
+            vals = by_type[k]
+            if len(vals) == 1:
+                lines.append(f"  {k}: {vals[0]}")
+            else:
+                lines.append(f"  {k}:")
+                for v in vals:
+                    lines.append(f"    - {v}")
 
     return "\n".join(lines)
 

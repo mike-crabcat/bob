@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
-import { fetchAPI } from "@/lib/api";
+import { fetchAPI, postAPI } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -141,6 +141,7 @@ const CLAIM_COLORS: Record<string, string> = {
   file_path: "bg-amber-900/40 text-amber-300",
   file_ref: "bg-amber-900/40 text-amber-300",
   thing_type: "bg-lime-900/40 text-lime-300",
+  truth: "bg-rose-900/40 text-rose-300",
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -172,7 +173,25 @@ function relativeTimeEpoch(epoch: number): string {
 
 // ── Tab types ──────────────────────────────────────────────────────────────
 
-type Tab = "entities" | "pipeline" | "search";
+type Tab = "entities" | "pipeline" | "search" | "stats" | "qa";
+
+// ── Question types ──────────────────────────────────────────────────────────
+
+interface Question {
+  id: string;
+  entity_id: string;
+  question: string;
+  options: string[];
+  context: string;
+  status: string;
+  answer: string | null;
+  created_at: string | null;
+  answered_at: string | null;
+}
+
+interface QuestionsResponse {
+  questions: Question[];
+}
 
 // ── BulletinCard ───────────────────────────────────────────────────────────
 
@@ -576,6 +595,127 @@ function EntityDetailView({
   );
 }
 
+// ── Question Cards ────────────────────────────────────────────────────────
+
+function QuestionCard({
+  q,
+  onAnswer,
+  onDismiss,
+  onNavigateEntity,
+  isSubmitting,
+}: {
+  q: Question;
+  onAnswer: (answer: string) => void;
+  onDismiss: () => void;
+  onNavigateEntity: (entityId: string) => void;
+  isSubmitting: boolean;
+}) {
+  const [customAnswer, setCustomAnswer] = useState("");
+
+  return (
+    <div className="px-3 py-2 border-b border-border/50">
+      <div className="flex items-start gap-1.5 mb-1">
+        <span className="text-[8px] text-warning bg-warning/10 px-1 rounded shrink-0 mt-0.5">open</span>
+        <span className="text-[11px] text-text flex-1">{q.question}</span>
+        <button
+          onClick={onDismiss}
+          disabled={isSubmitting}
+          className="text-[8px] text-muted/50 hover:text-danger px-1 shrink-0 mt-0.5 disabled:opacity-30"
+          title="Dismiss"
+        >
+          dismiss
+        </button>
+      </div>
+      {q.context && (
+        <div className="text-[9px] text-muted/60 mb-1.5 pl-4">{q.context}</div>
+      )}
+      <div className="flex items-center gap-1 mb-2 pl-4">
+        <span className="text-[8px] text-muted/40">entity:</span>
+        <button
+          onClick={() => onNavigateEntity(q.entity_id)}
+          className="text-[9px] text-accent hover:underline"
+        >
+          {q.entity_id}
+        </button>
+      </div>
+      {q.options.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2 pl-4">
+          {q.options.map((opt) => (
+            <button
+              key={opt}
+              onClick={() => onAnswer(opt)}
+              disabled={isSubmitting}
+              className="text-[10px] px-2 py-0.5 border border-border text-muted hover:text-text hover:border-accent transition-colors rounded disabled:opacity-50"
+            >
+              {isSubmitting ? "..." : opt}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-1 pl-4">
+        <input
+          type="text"
+          value={customAnswer}
+          onChange={(e) => setCustomAnswer(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && customAnswer.trim() && !isSubmitting) {
+              onAnswer(customAnswer.trim());
+              setCustomAnswer("");
+            }
+          }}
+          placeholder="Custom answer..."
+          disabled={isSubmitting}
+          className="flex-1 text-[10px] bg-transparent border border-border px-2 py-0.5 text-text placeholder:text-muted/50 focus:outline-none focus:border-accent disabled:opacity-50"
+        />
+        <button
+          onClick={() => {
+            if (customAnswer.trim() && !isSubmitting) {
+              onAnswer(customAnswer.trim());
+              setCustomAnswer("");
+            }
+          }}
+          disabled={!customAnswer.trim() || isSubmitting}
+          className="px-2 py-0.5 text-[10px] border border-border text-muted hover:text-text hover:border-accent transition-colors disabled:opacity-30"
+        >
+          {isSubmitting ? "..." : "send"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AnsweredQuestionCard({
+  q,
+  onNavigateEntity,
+}: {
+  q: Question;
+  onNavigateEntity: (entityId: string) => void;
+}) {
+  return (
+    <div className="px-3 py-2 border-b border-border/50">
+      <div className="flex items-start gap-1.5 mb-1">
+        <span className="text-[8px] text-success bg-success/10 px-1 rounded shrink-0 mt-0.5">answered</span>
+        <span className="text-[11px] text-text/70 flex-1">{q.question}</span>
+      </div>
+      <div className="pl-4 flex flex-col gap-0.5">
+        <div className="text-[10px] text-text">{q.answer}</div>
+        <div className="flex items-center gap-1">
+          <span className="text-[8px] text-muted/40">entity:</span>
+          <button
+            onClick={() => onNavigateEntity(q.entity_id)}
+            className="text-[9px] text-accent/60 hover:underline"
+          >
+            {q.entity_id}
+          </button>
+          {q.answered_at && (
+            <span className="text-[8px] text-muted/40 ml-auto">{relativeTime(q.answered_at)}</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Memory Page ───────────────────────────────────────────────────────
 
 function MemoryPage() {
@@ -583,7 +723,7 @@ function MemoryPage() {
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const [lintConfirm, setLintConfirm] = useState(false);
+
   const queryClient = useQueryClient();
 
   // ── Data fetching ──
@@ -649,30 +789,38 @@ function MemoryPage() {
     },
   });
 
-  const lintMutation = useMutation({
-    mutationFn: async () => {
-      const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] ?? "";
-      const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/memory/lint?secret=${encodeURIComponent(secret)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      if (!res.ok) throw new Error(`API ${res.status}`);
-      return res.json();
+  // ── Questions data ──
+
+  const { data: openQuestionsData } = useQuery<QuestionsResponse>({
+    queryKey: ["memory-questions-open"],
+    queryFn: () => fetchAPI<QuestionsResponse>("/memory/questions?status=open"),
+    enabled: tab === "qa",
+  });
+
+  const { data: answeredQuestionsData } = useQuery<QuestionsResponse>({
+    queryKey: ["memory-questions-answered"],
+    queryFn: () => fetchAPI<QuestionsResponse>("/memory/questions?status=answered"),
+    enabled: tab === "qa",
+  });
+
+  const answerMutation = useMutation({
+    mutationFn: async ({ id, answer }: { id: string; answer: string }) => {
+      return postAPI(`/memory/questions/${id}/answer`, { answer });
     },
     onSuccess: () => {
-      setLintConfirm(false);
-      queryClient.invalidateQueries({ queryKey: ["memory-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["memory-questions-open"] });
+      queryClient.invalidateQueries({ queryKey: ["memory-questions-answered"] });
     },
   });
 
-  // Auto-clear lint success after 3s
-  useEffect(() => {
-    if (lintMutation.isSuccess) {
-      const t = setTimeout(() => lintMutation.reset(), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [lintMutation.isSuccess]);
+  const dismissMutation = useMutation({
+    mutationFn: async ({ id }: { id: string }) => {
+      return postAPI(`/memory/questions/${id}/dismiss`, {});
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["memory-questions-open"] });
+    },
+  });
 
   // ── Derived data ──
 
@@ -706,52 +854,9 @@ function MemoryPage() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header: stats + pipeline status */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
-        <span className="text-xs text-text font-medium">{stats.total_entries}</span>
-        <span className="text-[10px] text-muted">entries</span>
-        <div className="flex items-center gap-1">
-          {categories.map((c) => (
-            <span key={c.name} className="text-[9px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
-              {c.name} <span className="text-muted">{c.count}</span>
-            </span>
-          ))}
-        </div>
-        <div className="relative ml-auto">
-          {lintMutation.isSuccess ? (
-            <span className="text-[9px] text-success">linted</span>
-          ) : lintConfirm ? (
-            <div className="flex items-center gap-1">
-              <span className="text-[8px] text-warning">rewrites all entries</span>
-              <button
-                onClick={() => { lintMutation.mutate(); }}
-                disabled={lintMutation.isPending}
-                className="text-[9px] text-error hover:underline"
-              >
-                {lintMutation.isPending ? "..." : "confirm"}
-              </button>
-              <button
-                onClick={() => setLintConfirm(false)}
-                className="text-[9px] text-muted hover:text-text"
-              >
-                cancel
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setLintConfirm(true)}
-              disabled={lintMutation.isPending}
-              className="text-[10px] text-muted hover:text-text disabled:opacity-30"
-            >
-              lint
-            </button>
-          )}
-        </div>
-      </div>
-
       {/* Tab bar */}
       <div className="flex items-center gap-0 px-3 border-b border-border shrink-0">
-        {(["entities", "pipeline", "search"] as Tab[]).map((t) => (
+        {(["entities", "pipeline", "search", "stats", "qa"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -947,6 +1052,91 @@ function MemoryPage() {
             {!searchMutation.data && !searchMutation.isPending && (
               <div className="p-4 text-muted text-center text-xs">search memory entities by meaning</div>
             )}
+          </div>
+        )}
+
+        {/* ── Stats Tab ── */}
+        {tab === "stats" && (
+          <div className="flex flex-col h-full overflow-y-auto">
+            <div className="px-3 py-3">
+              <div className="text-xs text-text font-medium mb-2">
+                {stats.total_entries} entities
+              </div>
+              <div className="flex flex-col gap-1">
+                {categories
+                  .sort((a, b) => b.count - a.count)
+                  .map((c) => {
+                    const pct = stats.total_entries > 0 ? (c.count / stats.total_entries) * 100 : 0;
+                    return (
+                      <button
+                        key={c.name}
+                        onClick={() => { setSelectedType(c.name); setTab("entities"); }}
+                        className="flex items-center gap-2 w-full text-left hover:bg-surface/50 transition-colors py-0.5"
+                      >
+                        <span className="text-[10px] text-muted w-20 shrink-0">{c.name}</span>
+                        <div className="flex-1 h-3 bg-surface border border-border">
+                          <div className="h-full bg-accent/40" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-[10px] text-text w-6 text-right">{c.count}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="text-[10px] text-muted uppercase mb-1">Pipeline</div>
+                <div className="flex items-center gap-3 text-[10px]">
+                  <span className="text-muted">pending bulletins: <span className="text-text">{pendingCount}</span></span>
+                  {lastDream && <span className="text-muted">last dream: <span className="text-text">{lastDream}</span></span>}
+                </div>
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="text-[10px] text-muted uppercase mb-1">Claims</div>
+                <div className="text-[10px] text-muted">
+                  {(() => {
+                    const totalClaims = categories.reduce((s, c) => s + c.count, 0);
+                    return <span className="text-text">{totalClaims}</span>;
+                  })()}{" "}
+                  entity records
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── QA Tab ── */}
+        {tab === "qa" && (
+          <div className="flex flex-col h-full overflow-y-auto">
+            {/* Outstanding */}
+            <div className="border-b border-border">
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/50">
+                <span className="text-[10px] text-warning font-medium">outstanding</span>
+                <span className="text-[9px] text-muted/50">{openQuestionsData?.questions.length ?? 0} question{(openQuestionsData?.questions.length ?? 0) !== 1 ? "s" : ""}</span>
+              </div>
+              {(openQuestionsData?.questions.length ?? 0) === 0 ? (
+                <div className="px-3 py-4 text-muted text-center text-xs">no open questions</div>
+              ) : (
+                openQuestionsData!.questions.map((q) => (
+                  <QuestionCard key={q.id} q={q} onAnswer={(answer) => answerMutation.mutate({ id: q.id, answer })} onDismiss={() => dismissMutation.mutate({ id: q.id })} onNavigateEntity={navigateToEntity} isSubmitting={answerMutation.isPending || dismissMutation.isPending} />
+                ))
+              )}
+            </div>
+
+            {/* Answered */}
+            <div>
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/50">
+                <span className="text-[10px] text-muted font-medium">answered</span>
+                <span className="text-[9px] text-muted/50">{answeredQuestionsData?.questions.length ?? 0}</span>
+              </div>
+              {(answeredQuestionsData?.questions.length ?? 0) === 0 ? (
+                <div className="px-3 py-4 text-muted text-center text-xs">no answered questions</div>
+              ) : (
+                answeredQuestionsData!.questions.map((q) => (
+                  <AnsweredQuestionCard key={q.id} q={q} onNavigateEntity={navigateToEntity} />
+                ))
+              )}
+            </div>
           </div>
         )}
       </div>

@@ -81,7 +81,7 @@ Skills can instruct Cyborg to use these tools. You cannot call them yourself:
 - **run_script(path, args)**: Run a Python script in the workspace. \
   Use this to execute your helper.py.
 - Communication: send_whatsapp_message, send_whatsapp_to_contact, email_reply, email_skip
-- Workspace: list_files, read_file, write_file, update_agenda
+- Workspace: ls, read_file, write_file, rm, mv, find, update_agenda
 - Search: search_contacts
 
 ## Available Environment Variables

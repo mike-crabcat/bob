@@ -1,8 +1,9 @@
 import { Outlet, Link, useRouterState, createRootRoute, useNavigate } from "@tanstack/react-router";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ws, type WSEvent } from "@/lib/ws-client";
 import { useWSConnected } from "@/hooks/use-live-data";
+import { fetchAPI } from "@/lib/api";
 
 const NAV_ITEMS = [
   { to: "/" as const, label: "Home", icon: "home" },
@@ -47,6 +48,14 @@ function RootLayout() {
   const [overflowOpen, setOverflowOpen] = useState(false);
   const overflowRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
+
+  // Poll open question count for badge
+  const { data: questionsData } = useQuery<{ questions: { id: string }[] }>({
+    queryKey: ["memory-questions-open"],
+    queryFn: () => fetchAPI<{ questions: { id: string }[] }>("/memory/questions?status=open"),
+    refetchInterval: 30000,
+  });
+  const openQuestionCount = questionsData?.questions.length ?? 0;
 
   useEffect(() => {
     if (!overflowOpen) return;
@@ -129,18 +138,28 @@ function RootLayout() {
                 >
                   <NavIcon name={item.icon} size={14} />
                   <span>{item.label}</span>
+                  {item.to === "/memory" && openQuestionCount > 0 && (
+                    <span className="ml-auto min-w-[16px] h-4 flex items-center justify-center text-[9px] font-medium text-white bg-error rounded-full px-1">
+                      {openQuestionCount}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
           )}
           <button
             onClick={() => setOverflowOpen(!overflowOpen)}
-            className={`w-full flex flex-col items-center justify-center py-2.5 text-[10px] font-sans gap-0.5 transition-colors ${
+            className={`w-full flex flex-col items-center justify-center py-2.5 text-[10px] font-sans gap-0.5 transition-colors relative ${
               OVERFLOW_ITEMS.some((item) => currentPath.startsWith(item.to)) ? "text-accent" : "text-muted hover:text-text"
             }`}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
             <span>more</span>
+            {openQuestionCount > 0 && (
+              <span className="absolute top-1.5 right-1/4 min-w-[14px] h-3.5 flex items-center justify-center text-[8px] font-medium text-white bg-error rounded-full px-0.5">
+                {openQuestionCount}
+              </span>
+            )}
           </button>
         </div>
       </nav>

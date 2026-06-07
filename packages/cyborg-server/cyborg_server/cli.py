@@ -1923,6 +1923,95 @@ async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
         await db.close()
 
 
+@memory_app.command("reconcile")
+def memory_reconcile(
+    entity_ids: Annotated[Optional[list[str]], typer.Argument(help="Entity IDs to reconcile")] = None,
+    all: Annotated[bool, typer.Option("--all", help="Reconcile all active entities")] = False,
+    render_only: Annotated[bool, typer.Option("--render", help="Just show the full render, don't reconcile")] = False,
+) -> None:
+    """Run entity reconciliation to detect and fix inconsistencies."""
+    import asyncio
+    asyncio.run(_memory_reconcile(entity_ids, all, render_only))
+
+
+@memory_app.command("supplement")
+def memory_supplement(
+    entity_ids: Annotated[list[str], typer.Argument(help="Entity IDs to supplement with missing claims")],
+) -> None:
+    """Gap-fill: re-extract from source bulletins, only write missing claims."""
+    import asyncio
+    asyncio.run(_memory_supplement(entity_ids))
+
+
+async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory.reconciliation import render_entity_full, reconcile_entity
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        if all:
+            rows = await db.fetch_all(
+                "SELECT entity_id FROM memory_entities WHERE status = 'active'"
+            )
+            entity_ids = [r["entity_id"] for r in rows]
+
+        if not entity_ids:
+            typer.echo("No entity IDs specified. Use --all or provide entity IDs.")
+            return
+
+        llm = LLMDispatchService(ctx)
+
+        for eid in entity_ids:
+            if render_only:
+                rendered = await render_entity_full(db, eid)
+                typer.echo(f"\n{'='*60}")
+                typer.echo(f"  {eid}")
+                typer.echo(f"{'='*60}")
+                typer.echo(rendered)
+            else:
+                typer.echo(f"Reconciling {eid}...")
+                result = await reconcile_entity(db, llm, eid)
+                typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        await db.close()
+
+
+async def _memory_supplement(entity_ids: list[str]) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        workspace = settings.harness.workspace_dir
+        svc = MemoryService(ctx)
+
+        for eid in entity_ids:
+            typer.echo(f"Supplementing {eid}...")
+            result = await svc.supplement_entity(workspace, entity_id=eid)
+            typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        await db.close()
+
+
 @memory_app.command("validate")
 def memory_validate() -> None:
     """Validate memory structure: check frontmatter, dangling refs, required fields."""

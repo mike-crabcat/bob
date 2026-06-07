@@ -75,6 +75,20 @@ async def write_claim(db: Any, claim: Claim) -> str:
     return claim.id
 
 
+async def supersede_claim(
+    db: Any,
+    old_claim_id: str,
+    new_claim: Claim,
+    superseded_by_ref: str,
+) -> str:
+    """Mark old claim as superseded and write a replacement claim."""
+    await db.execute(
+        "UPDATE memory_claims SET status = 'superseded', superseded_by = ? WHERE id = ?",
+        (json.dumps([superseded_by_ref]), old_claim_id),
+    )
+    return await write_claim(db, new_claim)
+
+
 async def read_claim(db: Any, claim_id: str) -> Claim | None:
     """Read a claim from the database."""
     row = await db.fetch_one(
@@ -245,7 +259,7 @@ async def extract_claims_from_bulletin(
         model=llm.memory_model,
         call_category="memory_claim_extraction",
         temperature=0.2,
-        max_tokens=2000,
+        max_tokens=4000,
     )
 
     try:

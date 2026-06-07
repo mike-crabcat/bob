@@ -1358,6 +1358,66 @@ async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str
     }
 
 
+@router.get("/api/memory/questions")
+async def get_memory_questions(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+
+    status_filter = request.query_params.get("status", "open").strip()
+    rows = await db.fetch_all(
+        "SELECT * FROM memory_questions WHERE status = ? ORDER BY created_at DESC LIMIT 100",
+        (status_filter,),
+    )
+    questions = [
+        {
+            "id": r["id"],
+            "entity_id": r["entity_id"],
+            "question": r["question"],
+            "options": json.loads(r["options"]) if r["options"] else [],
+            "context": r["context"] or "",
+            "status": r["status"],
+            "answer": r["answer"],
+            "created_at": _utc(r["created_at"]),
+            "answered_at": _utc(r["answered_at"]) if r["answered_at"] else None,
+        }
+        for r in rows
+    ]
+    return {"questions": questions}
+
+
+@router.post("/api/memory/questions/{question_id}/answer")
+async def answer_memory_question(request: Request, question_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+
+    body = await request.json()
+    answer = body.get("answer", "").strip()
+    if not answer:
+        return {"error": "answer is required"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory import MemoryService
+
+    ctx = AppContext(db=_db(request), settings=request.app.state.settings)
+    svc = MemoryService(ctx)
+    workspace = request.app.state.settings.harness.workspace_dir
+    return await svc.answer_question(workspace, question_id, answer)
+
+
+@router.post("/api/memory/questions/{question_id}/dismiss")
+async def dismiss_memory_question(request: Request, question_id: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory import MemoryService
+
+    ctx = AppContext(db=_db(request), settings=request.app.state.settings)
+    svc = MemoryService(ctx)
+    return await svc.dismiss_question(question_id)
+
+
 @router.get("/api/memory/claims")
 async def get_memory_claims(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
@@ -1446,22 +1506,6 @@ async def redigest_bulletin(request: Request) -> dict[str, Any]:
 
     result = await svc.process_bulletin(workspace, bulletin)
     return {"ok": True, "slug": slug, "result": result}
-
-
-@router.post("/api/memory/lint")
-async def lint_memory_entries(request: Request) -> dict[str, Any]:
-    if not _check_auth(request):
-        return {"error": "unauthorized"}
-    settings = request.app.state.settings
-    workspace = settings.harness.workspace_dir
-
-    from cyborg_server.context import AppContext
-    from cyborg_server.services.memory import MemoryService
-
-    ctx = AppContext(settings=settings, db=_db(request))
-    svc = MemoryService(ctx)
-    result = await svc.validate(workspace)
-    return {"valid": result["valid"], "issues": result["issues"], "linted": True}
 
 
 @router.post("/api/memory/backfill-people")
