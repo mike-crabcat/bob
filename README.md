@@ -1,5 +1,7 @@
 # Cyborg
 
+![Cyborg](cyborg.png)
+
 Cyborg is an autonomous AI agent that communicates and acts across WhatsApp, email, voice chat, and phone calls. It maintains its own memory, manages contacts and calendars, and can reach out to people on your behalf through any supported channel.
 
 ## Feature Areas
