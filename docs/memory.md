@@ -2,12 +2,12 @@
 
 The memory system gives Cyborg a persistent, structured knowledge base that survives across conversations. Without memory, every session starts from scratch -- the LLM has no recollection of facts, people, or preferences discussed in prior exchanges. The memory system closes this gap by recording useful information during and after conversations, then surfacing it on demand via retrieval tools.
 
-Memory is backed by SQLite tables in the main database. A lightweight memory section describing the available tools is injected into the system prompt. When the assistant needs detail, it uses on-demand tools to read, search, or graph-traverse entries. When it learns something worth remembering, it writes a bulletin. A background dream pipeline curates bulletins into structured entity documents via an intermediate claim-extraction step.
+Memory is backed by SQLite tables in the main database. A lightweight memory section describing the available tools is injected into the system prompt. When the assistant needs detail, it uses on-demand tools to read, search, or browse entries. When it learns something worth remembering, it writes a bulletin. A background dream pipeline curates bulletins into structured entity documents via an intermediate claim-extraction step.
 
 The data model follows a four-stage pipeline:
 
 ```
-channel  -->  bulletin  -->  claim  -->  entity document
+channel  -->  bulletin  -->  claim  -->  entity
 (source)     (record)     (atom)     (derived view)
 ```
 
@@ -49,15 +49,16 @@ channel  -->  bulletin  -->  claim  -->  entity document
               |  + Tools     |
               +------+------+
                      |
-         +-----------+-----------+-----------+-----------+
-         |           |           |           |           |
-    memory_write  memory_read  memory_search memory_browse memory_graph
-         |           |           |             |           |
-         v           |           v             v           v
-   +----------+      |    +------------+ +----------+ +---------+
-   | bulletin |      |    | LLM-powered| | entity   | | graph   |
-   | queue    |      |    | semantic   | | listing  | | traverse|
-   +----+-----+      |    | search     | +----------+ +---------+
+         +-----------+-----------+-----------+
+         |           |           |           |
+    memory_write  memory_read  recall    find
+         |           |           |           |
+         v           |           v           v
+   +----------+      |    +------------+ +----------+
+   | bulletin |      |    | Hybrid     | | Structured|
+   | queue    |      |    | search     | | filter    |
+   +----+-----+      |    | (embed +   | | by type   |
+        |            |    |  FTS)      | +----------+
         |            |    +------+-----+
         |            |           |
         |            |     search logged to
@@ -67,13 +68,13 @@ channel  -->  bulletin  -->  claim  -->  entity document
         |    +------------------------------------------+
         |    | SQLite tables:                           |
         |    |   memory_bulletins                       |
-        |    |   memory_bulletin_entities                |
         |    |   memory_claims                          |
+        |    |   memory_claim_types                     |
         |    |   memory_entities                        |
-        |    |   memory_entity_relations                |
-        |    |   memory_aliases                         |
+        |    |   memory_entities_fts (FTS5)             |
+        |    |   memory_entity_embeddings (sqlite-vec)  |
         |    |   memory_entity_bulletins                |
-        |    |   memory_claim_bulletins                 |
+        |    |   memory_aliases                         |
         |    +------------------------------------------+
         |
         v
@@ -92,14 +93,38 @@ channel  -->  bulletin  -->  claim  -->  entity document
         v
   For each pending bulletin:
     1. extract_claims_from_bulletin() --> INSERT into memory_claims
-    2. _update_entities_from_claims()  --> LLM writes/updates entity docs
-    3. aliases + relations maintained inline by write_entity()
+    2. _ensure_entities_for_claims()  --> create entity rows
+    3. _update_entity_fts()           --> update FTS + embeddings
     4. mark bulletin digested (digested=1 in DB)
 ```
 
-## SQLite-Backed Storage
+## Data Model
 
-All memory data lives in SQLite tables defined by schema migrations. Tables are created automatically at server startup. The schema is in `schemas/307_memory_tables.sql` and `schemas/311_entity_bulletin_links.sql`.
+Entities are the core unit. Each entity has an ID, type, display name, and a set of typed claims. Entities have no body column -- the `rendered` view is generated deterministically from claims using type-specific templates.
+
+### Entity Types
+
+| Type | ID format | Description |
+|------|-----------|-------------|
+| `person` | `person-{slug}` | A specific human being (e.g. `person-mike-cleaver`) |
+| `group` | `group-{hex8}` | A WhatsApp or messaging group |
+| `location` | `location-{slug}` | A place (e.g. `location-paris`) |
+| `trip` | `trip-{slug}` | A trip or journey |
+| `tripstop` | `tripstop-{slug}` | A stop within a trip |
+| `transport` | `transport-{slug}` | A transport booking or method |
+| `event` | `event-{slug}` | An event or gathering |
+| `task` | `task-{slug}` | A to-do or action item |
+| `file` | `file-{slug}` | A file or document (must have `file_path` claim) |
+| `thing` | `thing-{slug}` | A physical object, animal, or product |
+| `decision` | `decision-{slug}` | A decision that was made |
+
+### Entity IDs
+
+Person entities use slug-based IDs derived from names (`person-mike-cleaver`), not hex8 IDs from the contacts table. A `contact_id` claim optionally links a person entity to their contacts table row.
+
+For all entity types, IDs use the format `{type}-{slug}` where slug is lowercase, hyphenated, alphanumeric.
+
+## SQLite Tables
 
 ### memory_bulletins
 
@@ -110,410 +135,224 @@ Immutable source records. Each bulletin is a plain-text memory captured from a c
 | `id` | TEXT PK | Auto-generated: `bulletin-YYYY-MM-DD-xxxxxx` |
 | `created_at` | TEXT | ISO timestamp |
 | `channel_id` | TEXT | Channel the bulletin came from |
-| `source_type` | TEXT | e.g. `session`, `email`, `manual` |
+| `source_type` | TEXT | e.g. `session`, `email`, `seed` |
 | `source_id` | TEXT | Session key or thread ID |
-| `session_id` | TEXT | Session identifier |
-| `transcript_range_id` | TEXT | Transcript range identifier |
 | `visibility` | TEXT | `private`, `contact`, `group`, `channel`, `public` |
-| `scope` | TEXT | JSON array of scope IDs |
-| `memory_types` | TEXT | JSON array of memory type tags |
-| `confidence` | TEXT | `high`, `medium`, `low` |
-| `requires_review` | INTEGER | Boolean flag |
-| `review_reasons` | TEXT | JSON array of reason strings |
 | `content` | TEXT | Plain-text bulletin body |
 | `digested` | INTEGER | 0=pending, 1=processed by dream |
-
-### memory_bulletin_entities
-
-Normalized entity references extracted from each bulletin.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `bulletin_id` | TEXT FK | References `memory_bulletins.id` |
-| `category` | TEXT | Entity category (contacts, groups, etc.) |
-| `entity_id` | TEXT | Referenced entity ID |
-| `display_name` | TEXT | Display name at extraction time |
-| `resolution_status` | TEXT | `known`, `unresolved`, `ambiguous`, `proposed`, `resolved` |
-| `role` | TEXT | Optional role (e.g. `task_owner`, `participant`) |
+| `session_range_start` | TEXT | First message timestamp in this bulletin's range |
+| `session_range_end` | TEXT | Last message timestamp in this bulletin's range |
 
 ### memory_claims
 
-Atomic typed memories extracted from bulletins by the LLM.
+Atomic typed memories extracted from bulletins by the LLM. Claims are the source of truth -- entity views are derived from claims.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | TEXT PK | Auto-generated |
-| `type` | TEXT | `fact`, `preference`, `constraint`, `decision`, `task`, `availability`, `booking`, `artifact`, `relationship`, `private_note` |
-| `subject_id` | TEXT | Canonical entity ID |
-| `predicate` | TEXT | Verb phrase (e.g. `accommodation_focus`) |
+| `claim_type_key` | TEXT | References `memory_claim_types.key` |
+| `subject_id` | TEXT | Entity ID this claim is about |
 | `object_id` | TEXT | Optional target entity ID |
-| `status` | TEXT | `active`, `superseded`, `retracted`, `expired`, `disputed`, `archived` |
+| `value` | TEXT | Optional text value |
+| `status` | TEXT | `active`, `superseded`, `retracted`, `archived` |
 | `visibility` | TEXT | Privacy level |
 | `scope` | TEXT | JSON array |
 | `created_at` | TEXT | ISO timestamp |
 | `superseded_by` | TEXT | JSON array of claim IDs |
 | `source_bulletins` | TEXT | JSON array of bulletin IDs |
-| `body` | TEXT | Human-readable statement |
+
+Each claim has exactly one of `object_id` or `value` set (never both, never neither). `object_id` is used for entity-to-entity relationships (e.g. `spouse → person-helen-burnside`). `value` is used for text properties (e.g. `food_preference → "Thai food"`).
+
+### memory_claim_types
+
+Registry of valid claim type keys, applicable entity types, descriptions, and examples. Enforced by `write_claim()` -- claims with unknown keys are rejected.
+
+Key claim types by entity:
+
+- **person**: alias, appearance, spouse, parent, child, sibling, home_address, workplace, job, food_preference, drink_preference, interest, personality, language, birthday, contact_method, contact_id
+- **group**: purpose, vibe, member
+- **event**: name, start_time, end_time, location, organizer, attendee
+- **trip**: destination, start_date, end_date, member, stop
+- **task**: owner, due_date, description, task_status, related_entity
+- **file**: name, file_path, purpose, owner
+- **thing**: name, thing_type, description, owner, location
+- **file_ref**: Cross-cutting -- any entity can reference a file
 
 ### memory_entities
 
-Derived current-state views optimized for retrieval. Written by the dream pipeline's entity update step.
+Entity registry. No body column -- rendered views are generated from claims on demand.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `entity_id` | TEXT PK | Canonical ID (e.g. `contact-7c9f0fd7`, `trip-bali-2026`) |
-| `entity_type` | TEXT | `channel`, `contact`, `group`, `location`, `trip`, `event`, `task`, `artifact`, `decision` |
+| `entity_id` | TEXT PK | Canonical ID (e.g. `person-mike-cleaver`) |
+| `entity_type` | TEXT | One of the 11 entity types |
 | `display_name` | TEXT | Human-readable name |
 | `status` | TEXT | `active`, `archived` |
-| `extra_frontmatter` | TEXT | JSON object of additional metadata |
-| `body` | TEXT | Markdown body with Summary, Current State, Related Entities, Timeline sections |
-| `source_bulletins` | TEXT | JSON array of bulletin IDs (accumulated deterministically) |
 | `created_at` | TEXT | ISO timestamp |
 | `updated_at` | TEXT | ISO timestamp |
 
-The `body` column contains markdown with a standard structure: Summary, Current State, Related Entities (mandatory, typed lists), Timeline, and Source Bulletins. Frontmatter is used as a serialization format for LLM communication and tool rendering, not as a storage format.
+### memory_entities_fts
 
-### memory_entity_relations
+FTS5 virtual table for keyword search. Indexed content is the rendered entity body (same text shown in the UI).
 
-Normalized related-entities graph. Replaces the old `reverse-links.yml` file.
+### memory_entity_embeddings
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `source_entity_id` | TEXT FK | Source entity |
-| `category` | TEXT | Relation category (contacts, groups, etc.) |
-| `target_entity_id` | TEXT | Target entity |
+sqlite-vec virtual table for semantic search. Stores 1536-dimension embeddings from OpenAI's `text-embedding-3-small` model.
 
 ### memory_aliases
 
-Display-name to entity-ID lookup. Replaces the old `aliases/aliases.yml` file.
+Display-name to entity-ID lookup.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `alias` | TEXT PK | Display name (case-sensitive and lowercase variants stored) |
+| `alias` | TEXT PK | Display name |
 | `entity_id` | TEXT FK | Referenced entity |
 
-### Join Tables (schemas/311_entity_bulletin_links.sql)
+### memory_entity_bulletins
 
-`memory_entity_bulletins` and `memory_claim_bulletins` provide indexed many-to-many links between entities/claims and their source bulletins for fast provenance lookups.
+Many-to-many link between entities and their source bulletins for provenance.
 
-## Authoring Memory Entries
+## Rendering
 
-### Real-Time: memory_write Tool
+`render_entity(entity_type, display_name, claims)` in `claim_types.py` generates a human-readable text block from an entity's claims using type-specific templates. Each entity type has an ordered list of (claim_type_key, label) pairs. The renderer groups claims by type, applies labels, and formats as indented bullet lists.
 
-During an active conversation, the LLM can use the `memory_write` tool to queue a bulletin. This is the fastest path -- the assistant decides a fact is worth remembering and writes it in the same turn. The bulletin is INSERTed into the `memory_bulletins` table awaiting the dream process.
-
-Parameters:
-
-| Parameter | Description |
-|-----------|-------------|
-| `content` | Markdown body describing what to remember |
-| `channel_id` | Optional channel association (defaults to session's channel) |
-| `visibility` | Privacy level: `private`, `contact`, `group`, `channel`, `public` |
-
-The tool derives the channel_id from the session key via `resolve_channel_id()`, validates the input, and calls `write_bulletin()` which generates a unique ID (`bulletin-YYYY-MM-DD-xxxxxx`), attaches metadata (source session, timestamps), and INSERTs into the database.
-
-### Post-Session: Bulletin Generation via Heartbeat
-
-After a conversation goes idle, the heartbeat system generates bulletins from the transcript. The flow is:
-
-1. `SessionIdleSummaryTask` (registered in `heartbeat.py`) runs on each heartbeat cycle.
-2. `_find_idle_sessions()` queries `session_messages` for sessions with no recent bulletin coverage, finding messages newer than the last bulletin's `session_range_end` and older than the idle threshold.
-3. For each idle session, it fetches messages and participant names from the database.
-4. Builds a `BulletinGeneratorInput` from the transcript using `build_generator_input()`:
-   - Derives `channel_id` and `visibility` from the session key.
-   - Includes the last 50 messages (truncated to 500 chars each).
-5. Calls `generate_bulletins()` which invokes an LLM with the bulletin generation prompt.
-6. The LLM decides whether to create bulletins (using memory-worthiness rules) or to decline.
-7. For each generated bulletin text, calls `write_bulletin()` to INSERT into the database.
-
-After all sessions are processed, the heartbeat task runs `MemoryService.run_dream()` to curate pending bulletins into structured entries.
-
-## The Dream Process
-
-The dream process is the curation pipeline that transforms raw bulletins into structured entity documents. It runs automatically at the end of each heartbeat cycle. The pipeline has three stages per bulletin:
-
-### Stage 1: Claim Extraction
-
-`extract_claims_from_bulletin()` sends the bulletin to an LLM with the `CLAIM_EXTRACTION_PROMPT` system prompt. The LLM returns a JSON array of atomic claim objects, each with:
-- `type` (fact, preference, constraint, decision, task, etc.)
-- `subject_id` and `object_id` (canonical entity IDs)
-- `predicate` (a verb phrase like `accommodation_focus`)
-- `body` (human-readable statement)
-- `visibility` and `scope` (inherited from the bulletin)
-- `source_bulletin_id` (provenance link)
-
-Entity IDs in claims are normalized via `normalize_entity_id()` and reconciled via `reconcile_contact_id()` using the `ContactDirectory` for contact ID lookup. Claims are INSERTed into `memory_claims` via `write_claim()`.
-
-### Stage 2: Entity Document Update
-
-`_update_entities_from_claims()` groups claims by `subject_id`, then for each entity:
-1. Loads the `ContactDirectory` and existing contact display names.
-2. Reconciles contact IDs to canonical form.
-3. Fetches new bulletin content from the database.
-4. Reads any existing entity body.
-5. Accumulates `source_bulletins` deterministically (union of existing + new, not from LLM).
-6. Sends everything to an LLM with the `ENTITY_UPDATE_PROMPT` system prompt.
-7. The LLM returns a JSON array of write operations with full entity content (frontmatter + markdown body).
-8. Each entity is parsed and written to the database via `write_entity()`.
-
-`write_entity()` also maintains derived data inline:
-- Deletes and re-inserts rows in `memory_entity_relations` from the entity's Related Entities.
-- Updates `memory_aliases` with the entity's display name (case-sensitive and lowercase).
-- Inserts into `memory_entity_bulletins` join table for provenance.
-
-### Stage 3: Index Maintenance
-
-Aliases and relations are maintained inline by `write_entity()` during each entity write. `index_service.rebuild_all()` is available for bulk rebuild operations (used by `cyborg memory rebuild`).
-
-### Bulletin Digestion
-
-Processed bulletins are marked `digested = 1` in the `memory_bulletins` table via `_mark_digested()`. They remain in the database for provenance and can be re-digested via the dashboard.
-
-### Dream Log
-
-Every dream run is logged to the `memory_dream_log` database table with the number of bulletins processed, entity operations, per-bulletin operation details, duration, and status.
+This rendered text is used for:
+- FTS5 indexing (stored in `memory_entities_fts`)
+- Embedding generation (stored in `memory_entity_embeddings`)
+- Dashboard UI display
+- Agent tool responses
 
 ## Retrieval
 
-### Memory Tool Descriptions (In System Prompt)
+### recall(query)
 
-The `prompt_assembler` module injects a `## Memory` section into every system prompt describing the five memory tools. The full entity index is currently disabled (commented out in `prompt_assembler.py`) because the ~22KB+ dump was mostly noise. Agents discover entities on demand via `memory_search` and `memory_browse` rather than through a prompt dump.
+The primary retrieval tool. Resolves a query to entity/claims in this order:
 
-### memory_read Tool
+1. **Exact entity ID** -- direct lookup in `memory_entities`
+2. **Alias lookup** -- case-insensitive match in `memory_aliases`
+3. **Embedding search** -- semantic similarity via `memory_entity_embeddings` (returns top 5, rendered)
+4. **FTS5 fallback** -- keyword AND-search across rendered bodies
 
-Reads a single entity by canonical ID. Queries `memory_entities` and `memory_entity_relations` to reconstruct the full entity document. Returns frontmatter-rendered markdown (via `serialize_frontmatter()`) for compatibility with tool callers.
+Embedding search uses cosine distance via sqlite-vec with a threshold of 1.2. When multiple close matches are found, the top result is rendered in full with additional matches appended. This enables queries like "what type of car does david have" to find `thing-subaru` via semantic similarity, even though neither "david" nor "car" appear in the Subaru entity's rendered text.
 
-### memory_search Tool
+### find(entity_type, claim_type_key?, value?)
 
-Semantic search across entity documents. The search is LLM-powered:
+Structured search -- list entities of a given type, optionally filtered by claim type and value.
 
-1. Queries all entities from `memory_entities` table (or filtered to a specific `entity_type`).
-2. Builds a catalog with truncated body text (300 chars per entry), entity IDs, types, and display names.
-3. Sends the catalog and query to an LLM with a strict system prompt requesting JSON with `abstract` (1-2 sentence summary) and `results` (array of matched entries with index numbers and relevance explanations).
-4. Maps index numbers back to entity IDs.
+### note(text)
 
-Returns `{abstract, results}` where each result has `entity_id`, `entity_type`, `display_name`, and `relevance`.
+Queue a manual bulletin for dream processing.
 
-Uses the model specified by `LLMDispatchService.memory_model` with temperature 0.0. Every search is logged to the `memory_search_log` database table.
+## The Dream Process
 
-### memory_browse Tool
+The dream process transforms raw bulletins into structured entities. It runs automatically after each heartbeat cycle. Per bulletin:
 
-Lists all entities of a given type. Queries `memory_entities` filtered by `entity_type`, sorted by `entity_id`. Returns a JSON array of `{entity_id, display_name, status}`.
+1. **Claim extraction**: `extract_claims_from_bulletin()` sends the bulletin to an LLM with the claim type registry. The LLM returns a JSON array of claim objects. Claims are validated against `memory_claim_types` and normalized (entity ID slugs, new-person resolution).
 
-### memory_graph Tool
+2. **Entity creation**: `_ensure_entities_for_claims()` creates `memory_entities` rows for any new entity IDs referenced in claims.
 
-Explores the memory graph around an entity. Queries `memory_entity_relations` for the entity's relations, then loads each referenced entity to build a neighbor map. Returns the entity's metadata plus a dict of `{category: [neighbor_entities]}`. Currently supports depth=1 (immediate neighbors).
+3. **Index maintenance**: `_update_entity_fts()` renders the entity via template, updates the FTS5 index, and generates an embedding vector for semantic search.
 
-## Entity Resolution
+4. **Digestion**: Bulletin is marked `digested=1`.
 
-The `entity_resolver` module handles mapping between different ID formats and display names:
+Bulletin content is pre-mapped before extraction: `{{contact:HEX8|Name}}` tags are replaced with `{{person-slug|Name}}` so the LLM sees person-entity IDs, not raw contact UUIDs.
 
-- `canonical_contact_id(uuid)` -- Converts full UUIDs to `contact-{hex8}` format (e.g. `7c9f0fd7-6134-4495-aa8c-f04f11bc15e8` becomes `contact-7c9f0fd7`).
-- `normalize_entity_id(entity_id, entity_type)` -- Normalizes any entity ID variant, handling raw UUIDs, slashes in artifact paths, and different contact ID formats.
-- `resolve_contact(db, name_or_ref)` -- Resolves names, `{{contact:UUID|Name}}` template references, or raw UUIDs to canonical contact IDs using database lookups.
+## Contact Integration
 
-The `reconcile` module provides `reconcile_contact_id()` which uses `ContactDirectory` to map non-canonical contact entity IDs (e.g. `contact-blair-nicol`) to canonical `contact-{hex8}` format from the contacts database.
+Each contact in the `contacts` table can have an associated `person` entity. The link is bidirectional:
 
-The `contact_directory` module provides `ContactDirectory` -- an in-memory lookup loaded from the contacts database that maps contact names, UUIDs, and identifiers to canonical IDs.
+- **Contact → Person**: Dashboard API `/api/contacts/{id}/entity` finds the person entity by `contact_id` claim, falling back to name-slug matching.
+- **Person → Contact**: The `contact_id` claim stores the hex8 ID for contacts table lookup.
+- **Contact detail page**: Shows the person entity's rendered content and a "view in memory" link.
 
-Channel IDs are derived from session keys via `channels.resolve_channel_id()`:
+## Bulletin Detail Pages
 
-| Session Key Format | Channel ID |
-|---|---|
-| `agent:main:whatsapp:group:120363...` | `channel-whatsapp-group-120363...` |
-| `agent:main:whatsapp:dm:61456224867` | `channel-whatsapp-dm-61456224867` |
-| `agent:main:email:thread-id` | `channel-email-thread-id` |
+The dashboard has dedicated bulletin detail pages at `/memory/bulletins/{bulletinId}` showing:
+- Source session/type, channel, visibility
+- Full bulletin text
+- All claims extracted from this bulletin (with links to their entities)
 
-Visibility and scope are also derived from the session key:
-- Group chats get `visibility: group` with a `group-{id}` scope.
-- DMs get `visibility: contact` with the contact's ID in scope.
-- Other sessions default to `visibility: private`.
+## Dashboard Memory Page
+
+The dashboard includes a memory page at `/memory` with these tabs:
+
+### Entities Tab
+- Entity list with claim counts, filterable by type
+- Entity detail view with rendered body, claims (with directional arrows showing subject/object), and source bulletins
+- Bulletin links navigate to bulletin detail pages
+
+### Pipeline Tab
+- Pending (undigested) bulletins with source and content preview
+- Dream run log with per-bulletin breakdown showing claims extracted and entity operations
+- Bulletin slugs link to bulletin detail pages
+
+### Search Tab
+- Live search input using `GET /api/memory/search?q=...`
+- Hybrid search: FTS5 keyword search first, then embedding similarity fallback
+- Search history from `memory_search_log`
+
+### Dashboard API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/memory/stats` | Entity counts, per-type stats, pending bulletins |
+| `GET /api/memory/search?q=...` | Search entities (FTS + embedding fallback) |
+| `GET /api/memory/bulletins` | Pending (undigested) bulletins |
+| `GET /api/memory/bulletins/{id}` | Bulletin detail with claims |
+| `GET /api/memory/dreams` | Last 20 dream log entries |
+| `GET /api/memory/entities` | All entities with claim counts |
+| `GET /api/memory/entities/{entity_id}` | Entity detail with rendered body and claims |
+| `GET /api/contacts/{id}/entity` | Person entity for a contact (with rendered body) |
+| `GET /api/contacts/{id}/claims` | Claims for a contact's person entity |
 
 ## CLI Commands
 
-### cyborg memory seed
-
-Regenerates all memory from session history using the bulletin generator.
-
-```bash
-# Dry run -- see what would be processed without calling the LLM
-cyborg memory seed --dry-run
-
-# Full seed -- generates bulletins and runs dream pipeline
-cyborg memory seed
-```
-
-The command (`seed_from_history()` in `seed.py`) follows this process:
-
-1. Clears existing data: DELETEs from `memory_claims`, `memory_claim_bulletins`, `memory_entity_relations`, `memory_entity_bulletins`, `memory_aliases`, `memory_entities`. Sets all bulletins `digested=0`.
-2. Queries all distinct session keys from `session_messages`, ordered by first message.
-3. Loads known contacts from the database for entity resolution.
-4. For each session with messages newer than the last bulletin:
-   - Builds a transcript from messages (with sender names resolved).
-   - Calls `generate_bulletins()` with the transcript and known entity hints.
-   - Writes each generated bulletin to the database.
-5. Runs the dream pipeline on all generated bulletins.
-
-### cyborg memory seed-email
-
-Regenerates memory from email thread history using the bulletin generator.
-
-```bash
-cyborg memory seed-email --dry-run
-cyborg memory seed-email --thread-id <thread-id>
-```
-
-Queries `email_threads` and related tables, extracts email content, and processes through the bulletin generator. Takes an optional `--thread-id` filter.
-
-### cyborg memory seed-manual
-
-Replays `memory_write` tool calls from LLM logs as bulletins.
-
-```bash
-cyborg memory seed-manual --dry-run
-```
-
-Extracts `memory_write` tool calls from the `llm_call_log` table and replays them as bulletins. Deduplicates against existing `memory_bulletins` content.
-
 ### cyborg memory rebuild
-
-Rebuilds derived data from bulletins.
 
 ```bash
 # Full rebuild: clear derived tables, re-process all bulletins
 cyborg memory rebuild --all
+
+# Rebuild a single entity
+cyborg memory rebuild --entity person-mike-cleaver
 ```
 
-Clears `memory_claims`, join tables, `memory_entity_relations`, `memory_entity_bulletins`, `memory_aliases`, and `memory_entities`. Sets all bulletins `digested=0` and re-runs the dream pipeline.
-
-### cyborg memory validate
-
-Validates memory structure by checking that all entity documents in the database have required fields (`entity_id`, `entity_type`, `display_name`).
+Clears `memory_claims`, `memory_entity_bulletins`, `memory_entity_relations`, `memory_aliases`, `memory_entities_fts`, `memory_entity_embeddings`, `memory_entities`. Sets all bulletins `digested=0` and re-runs the dream pipeline.
 
 ### cyborg memory cleanup-contacts
 
-Merges duplicate contact entities and rewires all references to canonical IDs.
-
-```bash
-# Dry run -- show what would change without writing
-cyborg memory cleanup-contacts --dry-run
-
-# Full cleanup
-cyborg memory cleanup-contacts
-```
-
-The command (`run_cleanup()` in `cleanup.py`) follows this process:
-
-1. Loads `ContactDirectory` from the contacts database.
-2. Builds a renaming map from non-canonical contact IDs to canonical `contact-{hex8}` IDs.
-3. Identifies duplicate entities to merge.
-4. Rewrites all references in `memory_claims`, `memory_bulletin_entities`, and `memory_entity_relations`.
-5. Merges entity documents and removes duplicates.
-6. Enriches contact entities with database foreign keys.
+Merges duplicate person entities and rewires all references to canonical IDs.
 
 ### cyborg memory query
 
-Queries memory with a natural language question. Optionally filters by entity type, actor, or channel.
+Queries memory with a natural language question via the `recall()` tool.
 
-```bash
-cyborg memory query "What is left to do for Bali?"
-cyborg memory query "Alice" --type contacts
-```
+## Embedding Search Details
 
-## Search Logging
-
-Every `memory_search` call (from tool or dashboard) is logged to the `memory_search_log` table. Schema from `schemas/300_memory_search_log.sql`:
-
-```sql
-CREATE TABLE IF NOT EXISTS memory_search_log (
-    id TEXT PRIMARY KEY,
-    query TEXT NOT NULL,
-    results_json TEXT NOT NULL DEFAULT '[]',
-    session_key TEXT,
-    result_count INTEGER NOT NULL DEFAULT 0,
-    latency_seconds REAL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
-
-## Dream Logging
-
-Every dream run is logged to the `memory_dream_log` table. Schema from `schemas/301_memory_dream_log.sql` and extended by `schemas/302_memory_dream_log_raw_response.sql`:
-
-```sql
-CREATE TABLE IF NOT EXISTS memory_dream_log (
-    id TEXT PRIMARY KEY,
-    bulletins_processed INTEGER NOT NULL DEFAULT 0,
-    entries_created INTEGER NOT NULL DEFAULT 0,
-    bulletin_slugs TEXT NOT NULL DEFAULT '[]',
-    operations_json TEXT NOT NULL DEFAULT '[]',
-    raw_response TEXT,
-    duration_seconds REAL,
-    status TEXT NOT NULL DEFAULT 'completed',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
-
-## Dashboard Memory Page
-
-The dashboard includes a memory page at `/memory` with these features:
-
-1. **Stats header** -- Total entity count and per-type counts, pulled from `GET /api/memory/stats`.
-2. **Live search** -- An input field that calls `GET /api/memory/search?q=...` and displays results with abstract, relevance explanations, and latency.
-3. **Pending bulletins** -- Shows all undigested bulletins with their source session and content preview.
-4. **Entity browser** -- Lists entities with claim counts via `GET /api/memory/entities`, with detail views via `GET /api/memory/entities/{entity_id}`.
-5. **Claims viewer** -- Lists and filters claims via `GET /api/memory/claims`.
-6. **Dream log** -- A feed of dream runs showing status, bulletins consumed, claims extracted, duration, and per-bulletin operation details.
-7. **Content viewer** -- An inline panel that loads any memory file's content.
-8. **Validate (lint)** -- A button to trigger `POST /api/memory/lint`.
-9. **Re-digest** -- Re-process a bulletin through the dream pipeline.
-
-Dashboard API endpoints (defined in `routers/dashboard_api.py`):
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/memory/stats` | Entity counts, per-type stats, pending bulletins, last dream time |
-| `GET /api/memory/search?q=...` | Search entities, log result, return with latency |
-| `GET /api/memory/searches` | Last 100 search log entries |
-| `GET /api/memory/bulletins` | Pending (undigested) bulletins |
-| `GET /api/memory/dreams` | Last 20 dream log entries |
-| `GET /api/memory/category/{category}` | Entities in a specific type |
-| `GET /api/memory/entities` | All entities with claim counts |
-| `GET /api/memory/entities/{entity_id}` | Entity detail with claims |
-| `GET /api/memory/claims` | List/filter claims |
-| `POST /api/memory/digested` | Fetch content of specific bulletins by ID |
-| `POST /api/memory/redigest` | Re-process a bulletin through dream pipeline |
-| `POST /api/memory/lint` | Validate all entity documents |
-| `POST /api/memory/backfill-people` | Backfill contact entities |
-
-All endpoints are protected by the dashboard secret (Bearer token or `?secret=` query parameter).
+- **Model**: OpenAI `text-embedding-3-small` (1536 dimensions)
+- **Storage**: sqlite-vec `vec0` virtual table, embeddings stored as packed float32 blobs
+- **Indexing**: Embeddings are generated when entities are created/updated (inside `_update_entity_fts`)
+- **Rebuild**: `svc.rebuild_embeddings()` batch-embeds all entities (up to 100 per OpenAI API call)
+- **Query**: Embed the search query, then cosine-distance search against all entity embeddings
+- **Cost**: ~$0.02 per 1M tokens. With ~100 entities at 1-2KB each, a full rebuild costs under $0.01
 
 ## Key Source Files
 
 | File | Purpose |
 |------|---------|
-| `services/memory/service.py` | Core service: SQLite-backed bulletin/entity CRUD, dream pipeline, search, validation |
-| `services/memory/models.py` | Data models (Bulletin, Claim, EntityDocument, frontmatter parse/serialize helpers) |
-| `services/memory/claim_service.py` | Claim extraction from bulletins, claim CRUD, active claim queries |
-| `services/memory/entity_resolver.py` | Entity ID normalization, contact resolution |
-| `services/memory/reconcile.py` | Contact ID reconciliation (non-canonical to canonical mapping) |
-| `services/memory/contact_directory.py` | In-memory contacts DB lookup for name/UUID resolution |
-| `services/memory/channels.py` | Session key to channel ID/visibility/scope derivation |
-| `services/memory/index_service.py` | Bulk alias rebuild (`rebuild_all`) |
-| `services/memory/prompts.py` | LLM system prompts for bulletin generation, claim extraction, entity update, retrieval |
-| `services/memory/bulletin_generator.py` | Transcript-to-bulletin LLM pipeline with input construction and output validation |
-| `services/memory/cleanup.py` | Duplicate contact entity cleanup and merging |
-| `services/memory/seed.py` | Bulk history regeneration from session messages |
-| `services/memory/seed_email.py` | Email history bulletin seeding |
-| `services/memory/seed_manual.py` | Manual bulletin extraction from LLM call logs |
-| `services/memory_tools.py` | LLM function-call tools (memory_write, memory_read, memory_search, memory_browse, memory_graph) |
-| `services/prompt_assembler.py` | Injects memory tool descriptions into system prompt |
-| `heartbeat.py` | SessionIdleSummaryTask triggers bulletin generation + dream after idle detection |
-| `cli.py` | CLI commands: `cyborg memory seed/seed-email/seed-manual/rebuild/validate/cleanup-contacts/query` |
-| `schemas/307_memory_tables.sql` | Core memory table schema (bulletins, claims, entities, relations, aliases) |
-| `schemas/311_entity_bulletin_links.sql` | Join table schema for entity/claim provenance |
-| `schemas/300_memory_search_log.sql` | Database schema for search logging |
-| `schemas/301_memory_dream_log.sql` | Database schema for dream run logging |
-| `schemas/302_memory_dream_log_raw_response.sql` | Adds raw_response column to dream log |
-| `routers/dashboard_api.py` | Dashboard API endpoints for memory stats, search, bulletins, dreams, entities, claims |
-| `ui_app/src/routes/memory/index.tsx` | Dashboard memory page UI component |
+| `services/memory/service.py` | Core service: CRUD, dream pipeline, search, FTS/embedding indexing |
+| `services/memory/models.py` | Data models (Bulletin, Claim) and entity type registry |
+| `services/memory/claim_service.py` | Claim extraction from bulletins, claim CRUD, entity ID normalization |
+| `services/memory/claim_types.py` | Claim type registry, entity templates, `render_entity()` |
+| `services/memory/embedding.py` | OpenAI embedding API, sqlite-vec similarity search |
+| `services/memory/tools.py` | Agent tools: `recall()`, `find()`, `note()` |
+| `services/memory/prompts.py` | LLM system prompts for bulletin generation and claim extraction |
+| `services/memory/entity_resolver.py` | Entity ID normalization |
+| `services/memory/contact_directory.py` | In-memory contacts DB lookup |
+| `services/memory/cleanup.py` | Duplicate person entity cleanup |
+| `services/memory/bulletin_generator.py` | Transcript-to-bulletin LLM pipeline |
+| `database.py` | SQLite connection pool with sqlite-vec extension loading |
+| `routers/dashboard_api.py` | Dashboard API endpoints |
+| `ui_app/src/routes/memory/index.tsx` | Memory page UI (entities, pipeline, search tabs) |
+| `ui_app/src/routes/memory/bulletins/$bulletinId.tsx` | Bulletin detail page |
+| `ui_app/src/routes/contacts/$contactId.tsx` | Contact detail with person entity section |

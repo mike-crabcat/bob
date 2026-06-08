@@ -35,22 +35,19 @@ interface EntityDocument {
   entity_type: string;
   display_name: string;
   status: string;
-  body: string;
-  related_entities: Record<string, string[]>;
-  source_bulletins: string[];
+  rendered: string;
 }
 
 interface Claim {
   id: string;
-  type: string;
+  claim_type_key: string;
   subject_id: string;
-  predicate: string;
   object_id: string | null;
+  value: string | null;
   status: string;
   source_bulletins: string[];
   visibility: string;
   created_at: string | null;
-  body: string;
 }
 
 const CHANNEL_COLORS: Record<string, string> = {
@@ -61,14 +58,36 @@ const CHANNEL_COLORS: Record<string, string> = {
 };
 
 const CLAIM_COLORS: Record<string, string> = {
-  fact: "bg-blue-900/40 text-blue-300",
-  preference: "bg-purple-900/40 text-purple-300",
-  constraint: "bg-orange-900/40 text-orange-300",
+  spouse: "bg-pink-900/40 text-pink-300",
+  parent: "bg-pink-900/40 text-pink-300",
+  child: "bg-pink-900/40 text-pink-300",
+  sibling: "bg-pink-900/40 text-pink-300",
+  home_address: "bg-cyan-900/40 text-cyan-300",
+  workplace: "bg-cyan-900/40 text-cyan-300",
+  job: "bg-cyan-900/40 text-cyan-300",
+  food_preference: "bg-orange-900/40 text-orange-300",
+  drink_preference: "bg-orange-900/40 text-orange-300",
+  interest: "bg-purple-900/40 text-purple-300",
+  personality: "bg-purple-900/40 text-purple-300",
+  language: "bg-blue-900/40 text-blue-300",
+  birthday: "bg-blue-900/40 text-blue-300",
+  alias: "bg-gray-900/40 text-gray-300",
+  contact_id: "bg-gray-900/40 text-gray-300",
+  member: "bg-green-900/40 text-green-300",
+  destination: "bg-green-900/40 text-green-300",
+  start_date: "bg-blue-900/40 text-blue-300",
+  end_date: "bg-blue-900/40 text-blue-300",
+  task_status: "bg-yellow-900/40 text-yellow-300",
+  owner: "bg-yellow-900/40 text-yellow-300",
+  due_date: "bg-yellow-900/40 text-yellow-300",
+  description: "bg-gray-900/40 text-gray-300",
+  location: "bg-cyan-900/40 text-cyan-300",
+  transport_type: "bg-cyan-900/40 text-cyan-300",
   decision: "bg-green-900/40 text-green-300",
-  task: "bg-yellow-900/40 text-yellow-300",
-  availability: "bg-cyan-900/40 text-cyan-300",
-  relationship: "bg-pink-900/40 text-pink-300",
-  private_note: "bg-gray-900/40 text-gray-300",
+  rationale: "bg-green-900/40 text-green-300",
+  file_path: "bg-amber-900/40 text-amber-300",
+  file_ref: "bg-amber-900/40 text-amber-300",
+  thing_type: "bg-lime-900/40 text-lime-300",
 };
 
 function ContactDetailPage() {
@@ -269,9 +288,18 @@ function ContactDetailPage() {
 
       {entity && (
         <section>
-          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">entity document</h2>
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-xs text-muted font-sans uppercase tracking-wider">person entity</h2>
+            <Link
+              to="/memory"
+              search={{ entity: entity.entity_id }}
+              className="text-[10px] text-accent hover:underline"
+            >
+              view in memory →
+            </Link>
+          </div>
           <div className="text-xs text-text bg-surface border border-border p-2 whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-y-auto">
-            {entity.body}
+            {entity.rendered || `${entity.entity_type}: ${entity.display_name}`}
           </div>
         </section>
       )}
@@ -287,11 +315,11 @@ function ContactDetailPage() {
                 className="bg-surface border border-border px-2 py-1.5 cursor-pointer hover:border-accent/30 transition-colors"
               >
                 <div className="flex items-center gap-2">
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${CLAIM_COLORS[c.type] ?? "bg-gray-900/40 text-gray-300"}`}>
-                    {c.type}
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
+                    {c.claim_type_key}
                   </span>
                   <span className="text-xs text-text flex-1 truncate">
-                    {c.predicate} {c.object_id && <span className="text-muted">&rarr; {c.object_id}</span>}
+                    {c.object_id ? `${c.subject_id} → ${c.object_id}` : c.value ? `${c.subject_id} → ${c.value}` : c.subject_id}
                   </span>
                   {c.created_at && (
                     <span className="text-[10px] text-muted shrink-0">
@@ -299,9 +327,12 @@ function ContactDetailPage() {
                     </span>
                   )}
                 </div>
-                {expandedClaim === c.id && c.body && (
-                  <div className="mt-1 text-[11px] text-muted border-t border-border pt-1">
-                    {c.body}
+                {expandedClaim === c.id && (
+                  <div className="mt-1 text-[10px] text-muted border-t border-border/30 pt-1 flex flex-col gap-0.5">
+                    <div><span className="text-muted/50">from:</span> {c.subject_id}</div>
+                    {c.object_id && <div><span className="text-muted/50">to:</span> {c.object_id}</div>}
+                    {c.value && <div><span className="text-muted/50">value:</span> {c.value}</div>}
+                    <div><span className="text-muted/50">vis:</span> {c.visibility}</div>
                   </div>
                 )}
               </div>

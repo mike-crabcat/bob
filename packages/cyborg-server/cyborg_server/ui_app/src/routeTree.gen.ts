@@ -21,6 +21,7 @@ import { Route as SessionsSessionKeyRouteImport } from './routes/sessions/$sessi
 import { Route as ContactsContactIdRouteImport } from './routes/contacts/$contactId'
 import { Route as SessionsSessionKeyIndexRouteImport } from './routes/sessions/$sessionKey/index'
 import { Route as PhoneCallIdIndexRouteImport } from './routes/phone/$callId/index'
+import { Route as MemoryBulletinsBulletinIdRouteImport } from './routes/memory/bulletins/$bulletinId'
 import { Route as SessionsSessionKeyCallsCallIdRouteImport } from './routes/sessions/$sessionKey/calls/$callId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -83,6 +84,12 @@ const PhoneCallIdIndexRoute = PhoneCallIdIndexRouteImport.update({
   path: '/phone/$callId/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MemoryBulletinsBulletinIdRoute =
+  MemoryBulletinsBulletinIdRouteImport.update({
+    id: '/memory/bulletins/$bulletinId',
+    path: '/memory/bulletins/$bulletinId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const SessionsSessionKeyCallsCallIdRoute =
   SessionsSessionKeyCallsCallIdRouteImport.update({
     id: '/calls/$callId',
@@ -101,6 +108,7 @@ export interface FileRoutesByFullPath {
   '/sessions/': typeof SessionsIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
+  '/memory/bulletins/$bulletinId': typeof MemoryBulletinsBulletinIdRoute
   '/phone/$callId/': typeof PhoneCallIdIndexRoute
   '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
@@ -115,6 +123,7 @@ export interface FileRoutesByTo {
   '/sessions': typeof SessionsIndexRoute
   '/skills': typeof SkillsIndexRoute
   '/workspace': typeof WorkspaceIndexRoute
+  '/memory/bulletins/$bulletinId': typeof MemoryBulletinsBulletinIdRoute
   '/phone/$callId': typeof PhoneCallIdIndexRoute
   '/sessions/$sessionKey': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
@@ -131,6 +140,7 @@ export interface FileRoutesById {
   '/sessions/': typeof SessionsIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
+  '/memory/bulletins/$bulletinId': typeof MemoryBulletinsBulletinIdRoute
   '/phone/$callId/': typeof PhoneCallIdIndexRoute
   '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
   '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/sessions/'
     | '/skills/'
     | '/workspace/'
+    | '/memory/bulletins/$bulletinId'
     | '/phone/$callId/'
     | '/sessions/$sessionKey/'
     | '/sessions/$sessionKey/calls/$callId'
@@ -162,6 +173,7 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/skills'
     | '/workspace'
+    | '/memory/bulletins/$bulletinId'
     | '/phone/$callId'
     | '/sessions/$sessionKey'
     | '/sessions/$sessionKey/calls/$callId'
@@ -177,6 +189,7 @@ export interface FileRouteTypes {
     | '/sessions/'
     | '/skills/'
     | '/workspace/'
+    | '/memory/bulletins/$bulletinId'
     | '/phone/$callId/'
     | '/sessions/$sessionKey/'
     | '/sessions/$sessionKey/calls/$callId'
@@ -193,6 +206,7 @@ export interface RootRouteChildren {
   SessionsIndexRoute: typeof SessionsIndexRoute
   SkillsIndexRoute: typeof SkillsIndexRoute
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
+  MemoryBulletinsBulletinIdRoute: typeof MemoryBulletinsBulletinIdRoute
   PhoneCallIdIndexRoute: typeof PhoneCallIdIndexRoute
 }
 
@@ -282,6 +296,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PhoneCallIdIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/memory/bulletins/$bulletinId': {
+      id: '/memory/bulletins/$bulletinId'
+      path: '/memory/bulletins/$bulletinId'
+      fullPath: '/memory/bulletins/$bulletinId'
+      preLoaderRoute: typeof MemoryBulletinsBulletinIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions/$sessionKey/calls/$callId': {
       id: '/sessions/$sessionKey/calls/$callId'
       path: '/calls/$callId'
@@ -316,6 +337,7 @@ const rootRouteChildren: RootRouteChildren = {
   SessionsIndexRoute: SessionsIndexRoute,
   SkillsIndexRoute: SkillsIndexRoute,
   WorkspaceIndexRoute: WorkspaceIndexRoute,
+  MemoryBulletinsBulletinIdRoute: MemoryBulletinsBulletinIdRoute,
   PhoneCallIdIndexRoute: PhoneCallIdIndexRoute,
 }
 export const routeTree = rootRouteImport

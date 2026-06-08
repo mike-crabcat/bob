@@ -68,8 +68,8 @@ def _make_mock_workspace_tools():
     from cyborg_server.services.tools import tool
 
     @tool
-    async def list_files(path: str = "", depth: int = 1) -> str:
-        """List files and directories in the workspace."""
+    async def ls(path: str = "") -> str:
+        """List files and directories in a single workspace directory (non-recursive)."""
         return json.dumps([{"name": "skills/", "type": "dir"}])
 
     @tool
@@ -87,7 +87,7 @@ def _make_mock_workspace_tools():
         """Send a reply message to the WhatsApp chat."""
         return "Message sent"
 
-    return [list_files, read_file, write_file, send_whatsapp_message]
+    return [ls, read_file, write_file, send_whatsapp_message]
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:

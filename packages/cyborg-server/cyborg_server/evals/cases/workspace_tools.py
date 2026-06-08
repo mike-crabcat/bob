@@ -24,8 +24,8 @@ def _make_mock_workspace_tools():
     from cyborg_server.services.tools import tool
 
     @tool
-    async def list_files(path: str = "", depth: int = 1) -> str:
-        """List files and directories in the workspace. Depth controls recursion (1=immediate, 2=one level deeper)."""
+    async def ls(path: str = "") -> str:
+        """List files and directories in a single workspace directory (non-recursive)."""
         return _MOCK_FILE_TREE
 
     @tool
@@ -38,7 +38,7 @@ def _make_mock_workspace_tools():
         """Write content to a file in the workspace. Creates parent directories if needed."""
         return json.dumps({"ok": True, "path": path, "bytes": len(content)})
 
-    return [list_files, read_file, write_file]
+    return [ls, read_file, write_file]
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:
@@ -54,21 +54,21 @@ def _extract_tool_calls(messages: list) -> list[dict]:
 
 
 @eval_case(
-    id="workspace_list_files",
+    id="workspace_ls",
     category="workspace_tools",
-    description="LLM should call list_files when asked what files are in the workspace.",
+    description="LLM should call ls when asked what files are in the workspace.",
     structural_checks=[
-        StructuralCheck(kind="tool_call_made", params={"tool_name": "list_files"}),
+        StructuralCheck(kind="tool_call_made", params={"tool_name": "ls"}),
         StructuralCheck(kind="min_length", params={"min_length": 10}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(
-            "The LLM should have called list_files (with no args or path=''). "
+            "The LLM should have called ls (with no args or path=''). "
             "The final response should mention the files found."
         ),
     ),
 )
-async def workspace_list_files(ctx):
+async def workspace_ls(ctx):
     from cyborg_server.services.llm_dispatch import LLMDispatchService
 
     messages = [

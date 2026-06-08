@@ -167,6 +167,8 @@ class LLMDispatchService(BaseService):
                 "session_key": session_key,
                 "call_category": call_category,
                 "tool_name": name,
+                "tool_args": args,
+                "tool_output": result_summary,
             }
             if log_id:
                 payload["log_id"] = log_id
@@ -205,11 +207,13 @@ class LLMDispatchService(BaseService):
         t0 = time.monotonic()
 
         try:
+            stream_result = StreamResult()
             result = await service.chat(
                 messages=messages,
                 model=resolved_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                stream_result=stream_result,
             )
             elapsed = time.monotonic() - t0
 
@@ -224,6 +228,10 @@ class LLMDispatchService(BaseService):
                 messages_json=messages_json,
                 response_text=result or "",
                 latency_seconds=elapsed,
+                prompt_tokens=stream_result.prompt_tokens,
+                completion_tokens=stream_result.completion_tokens,
+                total_tokens=stream_result.total_tokens,
+                cached_tokens=stream_result.cached_tokens,
                 status="completed",
                 project_id=project_id,
                 task_id=task_id,
@@ -233,15 +241,16 @@ class LLMDispatchService(BaseService):
 
             logger.info(
                 "LLM dispatch: model=%s category=%s latency=%.2fs "
-                "input_chars=%d output_chars=%d",
+                "input_chars=%d output_chars=%d tokens=%s",
                 resolved_model, call_category, elapsed,
                 sum(_content_char_len(m.get("content", "")) for m in messages),
                 len(result or ""),
+                stream_result.total_tokens,
             )
             await self._publish_call(
                 status="completed", session_key=session_key,
                 call_category=call_category, model=resolved_model,
-                latency_seconds=elapsed, total_tokens=None,
+                latency_seconds=elapsed, total_tokens=stream_result.total_tokens,
             )
             return result
 
@@ -432,6 +441,12 @@ class LLMDispatchService(BaseService):
         try:
             stream_result = StreamResult()
 
+            async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
+                await _record_log(self.db, log_id=log_id,
+                    messages_json=json.dumps(_sanitize_for_json(msgs)),
+                    status="running",
+                )
+
             result = await service.chat_with_tools(
                 messages=messages,
                 tools=openai_tools,
@@ -440,6 +455,7 @@ class LLMDispatchService(BaseService):
                 max_iterations=max_iterations,
                 stream_result=stream_result,
                 on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
+                on_iteration_complete=_on_iteration,
             )
             elapsed = time.monotonic() - t0
 
@@ -534,6 +550,12 @@ class LLMDispatchService(BaseService):
         accumulated = ""
         ttft: float | None = None
 
+        async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
+            await _record_log(self.db, log_id=log_id,
+                messages_json=json.dumps(_sanitize_for_json(msgs)),
+                status="running",
+            )
+
         try:
             async for chunk in service.chat_stream_with_tools(
                 messages=messages,
@@ -542,6 +564,7 @@ class LLMDispatchService(BaseService):
                 model=resolved_model,
                 max_iterations=max_iterations,
                 on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
+                on_iteration_complete=_on_iteration,
             ):
                 if chunk:
                     if ttft is None:

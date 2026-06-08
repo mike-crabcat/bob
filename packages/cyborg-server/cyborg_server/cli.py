@@ -1892,13 +1892,102 @@ async def _memory_seed_manual(dry_run: bool) -> None:
 def memory_rebuild(
     all: Annotated[bool, typer.Option("--all", help="Rebuild all derived data from bulletins")] = False,
     entity_id: Annotated[Optional[str], typer.Option("--entity", help="Rebuild indexes for a specific entity")] = None,
+    full: Annotated[bool, typer.Option("--full", help="Use full-document mode instead of patches")] = False,
 ) -> None:
     """Rebuild memory indexes and derived data from bulletins."""
     import asyncio
-    asyncio.run(_memory_rebuild(all, entity_id))
+    asyncio.run(_memory_rebuild(all, entity_id, full))
 
 
-async def _memory_rebuild(all: bool, entity_id: str | None) -> None:
+async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    await db.apply_migrations()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        workspace = settings.harness.workspace_dir
+        svc = MemoryService(ctx)
+
+        result = await svc.rebuild(workspace, entity_id=entity_id, all=all)
+        typer.echo(f"Rebuild result: {json.dumps(result, indent=2)}")
+    finally:
+        await db.close()
+
+
+@memory_app.command("reconcile")
+def memory_reconcile(
+    entity_ids: Annotated[Optional[list[str]], typer.Argument(help="Entity IDs to reconcile")] = None,
+    all: Annotated[bool, typer.Option("--all", help="Reconcile all active entities")] = False,
+    render_only: Annotated[bool, typer.Option("--render", help="Just show the full render, don't reconcile")] = False,
+) -> None:
+    """Run entity reconciliation to detect and fix inconsistencies."""
+    import asyncio
+    asyncio.run(_memory_reconcile(entity_ids, all, render_only))
+
+
+@memory_app.command("supplement")
+def memory_supplement(
+    entity_ids: Annotated[list[str], typer.Argument(help="Entity IDs to supplement with missing claims")],
+) -> None:
+    """Gap-fill: re-extract from source bulletins, only write missing claims."""
+    import asyncio
+    asyncio.run(_memory_supplement(entity_ids))
+
+
+async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory.reconciliation import render_entity_full, reconcile_entity
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        if all:
+            rows = await db.fetch_all(
+                "SELECT entity_id FROM memory_entities WHERE status = 'active'"
+            )
+            entity_ids = [r["entity_id"] for r in rows]
+
+        if not entity_ids:
+            typer.echo("No entity IDs specified. Use --all or provide entity IDs.")
+            return
+
+        llm = LLMDispatchService(ctx)
+
+        for eid in entity_ids:
+            if render_only:
+                rendered = await render_entity_full(db, eid)
+                typer.echo(f"\n{'='*60}")
+                typer.echo(f"  {eid}")
+                typer.echo(f"{'='*60}")
+                typer.echo(rendered)
+            else:
+                typer.echo(f"Reconciling {eid}...")
+                result = await reconcile_entity(db, llm, eid)
+                typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        await db.close()
+
+
+async def _memory_supplement(entity_ids: list[str]) -> None:
     from cyborg_server.config import Settings
     from cyborg_server.context import AppContext
     from cyborg_server.database import Database
@@ -1916,8 +2005,41 @@ async def _memory_rebuild(all: bool, entity_id: str | None) -> None:
         workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)
 
-        result = await svc.rebuild(workspace, entity_id=entity_id, all=all)
-        typer.echo(f"Rebuild result: {json.dumps(result, indent=2)}")
+        for eid in entity_ids:
+            typer.echo(f"Supplementing {eid}...")
+            result = await svc.supplement_entity(workspace, entity_id=eid)
+            typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        await db.close()
+
+
+@memory_app.command("merge")
+def memory_merge(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview merges without executing")] = False,
+) -> None:
+    """Detect and merge duplicate entities using embeddings + LLM."""
+    import asyncio
+    asyncio.run(_memory_merge(dry_run))
+
+
+async def _memory_merge(dry_run: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        svc = MemoryService(ctx)
+        result = await svc.merge_entities(dry_run=dry_run)
+        typer.echo(json.dumps(result, indent=2, default=str))
     finally:
         await db.close()
 
@@ -1954,6 +2076,34 @@ async def _memory_validate() -> None:
             typer.echo(f"Issues found ({len(result['issues'])}):")
             for issue in result["issues"]:
                 typer.echo(f"  - {issue}")
+    finally:
+        await db.close()
+
+
+@memory_app.command("reindex")
+def memory_reindex() -> None:
+    """Rebuild the FTS search index from existing entity data (no LLM calls)."""
+    import asyncio
+    asyncio.run(_memory_reindex())
+
+
+async def _memory_reindex() -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+        svc = MemoryService(ctx)
+        count = await svc.rebuild_fts()
+        typer.echo(f"FTS index rebuilt: {count} entities indexed.")
     finally:
         await db.close()
 

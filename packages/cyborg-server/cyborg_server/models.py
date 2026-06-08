@@ -281,7 +281,7 @@ class ContextCalendarResponse(CyborgModel):
 
 class ContactFields(CyborgModel):
     name: str = Field(min_length=1, max_length=255)
-    phone_number: str = Field(min_length=1, max_length=50)
+    phone_number: str | None = Field(default=None, max_length=50)
     email: str | None = Field(default=None, max_length=255)
     metadata: MetadataDict = Field(default_factory=dict)
 
@@ -295,10 +295,12 @@ class ContactFields(CyborgModel):
 
     @field_validator("phone_number")
     @classmethod
-    def phone_number_must_not_be_blank(cls, value: str) -> str:
+    def phone_number_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         stripped = value.strip()
         if not stripped:
-            raise ValueError("phone_number must not be blank")
+            return None
         return stripped
 
 

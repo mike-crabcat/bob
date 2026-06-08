@@ -2,7 +2,109 @@
 
 All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
-## [Unreleased] - 2026-05-31
+## 2026-06-07
+
+### Added
+- Add `POST /api/v1/email/poll` endpoint for on-demand email inbox polling with `force=True` to bypass the interval check
+- Add `/email` slash command skill for triggering immediate email inbox check
+- Add entity reconciliation system with LLM-driven consistency checking, per-type rules, and human-in-the-loop conflict resolution via questions
+- Add `supplement_entity` pipeline to gap-fill missing claims from related bulletins after dream processing
+- Add `memory_correct` tool supporting `remove_entity`, `remove_claim`, and `set_truth` actions for agent-driven memory correction
+- Add `truth` claim type for user-stated facts and corrections that override inference, with migration of legacy `purpose` answer claims
+- Add `memory reconcile` and `memory supplement` CLI commands for manual entity consistency repair and gap-filling
+- Add memory questions API endpoints and QA tab in dashboard for surfacing and resolving open reconciliation questions
+- Add stats tab to memory dashboard showing entity distribution, pipeline status, and claim counts
+- Add `rm`, `mv`, and `find` workspace tools for file deletion, move/rename, and content search
+- Add `LLMCallStalenessTask` heartbeat to detect and mark LLM calls stuck in "running" status after 30 minutes
+- Add orphan claims rendering in entity detail display for claims not covered by the entity template
+- Add tool args and output display to live tool call cards in session call detail view
+- Add `on_iteration_complete` callback to OpenAI tool-call loops for persisting intermediate messages to LLM call logs
+
+### Changed
+- Trigger memory dream immediately on bulletin write with 2-second debounce instead of waiting for the heartbeat cycle
+- Run supplement and reconciliation automatically after each dream cycle for all touched entities
+- Add pagination to email inbox polling for handling >50 unread messages
+- Replace `list_files` workspace tool with `ls` (non-recursive, single-directory listing)
+- Replace memory "lint" button with the new QA questions workflow
+- Increase claim extraction `max_tokens` from 2000 to 4000
+- Simplify trip entity model: remove destination/date claims at trip level, rely on tripstop-level data instead
+- Strengthen transport entity extraction rules: require transport entities for all flights/trains/buses with route details
+- Add explicit timeouts (300s read, 30s connect) to OpenAI client
+- Include tool args and output summary in `llm.call.tool_completed` WebSocket events
+
+### Fixed
+- Fix backfilled emails never dispatched: poll now re-dispatches messages that were imported via sync but never reached the LLM
+- Fix emails stuck unread in AgentMail: deduplicated messages are now marked as read even when processing is skipped
+
+### Removed
+- Remove dream trigger from `SessionIdleSummaryTask` heartbeat (moved to debounced bulletin-write trigger)
+- Remove `/api/memory/lint` endpoint and its corresponding UI button
+
+## 2026-06-06
+
+### Added
+- Add embedding-based semantic search using OpenAI text-embedding-3-small and sqlite-vec: entities are embedded at write time and queries like "what type of car does david have" now find results via cosine similarity when FTS5 keyword search fails
+- Add bulletin detail page at `/memory/bulletins/{id}` showing source session/type, full text, and all claims extracted from that bulletin
+- Add person entity rendering on contact detail page with rendered body display and "view in memory" link
+- Add claim type registry (`claim_types.py`) with type-specific render templates that generate human-readable entity views from claims
+- Add `render_entity()` function that deterministically renders entity claims into structured text using per-type templates (person, group, event, trip, etc.)
+- Add FTS5 index built from rendered entity templates instead of raw claim data, improving keyword search relevance
+- Add `rebuild_embeddings()` method for batch embedding all entities and `sqlite-vec` extension loading in database connection pool
+- Add schema migrations 314–322: FTS5 index, claim types registry, claims v2 (claim_type_key replacing type/predicate/body), entity type renames, template-based FTS, and embedding vectors table
+- Add file_path validation during claim extraction: file entities without a file_path claim are dropped automatically
+
+### Changed
+- Rename entity types: contact→person (slug-based IDs like `person-mike-cleaver`), artifact→file (requires file_path) and thing (physical objects with thing_type)
+- Replace entity body documents with claim-only model: entities have no body column, all content is derived from claims via render templates
+- Replace LLM-powered entity update with deterministic claim extraction: claims are the source of truth, entity views are generated on demand
+- Add name-slug fallback for contact-to-person entity lookup when contact_id claim is missing
+- Pre-map `{{contact:HEX8|Name}}` tags to `{{person-slug|Name}}` before LLM extraction so the LLM never sees raw contact IDs
+- Update dashboard search to try embedding similarity when FTS5 returns no results
+- Update memory recall tool with hybrid retrieval: exact ID → alias → embedding similarity → FTS5
+- Update memory documentation to reflect current architecture
+
+### Removed
+- Remove social_relation claim type from registry, templates, and database (LLM over-generated it, producing noise)
+
+## 2026-06-05
+
+### Added
+- Add patience system for LLM-driven message batching with WhatsApp typing awareness: buffers incoming messages, subscribes to contact presence, and dispatches only when the user stops typing
+- Add ContactDirectory service for loading and querying contacts DB with `as_known_entities()` for bulletin generator context
+- Add contact ID reconciliation for mapping non-canonical contact IDs (name slugs, unresolved variants) to canonical UUIDs during entity updates
+- Add entity cleanup pipeline: merge duplicate contact entities, build renaming maps, rewrite claims/bulletins/entity relations, and run orchestrated cleanup via CLI
+- Add email thread tools (`email_thread_read`, `email_thread_search`) for LLM function calling with trust-scoped access control
+- Add email memory seeding from email thread history with seed_email CLI command
+- Add phone call result service for surfacing call outcomes back to originating sessions
+- Add email thread result tools for surfacing email outcomes back to originating sessions
+- Add generic thread result service for linking communication threads to their origin sessions
+- Add contact entity and claims API endpoints (dashboard and REST) for viewing memory data per contact
+- Add contact detail page in dashboard UI showing entity document and claims
+- Add phone call hangup endpoint via Twilio API
+- Add phone call status persistence (ringing, active, completed, duration, recording path) to database
+- Add schema migrations 307–313: memory tables in SQLite, phone/email origin session links, simplified bulletins, entity-bulletin links, session range tracking, drop session summaries table
+- Add SQLite-backed memory storage replacing file-based bulletin/claim/entity persistence
+- Add manual bulletin seeding via CLI (`seed_manual`) for ad-hoc memory injection
+
+### Changed
+- Simplify bulletin model from structured metadata (entities, scope, session tracking) to plain-text notes with inline `{{contact:ID|Name}}` tags
+- Simplify bulletin generator input from verbose structured transcript to compact message list with sender contact IDs and timestamps
+- Replace session summary service with bulletin-based idle session processing in heartbeat task
+- Replace summary cards with bulletin cards in dashboard home view
+- Update memory dashboard route with enhanced entity browsing and claim visualization
+- Migrate memory service from file-based YAML storage to SQLite with related entity parsing from body text
+- Gate tap dispatch behind `tap_enabled()` check instead of unconditionally running on every non-tool response
+- Update WhatsApp bridge to subscribe to contact presence for patience system integration
+- Strengthen bulletin generator prompt to forbid inventing IDs for known contacts
+- Pass known entities from ContactDirectory to bulletin generator for canonical ID enforcement
+- Add email polling integration with patience gate for coordinated message processing
+- Update memory CLI with new seed commands and cleanup orchestration
+
+### Fixed
+- Fix phone call recording finalization on call completion with proper path persistence
+- Fix phone call status transitions to persist all intermediate states (ringing, in-progress) to database
+
+## 2026-05-31
 
 ### Added
 - Add entity-centric memory system (v3) replacing wiki/category model: channel-based architecture with bulletin generation from session transcripts, entity resolution, claim extraction, and graph-based entity relationships
@@ -28,7 +130,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 ### Fixed
 - Fix animated GIF sending via WhatsApp: preserve GIF animation by passing files under the bridge payload limit as-is, and add frame-dropping resize for oversized animated GIFs instead of flattening to static JPEG
 
-## [Unreleased] - 2026-05-30
+## 2026-05-30
 
 ### Added
 - Add multimodal image support: Go bridge downloads incoming WhatsApp images to disk and forwards metadata to the Python server, which stores image references in message metadata and reconstructs OpenAI `input_image` content parts in the prompt for GPT-5.5 vision
@@ -45,7 +147,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 - Fix contact detail page: update dashboard API and React component to query new group tables instead of removed whatsapp_groups column
 - Fix LLM dispatch and OpenAI service logging to handle multimodal message content (list of content parts) without crashing
 
-## [Unreleased] - 2026-05-28
+## 2026-05-28
 
 ### Added
 - Add subagent system with Claude Code CLI integration, replacing skill-specific delegation with a generic async subagent service that spawns Claude processes and tracks status, cost, and results
@@ -70,7 +172,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 - Backfill missing chat_id on all existing WhatsApp DM routes from metadata sender_jid
 - Fix subagent sessions displaying as "whatsapp" channel in dashboard by checking subagent: prefix before :whatsapp: in channel parser
 
-## [Unreleased] - 2026-05-24
+## 2026-05-24
 
 ### Added
 - Add centralized tool registry with `build_common_tools()` replacing duplicated tool assembly across WhatsApp and email dispatchers

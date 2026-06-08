@@ -45,9 +45,15 @@ def test_no_directory_returns_input_unchanged():
     assert reconcile_contact_id("contact-blair-nicol", "Blair Nicol", None) == "contact-blair-nicol"
 
 
-def test_no_display_name_returns_input_unchanged():
+def test_slug_fallback_resolves_without_display_name():
+    """When no display_name is provided, extract name from the slug itself."""
     dir_ = _directory_with_blair()
-    assert reconcile_contact_id("contact-blair-nicol", "", dir_) == "contact-blair-nicol"
+    assert reconcile_contact_id("contact-blair-nicol", "", dir_) == "contact-03f3902d"
+
+
+def test_slug_fallback_resolves_unresolved_prefix():
+    dir_ = _directory_with_blair()
+    assert reconcile_contact_id("unresolved-contact-blair", "", dir_) == "contact-03f3902d"
 
 
 def test_display_name_not_in_db_preserves_id():

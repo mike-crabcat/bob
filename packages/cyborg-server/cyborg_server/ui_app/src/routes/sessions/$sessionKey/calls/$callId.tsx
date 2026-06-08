@@ -98,11 +98,16 @@ function MessageBubble({ role, content }: { role: string; content: string }) {
   );
 }
 
-function LiveToolCard({ name, output }: { name: string; output?: string }) {
+function LiveToolCard({ name, args, output }: { name: string; args?: string; output?: string }) {
+  let displayArgs = args;
+  try { displayArgs = JSON.stringify(JSON.parse(args ?? ""), null, 2); } catch { /* keep raw */ }
   return (
     <div className="bg-surface border border-accent/30">
       <div className="p-2 border-b border-border">
         <div className="text-xs text-accent font-medium">{name}</div>
+        {displayArgs && (
+          <div className="text-xs text-text mt-1 whitespace-pre-wrap break-words">{displayArgs}</div>
+        )}
       </div>
       {output ? (
         <div className="p-2">
@@ -130,7 +135,7 @@ function CallDetailPage() {
     queryFn: () => fetchAPI<CallDetail>(`/calls/${callId}`),
   });
 
-  const liveTools = useRef<Map<string, string>>(new Map());
+  const liveTools = useRef<Map<string, { name: string; args?: string; output?: string }>>(new Map());
   const wsEvents = useWSEvents();
   const _lastEvent = wsEvents[0];
 
@@ -140,7 +145,14 @@ function CallDetailPage() {
     const evt = _lastEvent;
     const evtLogId = evt.payload?.log_id as string | undefined;
     if (evtLogId === callId && evt.type === "llm.call.tool_completed") {
-      liveTools.current.set(evt.payload.tool_name as string, "");
+      const toolName = evt.payload.tool_name as string;
+      const toolArgs = evt.payload.tool_args as Record<string, unknown> | undefined;
+      const toolOutput = evt.payload.tool_output as string | undefined;
+      liveTools.current.set(`${toolName}-${liveTools.current.size}`, {
+        name: toolName,
+        args: toolArgs ? JSON.stringify(toolArgs) : undefined,
+        output: toolOutput,
+      });
     }
     if (evt.type === "llm.call.completed" || evt.type === "llm.call.failed") {
       if (liveTools.current.size > 0) {
@@ -171,7 +183,7 @@ function CallDetailPage() {
   const toolCalls = allMsgs.filter(isToolCall);
   const toolOutputs = allMsgs.filter(isToolOutput);
   const webSearches = allMsgs.filter(isWebSearch);
-  const liveToolNames = [...liveTools.current.keys()];
+  const liveToolEntries = [...liveTools.current.values()];
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -224,10 +236,10 @@ function CallDetailPage() {
         </section>
       )}
 
-      {(toolCalls.length > 0 || webSearches.length > 0 || liveToolNames.length > 0) && (
+      {(toolCalls.length > 0 || webSearches.length > 0 || liveToolEntries.length > 0) && (
         <section>
           <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">
-            tool calls ({webSearches.length + toolCalls.length + liveToolNames.length})
+            tool calls ({webSearches.length + toolCalls.length + liveToolEntries.length})
           </h2>
           <div className="flex flex-col gap-1">
             {webSearches.map((ws) => (
@@ -255,8 +267,8 @@ function CallDetailPage() {
                 </div>
               );
             })}
-            {liveToolNames.map((name) => (
-              <LiveToolCard key={name} name={name} />
+            {liveToolEntries.map((lt, i) => (
+              <LiveToolCard key={`live-${i}`} name={lt.name} args={lt.args} output={lt.output} />
             ))}
           </div>
         </section>

@@ -33,9 +33,10 @@ def _build_dream_messages(
     existing_entries: str = "",
 ) -> list[dict]:
     """Build the messages array that the dream process would send to the LLM."""
-    from cyborg_server.services.memory.prompts import ENTITY_UPDATE_PROMPT
+    from cyborg_server.services.memory.prompts import build_extraction_prompt
+    from cyborg_server.services.memory.claim_types import build_extraction_prompt_section
 
-    system_prompt = ENTITY_UPDATE_PROMPT
+    system_prompt = build_extraction_prompt(build_extraction_prompt_section(["contact"]))
 
     bulletin_lines: list[str] = []
     for i, b in enumerate(bulletins, 1):

@@ -72,12 +72,14 @@ def resolve_contact_id_only(contact_id: str) -> str:
 def normalize_entity_id(entity_id: str, entity_type: str = "") -> str:
     """Normalize any entity ID to its canonical form.
 
-    Handles contact UUIDs, artifact paths with slashes, and other common
-    LLM-generated ID variations.
+    Handles slashes, and other common LLM-generated ID variations.
+    Person entities use slug-based IDs (person-{slug}), not UUIDs.
+    The contacts table still uses contact-{hex8} for message attribution.
     """
     entity_id = entity_id.replace("/", "-").replace("\\", "-")
 
     # Raw UUID that looks like a contact → contact-{hex8}
+    # (for backward compat with contact references from message attribution)
     if re.match(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", entity_id):
         return f"contact-{entity_id[:8]}"
 
@@ -85,6 +87,7 @@ def normalize_entity_id(entity_id: str, entity_type: str = "") -> str:
     if entity_id.startswith("contact-"):
         return resolve_contact_id_only(entity_id)
 
+    # person- IDs are slug-based, pass through
     return entity_id
 
 

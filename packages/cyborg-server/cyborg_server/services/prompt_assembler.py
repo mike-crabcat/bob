@@ -63,6 +63,7 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             "- **memory_browse(entity_type)** — List all entities of a type.\n"
             "- **memory_write(content, channel_id?, visibility?)** — Write a new bulletin (queued, curated by dream process).\n"
             "- **memory_graph(entity_id, depth?)** — Explore related entities.\n"
+            "- **memory_correct(action, entity_id?, claim_type_key?, value?, reason)** — Correct wrong memory. Actions: remove_entity (archive entity + all claims), remove_claim (supersede a specific claim), set_truth (write a user correction). Always provide a reason.\n"
             "\n"
             "Entity types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.\n"
         )

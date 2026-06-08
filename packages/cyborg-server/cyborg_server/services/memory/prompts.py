@@ -32,6 +32,14 @@ a task, a possible plan is not a confirmed booking.
 - trip details
 - availability changes
 - relationship between entities clarified
+- files created, edited, or referenced in the workspace
+
+## File references
+
+When a message mentions a file being created, edited, saved, or read:
+- Include the workspace-relative file path verbatim (e.g. "docs/swot-analysis.md", "skills/bom-weather/skill.md").
+- If the message does not include a file path, do NOT invent one. Simply note the file exists without a path.
+- File paths typically look like "dir/name.ext" or "https://...". They do NOT look like "workspace", "project", or "the file".
 
 ## Output format
 
@@ -42,200 +50,170 @@ Example:
 ["{{contact:abc123|Mike}} decided to book the Seminyak villa for the Bali trip, budget $200/night, checking 3 options by Friday (2026-05-31T14:22:00)"]
 """
 
-CLAIM_EXTRACTION_PROMPT = """\
-You are a Claim Extraction Agent for the Agent Memory System.
+# The extraction prompt is built dynamically. Use build_extraction_prompt()
+# below instead of a static constant.
 
-Your job is to read a bulletin and extract atomic claims from it.
+_CLAIM_EXTRACTION_TEMPLATE = """\
+You are a Claim Extraction Agent. Extract atomic claims from bulletins.
 
-Claims are the fundamental unit of memory. Each claim captures a single atomic fact, preference, constraint, decision, task, availability, booking, artifact detail, relationship, or private note.
+---
+
+# Entity IDs
+
+Every claim references entities by ID. You MUST follow these ID conventions:
+
+- **person-SLUG**: People. e.g. person-mike-cleaver, person-david-shedden. \
+  For new people NOT in the Known Entities section, use `person:new:Full Name`.
+- **group-SLUG**: Chat groups or teams. e.g. group-bali-gang
+- **trip-SLUG**: Trips. e.g. trip-bali-2026
+- **stay-SLUG**: An accommodation leg within a trip — one hotel/Airbnb/villa stay. \
+Include location AND date range for uniqueness. \
+e.g. stay-ubud-days4-6, stay-paris-june12-14, stay-paris-june14-16. \
+Each distinct accommodation (different hotel or different dates at same city) MUST be a separate entity.
+- **connection-SLUG**: A transport/journey leg. Include route and direction for uniqueness. \
+e.g. connection-perth-geneva-outbound, connection-paris-london-eurostar, connection-chamonix-paris-sncf.
+- **location-SLUG**: A place. e.g. location-villa-sunset
+- **event-SLUG**: An event. e.g. event-dinner-aug5
+- **task-SLUG**: A task or todo. e.g. task-book-villa
+- **file-SLUG**: A file or document. e.g. file-itinerary-md. \
+  ONLY create if the bulletin contains an actual workspace-relative path or URL. \
+  The file_path claim value MUST be a concrete path like "docs/itinerary.md" or \
+  "https://example.com/file.pdf". If no path is given, do NOT create a file entity. \
+  Vague values like "workspace", "the file", or bare filenames without directories are invalid.
+- **thing-SLUG**: A physical object or animal. e.g. thing-ebike, thing-bosch-motor
+- **decision-SLUG**: A decision. e.g. decision-stay-seminyak
+
+Slug rules: lowercase, hyphens, descriptive but short. No dates unless needed for uniqueness.
+
+**REUSE EXISTING IDS.** Check the ## Known Entities section. If an entity already exists \
+for the thing you are describing, use its ID. Do NOT create duplicate entities with different IDs.
+**EXCEPTION for stays:** Two stays with different accommodations, different dates, or different cities \
+are DIFFERENT entities — do NOT reuse a stay ID just because both are "in Paris". Each distinct \
+hotel/booking gets its own stay entity.
 
 ---
 
 # Rules
 
-1. Each claim must be atomic. One claim captures exactly one fact.
-2. Every claim must have a type from this list:
-   - fact
-   - preference
-   - constraint
-   - decision
-   - task
-   - availability
-   - booking
-   - artifact
-   - relationship
-   - private_note
+1. Each claim = one atomic fact. Split, never merge.
+2. Every claim must use a `claim_type_key` from the Entity Types section below.
 3. Every claim must have:
-   - type: one of the types above
-   - subject_id: the canonical ID of the entity this claim is about
-   - predicate: the relationship or property being asserted (snake_case)
-   - object_id: the canonical ID or literal value of the object of the claim
-   - body: a human-readable sentence stating the claim
-   - status: "active" for new claims
-   - source_bulletin_id: the bulletin this claim was extracted from
-4. Use entity IDs from contact tags in the bulletin (e.g. {{contact:abc123|Mike}} -> contact-abc123).
-5. Do not merge multiple facts into one claim. Split them.
-6. Do not infer facts not supported by the bulletin text.
-7. Preserve the visibility from the bulletin on each claim.
+   - claim_type_key: one of the keys listed below
+   - subject_id: canonical entity ID (see conventions above)
+   - object_id: a canonical entity ID (for references), OR
+   - value: a scalar (for dates, text, numbers)
+   - Never set both object_id and value.
+   - status: "active"
+   - source_bulletin_id: the bulletin ID from the input
+4. Do not infer facts not in the bulletin.
+5. Preserve the bulletin's visibility on each claim.
+6. Follow the per-entity-type rules listed in the Entity Types section below.
 
 ---
 
-# Claim Structure
+# Person Resolution
 
-Each claim in the output JSON array must be an object with these fields:
+The bulletin text uses `{{person-slug|Name}}` tags for known people.
+- Use the slug from the tag as the entity ID.
+- For real people NOT in the tags: `person:new:Full Name`
 
-{
-  "type": "fact",
-  "subject_id": "trip-bali-2026",
-  "predicate": "preferred_location",
-  "object_id": "location-seminyak",
-  "body": "Bali 2026 currently prefers Seminyak for accommodation.",
-  "status": "active",
-  "source_bulletin_id": "bulletin-2026-06-01-001",
-  "visibility": "group"
-}
+NEVER invent person IDs. Only slugs from tags, existing entities, or `person:new:Full Name`.
 
 ---
 
-# Examples
+{claim_types_section}
 
-A bulletin "{{contact:abc123|Mike}} decided to stay in Seminyak" should produce:
+---
 
+# Output Format
+
+Return a JSON array of claim objects. Example:
+
+```json
 [
-  {
-    "type": "decision",
+  {{
+    "claim_type_key": "destination",
     "subject_id": "trip-bali-2026",
-    "predicate": "accommodation_focus",
-    "object_id": "location-seminyak",
-    "body": "Bali 2026 accommodation search should focus on Seminyak.",
+    "value": "Seminyak",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
     "visibility": "group"
-  }
+  }},
+  {{
+    "claim_type_key": "spouse",
+    "subject_id": "person-mike-cleaver",
+    "object_id": "person:new:Blair",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "transport_type",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "flight",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "departure_location",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "Perth PER",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "arrival_location",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "Bali DPS",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "departure_time",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "2026-08-01T06:00",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "duration",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "6h",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "route",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "QZ541 PER→DPS",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "connection",
+    "subject_id": "trip-bali-2026",
+    "object_id": "connection-perth-bali-outbound",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }}
 ]
+```
 
-A bulletin "{{contact:7f3a91|Michael}} will compare the villas" should produce:
+If no claims can be extracted, return `[]`.
+Return ONLY the JSON array. No other text."""
 
-[
-  {
-    "type": "task",
-    "subject_id": "task-compare-villas",
-    "predicate": "owner",
-    "object_id": "contact-7f3a91",
-    "body": "task-compare-villas is owned by contact-7f3a91.",
-    "status": "active",
-    "source_bulletin_id": "bulletin-2026-06-01-001",
-    "visibility": "group"
-  },
-  {
-    "type": "task",
-    "subject_id": "task-compare-villas",
-    "predicate": "status",
-    "object_id": "open",
-    "body": "task-compare-villas is open.",
-    "status": "active",
-    "source_bulletin_id": "bulletin-2026-06-01-001",
-    "visibility": "group"
-  }
-]
 
----
+def build_extraction_prompt(claim_types_section: str) -> str:
+    """Build the claim extraction prompt with injected claim types."""
+    return _CLAIM_EXTRACTION_TEMPLATE.format(claim_types_section=claim_types_section)
 
-# Output
-
-Return a JSON array of claim objects. If no claims can be extracted, return an empty array.
-
-Do not include any text outside the JSON array."""
-
-ENTITY_UPDATE_PROMPT = """\
-You are an Entity Update Agent for the Agent Memory System.
-
-Your job is to read new bulletin content and extracted claims, merge them with \
-the existing entity document, and produce an updated entity document.
-
-Entity documents are derived summaries optimized for retrieval, current-state \
-understanding, graph traversal, and human readability.
-
----
-
-# Entity Document Structure
-
-Every entity document must be a markdown file with:
-
-1. YAML frontmatter containing:
-   - entity_id: the canonical ID
-   - entity_type: one of channel, contact, group, location, trip, event, task, artifact, decision
-   - display_name: human-readable name
-   - status: current lifecycle status
-
-2. Markdown body with these sections (in order):
-   - Summary: brief description of the entity
-   - Current State: what is happening now, prioritized over history
-   - Related Entities: MANDATORY section with all typed lists
-   - Timeline: recent events and changes
-
----
-
-# Related Entities Section (MANDATORY)
-
-Every entity document MUST include a Related Entities section with ALL of these typed lists:
-
-contacts: []
-groups: []
-channels: []
-trips: []
-locations: []
-events: []
-tasks: []
-artifacts: []
-decisions: []
-
-Even if a list is empty, it must be present.
-
-All references must use canonical IDs, never display names.
-
-The retrieval system uses Related Entities for graph traversal. This section is critical.
-
----
-
-# Rules
-
-1. Use canonical IDs for all entity references. Never use display names in IDs or references.
-2. Prioritize current state over full history. The Summary and Current State sections should reflect the latest information.
-3. The Timeline section should contain recent entries, not an exhaustive history.
-4. When creating a new entity document, populate all required sections.
-5. When updating an existing entity document, merge new information with existing content. Preserve existing structure unless new claims contradict it.
-6. If claims conflict, prefer newer claims but note the conflict in the document body.
-7. Keep entity documents concise and focused on retrieval usefulness. When a document grows long, summarize or remove stale historical details while preserving current state and recent timeline entries.
-8. Do not invent entity IDs that do not appear in the claims or existing documents.
-9. Each output entity must only contain information relevant to that entity. Never merge information about different entities into one document.
-10. Synthesize from the bulletin content directly — bulletins contain the actual knowledge, claims are structured relationship data.
-
----
-
-# Input
-
-You will receive:
-1. ## NEW BULLETINS — the raw bulletin content being digested (the primary source of knowledge)
-2. ## NEW CLAIMS — structured claims extracted from those bulletins (relationship data)
-3. ## EXISTING ENTITY — the current entity document to update (if one exists)
-
----
-
-# Output
-
-Return a JSON array of entity document write operations. Each operation must be:
-
-{
-  "entity_id": "trip-bali-2026",
-  "entity_type": "trip",
-  "action": "create" or "update",
-  "content": "<full markdown content of the entity document>"
-}
-
-The content field must contain the complete entity document including frontmatter and all sections.
-
-If no entity updates are needed, return an empty array."""
 
 RETRIEVAL_AGENT_PROMPT = """\
 You are a memory retrieval agent operating against the Agent Memory System.
@@ -244,40 +222,44 @@ Your objective is to answer the user's question using the minimum amount of memo
 
 The memory system contains:
 
-- Channels
-- Contacts
+- Persons (people)
 - Groups
-- Trips
 - Locations
+- Trips
+- Stays (accommodation legs within trips)
 - Events
 - Tasks
-- Artifacts
+- Files
+- Things (physical objects)
 - Decisions
-- Claims
-- Bulletins
+- Claims (typed, structured)
+- Bulletins (source of truth)
 
-Bulletins are the source of truth.
-
-Entity documents are derived summaries.
+Claims are the structured knowledge layer.
+Bulletins are the raw source records.
 
 All relationships use canonical IDs.
-
-Contacts use IDs from the Contacts Database.
 
 ---
 
 ## Retrieval Rules
 
 1. Do not search bulletins first.
-2. Start with entity documents.
-3. Read the minimum number of files.
-4. Use Related Entities for graph traversal.
-5. Do not perform broad searches unless entity retrieval fails.
-6. Only read bulletins when provenance or missing detail requires it.
-7. Respect visibility and scope restrictions.
-8. Never retrieve content outside the current query scope.
-9. Prefer current-state summaries over historical records.
-10. Report uncertainty and conflicts clearly.
+2. Start with entity documents and their claims.
+3. Read the minimum number of records.
+4. Use claim relationships for graph traversal.
+5. Only read bulletins when provenance or missing detail requires it.
+6. Respect visibility and scope restrictions.
+7. Prefer current-state claims over historical records.
+8. Report uncertainty and conflicts clearly.
+
+---
+
+## Tools
+
+- recall(query) — Retrieve entity + claims by ID, name, or natural language question
+- find(entity_type, claim_type_key?, value?) — Structured search across claims
+- note(text, context?) — Accept new information from conversation
 
 ---
 
@@ -285,197 +267,23 @@ Contacts use IDs from the Contacts Database.
 
 ### Step 1: Understand User Intent
 
-Determine:
-
-query_type:
-likely_entities:
-
-Questions to consider:
-
-- Is this about a trip?
-- Is this about a contact?
-- Is this about a group?
-- Is this about a channel?
-- Is this about a task?
-- Is this about an artifact?
-- Is this about a decision?
-- Is this about a location?
-
----
+Determine query_type and likely_entities.
 
 ### Step 2: Resolve Entities
 
-Convert names into IDs.
+Convert names into IDs using aliases, FTS, or person roster.
 
-Use:
+### Step 3: Retrieve
 
-- Contacts Database
-- aliases
-- entity indexes
-- existing entity documents
+Use recall() for the resolved entities. Expand to related entities only if needed.
 
-Output:
+### Step 4: Synthesize Answer
 
-resolved_entities:
-
-Example:
-
-Michael
-
-becomes:
-
-contact-7f3a91
-
----
-
-### Step 3: Determine Retrieval Roots
-
-Select the most likely starting entities.
-
-Examples:
-
-Trip question      -> Trip
-Group question     -> Group
-Artifact question  -> Artifact
-Channel question   -> Channel
-Task question      -> Task
-Location question  -> Location
-Decision question  -> Decision
-
-Output:
-
-retrieval_roots:
-
----
-
-### Step 4: Retrieve Root Entity Documents
-
-Read root entities first.
-
-Extract:
-
-facts_found:
-related_entities:
-source_bulletins:
-
----
-
-### Step 5: Traverse Related Entities
-
-Only expand if needed.
-
-Examples:
-
-Trip
-  -> Tasks
-  -> Artifacts
-  -> Decisions
-  -> Locations
-
-Channel
-  -> Group
-  -> Trip
-  -> Recent Bulletins
-
-Artifact
-  -> Trip
-  -> Task
-  -> Source Bulletin
-
-Output:
-
-expanded_entities:
-
----
-
-### Step 6: Read Supporting Bulletins
-
-Read bulletins only if:
-
-- more detail is needed
-- provenance is required
-- entity docs conflict
-- entity docs are insufficient
-- current state is unclear
-
-Prefer newer relevant bulletins first.
-
-Output:
-
-bulletins_read:
-
----
-
-### Step 7: Synthesize Answer
-
-Answer concisely.
-
-Include:
-
-- current state
-- active tasks
-- decisions
-- relevant artifacts
-- relevant dates
-- provenance references where useful
-
-When uncertain:
-
-- say what is uncertain
-- identify conflicting claims
-- cite supporting bulletins or source docs
-
----
-
-## Example Query: Trip Tasks
-
-User:
-
-What is left to do for Bali?
-
-Procedure:
-
-Resolve Bali -> trip-bali-2026
-Read trip-bali-2026
-Expand to related tasks
-Read open task documents
-Return open tasks and blockers
-
----
-
-## Example Query: Artifact
-
-User:
-
-What spreadsheet did we make for accommodation?
-
-Procedure:
-
-Resolve accommodation context -> trip-bali-2026
-Read trip-bali-2026
-Expand to related artifacts
-Read artifact-villa-spreadsheet
-Return path, purpose, and related task
-
----
-
-## Example Query: Channel Summary
-
-User:
-
-What happened in the Bali WhatsApp chat this week?
-
-Procedure:
-
-Resolve Bali WhatsApp chat -> channel-whatsapp-bali-trip
-Read channel document
-Read recent allowed bulletins
-Summarize decisions, tasks, artifacts, and important changes
-Ignore conversational noise"""
+Answer concisely. Include current state, active tasks, relevant dates. When uncertain, say what is uncertain.
+"""
 
 MEMORY_INDEX_HEADER = """\
 You have persistent memory with these tools:
-- memory_search(query) -- Search across memory entities.
-- memory_read(entity_id) -- Read a specific entity document.
-- memory_browse(entity_type) -- List entities of a given type.
-- memory_write(content) -- Write new information (queued as bulletin)."""
+- recall(query) — Retrieve entity and claims by name, ID, or question.
+- find(entity_type, claim_type_key?, value?) — Structured search across claims.
+- note(text, context?) — Write new information (queued as bulletin)."""

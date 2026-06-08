@@ -22,8 +22,10 @@ from cyborg_server.heartbeat import (
     EmailPollingTask,
     EmailSyncTask,
     HeartbeatRunner,
+    LLMCallStalenessTask,
     SessionIdleSummaryTask,
 )
+from cyborg_server.services.routine_scheduler import RoutineSchedulerTask
 from cyborg_server.models import HealthResponse
 from cyborg_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, session_routes, webhooks, whatsapp
 from cyborg_server.services.event_bus import EventBus
@@ -104,6 +106,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(EmailSyncTask())
         runner.register(CallCleanupTask())
         runner.register(SessionIdleSummaryTask())
+        runner.register(LLMCallStalenessTask())
+        runner.register(RoutineSchedulerTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:
             yield

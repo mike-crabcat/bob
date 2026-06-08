@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Awaitable
+from httpx import Timeout
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
@@ -88,7 +89,11 @@ def _get_cached_client(api_key: str, base_url: str) -> Any:
         return _cached_client[2]
     if AsyncOpenAI is None:
         raise RuntimeError("openai SDK is not installed. Install with: pip install cyborg-server[openai]")
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=Timeout(300.0, connect=30.0),
+    )
     _cached_client = (api_key, base_url, client)
     logger.info("OpenAI client created for base_url=%s", base_url)
     return client
@@ -131,6 +136,7 @@ class OpenAIService(BaseService):
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        stream_result: StreamResult | None = None,
     ) -> str:
         """Non-streaming chat completion via Responses API."""
         resolved_model = model or self._get_settings().openai.default_model
@@ -155,6 +161,13 @@ class OpenAIService(BaseService):
             usage = getattr(response, "usage", None)
 
             cached_tokens = self._extract_cached_tokens(usage)
+
+            if stream_result is not None:
+                stream_result.prompt_tokens = usage.input_tokens if usage else None
+                stream_result.completion_tokens = usage.output_tokens if usage else None
+                stream_result.total_tokens = usage.total_tokens if usage else None
+                stream_result.cached_tokens = cached_tokens
+                stream_result.latency_seconds = elapsed
 
             logger.info(
                 "OpenAI chat: model=%s latency=%.2fs "
@@ -258,6 +271,7 @@ class OpenAIService(BaseService):
         max_iterations: int = 100,
         stream_result: StreamResult | None = None,
         on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
+        on_iteration_complete: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -361,6 +375,12 @@ class OpenAIService(BaseService):
                 iteration + 1, len(function_calls),
             )
 
+            if on_iteration_complete:
+                try:
+                    await on_iteration_complete(messages)
+                except Exception:
+                    pass
+
         elapsed = time.monotonic() - t0
         logger.warning("OpenAI tool call hit max iterations: model=%s max=%d", resolved_model, max_iterations)
         return "Max tool call iterations reached."
@@ -374,6 +394,7 @@ class OpenAIService(BaseService):
         model: str | None = None,
         max_iterations: int = 100,
         on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
+        on_iteration_complete: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat with tool calling. Runs tool calls non-streamingly,
         then streams the final text response for real-time consumption."""
@@ -432,6 +453,12 @@ class OpenAIService(BaseService):
                 "chat_stream_with_tools: iteration=%d function_calls=%d",
                 iteration + 1, len(function_calls),
             )
+
+            if on_iteration_complete:
+                try:
+                    await on_iteration_complete(messages)
+                except Exception:
+                    pass
 
         # Hit max iterations — make one final streaming call
         logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)

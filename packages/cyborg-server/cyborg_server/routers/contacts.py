@@ -64,8 +64,8 @@ async def create_contact(
     """Create a new contact."""
     contact_id = uuid4()
     now = datetime.now(timezone.utc).isoformat()
-    normalized_phone = _normalize_phone_number(payload.phone_number)
-    
+    normalized_phone = _normalize_phone_number(payload.phone_number) if payload.phone_number else None
+
     try:
         await database.execute(
             """
@@ -379,9 +379,6 @@ async def get_contact_entity(
         "entity_type": entity.entity_type,
         "display_name": entity.display_name,
         "status": entity.status,
-        "body": entity.body,
-        "related_entities": entity.related_entities,
-        "source_bulletins": entity.source_bulletins,
     }
 
 
@@ -408,15 +405,14 @@ async def get_contact_claims(
     return [
         {
             "id": c.id,
-            "type": c.type,
+            "claim_type_key": c.claim_type_key,
             "subject_id": c.subject_id,
-            "predicate": c.predicate,
             "object_id": c.object_id,
+            "value": c.value,
             "status": c.status,
             "source_bulletins": c.source_bulletins,
             "visibility": c.visibility,
             "created_at": c.created_at.isoformat() if c.created_at else None,
-            "body": c.body,
         }
         for c in claims
     ]

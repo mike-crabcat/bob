@@ -416,3 +416,28 @@ async def sync_emails(
         return {"synced": count}
     finally:
         await client.close()
+
+
+@router.post("/poll")
+async def poll_emails(
+    settings: Settings = Depends(get_settings),
+    ctx: AppContext = Depends(get_app_context),
+) -> dict[str, Any]:
+    """Poll all inboxes for new messages and dispatch through patience system."""
+    from cyborg_server.services.email_polling_service import EmailPollingService
+
+    if not settings.agentmail.enabled:
+        raise HTTPException(status_code=400, detail="AgentMail is not configured")
+
+    from cyborg_server.services.agentmail_client import AgentMailClient
+
+    client = AgentMailClient(
+        base_url=settings.agentmail.base_url,
+        api_key=settings.agentmail.api_key,
+    )
+    try:
+        service = EmailPollingService(ctx, agentmail_client=client)
+        count = await service.poll_all_inboxes(force=True)
+        return {"polled": count}
+    finally:
+        await client.close()

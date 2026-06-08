@@ -26,6 +26,7 @@ dependencies = [
   "uvicorn>=0.35.0",
   "websockets>=15.0.0",
   "openai>=1.0.0",
+  "sqlite-vec>=0.1.6",
   "twilio>=9.0.0",
 ]
 

@@ -1,7 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
-import { fetchAPI } from "@/lib/api";
+import { fetchAPI, postAPI } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -67,11 +67,10 @@ interface DreamOp {
 
 interface ClaimSummary {
   id: string;
-  type: string;
+  claim_type_key: string;
   subject_id: string;
-  predicate: string;
   object_id: string | null;
-  body: string;
+  value: string | null;
 }
 
 interface EntityListItem {
@@ -81,6 +80,7 @@ interface EntityListItem {
   status: string;
   updated_at: string;
   claim_count: number;
+  summary: string;
 }
 
 interface EntityDetail {
@@ -88,39 +88,60 @@ interface EntityDetail {
   entity_type: string;
   display_name: string;
   status: string;
-  extra_frontmatter: Record<string, unknown>;
-  body: string;
-  related_entities: Record<string, string[]>;
-  source_bulletins: string[];
+  rendered: string;
   claims: ClaimDetail[];
+  source_bulletins?: string[];
 }
 
 interface ClaimDetail {
   id: string;
-  type: string;
+  claim_type_key: string;
   subject_id: string;
-  predicate: string;
   object_id: string | null;
+  value: string | null;
   status: string;
   source_bulletins: string[];
   visibility: string;
   created_at: string | null;
-  body: string;
 }
 
 // ── Claim colors ───────────────────────────────────────────────────────────
 
 const CLAIM_COLORS: Record<string, string> = {
-  fact: "bg-blue-900/40 text-blue-300",
-  preference: "bg-purple-900/40 text-purple-300",
-  constraint: "bg-orange-900/40 text-orange-300",
+  spouse: "bg-pink-900/40 text-pink-300",
+  parent: "bg-pink-900/40 text-pink-300",
+  child: "bg-pink-900/40 text-pink-300",
+  sibling: "bg-pink-900/40 text-pink-300",
+  home_address: "bg-cyan-900/40 text-cyan-300",
+  workplace: "bg-cyan-900/40 text-cyan-300",
+  job: "bg-cyan-900/40 text-cyan-300",
+  food_preference: "bg-orange-900/40 text-orange-300",
+  drink_preference: "bg-orange-900/40 text-orange-300",
+  interest: "bg-purple-900/40 text-purple-300",
+  personality: "bg-purple-900/40 text-purple-300",
+  language: "bg-blue-900/40 text-blue-300",
+  birthday: "bg-blue-900/40 text-blue-300",
+  alias: "bg-gray-900/40 text-gray-300",
+  contact_id: "bg-gray-900/40 text-gray-300",
+  member: "bg-green-900/40 text-green-300",
+  destination: "bg-green-900/40 text-green-300",
+  start_date: "bg-blue-900/40 text-blue-300",
+  end_date: "bg-blue-900/40 text-blue-300",
+  task_status: "bg-yellow-900/40 text-yellow-300",
+  owner: "bg-yellow-900/40 text-yellow-300",
+  due_date: "bg-yellow-900/40 text-yellow-300",
+  description: "bg-gray-900/40 text-gray-300",
+  location: "bg-cyan-900/40 text-cyan-300",
+  transport_type: "bg-cyan-900/40 text-cyan-300",
   decision: "bg-green-900/40 text-green-300",
-  task: "bg-yellow-900/40 text-yellow-300",
-  availability: "bg-cyan-900/40 text-cyan-300",
-  relationship: "bg-pink-900/40 text-pink-300",
-  private_note: "bg-gray-900/40 text-gray-300",
-  booking: "bg-teal-900/40 text-teal-300",
-  artifact: "bg-indigo-900/40 text-indigo-300",
+  rationale: "bg-green-900/40 text-green-300",
+  purpose: "bg-indigo-900/40 text-indigo-300",
+  name: "bg-blue-900/40 text-blue-300",
+  stop: "bg-teal-900/40 text-teal-300",
+  file_path: "bg-amber-900/40 text-amber-300",
+  file_ref: "bg-amber-900/40 text-amber-300",
+  thing_type: "bg-lime-900/40 text-lime-300",
+  truth: "bg-rose-900/40 text-rose-300",
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -152,7 +173,25 @@ function relativeTimeEpoch(epoch: number): string {
 
 // ── Tab types ──────────────────────────────────────────────────────────────
 
-type Tab = "entities" | "pipeline" | "search";
+type Tab = "entities" | "pipeline" | "search" | "stats" | "qa";
+
+// ── Question types ──────────────────────────────────────────────────────────
+
+interface Question {
+  id: string;
+  entity_id: string;
+  question: string;
+  options: string[];
+  context: string;
+  status: string;
+  answer: string | null;
+  created_at: string | null;
+  answered_at: string | null;
+}
+
+interface QuestionsResponse {
+  questions: Question[];
+}
 
 // ── BulletinCard ───────────────────────────────────────────────────────────
 
@@ -167,7 +206,14 @@ function BulletinCard({ b }: { b: Bulletin }) {
       >
         <span className="text-[8px] text-warning/80 bg-warning/10 px-1 rounded shrink-0 mt-0.5">queued</span>
         <div className="flex flex-col min-w-0 flex-1">
-          <span className="text-[11px] text-text truncate">{firstLine || b.slug}</span>
+          <Link
+            to="/memory/bulletins/$bulletinId"
+            params={{ bulletinId: b.slug }}
+            onClick={(e) => e.stopPropagation()}
+            className="text-[11px] text-text hover:text-accent truncate"
+          >
+            {firstLine || b.slug}
+          </Link>
           {b.participants && (
             <span className="text-[9px] text-muted/60">{b.participants}</span>
           )}
@@ -177,7 +223,7 @@ function BulletinCard({ b }: { b: Bulletin }) {
       {expanded && (
         <div className="px-3 pb-2">
           <div className="flex items-center gap-1.5 mb-1">
-            <span className="text-[8px] text-muted/50 font-mono">{b.slug}</span>
+            <Link to="/memory/bulletins/$bulletinId" params={{ bulletinId: b.slug }} className="text-[8px] text-accent/60 font-mono hover:underline">{b.slug}</Link>
             <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{b.source_type}</span>
           </div>
           <pre className="text-[10px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed max-h-48 overflow-y-auto">{b.content}</pre>
@@ -282,7 +328,7 @@ function DreamRunCard({
                   return (
                     <div key={i} className="bg-surface/50 border border-border/50 rounded px-2 py-1.5">
                       <div className="flex items-center gap-1.5 mb-1">
-                        <span className="text-[8px] text-muted/50 font-mono">{op.bulletin}</span>
+                        <Link to="/memory/bulletins/$bulletinId" params={{ bulletinId: op.bulletin }} className="text-[8px] text-accent/60 font-mono hover:underline">{op.bulletin}</Link>
                         <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{claimCount} claims</span>
                         <span className="text-[8px] text-success/60 bg-success/5 px-1 rounded">{op.entity_ops} entity ops</span>
                         {op.source && (
@@ -309,11 +355,12 @@ function DreamRunCard({
                           <span className="text-[8px] text-muted/40 uppercase tracking-wide">extracted claims</span>
                           {claimList.map((c, ci) => (
                             <div key={ci} className="flex items-center gap-1.5 pl-1">
-                              <span className={`text-[8px] px-1 rounded ${CLAIM_COLORS[c.type] ?? "bg-gray-900/40 text-gray-300"}`}>
-                                {c.type}
+                              <span className={`text-[8px] px-1 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
+                                {c.claim_type_key}
                               </span>
                               <span className="text-[10px] text-text truncate">
-                                {c.subject_id} {c.predicate} {c.object_id && <span className="text-muted">&rarr; {c.object_id}</span>}
+                                {c.subject_id}
+                                {c.object_id ? ` → ${c.object_id}` : c.value ? ` → ${c.value}` : ""}
                               </span>
                             </div>
                           ))}
@@ -375,16 +422,19 @@ function EntityDetailView({
   const [expandedClaim, setExpandedClaim] = useState<string | null>(null);
   const [bulletinContent, setBulletinContent] = useState<Record<string, string>>({});
   const [fetchedBulletins, setFetchedBulletins] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [mergeTarget, setMergeTarget] = useState("");
+  const [mergeBusy, setMergeBusy] = useState(false);
 
   const fetchBulletins = async () => {
-    if (fetchedBulletins || entity.source_bulletins.length === 0) return;
+    if (fetchedBulletins || !(entity.source_bulletins?.length)) return;
     try {
       const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] ?? "";
       const base = import.meta.env.BASE_URL.replace(/\/$/, "");
       const res = await fetch(`${base}/api/memory/digested?secret=${encodeURIComponent(secret)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slugs: entity.source_bulletins }),
+        body: JSON.stringify({ slugs: entity.source_bulletins ?? [] }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -401,7 +451,7 @@ function EntityDetailView({
     fetchBulletins();
   }, [entity.entity_id]);
 
-  const hasRelated = Object.values(entity.related_entities).some(ids => ids && ids.length > 0);
+  const hasRelated = false;
 
   return (
     <div className="flex flex-col h-full">
@@ -411,16 +461,61 @@ function EntityDetailView({
         <span className="text-xs text-text font-medium truncate flex-1">{entity.display_name}</span>
         <span className="text-[8px] text-accent/60 bg-accent/10 px-1.5 py-0.5 rounded">{entity.entity_type}</span>
         <span className="text-[8px] text-success/60 bg-success/10 px-1.5 py-0.5 rounded">{entity.status}</span>
+        {!merging && (
+          <button
+            onClick={() => setMerging(true)}
+            className="text-[8px] text-muted hover:text-accent bg-surface/50 border border-border/50 px-1.5 py-0.5 rounded hover:border-accent/30 transition-colors"
+          >merge</button>
+        )}
       </div>
+
+      {/* Merge bar */}
+      {merging && (
+        <div className="flex items-center gap-1.5 px-3 py-1 border-b border-border bg-warning/5 shrink-0">
+          <span className="text-[9px] text-muted">Merge into:</span>
+          <input
+            value={mergeTarget}
+            onChange={(e) => setMergeTarget(e.target.value)}
+            placeholder="canonical entity ID"
+            className="flex-1 text-[10px] bg-surface border border-border/50 rounded px-1.5 py-0.5 text-text font-mono placeholder:text-muted/30 focus:outline-none focus:border-accent/40"
+          />
+          <button
+            disabled={mergeBusy || !mergeTarget.trim()}
+            onClick={async () => {
+              setMergeBusy(true);
+              try {
+                const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] ?? "";
+                const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+                const res = await fetch(`${base}/api/memory/entities/merge?secret=${encodeURIComponent(secret)}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ canonical_id: mergeTarget.trim(), loser_id: entity.entity_id }),
+                });
+                const data = await res.json();
+                if (!res.ok || data.error) throw new Error(data.error || "merge failed");
+                onNavigateEntity(mergeTarget.trim());
+              } catch {
+                alert("Merge failed");
+              } finally {
+                setMergeBusy(false);
+              }
+            }}
+            className="text-[8px] text-warning bg-warning/10 border border-warning/30 px-1.5 py-0.5 rounded hover:bg-warning/20 disabled:opacity-40 transition-colors"
+          >{mergeBusy ? "..." : "confirm"}</button>
+          <button
+            onClick={() => { setMerging(false); setMergeTarget(""); }}
+            className="text-[8px] text-muted hover:text-text px-1"
+          >cancel</button>
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {/* Body */}
-        {entity.body && (
+        {/* Rendered body */}
+        {entity.rendered && (
           <div className="px-3 py-2 border-b border-border">
-            <span className="text-[9px] text-muted/50 uppercase tracking-wide">body</span>
-            <pre className="mt-1 text-[11px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed max-h-72 overflow-y-auto">
-              {entity.body}
+            <pre className="text-[11px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed">
+              {entity.rendered}
             </pre>
           </div>
         )}
@@ -430,30 +525,64 @@ function EntityDetailView({
           <div className="px-3 py-2 border-b border-border">
             <span className="text-[9px] text-muted/50 uppercase tracking-wide">claims ({entity.claims.length})</span>
             <div className="mt-1 flex flex-col gap-1">
-              {entity.claims.map((c) => (
-                <div
-                  key={c.id}
-                  onClick={() => setExpandedClaim(expandedClaim === c.id ? null : c.id)}
-                  className="bg-surface/50 border border-border/50 px-2 py-1 cursor-pointer hover:border-accent/30 transition-colors rounded"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className={`text-[9px] px-1 rounded ${CLAIM_COLORS[c.type] ?? "bg-gray-900/40 text-gray-300"}`}>
-                      {c.type}
-                    </span>
-                    <span className="text-[11px] text-text truncate flex-1">
-                      {c.predicate} {c.object_id && <span className="text-muted/60">&rarr; {c.object_id}</span>}
-                    </span>
-                    {c.created_at && (
-                      <span className="text-[9px] text-muted/40 shrink-0">{new Date(c.created_at).toLocaleDateString()}</span>
+              {entity.claims.map((c) => {
+                const isSubject = c.subject_id === entity.entity_id;
+                const otherEntity = isSubject ? c.object_id : c.subject_id;
+                const dir = isSubject ? "→" : "←";
+                return (
+                  <div
+                    key={c.id}
+                    onClick={() => setExpandedClaim(expandedClaim === c.id ? null : c.id)}
+                    className="bg-surface/50 border border-border/50 px-2 py-1 cursor-pointer hover:border-accent/30 transition-colors rounded"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[9px] px-1 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
+                        {c.claim_type_key}
+                      </span>
+                      <span className="text-[11px] text-text flex-1 break-all">
+                        {otherEntity ? (
+                          <>
+                            <span className="text-muted/60 mr-1">{dir}</span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onNavigateEntity(otherEntity); }}
+                              className="text-accent hover:underline"
+                            >
+                              {otherEntity}
+                            </button>
+                          </>
+                        ) : c.value ? (
+                          <>{dir} {c.value}</>
+                        ) : ""}
+                      </span>
+                      {c.created_at && (
+                        <span className="text-[9px] text-muted/40 shrink-0">{new Date(c.created_at).toLocaleDateString()}</span>
+                      )}
+                    </div>
+                    {expandedClaim === c.id && (
+                      <div className="mt-1 text-[10px] text-muted border-t border-border/30 pt-1 flex flex-col gap-0.5">
+                        <div>
+                          <span className="text-muted/50">from:</span>{" "}
+                          <button onClick={(e) => { e.stopPropagation(); onNavigateEntity(c.subject_id); }} className="text-accent hover:underline">{c.subject_id}</button>
+                        </div>
+                        {c.object_id && (
+                          <div>
+                            <span className="text-muted/50">to:</span>{" "}
+                            <button onClick={(e) => { e.stopPropagation(); onNavigateEntity(c.object_id!); }} className="text-accent hover:underline">{c.object_id}</button>
+                          </div>
+                        )}
+                        {c.value && (
+                          <div>
+                            <span className="text-muted/50">value:</span> {c.value}
+                          </div>
+                        )}
+                        <div>
+                          <span className="text-muted/50">vis:</span> {c.visibility}
+                        </div>
+                      </div>
                     )}
                   </div>
-                  {expandedClaim === c.id && c.body && (
-                    <div className="mt-1 text-[10px] text-muted border-t border-border/30 pt-1">
-                      {c.body}
-                    </div>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -486,14 +615,21 @@ function EntityDetailView({
         )}
 
         {/* Source bulletins */}
-        {entity.source_bulletins.length > 0 && (
+        {(entity.source_bulletins?.length ?? 0) > 0 && (
           <div className="px-3 py-2">
-            <span className="text-[9px] text-muted/50 uppercase tracking-wide">source bulletins ({entity.source_bulletins.length})</span>
+            <span className="text-[9px] text-muted/50 uppercase tracking-wide">source bulletins ({entity.source_bulletins?.length ?? 0})</span>
             <div className="mt-1 flex flex-col gap-1">
-              {entity.source_bulletins.map((slug) => (
+              {(entity.source_bulletins ?? []).map((slug) => (
                 <details key={slug}>
-                  <summary className="text-[9px] text-muted/50 font-mono cursor-pointer hover:text-muted/70">
-                    {slug}
+                  <summary className="text-[9px] font-mono cursor-pointer hover:text-muted/70">
+                    <Link
+                      to="/memory/bulletins/$bulletinId"
+                      params={{ bulletinId: slug }}
+                      className="text-accent/60 hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {slug}
+                    </Link>
                   </summary>
                   <pre className="mt-1 text-[10px] text-text/80 whitespace-pre-wrap break-words font-mono leading-relaxed max-h-32 overflow-y-auto bg-surface/50 border border-border/30 rounded px-1.5 py-1">
                     {bulletinContent[slug] || "loading..."}
@@ -508,6 +644,127 @@ function EntityDetailView({
   );
 }
 
+// ── Question Cards ────────────────────────────────────────────────────────
+
+function QuestionCard({
+  q,
+  onAnswer,
+  onDismiss,
+  onNavigateEntity,
+  isSubmitting,
+}: {
+  q: Question;
+  onAnswer: (answer: string) => void;
+  onDismiss: () => void;
+  onNavigateEntity: (entityId: string) => void;
+  isSubmitting: boolean;
+}) {
+  const [customAnswer, setCustomAnswer] = useState("");
+
+  return (
+    <div className="px-3 py-2 border-b border-border/50">
+      <div className="flex items-start gap-1.5 mb-1">
+        <span className="text-[8px] text-warning bg-warning/10 px-1 rounded shrink-0 mt-0.5">open</span>
+        <span className="text-[11px] text-text flex-1">{q.question}</span>
+        <button
+          onClick={onDismiss}
+          disabled={isSubmitting}
+          className="text-[8px] text-muted/50 hover:text-danger px-1 shrink-0 mt-0.5 disabled:opacity-30"
+          title="Dismiss"
+        >
+          dismiss
+        </button>
+      </div>
+      {q.context && (
+        <div className="text-[9px] text-muted/60 mb-1.5 pl-4">{q.context}</div>
+      )}
+      <div className="flex items-center gap-1 mb-2 pl-4">
+        <span className="text-[8px] text-muted/40">entity:</span>
+        <button
+          onClick={() => onNavigateEntity(q.entity_id)}
+          className="text-[9px] text-accent hover:underline"
+        >
+          {q.entity_id}
+        </button>
+      </div>
+      {q.options.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2 pl-4">
+          {q.options.map((opt) => (
+            <button
+              key={opt}
+              onClick={() => onAnswer(opt)}
+              disabled={isSubmitting}
+              className="text-[10px] px-2 py-0.5 border border-border text-muted hover:text-text hover:border-accent transition-colors rounded disabled:opacity-50"
+            >
+              {isSubmitting ? "..." : opt}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-1 pl-4">
+        <input
+          type="text"
+          value={customAnswer}
+          onChange={(e) => setCustomAnswer(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && customAnswer.trim() && !isSubmitting) {
+              onAnswer(customAnswer.trim());
+              setCustomAnswer("");
+            }
+          }}
+          placeholder="Custom answer..."
+          disabled={isSubmitting}
+          className="flex-1 text-[10px] bg-transparent border border-border px-2 py-0.5 text-text placeholder:text-muted/50 focus:outline-none focus:border-accent disabled:opacity-50"
+        />
+        <button
+          onClick={() => {
+            if (customAnswer.trim() && !isSubmitting) {
+              onAnswer(customAnswer.trim());
+              setCustomAnswer("");
+            }
+          }}
+          disabled={!customAnswer.trim() || isSubmitting}
+          className="px-2 py-0.5 text-[10px] border border-border text-muted hover:text-text hover:border-accent transition-colors disabled:opacity-30"
+        >
+          {isSubmitting ? "..." : "send"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AnsweredQuestionCard({
+  q,
+  onNavigateEntity,
+}: {
+  q: Question;
+  onNavigateEntity: (entityId: string) => void;
+}) {
+  return (
+    <div className="px-3 py-2 border-b border-border/50">
+      <div className="flex items-start gap-1.5 mb-1">
+        <span className="text-[8px] text-success bg-success/10 px-1 rounded shrink-0 mt-0.5">answered</span>
+        <span className="text-[11px] text-text/70 flex-1">{q.question}</span>
+      </div>
+      <div className="pl-4 flex flex-col gap-0.5">
+        <div className="text-[10px] text-text">{q.answer}</div>
+        <div className="flex items-center gap-1">
+          <span className="text-[8px] text-muted/40">entity:</span>
+          <button
+            onClick={() => onNavigateEntity(q.entity_id)}
+            className="text-[9px] text-accent/60 hover:underline"
+          >
+            {q.entity_id}
+          </button>
+          {q.answered_at && (
+            <span className="text-[8px] text-muted/40 ml-auto">{relativeTime(q.answered_at)}</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Memory Page ───────────────────────────────────────────────────────
 
 function MemoryPage() {
@@ -515,7 +772,7 @@ function MemoryPage() {
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const [lintConfirm, setLintConfirm] = useState(false);
+
   const queryClient = useQueryClient();
 
   // ── Data fetching ──
@@ -581,30 +838,38 @@ function MemoryPage() {
     },
   });
 
-  const lintMutation = useMutation({
-    mutationFn: async () => {
-      const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] ?? "";
-      const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/memory/lint?secret=${encodeURIComponent(secret)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      if (!res.ok) throw new Error(`API ${res.status}`);
-      return res.json();
+  // ── Questions data ──
+
+  const { data: openQuestionsData } = useQuery<QuestionsResponse>({
+    queryKey: ["memory-questions-open"],
+    queryFn: () => fetchAPI<QuestionsResponse>("/memory/questions?status=open"),
+    enabled: tab === "qa",
+  });
+
+  const { data: answeredQuestionsData } = useQuery<QuestionsResponse>({
+    queryKey: ["memory-questions-answered"],
+    queryFn: () => fetchAPI<QuestionsResponse>("/memory/questions?status=answered"),
+    enabled: tab === "qa",
+  });
+
+  const answerMutation = useMutation({
+    mutationFn: async ({ id, answer }: { id: string; answer: string }) => {
+      return postAPI(`/memory/questions/${id}/answer`, { answer });
     },
     onSuccess: () => {
-      setLintConfirm(false);
-      queryClient.invalidateQueries({ queryKey: ["memory-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["memory-questions-open"] });
+      queryClient.invalidateQueries({ queryKey: ["memory-questions-answered"] });
     },
   });
 
-  // Auto-clear lint success after 3s
-  useEffect(() => {
-    if (lintMutation.isSuccess) {
-      const t = setTimeout(() => lintMutation.reset(), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [lintMutation.isSuccess]);
+  const dismissMutation = useMutation({
+    mutationFn: async ({ id }: { id: string }) => {
+      return postAPI(`/memory/questions/${id}/dismiss`, {});
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["memory-questions-open"] });
+    },
+  });
 
   // ── Derived data ──
 
@@ -638,52 +903,9 @@ function MemoryPage() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header: stats + pipeline status */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
-        <span className="text-xs text-text font-medium">{stats.total_entries}</span>
-        <span className="text-[10px] text-muted">entries</span>
-        <div className="flex items-center gap-1">
-          {categories.map((c) => (
-            <span key={c.name} className="text-[9px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
-              {c.name} <span className="text-muted">{c.count}</span>
-            </span>
-          ))}
-        </div>
-        <div className="relative ml-auto">
-          {lintMutation.isSuccess ? (
-            <span className="text-[9px] text-success">linted</span>
-          ) : lintConfirm ? (
-            <div className="flex items-center gap-1">
-              <span className="text-[8px] text-warning">rewrites all entries</span>
-              <button
-                onClick={() => { lintMutation.mutate(); }}
-                disabled={lintMutation.isPending}
-                className="text-[9px] text-error hover:underline"
-              >
-                {lintMutation.isPending ? "..." : "confirm"}
-              </button>
-              <button
-                onClick={() => setLintConfirm(false)}
-                className="text-[9px] text-muted hover:text-text"
-              >
-                cancel
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setLintConfirm(true)}
-              disabled={lintMutation.isPending}
-              className="text-[10px] text-muted hover:text-text disabled:opacity-30"
-            >
-              lint
-            </button>
-          )}
-        </div>
-      </div>
-
       {/* Tab bar */}
       <div className="flex items-center gap-0 px-3 border-b border-border shrink-0">
-        {(["entities", "pipeline", "search"] as Tab[]).map((t) => (
+        {(["entities", "pipeline", "search", "stats", "qa"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -751,7 +973,7 @@ function MemoryPage() {
                       <span className="text-[8px] text-accent/60 bg-accent/10 px-1 rounded shrink-0">{e.entity_type}</span>
                       <div className="flex flex-col min-w-0 flex-1">
                         <span className="text-[11px] text-text truncate">{e.display_name || e.entity_id}</span>
-                        <span className="text-[9px] text-muted/40 font-mono truncate">{e.entity_id}</span>
+                        <span className="text-[9px] text-muted/40 font-mono truncate">{e.summary || e.entity_id}</span>
                       </div>
                       {e.claim_count > 0 && (
                         <span className="text-[8px] text-muted/50 shrink-0">{e.claim_count} claims</span>
@@ -859,7 +1081,7 @@ function MemoryPage() {
                       onClick={() => {
                         // Try to navigate to entity if it looks like an entity_id
                         const slug = r.path.split("/").pop()?.replace(".md", "") || "";
-                        if (slug.startsWith("contact-") || slug.startsWith("group-") || slug.startsWith("trip-")) {
+                        if (slug.startsWith("person-") || slug.startsWith("contact-") || slug.startsWith("group-") || slug.startsWith("trip-") || slug.startsWith("file-") || slug.startsWith("thing-")) {
                           navigateToEntity(slug);
                         }
                       }}
@@ -879,6 +1101,91 @@ function MemoryPage() {
             {!searchMutation.data && !searchMutation.isPending && (
               <div className="p-4 text-muted text-center text-xs">search memory entities by meaning</div>
             )}
+          </div>
+        )}
+
+        {/* ── Stats Tab ── */}
+        {tab === "stats" && (
+          <div className="flex flex-col h-full overflow-y-auto">
+            <div className="px-3 py-3">
+              <div className="text-xs text-text font-medium mb-2">
+                {stats.total_entries} entities
+              </div>
+              <div className="flex flex-col gap-1">
+                {categories
+                  .sort((a, b) => b.count - a.count)
+                  .map((c) => {
+                    const pct = stats.total_entries > 0 ? (c.count / stats.total_entries) * 100 : 0;
+                    return (
+                      <button
+                        key={c.name}
+                        onClick={() => { setSelectedType(c.name); setTab("entities"); }}
+                        className="flex items-center gap-2 w-full text-left hover:bg-surface/50 transition-colors py-0.5"
+                      >
+                        <span className="text-[10px] text-muted w-20 shrink-0">{c.name}</span>
+                        <div className="flex-1 h-3 bg-surface border border-border">
+                          <div className="h-full bg-accent/40" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-[10px] text-text w-6 text-right">{c.count}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="text-[10px] text-muted uppercase mb-1">Pipeline</div>
+                <div className="flex items-center gap-3 text-[10px]">
+                  <span className="text-muted">pending bulletins: <span className="text-text">{pendingCount}</span></span>
+                  {lastDream && <span className="text-muted">last dream: <span className="text-text">{lastDream}</span></span>}
+                </div>
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="text-[10px] text-muted uppercase mb-1">Claims</div>
+                <div className="text-[10px] text-muted">
+                  {(() => {
+                    const totalClaims = categories.reduce((s, c) => s + c.count, 0);
+                    return <span className="text-text">{totalClaims}</span>;
+                  })()}{" "}
+                  entity records
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── QA Tab ── */}
+        {tab === "qa" && (
+          <div className="flex flex-col h-full overflow-y-auto">
+            {/* Outstanding */}
+            <div className="border-b border-border">
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/50">
+                <span className="text-[10px] text-warning font-medium">outstanding</span>
+                <span className="text-[9px] text-muted/50">{openQuestionsData?.questions.length ?? 0} question{(openQuestionsData?.questions.length ?? 0) !== 1 ? "s" : ""}</span>
+              </div>
+              {(openQuestionsData?.questions.length ?? 0) === 0 ? (
+                <div className="px-3 py-4 text-muted text-center text-xs">no open questions</div>
+              ) : (
+                openQuestionsData!.questions.map((q) => (
+                  <QuestionCard key={q.id} q={q} onAnswer={(answer) => answerMutation.mutate({ id: q.id, answer })} onDismiss={() => dismissMutation.mutate({ id: q.id })} onNavigateEntity={navigateToEntity} isSubmitting={answerMutation.isPending || dismissMutation.isPending} />
+                ))
+              )}
+            </div>
+
+            {/* Answered */}
+            <div>
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/50">
+                <span className="text-[10px] text-muted font-medium">answered</span>
+                <span className="text-[9px] text-muted/50">{answeredQuestionsData?.questions.length ?? 0}</span>
+              </div>
+              {(answeredQuestionsData?.questions.length ?? 0) === 0 ? (
+                <div className="px-3 py-4 text-muted text-center text-xs">no answered questions</div>
+              ) : (
+                answeredQuestionsData!.questions.map((q) => (
+                  <AnsweredQuestionCard key={q.id} q={q} onNavigateEntity={navigateToEntity} />
+                ))
+              )}
+            </div>
           </div>
         )}
       </div>
