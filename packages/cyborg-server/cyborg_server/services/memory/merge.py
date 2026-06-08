@@ -240,6 +240,13 @@ async def _execute_merge(db: Any, canonical_id: str, loser_id: str) -> dict[str,
         (canonical_id, loser_id),
     )
 
+    # Remove self-referential claims created by the merge
+    self_refs = await db.execute(
+        "UPDATE memory_claims SET status = 'superseded', superseded_by = ? "
+        "WHERE subject_id = ? AND object_id = ? AND status = 'active'",
+        (json.dumps(["merge-self-ref"]), canonical_id, canonical_id),
+    )
+
     # Deduplicate claims on canonical
     deduped = await _deduplicate_claims(db, canonical_id)
 
@@ -254,6 +261,7 @@ async def _execute_merge(db: Any, canonical_id: str, loser_id: str) -> dict[str,
         "bulletins_rewritten": bulletins_rewritten,
         "relations_rewritten": relations_rewritten,
         "claims_deduplicated": deduped,
+        "self_refs_removed": self_refs,
     }
 
 
