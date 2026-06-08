@@ -539,7 +539,7 @@ function EntityDetailView({
                       <span className={`text-[9px] px-1 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
                         {c.claim_type_key}
                       </span>
-                      <span className="text-[11px] text-text flex-1 overflow-hidden">
+                      <span className="text-[11px] text-text flex-1 break-all">
                         {otherEntity ? (
                           <>
                             <span className="text-muted/60 mr-1">{dir}</span>
@@ -547,7 +547,7 @@ function EntityDetailView({
                               onClick={(e) => { e.stopPropagation(); onNavigateEntity(otherEntity); }}
                               className="text-accent hover:underline"
                             >
-                              {otherEntity.length > 40 ? otherEntity.slice(0, -6) + ".." + otherEntity.slice(-4) : otherEntity}
+                              {otherEntity}
                             </button>
                           </>
                         ) : c.value ? (
