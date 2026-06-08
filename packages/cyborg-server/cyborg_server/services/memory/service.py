@@ -1450,7 +1450,7 @@ class MemoryService(BaseService):
             # Skip entity-ref claims — supplement should not infer relationships.
             # Entity-ref claims (parent, child, partner, etc.) must come from
             # explicit extraction, not supplement inference.
-            if ctk in ENTITY_REF_CLAIM_KEYS and obj:
+            if ctk in ENTITY_REF_CLAIM_KEYS:
                 continue
             claim = Claim(
                 id=f"claim-suppl-{uuid.uuid4().hex[:8]}",
