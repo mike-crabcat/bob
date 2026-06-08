@@ -21,6 +21,8 @@ from cyborg_server.services.contact_tools import make_contact_tools
 from cyborg_server.services.phone_tools import make_phone_tools
 from cyborg_server.services.reflection_service import make_reflection_tools
 from cyborg_server.services.subagent_tools import make_subagent_tools
+from cyborg_server.services.session_tools import make_session_tools
+from cyborg_server.services.routine_tools import make_routine_tools
 
 if TYPE_CHECKING:
     from cyborg_server.context import AppContext
@@ -57,6 +59,8 @@ def build_common_tools(
     _extend(make_changelog_tools(ctx, session_key=session_key))
     _extend(make_email_send_tools(ctx, session_key=session_key))
     _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
+    _extend(make_session_tools(ctx, caller_session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
+    _extend(make_routine_tools(ctx, session_key=session_key))
 
     # Trust-escalated tools
     if is_trusted:
