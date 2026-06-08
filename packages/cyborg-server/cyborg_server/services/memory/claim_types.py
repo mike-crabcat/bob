@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
+
+from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
 
 @dataclass(slots=True)
@@ -216,11 +219,14 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
         extraction_rules=[
             "When a bulletin describes flights, trains, buses, ferries, or other transport with specific "
             "routes, times, flight numbers, or booking references, create a connection entity for each "
-            "distinct journey segment (one booking/PNR = one connection). Give each connection a descriptive "
-            "slug (e.g. connection-perth-geneva-outbound, connection-paris-london-eurostar). "
-            "Extract structured claims on the connection: departure_location, arrival_location, "
-            "departure_time, arrival_time, transport_type, duration, booking_ref, route, passengers. "
-            "Then add a connection claim on the trip pointing to the connection entity. "
+            "individual HOP (one direct leg from A to B). A multi-leg journey under one booking/PNR "
+            "becomes SEPARATE connection entities — one per leg. e.g. PER→KUL→LHR→GVA is three connections. "
+            "Give each connection a descriptive slug (e.g. connection-perth-kuala-lumpur-mh124, "
+            "connection-kuala-lumpur-london-mh002, connection-london-geneva-ba744). "
+            "They share the same booking_ref. Extract structured claims on each connection: "
+            "departure_location, arrival_location, departure_time, arrival_time, transport_type, "
+            "duration, booking_ref, route, passengers. "
+            "Then add a connection claim on the trip for EACH connection entity. "
             "NEVER skip transport data — it is as important as person or trip data.",
         ],
         reconciliation_rules=(
@@ -264,25 +270,52 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "create a separate stay entity for each hotel — even if they are in the same city. "
             "A stay at Hotel A on June 1-3 and a stay at Hotel B on June 3-5 are two different stay entities.",
         ],
-        reconciliation_rules="1. Arrival date must be before departure date.\n",
+        reconciliation_rules=(
+            "1. Arrival date must be before departure date.\n"
+            "2. There MUST be exactly one arrival_date claim and exactly one departure_date claim. "
+            "If there are duplicates, keep the most specific/sourced one and retract the rest."
+        ),
         follow_for_bulletins=True,
     ),
     "connection": EntityType(
         name="connection",
         prefix="connection-",
         description=(
-            "A transport/connection leg: a flight, train, bus, ferry, or other journey segment. "
-            "Has departure/arrival details, transport type, route, and booking references. "
-            "Each distinct journey (one booking/PNR) is one connection entity."
+            "A single transport hop: one flight leg, one train ride, one bus segment. "
+            "Each hop is its own connection entity, even if multiple hops share the same booking/PNR. "
+            "Has departure/arrival details, transport type, and booking references."
         ),
         keywords=["flight", "train", "bus", "ferry", "Eurostar", "booking ref"],
         triggers_types=["connection"],
         extraction_rules=[
-            "Each connection is ONE journey segment (one booking/PNR). Multi-leg flights under one "
-            "booking are one connection. Separate bookings are separate connections.",
+            "Each connection is ONE HOP (one direct leg from A to B). A multi-leg journey "
+            "under one booking/PNR becomes SEPARATE connection entities — one per leg. "
+            "e.g. PER→KUL→LHR→GVA is three connections, not one. They share the same booking_ref.",
         ],
-        reconciliation_rules="No specific reconciliation rules.",
+        reconciliation_rules=(
+            "1. The connection SHOULD be referenced by a trip's ``connection`` claim. "
+            "Use get_entity to check if any trip references this connection in its "
+            "``connection`` claims (shown in reverse references). If no trip references "
+            "this connection, use list_entities(\"trip\") to find candidate trips, then "
+            "get_entity to inspect their date ranges (derived from stays). If exactly one "
+            "trip's date range encompasses this connection's departure_time, add a "
+            "``connection`` claim on that trip with object_id set to this connection's "
+            "entity_id.\n"
+            "2. There MUST be exactly one departure_location, one arrival_location, "
+            "one departure_time, one arrival_time, one transport_type, one duration, "
+            "and one route claim. If there are duplicates, keep the most specific/sourced "
+            "version and retract the rest.\n"
+            "3. If the connection represents a multi-hop journey (e.g. PER→KUL→LHR→GVA "
+            "as a single entity), it should be split into separate connection entities, "
+            "one per hop. Create the new entities, add connection claims on the trip, "
+            "and delete the original multi-hop entity.\n"
+            "4. If the connection has no departure_time but the source bulletins contain "
+            "departure information, add the missing departure_time claim.\n"
+            "5. If the connection cannot be linked to any trip and no suitable trip exists, "
+            "raise a question asking which trip it belongs to."
+        ),
         follow_for_bulletins=True,
+        has_orphan_linker=True,
     ),
     "event": EntityType(
         name="event",
@@ -554,8 +587,158 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# Jinja2 entity template engine
+# ---------------------------------------------------------------------------
 
-def render_entity(
+_ENTITY_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "entity_templates")
+_jinja_env = Environment(
+    loader=FileSystemLoader(_ENTITY_TEMPLATES_DIR),
+    keep_trailing_newline=False,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+def _group_claims(claims: list[dict[str, Any]]) -> dict[str, list[dict]]:
+    by_type: dict[str, list[dict]] = {}
+    for claim in claims:
+        key = claim["claim_type_key"]
+        by_type.setdefault(key, []).append(claim)
+    return by_type
+
+
+def _build_template_context(
+    entity_type: str,
+    display_name: str,
+    claims: list[dict[str, Any]],
+    entity_id: str | None = None,
+) -> dict:
+    by_type = _group_claims(claims)
+    template = _ENTITY_TEMPLATES.get(entity_type, [])
+    template_keys = {ck for ck, _ in template}
+    orphans = {k: v for k, v in by_type.items() if k not in template_keys}
+
+    return {
+        "display_name": display_name,
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "claims": by_type,
+        "orphans": orphans,
+        "rendered_refs": {},
+    }
+
+
+async def _resolve_entity_refs(
+    db: Any,
+    claims: list[dict[str, Any]],
+    visited: set[str],
+) -> dict[str, dict]:
+    resolved: dict[str, dict] = {}
+    for claim in claims:
+        ref = claim.get("object_id") or claim.get("value")
+        if not ref or not isinstance(ref, str) or ref in visited or ref in resolved:
+            continue
+        if not any(ref.startswith(p) for p in ENTITY_TYPE_PREFIXES):
+            continue
+        row = await db.fetch_one(
+            "SELECT entity_id, entity_type, display_name FROM memory_entities "
+            "WHERE entity_id = ? AND status = 'active'",
+            (ref,),
+        )
+        if not row:
+            continue
+        ref_claims = await db.fetch_all(
+            "SELECT claim_type_key, object_id, value FROM memory_claims "
+            "WHERE status = 'active' AND subject_id = ?",
+            (ref,),
+        )
+        claim_dicts = [
+            {"claim_type_key": r["claim_type_key"], "object_id": r["object_id"], "value": r["value"]}
+            for r in ref_claims
+        ]
+        resolved[ref] = {
+            "entity_id": row["entity_id"],
+            "entity_type": row["entity_type"],
+            "display_name": row["display_name"],
+            "claims": _group_claims(claim_dicts),
+            "claim_dicts": claim_dicts,
+        }
+    return resolved
+
+
+async def render_entity(
+    entity_type: str,
+    display_name: str,
+    claims: list[dict[str, Any]],
+    entity_id: str | None = None,
+    *,
+    db: Any = None,
+    _visited: set[str] | None = None,
+) -> str:
+    """Render entity claims into a human-readable text block.
+
+    Uses Jinja2 templates from entity_templates/ if available, otherwise
+    falls back to the generic renderer. When db is provided, entity
+    references are resolved recursively for rich rendering.
+    """
+    if _visited is None:
+        _visited = set()
+    if entity_id:
+        _visited = _visited | {entity_id}
+
+    # Try Jinja2 template for this entity type
+    template_name = f"{entity_type}.md"
+    try:
+        template = _jinja_env.get_template(template_name)
+    except TemplateNotFound:
+        return _render_entity_generic(entity_type, display_name, claims, entity_id)
+
+    ctx = _build_template_context(entity_type, display_name, claims, entity_id)
+
+    # Pre-resolve and render entity references recursively
+    resolved: dict[str, dict] = {}
+    rendered_refs: dict[str, str] = {}
+    if db:
+        resolved = await _resolve_entity_refs(db, claims, _visited)
+        for eid, entity_data in resolved.items():
+            rendered_refs[eid] = await render_entity(
+                entity_data["entity_type"],
+                entity_data["display_name"],
+                entity_data["claim_dicts"],
+                entity_id=eid,
+                db=db,
+                _visited=_visited,
+            )
+
+    # Build sort_by_date closure that captures the resolved dict
+    def sort_by_date(entity_ids: list[str], date_keys: list[str] | None = None) -> list[str]:
+        keys = date_keys or ["departure_time", "arrival_date", "start_time", "departure_date"]
+        def sort_key(eid: str) -> str:
+            entity = resolved.get(eid)
+            if not entity:
+                return ""
+            for key in keys:
+                cs = entity.get("claims", {}).get(key, [])
+                if cs:
+                    return cs[0].get("value", "")
+            return ""
+        return sorted(entity_ids, key=sort_key)
+
+    ctx["resolved"] = resolved
+    ctx["rendered_refs"] = rendered_refs
+    ctx["sort_by_date"] = sort_by_date
+    ctx["first_claim"] = _first_claim
+
+    return template.render(**ctx)
+
+
+def _first_claim(entity: dict, key: str, default: str = "") -> str:
+    claims = entity.get("claims", {}).get(key, [])
+    return claims[0].get("value", "") if claims else default
+
+
+def _render_entity_generic(
     entity_type: str,
     display_name: str,
     claims: list[dict[str, Any]],
