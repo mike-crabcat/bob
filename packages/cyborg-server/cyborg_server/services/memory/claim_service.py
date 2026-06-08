@@ -11,6 +11,7 @@ from typing import Any
 from cyborg_server.services.memory.claim_types import (
     get_all_keys,
     build_extraction_prompt_section,
+    ENTITY_TYPE_REGISTRY,
 )
 from cyborg_server.services.memory.models import Claim, Bulletin
 from cyborg_server.services.memory.prompts import build_extraction_prompt
@@ -353,7 +354,7 @@ async def extract_claims_from_bulletin(
     return claims
 
 
-_ENTITY_TYPE_PREFIXES = ("person", "trip", "location", "event", "task", "file", "thing", "decision", "group", "transport", "tripstop")
+_ENTITY_TYPE_PREFIXES = tuple(ENTITY_TYPE_REGISTRY.keys())
 _ENTITY_COLON_RE = re.compile(r"^(" + "|".join(_ENTITY_TYPE_PREFIXES) + r"):(.+)$")
 
 

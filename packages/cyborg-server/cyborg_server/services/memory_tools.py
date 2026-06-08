@@ -38,7 +38,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         value: str = "",
     ) -> str:
         """Find entities by type with optional claim filters.
-        Entity types: contact, group, location, trip, tripstop, transport, event, task, artifact, decision.
+        Entity types: person, group, location, trip, stay, event, task, file, thing, decision.
         Returns matching entity IDs and display names."""
         from cyborg_server.services.memory.tools import find as _find
         return await _find(ctx.db, entity_type, claim_type_key or None, value or None)
@@ -91,7 +91,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
             for c in claims
         ]
-        rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts)
+        rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts, entity_id=entity.entity_id)
         return json.dumps({
             "entity_id": entity.entity_id,
             "entity_type": entity.entity_type,

@@ -51,10 +51,7 @@ def serialize_frontmatter(fm: dict, body: str) -> str:
 # Entity types & helpers
 # ---------------------------------------------------------------------------
 
-ENTITY_TYPES: tuple[str, ...] = (
-    "person", "group", "location", "trip", "tripstop",
-    "transport", "event", "task", "file", "thing", "decision",
-)
+from cyborg_server.services.memory.claim_types import ENTITY_TYPES  # noqa: F401 — re-export
 
 
 CLAIM_STATUSES: tuple[str, ...] = (

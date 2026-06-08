@@ -101,7 +101,11 @@ async def upsert_embedding(db: Any, entity_id: str, embedding: list[float]) -> N
     """Insert or replace an entity embedding."""
     packed = _pack_embedding(embedding)
     await db.execute(
-        "INSERT OR REPLACE INTO memory_entity_embeddings(entity_id, embedding) VALUES (?, ?)",
+        "DELETE FROM memory_entity_embeddings WHERE entity_id = ?",
+        (entity_id,),
+    )
+    await db.execute(
+        "INSERT INTO memory_entity_embeddings(entity_id, embedding) VALUES (?, ?)",
         (entity_id, packed),
     )
 

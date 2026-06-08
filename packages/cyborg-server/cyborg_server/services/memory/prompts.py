@@ -66,16 +66,20 @@ Every claim references entities by ID. You MUST follow these ID conventions:
   For new people NOT in the Known Entities section, use `person:new:Full Name`.
 - **group-SLUG**: Chat groups or teams. e.g. group-bali-gang
 - **trip-SLUG**: Trips. e.g. trip-bali-2026
-- **tripstop-SLUG**: A stop within a trip. Include location AND date range for uniqueness. \
-e.g. tripstop-ubud-days4-6, tripstop-paris-june12-14, tripstop-paris-june14-16. \
-Each distinct stay (different hotel or different dates at same city) MUST be a separate entity.
-- **transport-SLUG**: A transport leg. e.g. transport-flight-qz541
+- **stay-SLUG**: An accommodation leg within a trip — one hotel/Airbnb/villa stay. \
+Include location AND date range for uniqueness. \
+e.g. stay-ubud-days4-6, stay-paris-june12-14, stay-paris-june14-16. \
+Each distinct accommodation (different hotel or different dates at same city) MUST be a separate entity.
+- **connection-SLUG**: A transport/journey leg. Include route and direction for uniqueness. \
+e.g. connection-perth-geneva-outbound, connection-paris-london-eurostar, connection-chamonix-paris-sncf.
 - **location-SLUG**: A place. e.g. location-villa-sunset
 - **event-SLUG**: An event. e.g. event-dinner-aug5
 - **task-SLUG**: A task or todo. e.g. task-book-villa
-- **file-SLUG**: A file or document. e.g. file-itinerary-md. MUST have a file_path claim \
-  with the actual workspace-relative path (e.g. "docs/itinerary.md") or a URL. \
-  Vague paths like "workspace" are invalid.
+- **file-SLUG**: A file or document. e.g. file-itinerary-md. \
+  ONLY create if the bulletin contains an actual workspace-relative path or URL. \
+  The file_path claim value MUST be a concrete path like "docs/itinerary.md" or \
+  "https://example.com/file.pdf". If no path is given, do NOT create a file entity. \
+  Vague values like "workspace", "the file", or bare filenames without directories are invalid.
 - **thing-SLUG**: A physical object or animal. e.g. thing-ebike, thing-bosch-motor
 - **decision-SLUG**: A decision. e.g. decision-stay-seminyak
 
@@ -83,6 +87,9 @@ Slug rules: lowercase, hyphens, descriptive but short. No dates unless needed fo
 
 **REUSE EXISTING IDS.** Check the ## Known Entities section. If an entity already exists \
 for the thing you are describing, use its ID. Do NOT create duplicate entities with different IDs.
+**EXCEPTION for stays:** Two stays with different accommodations, different dates, or different cities \
+are DIFFERENT entities — do NOT reuse a stay ID just because both are "in Paris". Each distinct \
+hotel/booking gets its own stay entity.
 
 ---
 
@@ -100,24 +107,7 @@ for the thing you are describing, use its ID. Do NOT create duplicate entities w
    - source_bulletin_id: the bulletin ID from the input
 4. Do not infer facts not in the bulletin.
 5. Preserve the bulletin's visibility on each claim.
-6. person entities are REAL HUMANS ONLY. Never create persons for: bots, subagents, AI models, \
-tools, services, APIs, phone numbers, companies, places, dates, concepts, inanimate objects, \
-software, scripts, workflows, folders, or anything that is not a specific human being. \
-When in doubt, do NOT create a person entity.
-7. file entities: only create a file entity if the bulletin contains an actual workspace path \
-   (e.g. "docs/itinerary.md") or URL (https://...). If the bulletin mentions a file but gives no \
-   path, do NOT create a file entity — skip it. Vague values like "workspace", "project", or \
-   "new file" are NOT valid paths. No valid path = no file entity.
-8. thing entities are physical objects and animals only. Not for abstract concepts.
-9. When a bulletin describes flights, trains, buses, ferries, or other transport with specific \
-routes, times, flight numbers, or booking references, you MUST create transport entities and \
-extract all details as claims. Create ONE transport entity per journey direction (e.g. one for \
-outbound, one for return). Use the overall origin as departure_location and final destination as \
-arrival_location. Put the individual flight legs, connection details, and intermediate stops in a \
-truth claim. Include departure_time, transport_type, and duration as scalar claims. \
-NEVER skip transport data — it is as important as person or trip data.
-Example: Perth→KUL→LHR→Geneva becomes ONE entity with departure_location=Perth PER, \
-arrival_location=Geneva GVA, and a truth claim listing the connection details.
+6. Follow the per-entity-type rules listed in the Entity Types section below.
 
 ---
 
@@ -159,7 +149,7 @@ Return a JSON array of claim objects. Example:
   }},
   {{
     "claim_type_key": "transport_type",
-    "subject_id": "transport-flight-mh124",
+    "subject_id": "connection-perth-bali-outbound",
     "value": "flight",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
@@ -167,7 +157,7 @@ Return a JSON array of claim objects. Example:
   }},
   {{
     "claim_type_key": "departure_location",
-    "subject_id": "transport-flight-mh124",
+    "subject_id": "connection-perth-bali-outbound",
     "value": "Perth PER",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
@@ -175,8 +165,40 @@ Return a JSON array of claim objects. Example:
   }},
   {{
     "claim_type_key": "arrival_location",
-    "subject_id": "transport-flight-mh124",
-    "value": "Kuala Lumpur KUL",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "Bali DPS",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "departure_time",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "2026-08-01T06:00",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "duration",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "6h",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "route",
+    "subject_id": "connection-perth-bali-outbound",
+    "value": "QZ541 PER→DPS",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "connection",
+    "subject_id": "trip-bali-2026",
+    "object_id": "connection-perth-bali-outbound",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
     "visibility": "group"
@@ -204,8 +226,7 @@ The memory system contains:
 - Groups
 - Locations
 - Trips
-- Trip Stops
-- Transport
+- Stays (accommodation legs within trips)
 - Events
 - Tasks
 - Files

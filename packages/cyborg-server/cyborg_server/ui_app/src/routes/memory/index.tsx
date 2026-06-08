@@ -422,6 +422,9 @@ function EntityDetailView({
   const [expandedClaim, setExpandedClaim] = useState<string | null>(null);
   const [bulletinContent, setBulletinContent] = useState<Record<string, string>>({});
   const [fetchedBulletins, setFetchedBulletins] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [mergeTarget, setMergeTarget] = useState("");
+  const [mergeBusy, setMergeBusy] = useState(false);
 
   const fetchBulletins = async () => {
     if (fetchedBulletins || !(entity.source_bulletins?.length)) return;
@@ -458,7 +461,53 @@ function EntityDetailView({
         <span className="text-xs text-text font-medium truncate flex-1">{entity.display_name}</span>
         <span className="text-[8px] text-accent/60 bg-accent/10 px-1.5 py-0.5 rounded">{entity.entity_type}</span>
         <span className="text-[8px] text-success/60 bg-success/10 px-1.5 py-0.5 rounded">{entity.status}</span>
+        {!merging && (
+          <button
+            onClick={() => setMerging(true)}
+            className="text-[8px] text-muted hover:text-accent bg-surface/50 border border-border/50 px-1.5 py-0.5 rounded hover:border-accent/30 transition-colors"
+          >merge</button>
+        )}
       </div>
+
+      {/* Merge bar */}
+      {merging && (
+        <div className="flex items-center gap-1.5 px-3 py-1 border-b border-border bg-warning/5 shrink-0">
+          <span className="text-[9px] text-muted">Merge into:</span>
+          <input
+            value={mergeTarget}
+            onChange={(e) => setMergeTarget(e.target.value)}
+            placeholder="canonical entity ID"
+            className="flex-1 text-[10px] bg-surface border border-border/50 rounded px-1.5 py-0.5 text-text font-mono placeholder:text-muted/30 focus:outline-none focus:border-accent/40"
+          />
+          <button
+            disabled={mergeBusy || !mergeTarget.trim()}
+            onClick={async () => {
+              setMergeBusy(true);
+              try {
+                const secret = document.cookie.match(/cyborg_dashboard_secret=([^;]+)/)?.[1] ?? "";
+                const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+                const res = await fetch(`${base}/api/memory/entities/merge?secret=${encodeURIComponent(secret)}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ canonical_id: mergeTarget.trim(), loser_id: entity.entity_id }),
+                });
+                const data = await res.json();
+                if (!res.ok || data.error) throw new Error(data.error || "merge failed");
+                onNavigateEntity(mergeTarget.trim());
+              } catch {
+                alert("Merge failed");
+              } finally {
+                setMergeBusy(false);
+              }
+            }}
+            className="text-[8px] text-warning bg-warning/10 border border-warning/30 px-1.5 py-0.5 rounded hover:bg-warning/20 disabled:opacity-40 transition-colors"
+          >{mergeBusy ? "..." : "confirm"}</button>
+          <button
+            onClick={() => { setMerging(false); setMergeTarget(""); }}
+            className="text-[8px] text-muted hover:text-text px-1"
+          >cancel</button>
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">

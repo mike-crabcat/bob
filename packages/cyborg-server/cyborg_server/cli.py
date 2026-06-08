@@ -1909,6 +1909,7 @@ async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
     db_path = settings.db_path or Path("cyborg.db")
     db = Database(db_path, schema_dir)
     await db.connect()
+    await db.apply_migrations()
     ctx = AppContext(settings=settings, db=db)
 
     try:
@@ -2008,6 +2009,37 @@ async def _memory_supplement(entity_ids: list[str]) -> None:
             typer.echo(f"Supplementing {eid}...")
             result = await svc.supplement_entity(workspace, entity_id=eid)
             typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        await db.close()
+
+
+@memory_app.command("merge")
+def memory_merge(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview merges without executing")] = False,
+) -> None:
+    """Detect and merge duplicate entities using embeddings + LLM."""
+    import asyncio
+    asyncio.run(_memory_merge(dry_run))
+
+
+async def _memory_merge(dry_run: bool) -> None:
+    from cyborg_server.config import Settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("cyborg.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+
+    try:
+        from cyborg_server.services.memory import MemoryService
+
+        svc = MemoryService(ctx)
+        result = await svc.merge_entities(dry_run=dry_run)
+        typer.echo(json.dumps(result, indent=2, default=str))
     finally:
         await db.close()
 

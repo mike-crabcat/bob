@@ -736,7 +736,7 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
         {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
         for c in claims
     ]
-    rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts)
+    rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts, entity_id=entity.entity_id)
 
     return {
         "entity_id": entity.entity_id,
@@ -1271,7 +1271,7 @@ async def get_memory_entities(request: Request) -> dict[str, Any]:
         "trip": "destination",
         "decision": "rationale",
         "event": "location",
-        "tripstop": "stay",
+        "stay": "accommodation",
     }
 
     entity_ids = [r["entity_id"] for r in rows]
@@ -1333,7 +1333,7 @@ async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str
         {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
         for c in claims
     ]
-    rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts)
+    rendered = render_entity(entity.entity_type, entity.display_name, claim_dicts, entity_id=entity.entity_id)
 
     return {
         "entity_id": entity.entity_id,
@@ -1506,6 +1506,41 @@ async def redigest_bulletin(request: Request) -> dict[str, Any]:
 
     result = await svc.process_bulletin(workspace, bulletin)
     return {"ok": True, "slug": slug, "result": result}
+
+
+@router.post("/api/memory/entities/merge")
+async def merge_entities(request: Request) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    canonical_id: str = body.get("canonical_id", "")
+    loser_id: str = body.get("loser_id", "")
+    if not canonical_id or not loser_id:
+        return {"error": "missing canonical_id or loser_id"}
+
+    db = _db(request)
+
+    # Verify both entities exist
+    for eid in (canonical_id, loser_id):
+        row = await db.fetch_one(
+            "SELECT entity_id FROM memory_entities WHERE entity_id = ? AND status = 'active'",
+            (eid,),
+        )
+        if not row:
+            return {"error": f"entity not found: {eid}"}
+
+    from cyborg_server.services.memory.merge import _execute_merge
+    result = await _execute_merge(db, canonical_id, loser_id)
+
+    # Rebuild FTS + embedding for canonical
+    settings = request.app.state.settings
+    from cyborg_server.context import AppContext
+    from cyborg_server.services.memory import MemoryService
+    ctx = AppContext(settings=settings, db=db)
+    svc = MemoryService(ctx)
+    await svc._update_entity_fts(canonical_id)
+
+    return {"ok": True, **result}
 
 
 @router.post("/api/memory/backfill-people")

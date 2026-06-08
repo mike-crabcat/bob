@@ -32,8 +32,8 @@ class TestTemplateRendering:
         ]
         result = render_entity("trip", "Bali 2026", claims)
         assert "Bali 2026" in result
-        assert "Destination: Bali, Indonesia" in result
-        assert "Dates: 2026-08-01" in result
+        assert "Members: person-7f3a91" in result
+        assert "destination: Bali, Indonesia" in result
 
     def test_renders_multiple_values_as_list(self):
         claims = [

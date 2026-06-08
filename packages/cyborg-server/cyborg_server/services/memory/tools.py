@@ -58,7 +58,7 @@ async def recall(
         (entity_id,),
     )
 
-    rendered = render_entity(entity_type, display_name, claim_dicts)
+    rendered = render_entity(entity_type, display_name, claim_dicts, entity_id=entity_id)
 
     # Append reverse references
     if reverse_claims:
@@ -86,7 +86,7 @@ async def recall(
                 {"claim_type_key": r["claim_type_key"], "object_id": r["object_id"], "value": r["value"]}
                 for r in e_claims
             ]
-            e_rendered = render_entity(e_row["entity_type"], e_row["display_name"], e_dicts)
+            e_rendered = render_entity(e_row["entity_type"], e_row["display_name"], e_dicts, entity_id=eid)
             rendered += f"\n\n---\n{e_rendered}"
 
     return rendered

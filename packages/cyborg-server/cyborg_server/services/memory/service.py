@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from cyborg_server.services.base import BaseService, utcnow
-from cyborg_server.services.memory.claim_types import ENTITY_REF_CLAIM_KEYS
+from cyborg_server.services.memory.claim_types import (
+    ENTITY_REF_CLAIM_KEYS,
+    ENTITY_TYPE_REGISTRY,
+    FOLLOW_FOR_BULLETINS_PREFIXES,
+    SKIP_NEW_PATTERNS,
+    detect_entity_type,
+    detect_entity_types_in_text,
+)
 from cyborg_server.services.memory.models import (
     Bulletin,
     Claim,
@@ -31,6 +38,7 @@ from cyborg_server.services.memory.claim_service import (
     extract_claims_from_bulletin,
     write_claim,
     get_active_claims,
+    _is_valid_file_path,
 )
 from cyborg_server.services.memory.entity_resolver import (
     canonical_contact_id,
@@ -38,27 +46,6 @@ from cyborg_server.services.memory.entity_resolver import (
 )
 
 logger = logging.getLogger(__name__)
-
-_ENTITY_TYPE_PREFIXES: dict[str, str] = {
-    "person-": "person", "group-": "group",
-    "trip-": "trip", "location-": "location", "event-": "event",
-    "task-": "task", "file-": "file", "thing-": "thing",
-    "decision-": "decision", "tripstop-": "tripstop", "transport-": "transport",
-}
-
-
-def _detect_entity_type(entity_id: str) -> str:
-    for prefix, etype in _ENTITY_TYPE_PREFIXES.items():
-        if entity_id.startswith(prefix):
-            return etype
-    # Handle colon-based IDs (e.g. file:foo -> file)
-    colon = entity_id.find(":")
-    if colon > 0:
-        prefix = entity_id[:colon]
-        if prefix in ("person", "group", "trip", "location", "event",
-                       "task", "file", "thing", "decision", "tripstop", "transport"):
-            return prefix
-    return "person"
 
 
 class MemoryService(BaseService):
@@ -153,9 +140,14 @@ class MemoryService(BaseService):
             if not entity_ids:
                 return
             try:
-                from cyborg_server.services.memory.reconciliation import reconcile_entity
+                from cyborg_server.services.memory.reconciliation import reconcile_entity, deprecate_file_entities_without_path
                 from cyborg_server.services.llm_dispatch import LLMDispatchService
                 llm = LLMDispatchService(self.ctx)
+
+                # Phase 0: deprecate file entities with no valid file_path
+                deprecated = await deprecate_file_entities_without_path(self.db)
+                if deprecated:
+                    logger.info("Deprecated %d file entities with no valid file_path", len(deprecated))
 
                 # Phase 1: supplement — gap-fill from related bulletins
                 workspace = self.ctx.settings.harness.workspace_dir
@@ -189,10 +181,14 @@ class MemoryService(BaseService):
         self, workspace_dir: Path, *, entity_ids: list[str] | None = None
     ) -> dict[str, Any]:
         """Manually trigger reconciliation for specific or all active entities."""
-        from cyborg_server.services.memory.reconciliation import reconcile_entity
+        from cyborg_server.services.memory.reconciliation import reconcile_entity, deprecate_file_entities_without_path
         from cyborg_server.services.llm_dispatch import LLMDispatchService
 
         llm = LLMDispatchService(self.ctx)
+
+        # Deprecate file entities with no valid file_path
+        deprecated = await deprecate_file_entities_without_path(self.db)
+
         if entity_ids is None:
             rows = await self.db.fetch_all(
                 "SELECT entity_id FROM memory_entities WHERE status = 'active'"
@@ -577,9 +573,8 @@ class MemoryService(BaseService):
             entity_row["entity_type"],
             entity_row["display_name"],
             claim_dicts,
+            entity_id=entity_id,
         )
-
-        # Upsert FTS row (contentless FTS — delete then insert)
         await self.db.execute(
             "DELETE FROM memory_entities_fts WHERE entity_id = ?",
             (entity_id,),
@@ -704,44 +699,37 @@ class MemoryService(BaseService):
     @staticmethod
     def _detect_entity_types_in_text(text: str) -> list[str]:
         """Detect likely entity types mentioned in text for claim type injection."""
-        types: list[str] = ["person"]  # Always include person
-        lower = text.lower()
-        if any(w in lower for w in ("trip", "travel", "holiday", "vacation", "flight")):
-            types.extend(["trip", "tripstop", "transport", "location"])
-        if any(w in lower for w in ("event", "dinner", "party", "meeting", "concert")):
-            types.append("event")
-        if any(w in lower for w in ("villa", "hotel", "restaurant", "house", "stay")):
-            types.append("location")
-        if any(w in lower for w in ("task", "todo", "need to", "remember to")):
-            types.append("task")
-        if any(w in lower for w in ("decided", "decision", "going with")):
-            types.append("decision")
-        if any(w in lower for w in ("file", "document", "spreadsheet", "pdf", ".md", ".txt", "sheet", "folder", "path", "wrote to", "saved to")):
-            types.append("file")
-        if any(w in lower for w in ("bought", "purchased", "owns", "bike", "car", "toy", "tool",
-                                     "animal", "pet", "device", "phone", "laptop", "ebike", "motor")):
-            types.append("thing")
-        return list(set(types))
+        return detect_entity_types_in_text(text)
 
     async def _ensure_entities_for_claims(
         self, claims: list[Claim], bulletin: Bulletin
     ) -> list[str]:
         """Ensure entity records exist for all claim subject/object IDs."""
-        _SKIP_PATTERNS = ("person:new:", "person-new-", "file:new:", "task:new:", "event:new:", "thing:new:")
+        _skip_patterns = SKIP_NEW_PATTERNS + ("transport-",)
         entity_ids: set[str] = set()
         for c in claims:
             for attr in ("subject_id", "object_id"):
                 val = getattr(c, attr)
-                if not val or any(val.startswith(p) for p in _SKIP_PATTERNS):
+                if not val or any(val.startswith(p) for p in _skip_patterns):
                     continue
                 entity_ids.add(val)
+
+        # File entities require a valid file_path claim — skip otherwise.
+        file_ids_with_path: set[str] = set()
+        for c in claims:
+            if c.claim_type_key == "file_path" and c.value and _is_valid_file_path(c.value):
+                file_ids_with_path.add(c.subject_id)
+        entity_ids = {
+            eid for eid in entity_ids
+            if not eid.startswith("file-") or eid in file_ids_with_path
+        }
 
         existing = await self._list_all_entity_ids()
         created: list[str] = []
 
         for eid in entity_ids:
             if eid not in existing:
-                etype = _detect_entity_type(eid)
+                etype = detect_entity_type(eid)
                 display_name = await self._resolve_display_name(eid)
                 entity = EntityDocument(
                     entity_id=eid,
@@ -757,11 +745,14 @@ class MemoryService(BaseService):
 
     async def _resolve_display_name(self, entity_id: str) -> str:
         """Try to resolve a display name for an entity ID."""
-        if entity_id.startswith("person-"):
-            # Check if there's a contact_id claim pointing to a contacts table row
+        etype = detect_entity_type(entity_id)
+        et_def = ENTITY_TYPE_REGISTRY.get(etype)
+
+        if et_def and et_def.display_name_claim:
             rows = await self.db.fetch_all(
-                "SELECT value FROM memory_claims WHERE subject_id = ? AND claim_type_key = 'contact_id' AND status = 'active' LIMIT 1",
-                (entity_id,),
+                "SELECT value FROM memory_claims WHERE subject_id = ? "
+                "AND claim_type_key = ? AND status = 'active' LIMIT 1",
+                (entity_id, et_def.display_name_claim),
             )
             if rows and rows[0]["value"]:
                 hex8 = rows[0]["value"][:8]
@@ -771,10 +762,9 @@ class MemoryService(BaseService):
                 )
                 if row and row["name"]:
                     return row["name"]
-            # Fallback: capitalize slug parts
-            slug = entity_id.removeprefix("person-")
+            slug = entity_id.removeprefix(et_def.prefix)
             return " ".join(part.capitalize() for part in slug.split("-"))
-        # For other types, use the ID as fallback
+
         return entity_id
 
     async def _list_all_entity_ids(self) -> set[str]:
@@ -847,6 +837,14 @@ class MemoryService(BaseService):
         """Build compact memory index for system prompt injection."""
         return await build_memory_index_text_db(self.db)
 
+    async def merge_entities(self, *, dry_run: bool = False) -> dict[str, Any]:
+        """Detect and merge duplicate entities using embeddings + LLM."""
+        from cyborg_server.services.memory.merge import run_merge
+        from cyborg_server.services.llm_dispatch import LLMDispatchService
+
+        llm = LLMDispatchService(self.ctx)
+        return await run_merge(self.db, llm, dry_run=dry_run)
+
     async def rebuild_fts(self) -> int:
         """Rebuild the FTS5 index from scratch. Returns row count."""
         rows = await self.db.fetch_all("SELECT entity_id FROM memory_entities")
@@ -877,7 +875,7 @@ class MemoryService(BaseService):
                 {"claim_type_key": c["claim_type_key"], "object_id": c["object_id"], "value": c["value"]}
                 for c in claims
             ]
-            rendered_map[r["entity_id"]] = render_entity(r["entity_type"], r["display_name"], claim_dicts)
+            rendered_map[r["entity_id"]] = render_entity(r["entity_type"], r["display_name"], claim_dicts, entity_id=r["entity_id"])
 
         # Batch embed (up to 100 at a time)
         entity_ids = list(rendered_map.keys())
@@ -1142,6 +1140,7 @@ class MemoryService(BaseService):
             await self.db.execute("DELETE FROM memory_entities_fts")
             await self.db.execute("DELETE FROM memory_entity_embeddings")
             await self.db.execute("DELETE FROM memory_entities")
+            await self.db.execute("DELETE FROM memory_questions")
             await self.db.execute("UPDATE memory_bulletins SET digested = 0")
 
             bulletins = await self.read_bulletins(workspace_dir, limit=10000, oldest_first=True)
@@ -1150,7 +1149,28 @@ class MemoryService(BaseService):
                 result = await self.process_bulletin(workspace_dir, bulletin)
                 total_claims += result["claims_extracted"]
 
-            return {"status": "completed", "bulletins_processed": len(bulletins), "claims": total_claims}
+            # Rebuild embeddings
+            embed_count = await self.rebuild_embeddings()
+
+            # Reconcile trips — catches merged stays, overlapping dates, etc.
+            trip_rows = await self.db.fetch_all(
+                "SELECT entity_id FROM memory_entities WHERE entity_type = 'trip' AND status = 'active'"
+            )
+            recon_result = await self.reconcile_entities(
+                workspace_dir, entity_ids=[r["entity_id"] for r in trip_rows],
+            )
+
+            return {
+                "status": "completed",
+                "bulletins_processed": len(bulletins),
+                "claims": total_claims,
+                "embeddings_rebuilt": embed_count,
+                "reconciliation": {
+                    "issues": recon_result["total_issues"],
+                    "operations": recon_result["total_ops"],
+                    "questions": recon_result["total_questions"],
+                },
+            }
 
         return {"status": "no_op"}
 
@@ -1200,9 +1220,9 @@ class MemoryService(BaseService):
     async def _collect_related_bulletins(self, entity_id: str) -> list[str]:
         """Collect bulletin IDs from an entity and its related entities.
 
-        Walks ENTITY_REF_CLAIM_KEYS to find parent trip, sibling tripstops,
+        Walks ENTITY_REF_CLAIM_KEYS to find parent trip, sibling stays,
         linked transports, locations etc. Also follows the chain two hops
-        (e.g. tripstop → trip → sibling tripstop bulletins).
+        (e.g. stay → trip → sibling stay bulletins).
         Includes bulletins from the same source threads as any related bulletin.
         """
         # Directly-linked bulletins
@@ -1236,7 +1256,7 @@ class MemoryService(BaseService):
         related_ids: set[str] = set()
         for c in claims:
             ref = c["object_id"] or c["value"] or ""
-            if ref and ref.startswith(("trip", "tripstop", "transport", "location", "event")):
+            if ref and ref.startswith(FOLLOW_FOR_BULLETINS_PREFIXES):
                 related_ids.add(ref)
 
         # Also find entities that reference this entity (reverse direction)
@@ -1263,7 +1283,7 @@ class MemoryService(BaseService):
             )
             for c in hop2_claims:
                 ref = c["object_id"] or c["value"] or ""
-                if ref and ref.startswith(("trip", "tripstop", "transport", "location", "event")):
+                if ref and ref.startswith(FOLLOW_FOR_BULLETINS_PREFIXES):
                     related_ids.add(ref)
 
         # Collect bulletins from all related entities
@@ -1281,7 +1301,7 @@ class MemoryService(BaseService):
         """Re-extract from source bulletins and only write missing claims.
 
         Scans bulletins from the entity itself plus related entities
-        (parent trip, sibling tripstops, linked transports/locations).
+        (parent trip, sibling stays, linked transports/locations).
         Uses a dedicated supplement prompt that allows inference from
         related data (unlike the strict extraction prompt).
         Non-destructive: existing claims are never modified or removed.
@@ -1318,6 +1338,18 @@ class MemoryService(BaseService):
             return {"status": "no_op", "reason": "entity not found"}
 
         entity_type = entity_row["entity_type"]
+
+        # File entities: skip supplement if no valid file_path exists
+        if entity_type == "file":
+            has_path = any(
+                r["claim_type_key"] == "file_path" and r["value"]
+                and _is_valid_file_path(r["value"])
+                for r in current_rows
+            )
+            if not has_path:
+                logger.info("Supplement: skipping file entity %s — no valid file_path", entity_id)
+                return {"status": "no_op", "reason": "file entity has no valid file_path"}
+
         claim_types = get_claim_types_for_entity(entity_type)
 
         bulletins = await self.read_bulletins(workspace_dir, limit=10000, oldest_first=True)
@@ -1340,8 +1372,15 @@ class MemoryService(BaseService):
         prompt = (
             f"You are a Memory Supplement Agent. You review bulletins and identify claims that are "
             f"missing for a specific entity. Unlike initial extraction, you MAY infer entity claims "
-            f"from related information (e.g. a transport departure implies a tripstop departure date, "
-            f"a hotel check-in implies a tripstop arrival).\n\n"
+            f"from related information (e.g. a transport departure implies a stay departure date, "
+            f"a hotel check-in implies a stay arrival).\n\n"
+            f"## CRITICAL RULE\n\n"
+            f"Every claim you produce must be a fact ABOUT the target entity "
+            f"({entity_row['display_name']} / {entity_id}). "
+            f"Do NOT extract claims about OTHER entities that happen to be mentioned in the bulletins. "
+            f"For example, if the target is a person mentioned only as \"Sam (~8)\" in a family list, "
+            f"do NOT extract the speaker's email, timezone, or language — those belong to the speaker, "
+            f"not to Sam.\n\n"
             f"## Entity: {entity_id} ({entity_type})\n\n"
             f"Display name: {entity_row['display_name']}\n\n"
             f"## Current Claims\n\n{current_claims_str}\n\n"
@@ -1420,7 +1459,7 @@ class MemoryService(BaseService):
                 value=val,
                 object_id=obj,
                 status="active",
-                source_bulletins=[],
+                source_bulletins=bulletin_ids,
                 created_at=datetime.now(),
             )
             await write_claim(self.db, claim)
