@@ -2,14 +2,45 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 from pathlib import Path
 
 from cyborg_server.context import AppContext
 from cyborg_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
+
+MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25 MB
+
+
+def _read_file_as_attachment(
+    file_path: str,
+    workspace_dir: Path,
+) -> dict:
+    """Read a file and return an attachment dict for the delivery service."""
+    path = Path(file_path)
+    if not path.is_absolute():
+        path = workspace_dir / path
+    path = path.resolve()
+
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    if not str(path).startswith(str(workspace_dir.resolve())):
+        raise ValueError(f"File must be within the workspace: {file_path}")
+
+    size = path.stat().st_size
+    if size > MAX_ATTACHMENT_SIZE:
+        raise ValueError(f"File too large ({size} bytes, max {MAX_ATTACHMENT_SIZE}): {file_path}")
+
+    content = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {
+        "content": content,
+        "filename": path.name,
+        "content_type": mimetypes.guess_type(str(path))[0] or "application/octet-stream",
+    }
 
 
 def make_email_tools(
@@ -30,18 +61,47 @@ def make_email_tools(
     """
 
     @tool
-    async def email_reply(body: str) -> str:
-        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output."""
+    async def email_reply(body: str, attachments: list[str] | None = None) -> str:
+        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Optionally attach files by providing their paths as a list (workspace-relative or absolute)."""
         from cyborg_server.services.email_delivery_service import EmailDeliveryService
+
+        if isinstance(attachments, str):
+            s = attachments.strip()
+            attachments = None if not s or s == "[]" else [s]
+
+        settings = ctx.settings
+        workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
+
+        attachment_dicts = None
+        if attachments:
+            attachments = [fp for fp in attachments if fp and fp.strip()]
+        if attachments:
+            attachment_dicts = []
+            errors = []
+            for fp in attachments:
+                try:
+                    attachment_dicts.append(_read_file_as_attachment(fp, workspace_dir))
+                except (FileNotFoundError, ValueError) as e:
+                    errors.append(str(e))
+            if errors:
+                return f"Error with attachments: {'; '.join(errors)}"
 
         svc = EmailDeliveryService(ctx)
         try:
-            result = await svc.send_reply(inbox_id=inbox_id, thread_id=thread_id, text=body)
+            await svc.send_reply(
+                inbox_id=inbox_id,
+                thread_id=thread_id,
+                text=body,
+                attachments=attachment_dicts,
+            )
             if reply_tracker is not None:
                 reply_tracker[0] = True
             if reply_body_tracker is not None:
                 reply_body_tracker.append(body)
-            return json.dumps({"ok": True, "thread_id": thread_id})
+            result = {"ok": True, "thread_id": thread_id}
+            if attachment_dicts:
+                result["attachments_sent"] = [a["filename"] for a in attachment_dicts]
+            return json.dumps(result)
         except Exception as e:
             logger.warning("email_reply failed: %s", e)
             return f"Error sending reply: {e}"
@@ -228,9 +288,31 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
         subject: str,
         body: str,
         agenda: str,
+        attachments: list[str] | None = None,
     ) -> str:
-        """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known."""
+        """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. Optionally attach files by providing their paths as a list (workspace-relative or absolute)."""
         from cyborg_server.services.email_delivery_service import EmailDeliveryService
+
+        if isinstance(attachments, str):
+            s = attachments.strip()
+            attachments = None if not s or s == "[]" else [s]
+
+        settings = ctx.settings
+        workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
+
+        attachment_dicts = None
+        if attachments:
+            attachments = [fp for fp in attachments if fp and fp.strip()]
+        if attachments:
+            attachment_dicts = []
+            errors = []
+            for fp in attachments:
+                try:
+                    attachment_dicts.append(_read_file_as_attachment(fp, workspace_dir))
+                except (FileNotFoundError, ValueError) as e:
+                    errors.append(str(e))
+            if errors:
+                return f"Error with attachments: {'; '.join(errors)}"
 
         # Resolve default inbox
         inbox = await ctx.db.fetch_one(
@@ -248,8 +330,12 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
                 text=body,
                 agenda=agenda,
                 origin_session_key=session_key,
+                attachments=attachment_dicts,
             )
-            return json.dumps({"ok": True, "thread_id": result.get("thread_id", "")})
+            response = {"ok": True, "thread_id": result.get("thread_id", "")}
+            if attachment_dicts:
+                response["attachments_sent"] = [a["filename"] for a in attachment_dicts]
+            return json.dumps(response)
         except Exception as e:
             logger.warning("email_send failed: %s", e)
             return f"Error sending email: {e}"

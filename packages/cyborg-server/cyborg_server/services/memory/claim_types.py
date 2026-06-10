@@ -78,7 +78,7 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("organizer", ["event"], "Who is running or hosting it", "event-dinner-aug5 → person-mike-cleaver"),
     ("attendee", ["event"], "Who is attending", "event-dinner-aug5 → person-david-shedden"),
     ("recurrence", ["event"], "Recurring pattern or one-off", 'event-dinner-aug5 → "one-off"'),
-    ("associated_trip", ["event"], "Trip this event relates to", "event-dinner-aug5 → trip-bali-2026"),
+    ("associated_trip", ["event", "attraction", "dayplan"], "Trip this relates to", "event-dinner-aug5 → trip-bali-2026"),
     # Location
     ("location_type", ["location"], "Kind of place", 'location-villa-sunset → "villa"'),
     ("parent_location", ["location"], "Location this is contained within", "location-villa-sunset → location-seminyak"),
@@ -88,7 +88,8 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("opening_hours", ["location"], "Opening hours (not for cities/countries)", 'location-mama-san → "12:00-23:00 daily"'),
     # Trip
     ("leg", ["trip"], "A Stay that is part of this trip", "trip-bali-2026 → stay-bali-day1-3"),
-    ("attraction", ["trip"], "A place of interest to visit during the trip", "trip-bali-2026 → location-tanah-lot"),
+    ("attraction", ["trip"], "An Attraction entity — a thing to see or do on the trip", "trip-bali-2026 → attraction-tanah-lot"),
+    ("dayplan", ["trip"], "A Dayplan entity — planned itinerary for a specific day", "trip-bali-2026 → dayplan-bali-aug3"),
     ("connection", ["trip"], "A Connection entity that is part of this trip",
      "trip-europe-france → connection-perth-geneva-outbound"),
     # Connection
@@ -112,6 +113,17 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
      "connection-perth-geneva → person-mike-cleaver"),
     ("seat", ["connection"], "Seat or cabin assignment",
      'connection-perth-geneva → "Coach 10, Seat 32"'),
+    # Attraction
+    ("attraction_type", ["attraction"], "Kind of attraction: temple, museum, beach, market, viewpoint, park, restaurant, bar, activity, tour",
+     'attraction-tanah-lot → "temple"'),
+    ("visit_date", ["attraction"], "Date/time when visiting", 'attraction-tanah-lot → "2026-08-03T16:00"'),
+    ("cost", ["attraction"], "Cost or ticket price", 'attraction-tanah-lot → "50k IDR"'),
+    ("location", ["attraction"], "Where the attraction is", "attraction-tanah-lot → location-tanah-lot"),
+    # Dayplan
+    ("date", ["dayplan"], "Date this dayplan covers", 'dayplan-bali-aug3 → "2026-08-03"'),
+    ("notes", ["dayplan"], "Ideas, plans, or notes for the day", 'dayplan-bali-aug3 → "Morning at beach, afternoon temple visit"'),
+    ("attraction", ["dayplan"], "Attraction planned for this day", "dayplan-bali-aug3 → attraction-tanah-lot"),
+    # (associated_trip also applies to event and attraction — see Event section above)
     # Stay
     ("accommodation", ["stay"], "Location where you stay", "stay-bali-day1-3 → location-villa-sunset"),
     ("accommodation_type", ["stay"], "Type of accommodation: hotel, airbnb, hostel, camping, resort, apartment, villa", 'stay-paris-june12-14 → "hotel"'),
@@ -134,9 +146,9 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     # Person
     ("preference", ["person"], "General preference or style (not food/drink — use those specific types). e.g. prefers dark mode, likes brief updates, wants to be asked before acting", 'person-mike-cleaver → "prefers concise summaries, no chitchat"'),
     # Cross-cutting
-    ("file_ref", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision"],
+    ("file_ref", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision", "attraction", "dayplan"],
      "Links to a file entity (object_id must be a file-* entity ID). Not for notes, actions, or non-file entity references", "trip-bali-2026 → file-villa-spreadsheet"),
-    ("truth", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision"],
+    ("truth", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision", "attraction", "dayplan"],
      "ONLY for explicit user corrections to existing memory ('actually...', 'no it's X', 'that's wrong'). NOT for observations, actions, requests, preferences, or general facts — use the specific claim type instead.", 'trip-mike-holiday-june-2026 → "No, we changed to 2 stops in Paris not 1"'),
 ]
 
@@ -274,6 +286,55 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "1. Arrival date must be before departure date.\n"
             "2. There MUST be exactly one arrival_date claim and exactly one departure_date claim. "
             "If there are duplicates, keep the most specific/sourced one and retract the rest."
+        ),
+        follow_for_bulletins=True,
+    ),
+    "attraction": EntityType(
+        name="attraction",
+        prefix="attraction-",
+        description=(
+            "A thing to see or do on a trip: a temple, museum, beach, market, viewpoint, "
+            "restaurant, bar, activity, or tour. Each attraction is a distinct place or activity "
+            "worth visiting. Include location and trip context in the slug for uniqueness "
+            "(e.g. attraction-tanah-lot, attraction-mama-san-dinner)."
+        ),
+        keywords=["visit", "see", "do", "attraction", "sightseeing", "temple", "museum",
+                   "beach", "market", "viewpoint", "activity", "tour"],
+        triggers_types=["attraction"],
+        extraction_rules=[
+            "Each attraction is a distinct place or activity to visit. Create separate attraction "
+            "entities for different places even if they're in the same area. "
+            "If the bulletin mentions a specific location for the attraction, create both the "
+            "attraction entity and reference the location.",
+        ],
+        reconciliation_rules=(
+            "1. If the attraction has no associated_trip claim, check if any trip references it "
+            "in its attraction claims. If found, add the associated_trip claim.\n"
+            "2. If two attractions have the same location and visit_date, they may be duplicates — "
+            "raise a question rather than silently fixing."
+        ),
+        follow_for_bulletins=True,
+    ),
+    "dayplan": EntityType(
+        name="dayplan",
+        prefix="dayplan-",
+        description=(
+            "A planned itinerary for a single day of a trip. Collects notes, ideas, and attractions "
+            "for a specific date. Include the trip and date in the slug for uniqueness "
+            "(e.g. dayplan-bali-aug3, dayplan-paris-jun12). Created when planning days of a trip."
+        ),
+        keywords=["day plan", "itinerary", "plan for", "agenda"],
+        triggers_types=["dayplan"],
+        extraction_rules=[
+            "Each dayplan covers exactly one date. Create separate dayplan entities for each day. "
+            "Include attraction references for things planned for that day, and notes for ideas or free-text plans.",
+        ],
+        reconciliation_rules=(
+            "1. There MUST be exactly one date claim. If there are duplicates, keep the most specific one.\n"
+            "2. Attraction claims should reference existing attraction entities. If an attraction claim "
+            "references a non-existent entity, raise a question.\n"
+            "3. If the dayplan has no associated_trip, check if any trip references it in its dayplan claims. "
+            "If found, add the associated_trip claim."
         ),
         follow_for_bulletins=True,
     ),
@@ -440,7 +501,7 @@ ENTITY_REF_CLAIM_KEYS: frozenset[str] = frozenset({
     "member", "location", "organizer", "attendee", "associated_trip",
     "parent_location", "associated_contact", "leg", "accommodation",
     "owner", "related_entity", "decider", "file_ref", "attraction",
-    "connection", "passenger",
+    "connection", "passenger", "dayplan",
 })
 
 
@@ -522,7 +583,25 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("member", "Members"),
         ("leg", "Legs"),
         ("attraction", "Attractions"),
+        ("dayplan", "Day plans"),
         ("connection", "Connections"),
+        ("file_ref", "Files"),
+        ("truth", "User truth"),
+    ],
+    "attraction": [
+        ("attraction_type", "Type"),
+        ("location", "Location"),
+        ("visit_date", "Visiting"),
+        ("cost", "Cost"),
+        ("associated_trip", "Trip"),
+        ("file_ref", "Files"),
+        ("truth", "User truth"),
+    ],
+    "dayplan": [
+        ("date", "Date"),
+        ("notes", "Notes"),
+        ("attraction", "Attractions"),
+        ("associated_trip", "Trip"),
         ("file_ref", "Files"),
         ("truth", "User truth"),
     ],

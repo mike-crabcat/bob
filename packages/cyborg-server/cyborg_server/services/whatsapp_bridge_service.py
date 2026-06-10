@@ -138,6 +138,7 @@ async def _prepare_media(path: str) -> str | None:
             return path
 
     import functools
+    import tempfile
 
     def _resize() -> str | None:
         from io import BytesIO
