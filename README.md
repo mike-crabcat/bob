@@ -1,30 +1,40 @@
-# Cyborg
+# bob
 
-![Cyborg](assets/cyborg-small.png)
+![bob](assets/bob-hero.png)
 
-Cyborg is an autonomous AI agent that communicates and acts across WhatsApp, email, voice chat, and phone calls. It maintains its own memory, manages contacts and calendars, and can reach out to people on your behalf through any supported channel.
+**An opinionated personal agent with SQL-backed memory.**
+
+bob is a small, stubborn agent backed by a SQL database.
+
+He remembers things, runs routines, keeps workspace state, and acts through tools. He does not offer a personality selector, model picker, plugin marketplace, or twelve competing abstractions for memory.
+
+There is no agent builder here.
+
+There is just bob.
+
+You too can have him.
 
 ## Feature Areas
 
 ### WhatsApp Messaging
 
-Cyborg connects to WhatsApp through a Go companion service (the WhatsApp Bridge) that links to WhatsApp Web via the `whatsmeow` library. It handles both direct messages and group chats, with support for text, images, and documents. Messages flow through a persistent SQLite queue with guaranteed delivery and automatic retries. Contacts are auto-seeded from shared contact cards. Proactive outreach tools let Cyborg initiate conversations with trusted contacts. A pairing system supports both QR code and phone number methods.
+Bob connects to WhatsApp through a Go companion service (the WhatsApp Bridge) that links to WhatsApp Web via the `whatsmeow` library. It handles both direct messages and group chats, with support for text, images, and documents. Messages flow through a persistent SQLite queue with guaranteed delivery and automatic retries. Contacts are auto-seeded from shared contact cards. Proactive outreach tools let Bob initiate conversations with trusted contacts. A pairing system supports both QR code and phone number methods.
 
 ### Voice Chat
 
-Real-time voice conversations run over WebSockets with a full STT/TTS pipeline. Cyborg uses Faster Whisper for speech-to-text (with CUDA acceleration) and Omnivoice for text-to-speech. The system supports barge-in detection, silence detection, multi-language conversations with language tagging, and session-based conversation tracking. Voice sessions are stored as unified session messages alongside text and email interactions.
+Real-time voice conversations run over WebSockets with a full STT/TTS pipeline. Bob uses Faster Whisper for speech-to-text (with CUDA acceleration) and Omnivoice for text-to-speech. The system supports barge-in detection, silence detection, multi-language conversations with language tagging, and session-based conversation tracking. Voice sessions are stored as unified session messages alongside text and email interactions.
 
 ### Phone Calls
 
-Phone integration uses Twilio Media Streams for real-time bidirectional audio during voice calls. Cyborg can initiate outbound calls to contacts and handle inbound calls, with automatic contact resolution from caller ID. Calls are recorded and each exchange is logged with detailed timing metrics (STT latency, LLM latency, TTS latency, end-to-end latency). The `make_phone_call` tool lets the LLM dial contacts directly, and `get_call_status` tracks call progress.
+Phone integration uses Twilio Media Streams for real-time bidirectional audio during voice calls. Bob can initiate outbound calls to contacts and handle inbound calls, with automatic contact resolution from caller ID. Calls are recorded and each exchange is logged with detailed timing metrics (STT latency, LLM latency, TTS latency, end-to-end latency). The `make_phone_call` tool lets the LLM dial contacts directly, and `get_call_status` tracks call progress.
 
 ### Email
 
-Cyborg reads and sends email through AgentMail. A polling service checks inboxes for new messages, resolves contacts from sender addresses, and dispatches the LLM with email context and reply tools. The system supports multiple inboxes, thread management, attachment handling (downloaded from trusted senders), and trust-based handling policies. Replies are sent back through the AgentMail API.
+Bob reads and sends email through AgentMail. A polling service checks inboxes for new messages, resolves contacts from sender addresses, and dispatches the LLM with email context and reply tools. The system supports multiple inboxes, thread management, attachment handling (downloaded from trusted senders), and trust-based handling policies. Replies are sent back through the AgentMail API.
 
 ### Dispatch System
 
-Every agent interaction is tracked as a dispatch, whether it is a WhatsApp message response, an email reply, a voice conversation, or a phone call. Dispatches have their own lifecycle (active, completed, failed, timed_out, cancelled) with concurrency limits, stuck detection, and automatic tapping. This gives Cyborg a unified view of everything the agent is doing across all channels.
+Every agent interaction is tracked as a dispatch, whether it is a WhatsApp message response, an email reply, a voice conversation, or a phone call. Dispatches have their own lifecycle (active, completed, failed, timed_out, cancelled) with concurrency limits, stuck detection, and automatic tapping. This gives Bob a unified view of everything the agent is doing across all channels.
 
 ### Session Management
 
@@ -168,7 +178,7 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
                                   |
 +--------+   +--------+   +------+-------+   +-----------+   +-----------+
 | WhatsApp|   |  Email |   |              |   |  Voice    |   |   Phone   |
-| Bridge  |   | (Agent |   |  Cyborg      |   |  Chat     |   |  (Twilio) |
+| Bridge  |   | (Agent |   |  Bob         |   |  Chat     |   |  (Twilio) |
 | (Go)    |   |  Mail) |   |  Server      |   |  (WS/STT/ |   |  (Media   |
 |         |   |        |   |  (FastAPI)   |   |   TTS)    |   |  Streams) |
 +----+----+   +----+---+   +------+-------+   +-----+-----+   +-----+-----+
@@ -199,7 +209,7 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 - A Twilio account (for phone calls)
 - An AgentMail account (for email)
 
-### Install Cyborg Server
+### Install Bob Server
 
 ```bash
 git clone <repo-url> cyborg
@@ -272,7 +282,7 @@ Start the bridge:
 whatsappbridge
 ```
 
-Then pair your WhatsApp account. Use the Cyborg CLI to request a pairing code:
+Then pair your WhatsApp account. Use the Bob CLI to request a pairing code:
 
 ```bash
 uv run cyborg whatsapp pair --phone +61400111222
@@ -280,7 +290,7 @@ uv run cyborg whatsapp pair --phone +61400111222
 
 Or scan a QR code from the dashboard at `http://localhost:8420/dashboard`.
 
-### Start Cyborg
+### Start Bob
 
 Run directly:
 
@@ -437,7 +447,7 @@ WhatsApp bridge (Go companion) variables:
 |---|---|---|
 | `WHATSAPPBRIDGE_HOST` | `127.0.0.1` | Bridge listen host |
 | `WHATSAPPBRIDGE_PORT` | `8430` | Bridge listen port |
-| `WHATSAPPBRIDGE_TOKEN` | *(none)* | Auth token (must match Cyborg side) |
+| `WHATSAPPBRIDGE_TOKEN` | *(none)* | Auth token (must match Bob side) |
 | `WHATSAPPBRIDGE_DATA_DIR` | `~/.local/share/cyborg/whatsappbridge` | Data directory |
 | `WHATSAPPBRIDGE_LOG_LEVEL` | `info` | Log level |
 
