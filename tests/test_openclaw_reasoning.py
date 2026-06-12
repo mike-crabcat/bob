@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from cyborg_server.models import (
+from bob_server.models import (
     JournalEntryType,
     PlanStep,
     ProjectCloseRequest,
@@ -13,17 +13,17 @@ from cyborg_server.models import (
     TaskBlockRequest,
     TaskCreate,
 )
-from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-from cyborg_server.services.context_builder import ContextScope
-from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
-from cyborg_server.database import Database
+from bob_server.services.openclaw_hook_service import OpenClawHookService
+from bob_server.services.context_builder import ContextScope
+from bob_server.services.openclaw_reasoning_service import OpenClawReasoningService
+from bob_server.database import Database
 
 
 @pytest_asyncio.fixture
 async def sample_project_with_data(db: Database):
     """Create a sample project with tasks for testing."""
-    from cyborg_server.services.project_service import ProjectService
-    from cyborg_server.services.task_service import TaskService
+    from bob_server.services.project_service import ProjectService
+    from bob_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -140,8 +140,8 @@ async def test_evaluate_success_criteria_with_mocked_openclaw(db: Database, samp
 @pytest.mark.asyncio
 async def test_evaluate_success_criteria_unmet(db: Database):
     """Test evaluation when criteria are not met."""
-    from cyborg_server.services.project_service import ProjectService
-    from cyborg_server.services.task_service import TaskService
+    from bob_server.services.project_service import ProjectService
+    from bob_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -197,7 +197,7 @@ async def test_evaluate_success_criteria_unmet(db: Database):
 @pytest.mark.asyncio
 async def test_generate_follow_up_tasks(db: Database):
     """Test generating follow-up tasks for unmet criteria."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
 
@@ -271,7 +271,7 @@ async def test_refine_project_strategy(db: Database, sample_project_with_data):
 @pytest.mark.asyncio
 async def test_refine_project_strategy_with_changes(db: Database):
     """Test strategy refinement when changes are suggested."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
 
@@ -321,7 +321,7 @@ async def test_refine_project_strategy_with_changes(db: Database):
 @pytest.mark.asyncio
 async def test_extract_learnings(db: Database):
     """Test learning extraction from completed project."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
 
@@ -379,9 +379,9 @@ async def test_extract_learnings(db: Database):
 @pytest.mark.asyncio
 async def test_generate_task_plan(db: Database):
     """Test task-level plan generation."""
-    from cyborg_server.services.task_service import TaskService
-    from cyborg_server.services.project_service import ProjectService
-    from cyborg_server.models import ProjectCreate
+    from bob_server.services.task_service import TaskService
+    from bob_server.services.project_service import ProjectService
+    from bob_server.models import ProjectCreate
 
     task_service = TaskService(db)
     project_service = ProjectService(db)
@@ -429,8 +429,8 @@ async def test_generate_task_plan(db: Database):
 @pytest.mark.asyncio
 async def test_analyze_project_health(db: Database):
     """Test project health analysis."""
-    from cyborg_server.services.project_service import ProjectService
-    from cyborg_server.services.task_service import TaskService
+    from bob_server.services.project_service import ProjectService
+    from bob_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -542,7 +542,7 @@ async def test_generate_project_plan(db: Database):
 @pytest.mark.asyncio
 async def test_openclaw_unavailable_handling(db: Database):
     """Test handling when OpenClaw gateway is unavailable."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
     project = await project_service.create_project(ProjectCreate(
@@ -570,7 +570,7 @@ async def test_openclaw_unavailable_handling(db: Database):
 @pytest.mark.asyncio
 async def test_malformed_json_response(db: Database):
     """Test handling of malformed JSON from OpenClaw."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
     project = await project_service.create_project(ProjectCreate(
@@ -603,7 +603,7 @@ async def test_malformed_json_response(db: Database):
 @pytest.mark.asyncio
 async def test_idempotency_key_included(db: Database):
     """Test that idempotency key is included in gateway calls."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
     project = await project_service.create_project(ProjectCreate(
@@ -636,7 +636,7 @@ async def test_idempotency_key_included(db: Database):
 @pytest.mark.asyncio
 async def test_response_format_json_hint(db: Database):
     """Test that JSON response format is requested."""
-    from cyborg_server.services.project_service import ProjectService
+    from bob_server.services.project_service import ProjectService
 
     project_service = ProjectService(db)
     project = await project_service.create_project(ProjectCreate(
@@ -788,8 +788,8 @@ async def test_session_key_override(db: Database, sample_project_with_data):
 @pytest.mark.asyncio
 async def test_upstream_context_in_evaluation_prompt(db: Database):
     """Evaluation prompt should mention upstream task results when they exist."""
-    from cyborg_server.services.project_service import ProjectService
-    from cyborg_server.services.task_service import TaskService
+    from bob_server.services.project_service import ProjectService
+    from bob_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)
@@ -857,8 +857,8 @@ async def test_upstream_context_in_evaluation_prompt(db: Database):
 @pytest.mark.asyncio
 async def test_upstream_context_in_refinement_prompt(db: Database):
     """Refinement prompt should include upstream context."""
-    from cyborg_server.services.project_service import ProjectService
-    from cyborg_server.services.task_service import TaskService
+    from bob_server.services.project_service import ProjectService
+    from bob_server.services.task_service import TaskService
 
     project_service = ProjectService(db)
     task_service = TaskService(db)

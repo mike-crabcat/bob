@@ -8,7 +8,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"go.cyborg.dev/whatsappbridge/internal/wsproto"
+	"go.bob.dev/whatsappbridge/internal/wsproto"
 )
 
 const schema = `

@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go.cyborg.dev/whatsappbridge/internal/bridge"
-	"go.cyborg.dev/whatsappbridge/internal/config"
+	"go.bob.dev/whatsappbridge/internal/bridge"
+	"go.bob.dev/whatsappbridge/internal/config"
 )
 
 func main() {

@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bob-server"
+version = "0.4.13"
+description = "Bob data service — server, CLI, and shared libraries"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+  { name = "Mike Cleaver" },
+]
+dependencies = [
+  "aiosqlite>=0.20.0",
+  "cryptography>=44.0.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.28.0",
+  "jinja2>=3.1.0",
+  "pydantic>=2.10.0",
+  "pyyaml>=6.0",
+  "python-multipart>=0.0.18",
+  "python-jose>=3.3.0",
+  "typer>=0.16.0",
+  "uvicorn>=0.35.0",
+  "websockets>=15.0.0",
+  "openai>=1.0.0",
+  "sqlite-vec>=0.1.6",
+  "twilio>=9.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.25",
+  "pytest-cov>=6.0",
+]
+
+[project.optional-dependencies]
+voice = [
+  "faster-whisper>=1.2.1",
+  "soundfile>=0.13.1",
+  "numpy>=2.0.0",
+  "omnivoice>=0.1.4",
+  "av>=14.0.0",
+]
+
+[project.scripts]
+bob = "bob_server.cli:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bob_server"]
+
+[tool.hatch.build]
+include = [
+  "bob_server/**/*.py",
+  "bob_server/**/*.sql",
+  "bob_server/**/*.html",
+  "bob_server/**/*.yml",
+  "bob_server/voice_data/**",
+  "bob_server/voice_frontend/**",
+  "bob_server/ui_dist/**",
+]

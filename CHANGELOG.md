@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Cyborg are documented here. Entries are based on analysis of actual code changes, not just commit messages.
+All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
 ## 2026-06-09
 
@@ -21,7 +21,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 
 ### Added
 - Add routines system: cron-scheduled prompts injected into sessions via `read_routine`/`write_routine`/`delete_routine` agent tools, with a `RoutineSchedulerTask` heartbeat task that fires due routines independently without blocking session activity
-- Add entity merge system for detecting and merging duplicate entities using embedding cosine similarity and LLM confirmation, with a CLI command (`cyborg memory merge --dry-run`), a dashboard API endpoint, and an inline merge UI in the memory dashboard
+- Add entity merge system for detecting and merging duplicate entities using embedding cosine similarity and LLM confirmation, with a CLI command (`bob memory merge --dry-run`), a dashboard API endpoint, and an inline merge UI in the memory dashboard
 - Add centralized entity type registry (`ENTITY_TYPE_REGISTRY` in `claim_types.py`) consolidating per-type metadata (prefixes, descriptions, keywords, extraction rules, reconciliation rules, display behavior)
 - Add `connection` as a first-class entity type replacing the old `transport` type, with structured claim types for departure/arrival locations, times, transport type, duration, booking ref, route, passengers, and seat
 - Add `stay` entity type replacing `tripstop`, with renamed claim keys (`accommodation`, `arrival_date`, `departure_date`, `accommodation_type`, `accommodation_address`)
@@ -30,7 +30,7 @@ All notable changes to Cyborg are documented here. Entries are based on analysis
 - Add `list_attachments` and `download_attachment` email tools for browsing and saving email attachments, with attachment metadata persisted to the database for all messages
 - Add Jinja2-based entity template engine for rich entity rendering with recursive entity reference resolution
 - Add entity deprecation status (`active`/`archived`/`deprecated`) and automatic deprecation of file entities with no valid `file_path` claim
-- Add `cyborg memory reindex` CLI command for rebuilding the FTS search index without LLM calls
+- Add `bob memory reindex` CLI command for rebuilding the FTS search index without LLM calls
 - Add PDF file viewer in the workspace dashboard using an embedded iframe
 - Add `deprecated` entity status to the database schema and migrations (schemas 325–328)
 

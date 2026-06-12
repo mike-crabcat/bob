@@ -1,4 +1,4 @@
-module go.cyborg.dev/whatsappbridge
+module go.bob.dev/whatsappbridge
 
 go 1.25.0
 

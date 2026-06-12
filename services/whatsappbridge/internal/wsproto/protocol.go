@@ -35,7 +35,7 @@ func ParseEnvelope(data []byte) (Envelope, error) {
 	return e, err
 }
 
-// --- Upstream messages (bridge → cyborg) ---
+// --- Upstream messages (bridge → bob) ---
 
 type ConnectedPayload struct {
 	PhoneNumber string `json:"phone_number"`
@@ -129,7 +129,7 @@ type GroupParticipantPayload struct {
 	IsSuperAdmin bool   `json:"is_super_admin"`
 }
 
-// --- Downstream messages (cyborg → bridge) ---
+// --- Downstream messages (bob → bridge) ---
 
 type SendMessagePayload struct {
 	ChatID             string `json:"chat_id"`

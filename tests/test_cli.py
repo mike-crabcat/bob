@@ -6,7 +6,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-import cyborg_server.cli as cli
+import bob_server.cli as cli
 
 
 runner = CliRunner()
@@ -573,20 +573,20 @@ def test_serve_loads_openclaw_settings_from_config_dir_env_file(tmp_path: Path, 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     for key in (
-        "CYBORG_OPENCLAW_BASE_URL",
-        "CYBORG_OPENCLAW_TOKEN",
-        "CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS",
-        "CYBORG_HEARTBEAT_INTERVAL_SECONDS",
-        "CYBORG_ENV_FILE",
+        "BOB_OPENCLAW_BASE_URL",
+        "BOB_OPENCLAW_TOKEN",
+        "BOB_NOTIFICATION_DISPATCH_INTERVAL_SECONDS",
+        "BOB_HEARTBEAT_INTERVAL_SECONDS",
+        "BOB_ENV_FILE",
     ):
         monkeypatch.delenv(key, raising=False)
     env_file = config_dir / ".env"
     env_file.write_text(
         "\n".join(
             [
-                "CYBORG_OPENCLAW_BASE_URL=https://openclaw.example",
-                "CYBORG_OPENCLAW_TOKEN=secret-token",
-                "CYBORG_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15",
+                "BOB_OPENCLAW_BASE_URL=https://openclaw.example",
+                "BOB_OPENCLAW_TOKEN=secret-token",
+                "BOB_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15",
             ]
         ),
         encoding="utf-8",
@@ -633,7 +633,7 @@ def test_service_file_contents_exports_config_dir() -> None:
 
     service_file = cli._service_file_contents(settings, Path("/work"))
 
-    assert "Environment=CYBORG_CONFIG_DIR=/tmp/config" in service_file
+    assert "Environment=BOB_CONFIG_DIR=/tmp/config" in service_file
 
 
 def test_session_route_create_builds_payload(monkeypatch) -> None:

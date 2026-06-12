@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
-BACKUP_NAME="cyborg_backup_${TIMESTAMP}.zip"
+BACKUP_NAME="bob_backup_${TIMESTAMP}.zip"
 BACKUP_PATH="$HOME/${BACKUP_NAME}"
 WORKSPACE_DIR="$HOME/.config/cyborg"
 DATA_DIR="$HOME/.local/share/cyborg"
@@ -59,7 +59,7 @@ for f in \
   "$PROJECT_DIR/.env.local" \
   "$PROJECT_DIR/pyproject.toml" \
   "$PROJECT_DIR/DOCS.yaml" \
-  "$PROJECT_DIR/packages/cyborg-server/pyproject.toml"; do
+  "$PROJECT_DIR/packages/bob-server/pyproject.toml"; do
   [ -f "$f" ] || continue
   dest="$STAGE/$(echo "$f" | sed "s|^$HOME/||")"
   mkdir -p "$(dirname "$dest")"

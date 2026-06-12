@@ -23,7 +23,7 @@ def _assert_no_internal_leakage(text: str) -> None:
     assert "task id" not in lowered
     assert "notification id" not in lowered
     assert "session key" not in lowered
-    assert "cyborg task assignment" not in lowered
+    assert "bob task assignment" not in lowered
 
 
 @pytest.fixture
@@ -40,12 +40,12 @@ def _start_task_assignment_session(
     live_openclaw: Any,
     *,
     task_id: str,
-    cyborg_service_url: str,
+    bob_service_url: str,
 ) -> tuple[dict[str, Any], str, str, dict[str, Any]]:
     notification = acceptance_builder.get_task_assignment_notification(task_id)
     route, _resolved_session_key = live_openclaw.resolve_target_route(notification)
     session_key = live_openclaw.new_session_key(f"task-assignment-{task_id}")
-    hook_service = live_openclaw.make_hook_service(cyborg_service_url=cyborg_service_url)
+    hook_service = live_openclaw.make_hook_service(bob_service_url=bob_service_url)
     params = asyncio.run(hook_service._build_task_assignment_agent_params(notification, route, session_key))
     params["deliver"] = False
     params.pop("channel", None)
@@ -55,7 +55,7 @@ def _start_task_assignment_session(
         params,
         expect_final=True,
         timeout_seconds=90.0,
-        cyborg_service_url=cyborg_service_url,
+        bob_service_url=bob_service_url,
     )
     text = live_openclaw.response_text(response, session_key=session_key)
     history = live_openclaw.fetch_history(session_key)
@@ -103,7 +103,7 @@ def _wait_for_task_completion(
     )
     if any(fragment in history_text.lower() for fragment in ("can't", "cannot", "unable", "don’t have access", "don't have access", "no tool")):
         raise AssertionError(
-            "OpenClaw did not complete the task, and the session history suggests the Cyborg skill/tooling is unavailable. "
+            "OpenClaw did not complete the task, and the session history suggests the Bob skill/tooling is unavailable. "
             f"Last task state: {last_task}"
         )
     raise AssertionError(f"Timed out waiting for task {task_id} to complete. Last task state: {last_task}")
@@ -120,7 +120,7 @@ def _find_task_result_notification(acceptance_builder: Any, *, task_id: str) -> 
 def test_live_task_assignment_direct_answer_completes_task(
     acceptance_builder: Any,
     live_openclaw: Any,
-    cyborg_http_server: str,
+    bob_http_server: str,
     test_project_for_task_assignment: dict[str, Any],
 ) -> None:
     contact = acceptance_builder.create_contact(
@@ -152,7 +152,7 @@ def test_live_task_assignment_direct_answer_completes_task(
             acceptance_builder,
             live_openclaw,
             task_id=task["id"],
-            cyborg_service_url=cyborg_http_server,
+            bob_service_url=bob_http_server,
         )
     except Exception as exc:
         _skip_if_live_backend_unavailable(exc)
@@ -183,7 +183,7 @@ def test_live_task_assignment_direct_answer_completes_task(
 def test_live_task_assignment_requests_follow_up_before_completion(
     acceptance_builder: Any,
     live_openclaw: Any,
-    cyborg_http_server: str,
+    bob_http_server: str,
     test_project_for_task_assignment: dict[str, Any],
 ) -> None:
     contact = acceptance_builder.create_contact(
@@ -222,7 +222,7 @@ def test_live_task_assignment_requests_follow_up_before_completion(
             acceptance_builder,
             live_openclaw,
             task_id=task["id"],
-            cyborg_service_url=cyborg_http_server,
+            bob_service_url=bob_http_server,
         )
     except Exception as exc:
         _skip_if_live_backend_unavailable(exc)

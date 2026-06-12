@@ -10,7 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"go.cyborg.dev/whatsappbridge/internal/wsproto"
+	"go.bob.dev/whatsappbridge/internal/wsproto"
 )
 
 var upgrader = websocket.Upgrader{
@@ -243,7 +243,7 @@ func (s *Server) Send(env wsproto.Envelope) bool {
 	}
 }
 
-// HasClient returns true if a cyborg-server client is connected.
+// HasClient returns true if a bob-server client is connected.
 func (s *Server) HasClient() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

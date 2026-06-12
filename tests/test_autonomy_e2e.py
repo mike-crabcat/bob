@@ -9,11 +9,11 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 
-from cyborg_server.database import Database
-from cyborg_server.models import SuccessCriterion, TaskStatus
-from cyborg_server.services.base import utcnow
-from cyborg_server.services.project_execution_service import ProjectExecutionService
-from cyborg_server.services.project_autonomy_service import ProjectAutonomyService
+from bob_server.database import Database
+from bob_server.models import SuccessCriterion, TaskStatus
+from bob_server.services.base import utcnow
+from bob_server.services.project_execution_service import ProjectExecutionService
+from bob_server.services.project_autonomy_service import ProjectAutonomyService
 from tests.mocks.mock_llm_service import MockLLMReasoningService
 
 
@@ -24,7 +24,7 @@ async def test_db():
     if db_path.exists():
         db_path.unlink()
 
-    db = Database(db_path=db_path, schema_dir=Path(__file__).parent.parent / "cyborg" / "schemas", pool_size=1)
+    db = Database(db_path=db_path, schema_dir=Path(__file__).parent.parent / "bob_server" / "schemas", pool_size=1)
     await db.connect()
     await db.apply_migrations()
 

@@ -4,15 +4,15 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest_asyncio
-from cyborg_server.database import Database
+from bob_server.database import Database
 
-SCHEMA_DIR = Path(__file__).parent.parent / "packages" / "cyborg-server" / "cyborg_server" / "schemas"
+SCHEMA_DIR = Path(__file__).parent.parent / "packages" / "bob-server" / "bob_server" / "schemas"
 
 
 @pytest_asyncio.fixture
 async def db():
     """Create a fresh in-memory test database for each test."""
-    db_path = Path(f"/tmp/cyborg-test-{uuid4()}.db")
+    db_path = Path(f"/tmp/bob-test-{uuid4()}.db")
 
     db = Database(db_path=db_path, schema_dir=SCHEMA_DIR, pool_size=1)
     await db.connect()

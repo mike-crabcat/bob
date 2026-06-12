@@ -10,8 +10,8 @@
    ```json
    { "mcpServers": { "chrome-devtools": { "command": "npx", "args": ["chrome-devtools-mcp@latest", "--browserUrl=http://127.0.0.1:9222"] } } }
    ```
-3. **Backend server running** (`cyborg serve` on port 8420)
-4. **Frontend dev server running** (`npm run dev` in `cyborg_server/ui_app/` on port 5173)
+3. **Backend server running** (`bob serve` on port 8420)
+4. **Frontend dev server running** (`npm run dev` in `bob_server/ui_app/` on port 5173)
 
 If testing production build instead of Vite dev, run `npm run build` first and use port 8420 directly.
 
@@ -32,7 +32,7 @@ navigate_page type=url url=http://localhost:5173/dashboard/
 ```
 
 **Verify:**
-- Header shows "cyborg" + green "live" indicator
+- Header shows "bob" + green "live" indicator
 - "ACTIVITY" section with recent events
 - "SESSIONS" section with clickable session links (channel dots, call counts, relative timestamps)
 - "LLM CALLS · 24H" chart renders with bar graph

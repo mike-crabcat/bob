@@ -11,18 +11,18 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
 
-import cyborg_server.services.calendar_service as calendar_service_module
-import cyborg_server.services.notification_service as notification_service_module
-import cyborg_server.services.openclaw_hook_service as openclaw_hook_service_module
-import cyborg_server.services.task_service as task_service_module
-from cyborg_server.config import OpenClawHookSettings, Settings
-from cyborg_server.database import Database
-from cyborg_server.exceptions import ConflictError, NotFoundError
-from cyborg_server.main import create_app
-from cyborg_server.models import ProjectSpecApproveRequest
-from cyborg_server.services.project_spec_service import ProjectSpecService
-from cyborg_server.services.session_route_service import SessionRouteService
-from cyborg_server.services.task_service import TaskService
+import bob_server.services.calendar_service as calendar_service_module
+import bob_server.services.notification_service as notification_service_module
+import bob_server.services.openclaw_hook_service as openclaw_hook_service_module
+import bob_server.services.task_service as task_service_module
+from bob_server.config import OpenClawHookSettings, Settings
+from bob_server.database import Database
+from bob_server.exceptions import ConflictError, NotFoundError
+from bob_server.main import create_app
+from bob_server.models import ProjectSpecApproveRequest
+from bob_server.services.project_spec_service import ProjectSpecService
+from bob_server.services.session_route_service import SessionRouteService
+from bob_server.services.task_service import TaskService
 
 
 def make_client(tmp_path: Path, settings: Settings | None = None) -> TestClient:
@@ -400,7 +400,7 @@ def test_project_update_with_full_spec_creates_pending_revision(tmp_path: Path) 
 
 
 def test_auto_execute_project_closes_when_last_manual_task_completes(tmp_path: Path, monkeypatch) -> None:
-    import cyborg_server.services.openclaw_reasoning_service as reasoning_module
+    import bob_server.services.openclaw_reasoning_service as reasoning_module
 
     call_count = 0
 
@@ -1399,7 +1399,7 @@ def test_openclaw_gateway_transport_uses_backend_handshake_and_connect_challenge
             gateway_token="secret",
         ),
     )
-    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "cyborg" / "schemas")
+    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "bob_server" / "schemas")
     db.settings = settings
     asyncio.run(db.connect())
 
@@ -1512,7 +1512,7 @@ def test_openclaw_gateway_transport_waits_for_final_agent_response_when_requeste
             gateway_token="secret",
         ),
     )
-    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "cyborg" / "schemas")
+    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "bob_server" / "schemas")
     db.settings = settings
     asyncio.run(db.connect())
 
@@ -1625,7 +1625,7 @@ def test_openclaw_gateway_transport_prefers_official_cli(tmp_path: Path, monkeyp
             gateway_token="secret",
         ),
     )
-    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "cyborg" / "schemas")
+    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "bob_server" / "schemas")
     db.settings = settings
     asyncio.run(db.connect())
 
@@ -1681,7 +1681,7 @@ def test_openclaw_gateway_cli_uses_expect_final_for_bootstrap(tmp_path: Path, mo
             gateway_token="secret",
         ),
     )
-    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "cyborg" / "schemas")
+    db = Database(settings.db_path, Path(__file__).resolve().parents[1] / "bob_server" / "schemas")
     db.settings = settings
     asyncio.run(db.connect())
 

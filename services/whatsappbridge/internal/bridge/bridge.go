@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"go.cyborg.dev/whatsappbridge/internal/config"
-	"go.cyborg.dev/whatsappbridge/internal/queue"
-	"go.cyborg.dev/whatsappbridge/internal/server"
-	whatsapp "go.cyborg.dev/whatsappbridge/internal/whatsapp"
-	"go.cyborg.dev/whatsappbridge/internal/wsproto"
+	"go.bob.dev/whatsappbridge/internal/config"
+	"go.bob.dev/whatsappbridge/internal/queue"
+	"go.bob.dev/whatsappbridge/internal/server"
+	whatsapp "go.bob.dev/whatsappbridge/internal/whatsapp"
+	"go.bob.dev/whatsappbridge/internal/wsproto"
 )
 
 type Bridge struct {
@@ -61,7 +61,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 	// Wire event handlers
 	b.srv = server.New(cfg.ListenAddr(), cfg.Token, log.With("component", "server"), b.handleClientMessage)
 	b.srv.OnConnect(func() {
-		b.log.Info("cyborg client connected, draining incoming queue")
+		b.log.Info("bob client connected, draining incoming queue")
 		b.drainIncoming()
 		if b.wa.IsConnected() {
 			go b.wa.SyncGroups()

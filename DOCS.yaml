@@ -12,7 +12,7 @@
           bulletin generation triggered by heartbeat), how retrieval works (on-demand semantic search via memory_search
           tool using an LLM, memory_read for full documents, memory_browse for listing by type, memory_graph for
           graph traversal), visibility and scope (private/contact/group/channel/public levels derived from session keys),
-          the CLI commands (cyborg memory seed/seed-email/seed-manual/rebuild/validate/cleanup-contacts/query),
+          the CLI commands (bob memory seed/seed-email/seed-manual/rebuild/validate/cleanup-contacts/query),
           the contact reconciliation pipeline (reconcile.py, cleanup.py, contact_directory.py),
           the search logging (memory_search_log table), dream logging (memory_dream_log table),
           and the dashboard memory page with API endpoints.
@@ -20,7 +20,7 @@
           Suitable for a software developer to understand the system end-to-end.
 - path: ./docs/skills.md
   prompt: |
-          This document must describe how skills work in Cyborg. It should start with the purpose and intent of the feature.
+          This document must describe how skills work in Bob. It should start with the purpose and intent of the feature.
           It must cover:
           - The file requirements: each skill is a directory under the workspace skills/ directory, containing either a
             skill.md or SKILL.md file (both are accepted). Optional files: helper Python scripts (run via run_script tool),
@@ -34,7 +34,7 @@
             a lightweight index (name + description + trigger) that is injected into every LLM system prompt via prompt_assembler.
           - How skills are activated: the LLM reads the trigger from the system prompt index, then calls the use_skill tool
             to load the full instructions. If the skill has Python scripts, the LLM calls run_script which executes via
-            `uv run` with a sandboxed environment (skill_env.py maps CYBORG_ prefixed secrets to standard env vars).
+            `uv run` with a sandboxed environment (skill_env.py maps BOB_ prefixed secrets to standard env vars).
           - The caching mechanism: module-level caches keyed by mtime hash detect file changes automatically — no server
             restart required to add or modify skills.
           - The dashboard integration: the /api/skills/installed endpoint lists all skills for the UI.

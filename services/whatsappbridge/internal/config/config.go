@@ -13,7 +13,7 @@ type Config struct {
 	Port    int
 	Token   string
 	DataDir string
-	DevDir  string // CYBORG_CONFIG_DIR for reading shared .env
+	DevDir  string // BOB_CONFIG_DIR for reading shared .env
 
 	LogLevel string
 
@@ -30,7 +30,7 @@ func Load() (*Config, error) {
 		Port:    envInt("WHATSAPPBRIDGE_PORT", 8430),
 		Token:   os.Getenv("WHATSAPPBRIDGE_TOKEN"),
 		DataDir: envOrDefault("WHATSAPPBRIDGE_DATA_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "cyborg", "whatsappbridge")),
-		DevDir:  envOrDefault("CYBORG_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), ".config", "cyborg")),
+		DevDir:  envOrDefault("BOB_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), ".config", "cyborg")),
 
 		LogLevel: envOrDefault("WHATSAPPBRIDGE_LOG_LEVEL", "info"),
 

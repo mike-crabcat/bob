@@ -1,10 +1,10 @@
 [project]
-name = "cyborg-workspace"
+name = "bob-workspace"
 version = "0.0.0"
-description = "Development workspace for Cyborg packages"
+description = "Development workspace for Bob packages"
 requires-python = ">=3.12"
 dependencies = [
-  "cyborg-server",
+  "bob-server",
 ]
 
 [project.optional-dependencies]
@@ -12,11 +12,11 @@ dev = [
   "pytest>=8.3.0",
 ]
 voice = [
-  "cyborg-server[voice]",
+  "bob-server[voice]",
 ]
 
 [tool.uv.sources]
-cyborg-server = { path = "packages/cyborg-server", editable = true }
+bob-server = { path = "packages/bob-server", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = []

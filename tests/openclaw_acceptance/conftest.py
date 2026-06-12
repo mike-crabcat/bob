@@ -16,10 +16,10 @@ import httpx
 import pytest
 import uvicorn
 
-from cyborg_server.config import OpenClawHookSettings, Settings
-from cyborg_server.database import Database
-from cyborg_server.main import create_app
-from cyborg_server.models import (
+from bob_server.config import OpenClawHookSettings, Settings
+from bob_server.database import Database
+from bob_server.main import create_app
+from bob_server.models import (
     JournalEntryType,
     ProjectCloseRequest,
     ProjectCreate,
@@ -29,16 +29,16 @@ from cyborg_server.models import (
     TaskCreate,
     TaskFailureRequest,
 )
-from cyborg_server.services.notification_service import NotificationService
-from cyborg_server.services.openclaw_hook_service import OpenClawHookService
-from cyborg_server.services.openclaw_reasoning_service import OpenClawReasoningService
-from cyborg_server.services.project_service import ProjectService
-from cyborg_server.services.project_spec_service import ProjectSpecService
-from cyborg_server.services.session_route_service import SessionRouteService
-from cyborg_server.services.task_service import TaskService
+from bob_server.services.notification_service import NotificationService
+from bob_server.services.openclaw_hook_service import OpenClawHookService
+from bob_server.services.openclaw_reasoning_service import OpenClawReasoningService
+from bob_server.services.project_service import ProjectService
+from bob_server.services.project_spec_service import ProjectSpecService
+from bob_server.services.session_route_service import SessionRouteService
+from bob_server.services.task_service import TaskService
 
 
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "cyborg" / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parents[2] / "bob_server" / "schemas"
 TASK_ASSIGNMENT_TIMEOUT_SECONDS = 90.0
 CHAT_POLL_INTERVAL_SECONDS = 2.0
 
@@ -328,8 +328,8 @@ class OpenClawLiveHarness:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self._call_index = 0
 
-    def make_hook_service(self, *, cyborg_service_url: str | None = None) -> OpenClawHookService:
-        return OpenClawHookService(self.db, routing_service=SessionRouteService(self.db), cyborg_service_url=cyborg_service_url)
+    def make_hook_service(self, *, bob_service_url: str | None = None) -> OpenClawHookService:
+        return OpenClawHookService(self.db, routing_service=SessionRouteService(self.db), bob_service_url=bob_service_url)
 
     def write_artifact(self, name: str, payload: Any) -> None:
         target = self.artifact_dir / name
@@ -345,13 +345,13 @@ class OpenClawLiveHarness:
         *,
         expect_final: bool = False,
         timeout_seconds: float | None = None,
-        cyborg_service_url: str | None = None,
+        bob_service_url: str | None = None,
     ) -> dict[str, Any]:
         self._call_index += 1
         prefix = f"{self._call_index:02d}_{method.replace('.', '_')}"
         self.write_artifact(f"{prefix}_request.json", {"method": method, "params": params, "expect_final": expect_final})
         response = _run(
-            self.make_hook_service(cyborg_service_url=cyborg_service_url)._send_gateway_request(
+            self.make_hook_service(bob_service_url=bob_service_url)._send_gateway_request(
                 method,
                 params,
                 expect_final=expect_final,
@@ -496,13 +496,13 @@ def openclaw_live_config(pytestconfig: pytest.Config) -> OpenClawLiveConfig:
 
     gateway_url = _pick(
         os.getenv("OPENCLAW_ACCEPTANCE_GATEWAY_URL"),
-        os.getenv("CYBORG_OPENCLAW_GATEWAY_URL"),
-        os.getenv("CYBORG_OPENCLAW_BASE_URL"),
+        os.getenv("BOB_OPENCLAW_GATEWAY_URL"),
+        os.getenv("BOB_OPENCLAW_BASE_URL"),
     )
     gateway_token = _pick(
         os.getenv("OPENCLAW_ACCEPTANCE_GATEWAY_TOKEN"),
-        os.getenv("CYBORG_OPENCLAW_GATEWAY_TOKEN"),
-        os.getenv("CYBORG_OPENCLAW_TOKEN"),
+        os.getenv("BOB_OPENCLAW_GATEWAY_TOKEN"),
+        os.getenv("BOB_OPENCLAW_TOKEN"),
     )
     if gateway_url.startswith("http://"):
         gateway_url = "ws://" + gateway_url[len("http://") :]
@@ -512,10 +512,10 @@ def openclaw_live_config(pytestconfig: pytest.Config) -> OpenClawLiveConfig:
         pytest.fail(
             "OpenClaw live acceptance is enabled but gateway credentials are missing. "
             "Set OPENCLAW_ACCEPTANCE_GATEWAY_URL and OPENCLAW_ACCEPTANCE_GATEWAY_TOKEN "
-            "(or the equivalent CYBORG_OPENCLAW_* variables)."
+            "(or the equivalent BOB_OPENCLAW_* variables)."
         )
 
-    agent_id = _pick(os.getenv("OPENCLAW_ACCEPTANCE_AGENT_ID"), os.getenv("CYBORG_OPENCLAW_AGENT_ID"), "main")
+    agent_id = _pick(os.getenv("OPENCLAW_ACCEPTANCE_AGENT_ID"), os.getenv("BOB_OPENCLAW_AGENT_ID"), "main")
     session_prefix = _pick(os.getenv("OPENCLAW_ACCEPTANCE_SESSION_PREFIX"), "acceptance")
     return OpenClawLiveConfig(
         gateway_url=gateway_url,
@@ -603,7 +603,7 @@ def live_reasoning_service(openclaw_gateway_db: Database) -> OpenClawReasoningSe
 
 
 @pytest.fixture
-def cyborg_http_server(acceptance_settings: Settings, artifact_dir: Path) -> str:
+def bob_http_server(acceptance_settings: Settings, artifact_dir: Path) -> str:
     host = "127.0.0.1"
     port = _available_port()
     app = create_app(acceptance_settings)
@@ -624,9 +624,9 @@ def cyborg_http_server(acceptance_settings: Settings, artifact_dir: Path) -> str
                 pass
             time.sleep(0.25)
         if not started:
-            raise RuntimeError(f"Cyborg HTTP server failed to start on {base_url}")
+            raise RuntimeError(f"Bob HTTP server failed to start on {base_url}")
         artifact = {"base_url": base_url, "port": port}
-        (artifact_dir / "cyborg_server.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+        (artifact_dir / "bob_server.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
         yield base_url
     finally:
         client.close()

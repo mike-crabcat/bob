@@ -7,11 +7,11 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from cyborg_server.config import Settings
-from cyborg_server.main import create_app
-from cyborg_server.models import ProjectSpecApproveRequest
-from cyborg_server.services.project_spec_service import ProjectSpecService
-from cyborg_server.services.task_service import TaskService
+from bob_server.config import Settings
+from bob_server.main import create_app
+from bob_server.models import ProjectSpecApproveRequest
+from bob_server.services.project_spec_service import ProjectSpecService
+from bob_server.services.task_service import TaskService
 
 PROJECT_ROUTE_METADATA = {
     "channel": "whatsapp",
@@ -559,8 +559,8 @@ class TestProjectExecution:
 
     def test_evaluate_endpoint(self, tmp_path: Path, monkeypatch) -> None:
         """Test the evaluate endpoint for manual completion check."""
-        import cyborg_server.services.openclaw_reasoning_service as reasoning_module
-        import cyborg_server.services.project_execution_service as execution_module
+        import bob_server.services.openclaw_reasoning_service as reasoning_module
+        import bob_server.services.project_execution_service as execution_module
 
         async def fake_evaluate_success_criteria(self, project_id):
             # Check actual completed task count to determine if criteria are met

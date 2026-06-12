@@ -1,7 +1,7 @@
-# Architecture Review — Cyborg Server
+# Architecture Review — Bob Server
 
 **Reviewed:** 2026-05-21
-**Scope:** `packages/cyborg-server/cyborg_server/` — services, routers, data model, config
+**Scope:** `packages/bob-server/bob_server/` — services, routers, data model, config
 
 ---
 
@@ -83,10 +83,10 @@ Services frequently import and instantiate each other inline:
 
 ```python
 # voice_service.py — inline imports during coroutine execution
-from cyborg_server.services.dispatch_service import DispatchService
-from cyborg_server.services.session_agenda_service import SessionAgendaService
-from cyborg_server.services.llm_dispatch import LLMDispatchService
-from cyborg_server.services.workspace_tools import make_workspace_tools
+from bob_server.services.dispatch_service import DispatchService
+from bob_server.services.session_agenda_service import SessionAgendaService
+from bob_server.services.llm_dispatch import LLMDispatchService
+from bob_server.services.workspace_tools import make_workspace_tools
 ```
 
 This creates tight coupling: `VoiceService` knows how to construct `DispatchService`, `LLMDispatchService`, and `SessionAgendaService`. Any constructor change to any of those ripples through callers.
