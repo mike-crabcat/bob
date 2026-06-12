@@ -29,8 +29,8 @@ func Load() (*Config, error) {
 		Host:    envOrDefault("WHATSAPPBRIDGE_HOST", "127.0.0.1"),
 		Port:    envInt("WHATSAPPBRIDGE_PORT", 8430),
 		Token:   os.Getenv("WHATSAPPBRIDGE_TOKEN"),
-		DataDir: envOrDefault("WHATSAPPBRIDGE_DATA_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "cyborg", "whatsappbridge")),
-		DevDir:  envOrDefault("BOB_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), ".config", "cyborg")),
+		DataDir: envOrDefault("WHATSAPPBRIDGE_DATA_DIR", filepath.Join(os.Getenv("HOME"), "data", "whatsappbridge")),
+		DevDir:  envOrDefault("BOB_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), "config")),
 
 		LogLevel: envOrDefault("WHATSAPPBRIDGE_LOG_LEVEL", "info"),
 

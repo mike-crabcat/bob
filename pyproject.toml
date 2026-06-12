@@ -5,6 +5,7 @@ description = "Development workspace for Bob packages"
 requires-python = ">=3.12"
 dependencies = [
   "bob-server",
+  "qrcode>=8.2",
 ]
 
 [project.optional-dependencies]

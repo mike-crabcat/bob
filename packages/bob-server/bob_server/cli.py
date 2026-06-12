@@ -360,8 +360,8 @@ def _print_event_table(events: list[dict[str, Any]]) -> None:
 def install(
     host: Annotated[str, typer.Option(help="Host address for the service")] = DEFAULT_HOST,
     port: Annotated[int, typer.Option(help="TCP port for the service")] = DEFAULT_PORT,
-    data_dir: Annotated[Path, typer.Option(help="Directory for the SQLite database")] = Path("~/.local/share/cyborg"),
-    config_dir: Annotated[Path, typer.Option(help="Directory for Bob config")] = Path("~/.config/cyborg"),
+    data_dir: Annotated[Path, typer.Option(help="Directory for the SQLite database")] = Path("~/data"),
+    config_dir: Annotated[Path, typer.Option(help="Directory for Bob config")] = Path("~/config"),
     db_path: Annotated[Path | None, typer.Option(help="Override SQLite database path")] = None,
 ) -> None:
     """Install and enable the systemd user service."""
@@ -448,8 +448,8 @@ def logs(
 def serve(
     host: Annotated[str, typer.Option(help="Host address to bind")] = DEFAULT_HOST,
     port: Annotated[int, typer.Option(help="TCP port to bind")] = DEFAULT_PORT,
-    data_dir: Annotated[Path, typer.Option(help="Directory for the SQLite database")] = Path("~/.local/share/cyborg"),
-    config_dir: Annotated[Path, typer.Option(help="Directory for config files")] = Path("~/.config/cyborg"),
+    data_dir: Annotated[Path, typer.Option(help="Directory for the SQLite database")] = Path("~/data"),
+    config_dir: Annotated[Path, typer.Option(help="Directory for config files")] = Path("~/config"),
     db_path: Annotated[Path | None, typer.Option(help="Override SQLite database path")] = None,
     log_level: Annotated[str, typer.Option(help="Uvicorn log level")] = "info",
 ) -> None:
@@ -1622,7 +1622,7 @@ async def _eval_run(
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -1680,7 +1680,7 @@ async def _eval_history(limit: int) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     try:
@@ -1796,7 +1796,7 @@ async def _memory_seed(dry_run: bool) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -1833,7 +1833,7 @@ async def _memory_seed_email(dry_run: bool, thread_id: str | None) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -1869,7 +1869,7 @@ async def _memory_seed_manual(dry_run: bool) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -1906,7 +1906,7 @@ async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     await db.apply_migrations()
@@ -1951,7 +1951,7 @@ async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -1994,7 +1994,7 @@ async def _memory_supplement(entity_ids: list[str]) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -2029,7 +2029,7 @@ async def _memory_merge(dry_run: bool) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -2058,7 +2058,7 @@ async def _memory_validate() -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -2094,7 +2094,7 @@ async def _memory_reindex() -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
@@ -2126,7 +2126,7 @@ async def _memory_cleanup_contacts(dry_run: bool) -> None:
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
 
@@ -2177,7 +2177,7 @@ async def _memory_query(question: str, entity_type: str, actor: str | None, chan
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("cyborg.db")
+    db_path = settings.db_path or Path("bob.db")
     db = Database(db_path, schema_dir)
     await db.connect()
     ctx = AppContext(settings=settings, db=db)

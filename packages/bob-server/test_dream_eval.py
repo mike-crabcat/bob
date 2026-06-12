@@ -13,7 +13,7 @@ from bob_server.context import AppContext
 from bob_server.database import Database
 
 # Load .env manually
-env_file = Path.home() / ".config" / "cyborg" / ".env"
+env_file = Path.home() / "config" / ".env"
 if env_file.exists():
     for line in env_file.read_text().splitlines():
         line = line.strip()
@@ -25,7 +25,7 @@ if env_file.exists():
 async def main():
     settings = Settings.from_env()
     schema_dir = Path("packages/bob-server/bob_server/schemas")
-    db = Database(settings.data_dir / "cyborg.db", schema_dir)
+    db = Database(settings.data_dir / "bob.db", schema_dir)
     await db.connect()
     await db.apply_migrations()
     ctx = AppContext(settings=settings, db=db)

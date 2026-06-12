@@ -7,14 +7,12 @@ This is a Python monorepo managed with `uv`. The main package is `bob-server`, a
 ## Database
 
 - **Engine**: SQLite via `aiosqlite` with WAL journal mode and foreign keys enabled
-- **Default location**: `~/.local/share/cyborg/cyborg.db`
+- **Default location**: `~/data/bob.db`
 - **Override**: Set `BOB_DB_PATH` environment variable
-- **Data directory**: `~/.local/share/cyborg/` (override with `BOB_DATA_DIR`)
-- **Config directory**: `~/.config/cyborg/` (override with `BOB_CONFIG_DIR`)
+- **Data directory**: `~/data/` (override with `BOB_DATA_DIR`)
+- **Config directory**: `~/config/` (override with `BOB_CONFIG_DIR`)
 - **Connection pool**: 4 connections by default (override with `BOB_DB_POOL_SIZE`)
 - **Migrations**: SQL files in `packages/bob-server/bob_server/schemas/`, numbered and applied automatically on startup via `apply_migrations()`
-
-Note: There is an empty `data/cyborg.db` at the project root — this is a leftover, not the active database.
 
 ## Server
 
@@ -36,9 +34,10 @@ Note: There is an empty `data/cyborg.db` at the project root — this is a lefto
 
 ## Runtime paths
 
-The cyborg.db is at `/home/bob/.local/share/cyborg/cyborg.db`
-Fetch logs for the running service using `journalctl` comand e.g. `journalctl --user -u bob.service --since "10 min ago"  # recent`
-The workspace directory is `/home/bob/.config/cyborg/harness`
+The database is at `/home/bob/data/bob.db`
+Fetch logs for the running service using `journalctl` command e.g. `journalctl --user -u bob.service --since "10 min ago"  # recent`
+The workspace directory is `/home/bob/workspace`
+Config directory is `/home/bob/config`
 
 ## Development
 

@@ -41,7 +41,7 @@ def _load_bob_env_files() -> None:
     for path in candidates:
         _load_env_file(path)
 
-    config_dir = _env_path("BOB_CONFIG_DIR", Path("~/.config/cyborg"))
+    config_dir = _env_path("BOB_CONFIG_DIR", Path("~/config"))
     _load_env_file(config_dir / DEFAULT_ENV_FILE_NAME)
 
 
@@ -186,7 +186,7 @@ class HarnessSettings:
     """Configuration for the local LLM harness for voice/phone."""
 
     enabled: bool = False
-    workspace_dir: Path = Path("~/.config/cyborg/harness")
+    workspace_dir: Path = Path("~/workspace")
     default_model: str = "gpt-5.4-mini"
     max_history_messages: int = 20
     skill_dev_enabled: bool = False
@@ -204,7 +204,7 @@ class WhatsAppBridgeSettings:
     url: str = "ws://127.0.0.1:8430/ws"
     token: str = ""
     reconnect_interval_seconds: float = 10.0
-    media_dir: Path = Path("~/.local/share/cyborg/whatsappbridge/media")
+    media_dir: Path = Path("~/data/whatsappbridge/media")
 
 
 @dataclass(slots=True)
@@ -224,8 +224,8 @@ class Settings:
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
-    data_dir: Path = Path("~/.local/share/cyborg")
-    config_dir: Path = Path("~/.config/cyborg")
+    data_dir: Path = Path("~/data")
+    config_dir: Path = Path("~/config")
     db_path: Path | None = None
     log_path: Path | None = None
     log_level: str = "info"
@@ -254,7 +254,7 @@ class Settings:
         self.data_dir = self.data_dir.expanduser()
         self.config_dir = self.config_dir.expanduser()
         if self.db_path is None:
-            self.db_path = self.data_dir / "cyborg.db"
+            self.db_path = self.data_dir / "bob.db"
         else:
             self.db_path = self.db_path.expanduser()
         if self.log_path is not None:
@@ -272,10 +272,10 @@ class Settings:
         """Build settings from environment variables."""
 
         _load_bob_env_files()
-        data_dir = _env_path("BOB_DATA_DIR", Path("~/.local/share/cyborg"))
-        config_dir = _env_path("BOB_CONFIG_DIR", Path("~/.config/cyborg"))
+        data_dir = _env_path("BOB_DATA_DIR", Path("~/data"))
+        config_dir = _env_path("BOB_CONFIG_DIR", Path("~/config"))
         db_path_value = os.getenv("BOB_DB_PATH")
-        db_path = Path(db_path_value).expanduser() if db_path_value else data_dir / "cyborg.db"
+        db_path = Path(db_path_value).expanduser() if db_path_value else data_dir / "bob.db"
         host = os.getenv("BOB_HOST", DEFAULT_HOST)
         port = int(os.getenv("BOB_PORT", str(DEFAULT_PORT)))
         pool_size = int(os.getenv("BOB_DB_POOL_SIZE", str(DEFAULT_POOL_SIZE)))
@@ -336,7 +336,7 @@ class Settings:
             stt_device=os.getenv("BOB_VOICE_STT_DEVICE", "cuda"),
             stt_compute_type=os.getenv("BOB_VOICE_STT_COMPUTE_TYPE", "int8"),
             tts_num_steps=int(os.getenv("BOB_VOICE_TTS_NUM_STEPS", "16")),
-            voices_dir=_env_path("BOB_VOICE_VOICES_DIR", Path.home() / ".cyborg" / "voices"),
+            voices_dir=_env_path("BOB_VOICE_VOICES_DIR", Path.home() / ".bob" / "voices"),
             lessons_dir=Path(v).expanduser() if (v := os.getenv("BOB_VOICE_LESSONS_DIR")) else None,
             frontend_dir=Path(v).expanduser() if (v := os.getenv("BOB_VOICE_FRONTEND_DIR")) else None,
             session_max_age_days=int(os.getenv("BOB_VOICE_SESSION_MAX_AGE_DAYS", "30")),
@@ -369,7 +369,7 @@ class Settings:
 
         harness = HarnessSettings(
             enabled=os.getenv("BOB_HARNESS_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
-            workspace_dir=_env_path("BOB_HARNESS_WORKSPACE_DIR", Path("~/.config/cyborg/harness")),
+            workspace_dir=_env_path("BOB_HARNESS_WORKSPACE_DIR", Path("~/workspace")),
             default_model=os.getenv("BOB_HARNESS_DEFAULT_MODEL", "gpt-5.4-mini"),
             max_history_messages=int(os.getenv("BOB_HARNESS_MAX_HISTORY_MESSAGES", "20")),
             skill_dev_enabled=os.getenv("BOB_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
@@ -384,7 +384,7 @@ class Settings:
             url=os.getenv("BOB_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:8430/ws"),
             token=os.getenv("BOB_WHATSAPP_BRIDGE_TOKEN", ""),
             reconnect_interval_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_RECONNECT_INTERVAL_SECONDS", "10")),
-            media_dir=_env_path("BOB_WHATSAPP_BRIDGE_MEDIA_DIR", Path("~/.local/share/cyborg/whatsappbridge/media")),
+            media_dir=_env_path("BOB_WHATSAPP_BRIDGE_MEDIA_DIR", Path("~/data/whatsappbridge/media")),
         )
 
         patience = PatienceSettings(
