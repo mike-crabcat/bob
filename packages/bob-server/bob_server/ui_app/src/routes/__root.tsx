@@ -16,6 +16,7 @@ const NAV_ITEMS = [
 const OVERFLOW_ITEMS = [
   { to: "/memory" as const, label: "Memory", icon: "search" },
   { to: "/phone" as const, label: "Phone", icon: "phone" },
+  { to: "/persona" as const, label: "Persona", icon: "user" },
 ] as const;
 
 function NavIcon({ name, size = 18 }: { name: string; size?: number }) {

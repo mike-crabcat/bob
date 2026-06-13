@@ -12,7 +12,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md")
+_WORKSPACE_FILES: tuple[str, ...] = ()
+_DEPRECATED_WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md")
 
 # Module-level cache for workspace file content.
 _cached_prompt: tuple[Any, str] | None = None  # (mtime_hash, content)
@@ -46,6 +47,20 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         return _cached_prompt[1]
 
     parts: list[str] = []
+
+    # Load embedded persona from codebase (with DB-configured values)
+    from bob_server.services.persona import get_persona
+    rendered_persona = await get_persona(db)
+    parts.append(rendered_persona)
+
+    for name in _DEPRECATED_WORKSPACE_FILES:
+        path = workspace_dir / name
+        if path.is_file():
+            logger.warning(
+                "Deprecated workspace file %s exists — persona is now embedded in codebase",
+                name,
+            )
+
     for name in _WORKSPACE_FILES:
         path = workspace_dir / name
         if path.is_file():
