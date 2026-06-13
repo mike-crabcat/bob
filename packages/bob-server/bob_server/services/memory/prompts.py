@@ -99,8 +99,29 @@ hotel/booking gets its own stay entity.
 
 ---
 
+# Bulletin Format
+
+Bulletins may be in one of two formats:
+
+1. **Raw transcript** (new). Contains:
+   - A header line `Prior messages (context only, do not extract):` followed by N \
+     messages. **DO NOT extract claims from this section.** These are repeated for \
+     context only; their facts have already been extracted from a previous window.
+   - A header line `Window messages:` followed by the window. Extract claims ONLY \
+     from messages under this header.
+   - Each line has the form `[<iso_ts>] [<name> <contact_id>][SYNTHETIC]: <content>`.
+   - Lines tagged `[SYNTHETIC]` are assistant responses generated using memory recall \
+     (echoing/summarizing facts already in memory). **DO NOT extract claims from \
+     `[SYNTHETIC]` lines.** They are not new ground truth.
+2. **Legacy LLM summary** (older bulletins). Plain text with no headers. Extract normally.
+
+---
+
 # Rules
 
+0. Identify the bulletin's format first. If raw transcript: skip the entire \
+   "Prior messages (context only, do not extract):" block, and skip any line tagged \
+   `[SYNTHETIC]`. Extract only from non-SYNTHETIC lines under "Window messages:".
 1. Each claim = one atomic fact. Split, never merge.
 2. Every claim must use a `claim_type_key` from the Entity Types section below.
 3. Every claim must have:
@@ -122,6 +143,11 @@ hotel/booking gets its own stay entity.
 The bulletin text uses `{{person-slug|Name}}` tags for known people.
 - Use the slug from the tag as the entity ID.
 - For real people NOT in the tags: `person:new:Full Name`
+
+For raw-transcript bulletins, lines use the bracketed `[Name contact_id]` form \
+instead of `{{person-slug|Name}}` tags. If a contact_id appears and matches a \
+Known Entity slug, use that slug. Otherwise derive `person:new:Full Name` from \
+the displayed Name.
 
 NEVER invent person IDs. Only slugs from tags, existing entities, or `person:new:Full Name`.
 

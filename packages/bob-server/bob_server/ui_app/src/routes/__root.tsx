@@ -9,12 +9,12 @@ const NAV_ITEMS = [
   { to: "/" as const, label: "Home", icon: "home" },
   { to: "/sessions" as const, label: "Sessions", icon: "chat" },
   { to: "/contacts" as const, label: "Contacts", icon: "user" },
-  { to: "/skills" as const, label: "Skills", icon: "zap" },
+  { to: "/memory" as const, label: "Memory", icon: "search" },
   { to: "/workspace" as const, label: "Workspace", icon: "folder" },
 ] as const;
 
 const OVERFLOW_ITEMS = [
-  { to: "/memory" as const, label: "Memory", icon: "search" },
+  { to: "/skills" as const, label: "Skills", icon: "zap" },
   { to: "/phone" as const, label: "Phone", icon: "phone" },
   { to: "/persona" as const, label: "Persona", icon: "user" },
 ] as const;
@@ -119,12 +119,17 @@ function RootLayout() {
             <Link
               key={item.to}
               to={item.to}
-              className={`flex-1 flex flex-col items-center justify-center py-2.5 text-[10px] font-sans gap-0.5 transition-colors ${
+              className={`flex-1 flex flex-col items-center justify-center py-2.5 text-[10px] font-sans gap-0.5 transition-colors relative ${
                 active ? "text-accent" : "text-muted hover:text-text"
               }`}
             >
               <NavIcon name={item.icon} />
               <span>{item.label}</span>
+              {item.to === "/memory" && openQuestionCount > 0 && (
+                <span className="absolute top-1.5 right-1/4 min-w-[14px] h-3.5 flex items-center justify-center text-[8px] font-medium text-white bg-error rounded-full px-0.5">
+                  {openQuestionCount}
+                </span>
+              )}
             </Link>
           );
         })}
@@ -139,11 +144,6 @@ function RootLayout() {
                 >
                   <NavIcon name={item.icon} size={14} />
                   <span>{item.label}</span>
-                  {item.to === "/memory" && openQuestionCount > 0 && (
-                    <span className="ml-auto min-w-[16px] h-4 flex items-center justify-center text-[9px] font-medium text-white bg-error rounded-full px-1">
-                      {openQuestionCount}
-                    </span>
-                  )}
                 </button>
               ))}
             </div>
@@ -156,11 +156,6 @@ function RootLayout() {
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
             <span>more</span>
-            {openQuestionCount > 0 && (
-              <span className="absolute top-1.5 right-1/4 min-w-[14px] h-3.5 flex items-center justify-center text-[8px] font-medium text-white bg-error rounded-full px-0.5">
-                {openQuestionCount}
-              </span>
-            )}
           </button>
         </div>
       </nav>

@@ -61,7 +61,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 	// Wire event handlers
 	b.srv = server.New(cfg.ListenAddr(), cfg.Token, log.With("component", "server"), b.handleClientMessage)
 	b.srv.OnConnect(func() {
-		b.log.Info("bob client connected, draining incoming queue")
+		b.log.Info("bob client connected")
 		b.drainIncoming()
 		if b.wa.IsConnected() {
 			go b.wa.SyncGroups()
@@ -166,6 +166,21 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			}
 		}
 		env := wsproto.NewEnvelope(wsproto.TypeIncomingMessage, payload)
+
+		// Log incoming message with content
+		textPreview := evt.Text
+		if len(textPreview) > 100 {
+			textPreview = textPreview[:100] + "..."
+		}
+		b.log.Info("incoming message",
+			"msg_id", evt.WhatsAppMessageID,
+			"chat", evt.ChatID,
+			"kind", evt.ChatKind,
+			"sender", evt.SenderName,
+			"sender_jid", evt.SenderJID,
+			"text", textPreview,
+			"has_media", evt.Media != nil,
+		)
 
 		// Always enqueue for durability
 		if err := b.inQ.Enqueue(queue.Incoming, evt.WhatsAppMessageID, wsproto.TypeIncomingMessage, payload); err != nil {
@@ -293,6 +308,16 @@ func (b *Bridge) handleSend(payload wsproto.SendMessagePayload) {
 		return
 	}
 
+	textPreview := payload.Text
+	if len(textPreview) > 100 {
+		textPreview = textPreview[:100] + "..."
+	}
+	b.log.Info("outgoing message",
+		"request_id", payload.RequestID,
+		"chat_id", payload.ChatID,
+		"text", textPreview,
+	)
+
 	jid, ok := b.wa.ParseJID(payload.ChatID)
 	if !ok {
 		b.log.Warn("invalid jid", "chat_id", payload.ChatID)
@@ -315,6 +340,7 @@ func (b *Bridge) handleSend(payload wsproto.SendMessagePayload) {
 		return
 	}
 
+	b.log.Info("message sent", "request_id", payload.RequestID, "msg_id", msgID, "chat_id", payload.ChatID)
 	b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
 		RequestID:         payload.RequestID,
 		Success:           true,
@@ -393,7 +419,7 @@ func (b *Bridge) handleSendMedia(payload wsproto.SendMediaPayload) {
 		return
 	}
 
-	b.log.Info("media sent", "chat_id", payload.ChatID, "mime_type", payload.MimeType, "request_id", payload.RequestID, "msg_id", msgID)
+	b.log.Info("media sent", "chat_id", payload.ChatID, "mime_type", payload.MimeType, "request_id", payload.RequestID, "msg_id", msgID, "caption", payload.Caption)
 	b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
 		RequestID:         payload.RequestID,
 		Success:           true,
@@ -406,6 +432,9 @@ func (b *Bridge) drainIncoming() {
 	if err != nil {
 		b.log.Warn("failed to drain incoming queue", "error", err)
 		return
+	}
+	if len(msgs) > 0 {
+		b.log.Info("draining incoming queue", "count", len(msgs))
 	}
 	for _, m := range msgs {
 		env, err := m.Envelope()
@@ -428,6 +457,9 @@ func (b *Bridge) drainOutgoing() {
 	if err != nil {
 		b.log.Warn("failed to drain outgoing queue", "error", err)
 		return
+	}
+	if len(msgs) > 0 {
+		b.log.Info("draining outgoing queue", "count", len(msgs))
 	}
 	for _, m := range msgs {
 		var payload wsproto.SendMessagePayload

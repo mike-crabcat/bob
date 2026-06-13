@@ -20,8 +20,8 @@ interface HomeSnapshot {
   chart_categories: string[];
   recent_bulletins: BulletinItem[];
   active_dispatches: DispatchItem[];
-  project_stats: Record<string, number>;
-  task_stats: Record<string, number>;
+  entity_count: number;
+  bulletin_count: number;
   cost_by_category: CostByCategory[];
   total_cost_24h: number;
 }
@@ -125,8 +125,8 @@ function HomePage() {
       <section>
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">stats</h2>
         <div className="grid grid-cols-2 gap-2 text-xs">
-          <StatBox label="projects" value={Object.values(home?.project_stats ?? {}).reduce((a: number, b: number) => a + b, 0)} />
-          <StatBox label="active tasks" value={home?.task_stats?.active ?? 0} />
+          <StatBox label="entities" value={home?.entity_count ?? 0} />
+          <StatBox label="bulletins" value={home?.bulletin_count ?? 0} />
           <StatBox label="dispatches" value={home?.active_dispatches?.length ?? 0} />
           <StatBox label="sessions" value={home?.active_sessions?.length ?? 0} />
         </div>

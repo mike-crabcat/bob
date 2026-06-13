@@ -38,15 +38,29 @@ class SessionService(BaseService):
         sender_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         dispatched: int = 1,
+        dispatch_id: str | None = None,
+        synthetic: bool | None = None,
     ) -> str:
-        """Store a message. Returns the message ID."""
+        """Store a message. Returns the message ID.
+
+        When ``synthetic`` is None and ``role == "assistant"``, the flag is
+        auto-detected from the dispatch's memory-tool usage via
+        ``LLMDispatchService.pop_memory_used(dispatch_id)``. Explicit values
+        are honoured as-is.
+        """
+        if synthetic is None:
+            if role == "assistant" and dispatch_id:
+                from bob_server.services.llm_dispatch import LLMDispatchService
+                synthetic = LLMDispatchService.pop_memory_used(dispatch_id)
+            else:
+                synthetic = False
         msg_id = str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
         await self.db.execute(
             """INSERT INTO session_messages
-               (id, session_key, role, content, sender_id, channel, metadata, dispatched)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, session_key, role, content, sender_id, channel, meta_json, dispatched),
+               (id, session_key, role, content, sender_id, channel, metadata, dispatched, synthetic)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, session_key, role, content, sender_id, channel, meta_json, dispatched, 1 if synthetic else 0),
         )
         return msg_id
 

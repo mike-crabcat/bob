@@ -174,6 +174,7 @@ async def get_home(request: Request) -> dict[str, Any]:
 
     # Recent bulletins
     recent_bulletins: list[dict[str, Any]] = []
+    bulletin_count = 0
     bulletins_table = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_bulletins'"
     )
@@ -192,6 +193,19 @@ async def get_home(request: Request) -> dict[str, Any]:
                 "content": row["content"],
                 "created_at": _utc(row["created_at"]),
             })
+        b_total = await db.fetch_one("SELECT COUNT(*) AS c FROM memory_bulletins")
+        bulletin_count = (b_total["c"] if b_total else 0) or 0
+
+    # Active entity count
+    entity_count = 0
+    entities_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entities'"
+    )
+    if entities_table:
+        e_total = await db.fetch_one(
+            "SELECT COUNT(*) AS c FROM memory_entities WHERE status = 'active'"
+        )
+        entity_count = (e_total["c"] if e_total else 0) or 0
 
     # Estimated 24h costs by call category
     cost_by_category: list[dict[str, Any]] = []
@@ -239,6 +253,8 @@ async def get_home(request: Request) -> dict[str, Any]:
         "chart_buckets": chart_buckets,
         "chart_categories": chart_categories,
         "recent_bulletins": recent_bulletins,
+        "entity_count": entity_count,
+        "bulletin_count": bulletin_count,
         "cost_by_category": cost_by_category,
         "total_cost_24h": total_cost_24h,
     }

@@ -39,6 +39,36 @@ _ENTITY_TYPE_PREFIXES = ENTITY_TYPE_PREFIXES
 
 _SKIP_EXPAND_PREFIXES = tuple(et.prefix for et in ENTITY_TYPE_REGISTRY.values() if et.skip_expand)
 
+
+async def resolve_reconciliation_model(
+    db: Any,
+    entity_id: str,
+    entity_type: str,
+    settings: Any,
+) -> str | None:
+    """Determine the model to use for reconciling a specific entity.
+
+    Resolution order:
+    1. Per-entity override (from recon_model_overrides table)
+    2. Per-entity-type override (from BOB_RECON_LARGE_MODEL_TYPES env var → large model)
+    3. None (caller falls through to the small model)
+
+    Returns the model name, or None to use the small (memory) model.
+    """
+    row = await db.fetch_one(
+        "SELECT model FROM recon_model_overrides WHERE entity_id = ?",
+        (entity_id,),
+    )
+    if row:
+        return row["model"]
+
+    large_types = getattr(getattr(settings, "reconciliation", None), "large_model_types", [])
+    if entity_type in large_types:
+        return settings.openai.default_model
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Reconciliation tools — read and write access for the LLM
 # ---------------------------------------------------------------------------
@@ -632,6 +662,7 @@ async def reconcile_entity(
     llm: Any,
     entity_id: str,
     *,
+    settings: Any = None,
     update_fts_fn=None,
     schedule_reconciliation_fn=None,
 ) -> dict[str, Any]:
@@ -640,6 +671,8 @@ async def reconcile_entity(
     The LLM has access to tools for looking up related entities and applying
     fixes directly. Returns {"issues": [...], "operations_applied": [...], "questions_raised": [...]}.
 
+    settings: used to resolve per-entity-type model overrides. When provided,
+              overrides take precedence; otherwise the small (memory) model is used.
     schedule_reconciliation_fn: async callback(entity_ids) to queue post-merge
                                  reconciliation on the resulting entities.
     """
@@ -702,6 +735,14 @@ async def reconcile_entity(
     for t in recon_tools:
         t.handler = _track(touched_entities)(original_handlers[t.name])
 
+    resolved_model = (
+        await resolve_reconciliation_model(db, entity_id, entity_type, settings)
+        if settings is not None
+        else None
+    )
+    if resolved_model is None:
+        resolved_model = llm.memory_model
+
     response = await llm.chat_with_tools(
         messages=[
             {"role": "system", "content": system_prompt},
@@ -709,6 +750,7 @@ async def reconcile_entity(
         ],
         tools=recon_tools,
         call_category="memory_reconciliation",
+        model=resolved_model,
     )
 
     # Parse the final JSON response for issues and questions

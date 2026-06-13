@@ -241,7 +241,7 @@ class EmailDeliveryService(BaseService):
                     dispatch_id=dispatch_id,
                 )
                 session_svc = SessionService(ctx)
-                await session_svc.add_message(session_key, "assistant", email_text, channel="email")
+                await session_svc.add_message(session_key, "assistant", email_text, channel="email", dispatch_id=dispatch_id)
                 return result
 
             asyncio.create_task(_run_send_dispatch())
