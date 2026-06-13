@@ -89,21 +89,21 @@ function HomePage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-muted text-[10px] uppercase">
-                  <th className="text-left pb-1">category</th>
-                  <th className="text-right pb-1">calls</th>
-                  <th className="text-right pb-1">prompt</th>
-                  <th className="text-right pb-1">completion</th>
-                  <th className="text-right pb-1">cost</th>
+                  <th className="text-left px-2 pb-1">category</th>
+                  <th className="text-right px-2 pb-1">calls</th>
+                  <th className="text-right px-2 pb-1">prompt</th>
+                  <th className="text-right px-2 pb-1">completion</th>
+                  <th className="text-right px-2 pb-1">cost</th>
                 </tr>
               </thead>
               <tbody>
                 {home.cost_by_category.map((c) => (
                   <tr key={c.category} className="border-t border-border">
-                    <td className="py-0.5">{c.category.replace(/_/g, " ")}</td>
-                    <td className="text-right tabular-nums">{c.call_count}</td>
-                    <td className="text-right tabular-nums">{fmtTokens(c.prompt_tokens)}</td>
-                    <td className="text-right tabular-nums">{fmtTokens(c.completion_tokens)}</td>
-                    <td className="text-right tabular-nums">${c.cost.toFixed(2)}</td>
+                    <td className="py-0.5 px-2">{c.category.replace(/_/g, " ")}</td>
+                    <td className="text-right tabular-nums px-2">{c.call_count}</td>
+                    <td className="text-right tabular-nums px-2">{fmtTokens(c.prompt_tokens)}</td>
+                    <td className="text-right tabular-nums px-2">{fmtTokens(c.completion_tokens)}</td>
+                    <td className="text-right tabular-nums px-2">${c.cost.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>

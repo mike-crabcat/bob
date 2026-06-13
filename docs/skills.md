@@ -48,7 +48,7 @@ skills/
 
 | File | Purpose |
 |------|---------|
-| `*.py` | Helper Python scripts invoked by the LLM via the `run_script` tool. |
+| `*.py` | Helper Python scripts invoked by the LLM via the `bash` tool (typically `cd <skill dir> && uv run python <script>`). |
 | `pyproject.toml` | Declares pip dependencies. `uv run` installs them automatically on first execution. |
 | `README.md` | Human-readable documentation (not consumed by the system). |
 
@@ -91,8 +91,8 @@ Example body structure:
 
 When this skill activates, follow these steps:
 
-1. **Fetch Data**: Call `run_script("skills/bom-weather/bom_fetcher.py", ["--location", "Perth Metro"])`
-2. **Format Output**: Call `run_script("skills/bom-weather/weather_formatter.py", [...args...])`
+1. **Fetch Data**: Call `bash("cd skills/bom-weather && uv run python bom_fetcher.py --location 'Perth Metro'")`
+2. **Format Output**: Call `bash("cd skills/bom-weather && uv run python weather_formatter.py ...args...")`
 3. **Send to User**: Use `send_whatsapp_to_contact` with the formatted result.
 
 ## Error Handling
@@ -231,7 +231,7 @@ The activation path:
 
 2. **Load instructions**: `use_skill` calls `skill_loader.load_skill()`, which reads the full `skill.md` content and returns it prefixed with the skill name and directory path.
 
-3. **Execute scripts**: The LLM follows the instructions, calling `run_script` for any helper Python scripts. Each script runs via `uv run` from its parent directory (so `pyproject.toml` dependencies resolve automatically). The subprocess inherits a sandboxed environment where `CYBORG_`-prefixed secrets are mapped to their standard equivalents (e.g., `CYBORG_OPENAI_API_KEY` becomes `OPENAI_API_KEY`). Scripts have a 900-second timeout.
+3. **Execute scripts**: The LLM follows the instructions, calling `bash` for any helper Python scripts. Skill instructions typically read `bash("cd skills/<name> && uv run python <script>.py ...")` so `uv run` resolves the per-skill `pyproject.toml`. The subprocess inherits a sandboxed environment where `CYBORG_`-prefixed secrets are mapped to their standard equivalents (e.g., `CYBORG_OPENAI_API_KEY` becomes `OPENAI_API_KEY`). Commands time out after 900 seconds and output above 30000 chars is truncated (use `head`/`tail`/`sed -n` to page).
 
 4. **Respond**: The LLM uses the script output to compose a response and deliver it via the appropriate messaging tool.
 
@@ -262,10 +262,10 @@ Both caches invalidate automatically when any `skill.md` file is modified. No se
 
 Resides at `packages/cyborg-server/cyborg_server/services/workspace_tools.py`.
 
-Relevant tools (both defined inside `make_workspace_tools(ctx)` which binds them to the application context):
+Relevant tools (defined inside `make_workspace_tools(ctx)` which binds them to the application context):
 
-- **`use_skill(skill_name)`** -- Loads full instructions for a named skill via `skill_loader.load_skill()`. Returns the skill markdown content prefixed with the skill name and directory path, so the LLM can follow its steps and construct correct `run_script` paths.
-- **`run_script(path, args)`** -- Executes a Python script at the given workspace-relative path. Resolves the path against the workspace root (preventing directory traversal), validates it is a `.py` file, then runs it via `uv run` from its parent directory. Uses `build_skill_env()` for environment. Returns stdout on success; returns an error message on timeout (900s) or non-zero exit code.
+- **`use_skill(skill_name)`** -- Loads full instructions for a named skill via `skill_loader.load_skill()`. Returns the skill markdown content prefixed with the skill name and directory path, so the LLM can follow its steps and construct correct `bash` commands.
+- **`bash(command)`** -- Runs a bash command in the workspace directory (cwd = workspace root). Inherits the skill environment via `build_skill_env()`. Returns stdout on success; on non-zero exit returns `Error (exit code N):\\n<stderr or stdout>`. Output above 30000 chars is truncated with a notice pointing the LLM at `head`/`tail`/`sed -n`/`grep`. Times out after 900s. Skill helper scripts are typically invoked as `cd skills/<name> && uv run python <script>.py ...` so per-skill `pyproject.toml` dependencies resolve.
 
 ### `skill_env.py`
 
@@ -391,7 +391,7 @@ trigger: when the user asks for API data
 
 ## Instructions
 
-1. Call `run_script("skills/my-skill/helper.py", ["--query", "<user query>"])`
+1. Call `bash("cd skills/my-skill && uv run python helper.py --query '<user query>'")`
 2. Parse the JSON output.
 3. Send a formatted response via `send_whatsapp_message`.
 ```

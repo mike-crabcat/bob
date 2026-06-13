@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Callable, Awaitable
 from httpx import Timeout
@@ -65,6 +66,124 @@ def _output_items_to_dicts(items: list[Any]) -> list[dict[str, Any]]:
             except Exception:
                 result.append({"type": str(item_type)})
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Citation handling
+#
+# When web_search is enabled, OpenAI's Responses API wraps cited passages with
+# private-use Unicode markers and emits the real URLs as `url_citation`
+# annotations on the message item. The format in `output_text` is:
+#
+#     citeturn0search0turn0search10
+#
+# where  = block start,  = block end,  = ref separator.
+# Without post-processing these markers leak into stored messages and outgoing
+# WhatsApp replies as garbage.
+#
+# We replace each citation block with `[N]` markers and append a `Sources:`
+# list of bare URLs (WhatsApp makes bare URLs clickable; markdown wouldn't
+# render). When `ref_map` is empty (no annotations available — e.g. no
+# web_search, or retroactive cleaning), citation blocks are stripped entirely.
+# ──────────────────────────────────────────────────────────────────────
+
+_REF_TOKEN = r"turn\d+(?:search|news|view)\d+"
+_REF_TOKEN_RE = re.compile(_REF_TOKEN)
+
+# OpenAI private-use Unicode markers
+_CITE_BLOCK_START = ""
+_CITE_BLOCK_END = ""
+_REF_SEPARATOR = ""
+
+# Match a complete or truncated OpenAI citation block. Non-greedy; stops at
+# end marker, next block start, or end of string.
+_CITATION_BLOCK_RE = re.compile(
+    rf"{_CITE_BLOCK_START}cite(?:(?!{_CITE_BLOCK_START}).)*?(?:{_CITE_BLOCK_END}|(?={_CITE_BLOCK_START})|$)",
+    re.DOTALL,
+)
+
+
+def _extract_ref_map_from_response(response: Any) -> dict[str, str]:
+    """Build a `{ref_token: url}` map from url_citation annotations.
+
+    Each annotation's `start_index/end_index` points into the message item's
+    content text where the citation placeholder lives. We extract any ref
+    tokens in that range and map them to the annotation's URL.
+    """
+    ref_map: dict[str, str] = {}
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) != "message":
+            continue
+        for content in (getattr(item, "content", None) or []):
+            text = getattr(content, "text", "") or ""
+            for ann in (getattr(content, "annotations", None) or []):
+                if getattr(ann, "type", None) != "url_citation":
+                    continue
+                start = getattr(ann, "start_index", None)
+                end = getattr(ann, "end_index", None)
+                cit = getattr(ann, "url_citation", None)
+                if cit is None or start is None or end is None:
+                    continue
+                if hasattr(cit, "url"):
+                    url = getattr(cit, "url", None)
+                elif isinstance(cit, dict):
+                    url = cit.get("url")
+                else:
+                    url = None
+                if not url:
+                    continue
+                if 0 <= start < end <= len(text):
+                    for ref in _REF_TOKEN_RE.findall(text[start:end]):
+                        ref_map[ref] = url
+    return ref_map
+
+
+def _render_citations(text: str, ref_map: dict[str, str]) -> str:
+    """Replace citation blocks with `[N]` markers and append a Sources list.
+
+    URL deduplication: each unique URL gets one number, assigned in first-encounter
+    order. Stray Unicode markers are stripped at the end so text never leaks
+    private-use chars even if a block was malformed.
+    """
+    url_to_idx: dict[str, int] = {}
+    sources: list[tuple[int, str]] = []
+
+    def replace(m: re.Match) -> str:
+        block = m.group(0)
+        refs = _REF_TOKEN_RE.findall(block)
+        if not refs or not ref_map:
+            return ""
+        markers: list[str] = []
+        for ref in refs:
+            if ref not in ref_map:
+                continue
+            url = ref_map[ref]
+            if url not in url_to_idx:
+                url_to_idx[url] = len(url_to_idx) + 1
+                sources.append((url_to_idx[url], url))
+            markers.append(f"[{url_to_idx[url]}]")
+        return "".join(markers) if markers else ""
+
+    cleaned = _CITATION_BLOCK_RE.sub(replace, text)
+
+    # Strip any stray markers that survived (malformed/truncated blocks)
+    for marker in (_CITE_BLOCK_START, _CITE_BLOCK_END, _REF_SEPARATOR):
+        cleaned = cleaned.replace(marker, "")
+
+    if sources:
+        cleaned = cleaned.rstrip() + "\n\nSources:\n" + "\n".join(
+            f"[{n}] {url}" for n, url in sources
+        )
+    return cleaned
+
+
+def _response_text_with_citations(response: Any) -> str:
+    """Return response.output_text with citation placeholders rendered as Sources."""
+    text = getattr(response, "output_text", "") or ""
+    if not text:
+        return ""
+    ref_map = _extract_ref_map_from_response(response)
+    return _render_citations(text, ref_map)
 
 
 @dataclass
@@ -157,7 +276,7 @@ class OpenAIService(BaseService):
         try:
             response = await self.client.responses.create(**kwargs)
             elapsed = time.monotonic() - t0
-            content = response.output_text or ""
+            content = _response_text_with_citations(response)
             usage = getattr(response, "usage", None)
 
             cached_tokens = self._extract_cached_tokens(usage)
@@ -297,7 +416,7 @@ class OpenAIService(BaseService):
 
             if not function_calls:
                 elapsed = time.monotonic() - t0
-                content = response.output_text or ""
+                content = _response_text_with_citations(response)
                 if not content:
                     logger.warning(
                         "OpenAI empty response: model=%s status=%s output_types=%s refusal=%s",
