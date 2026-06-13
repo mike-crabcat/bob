@@ -12,12 +12,12 @@ WORKSPACE_DIR="$HOME/workspace"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
-# Databases
+# Databases (grab WAL/SHM alongside bob.db so the snapshot is crash-consistent)
 for db in \
   "$DATA_DIR/bob.db" \
-  "$DATA_DIR/whatsappbridge/.env" \
-  "$HOME/.openclaw/lcm.db" \
-  "$HOME/.openclaw/bobvoice-sessions.db"; do
+  "$DATA_DIR/bob.db-wal" \
+  "$DATA_DIR/bob.db-shm" \
+  "$DATA_DIR/whatsappbridge/.env"; do
   if [ -f "$db" ]; then
     dest="$STAGE/$(echo "$db" | sed "s|^$HOME/||")"
     mkdir -p "$(dirname "$dest")"
@@ -39,7 +39,7 @@ fi
 
 # Data directory (non-code runtime data)
 if [ -d "$DATA_DIR" ]; then
-  rsync -a --exclude='*.log' "$DATA_DIR/" "$STAGE/data/" 2>/dev/null || \
+  rsync -a --exclude='*.log' --exclude='backups/' "$DATA_DIR/" "$STAGE/data/" 2>/dev/null || \
     cp -r "$DATA_DIR" "$STAGE/data/"
 fi
 
