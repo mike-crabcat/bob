@@ -506,7 +506,7 @@ class WhatsAppBridgeService(BaseService):
                 ):
                     pass
                 else:
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
 
                 return result
 
@@ -988,7 +988,7 @@ class WhatsAppBridgeService(BaseService):
                 ):
                     pass
                 else:
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
 
                 return result
 
@@ -1592,7 +1592,7 @@ class WhatsAppBridgeService(BaseService):
                 ):
                     pass  # Don't record NO_REPLY to session history
                 else:
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp")
+                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("whatsapp.message.received", {
                         "session_key": session_key,

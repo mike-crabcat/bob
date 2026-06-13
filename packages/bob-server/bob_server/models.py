@@ -499,3 +499,30 @@ class EmailThreadResponse(BobModel, EntityRef):
 class HealthResponse(BobModel):
     status: Literal["ok"]
     database: Literal["ok"]
+
+
+class PersonaConfig(BobModel):
+    owner_name: str = "Mike"
+    model: str = "OpenAI 5.4 mini"
+    channel: str = "WhatsApp"
+    host: str = "mike-workstation"
+
+
+class PersonaRecord(BobModel):
+    id: str
+    revision: int
+    soul: str
+    identity: str
+    agents: str
+    user_content: str
+    config: PersonaConfig
+    is_active: bool
+    created_at: str
+
+
+class PersonaUpdate(BobModel):
+    soul: str
+    identity: str
+    agents: str
+    user_content: str
+    config: PersonaConfig

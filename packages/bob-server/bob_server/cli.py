@@ -1981,8 +1981,99 @@ async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only
                 typer.echo(rendered)
             else:
                 typer.echo(f"Reconciling {eid}...")
-                result = await reconcile_entity(db, llm, eid)
+                result = await reconcile_entity(db, llm, eid, settings=settings)
                 typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        await db.close()
+
+
+@memory_app.command("model-override-set")
+def memory_model_override_set(
+    entity_id: Annotated[str, typer.Argument(help="Entity ID to override")],
+    model: Annotated[str, typer.Argument(help="Model name (e.g. gpt-5.5, o3)")],
+    reason: Annotated[str, typer.Option("--reason", help="Why this override exists")] = "",
+) -> None:
+    """Set a per-entity model override for reconciliation."""
+    import asyncio
+    asyncio.run(_memory_model_override_set(entity_id, model, reason))
+
+
+@memory_app.command("model-override-remove")
+def memory_model_override_remove(
+    entity_id: Annotated[str, typer.Argument(help="Entity ID to remove override for")],
+) -> None:
+    """Remove a per-entity model override."""
+    import asyncio
+    asyncio.run(_memory_model_override_remove(entity_id))
+
+
+@memory_app.command("model-override-list")
+def memory_model_override_list() -> None:
+    """List all per-entity model overrides."""
+    import asyncio
+    asyncio.run(_memory_model_override_list())
+
+
+async def _memory_model_override_set(entity_id: str, model: str, reason: str) -> None:
+    from bob_server.config import Settings
+    from bob_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("bob.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+
+    try:
+        await db.execute(
+            "INSERT OR REPLACE INTO recon_model_overrides (entity_id, model, reason) "
+            "VALUES (?, ?, ?)",
+            (entity_id, model, reason),
+        )
+        typer.echo(f"Set override: {entity_id} → {model}" + (f" ({reason})" if reason else ""))
+    finally:
+        await db.close()
+
+
+async def _memory_model_override_remove(entity_id: str) -> None:
+    from bob_server.config import Settings
+    from bob_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("bob.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+
+    try:
+        await db.execute(
+            "DELETE FROM recon_model_overrides WHERE entity_id = ?", (entity_id,)
+        )
+        typer.echo(f"Removed override for {entity_id}")
+    finally:
+        await db.close()
+
+
+async def _memory_model_override_list() -> None:
+    from bob_server.config import Settings
+    from bob_server.database import Database
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent / "schemas"
+    db_path = settings.db_path or Path("bob.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+
+    try:
+        rows = await db.fetch_all(
+            "SELECT entity_id, model, reason, set_at "
+            "FROM recon_model_overrides ORDER BY set_at DESC"
+        )
+        if not rows:
+            typer.echo("(no overrides)")
+            return
+        for r in rows:
+            typer.echo(f"{r['entity_id']}\t{r['model']}\t{r['set_at']}" + (f"\t{r['reason']}" if r['reason'] else ""))
     finally:
         await db.close()
 

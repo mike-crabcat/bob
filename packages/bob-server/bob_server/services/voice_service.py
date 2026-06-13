@@ -12,6 +12,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from bob_server.context import AppContext
 from bob_server.services.base import BaseService, utcnow
@@ -342,6 +343,7 @@ class VoiceService(BaseService):
                 await transport.send_status("idle")
                 return
 
+            voice_dispatch_id = str(uuid4())
             try:
                 voice_instructions = ""
                 message = text
@@ -394,6 +396,7 @@ class VoiceService(BaseService):
                     model=settings.harness.default_model,
                     call_category="voice_chat",
                     session_key=session_key,
+                    dispatch_id=voice_dispatch_id,
                 ):
                     if chunk:
                         accumulated += chunk
@@ -455,7 +458,7 @@ class VoiceService(BaseService):
                     new_lesson = await self._lesson_store.advance_lesson(user_id, "beginner_french", _TOTAL_LESSONS)
                     await self._lesson_store.reset_lesson(user_id, "beginner_french", new_lesson)
 
-            await self._session_svc.add_message(session_key, "assistant", clean_response, channel="voice")
+            await self._session_svc.add_message(session_key, "assistant", clean_response, channel="voice", dispatch_id=voice_dispatch_id)
 
         # --- Send final messages ---
         if tts_first_chunk_ms is None:

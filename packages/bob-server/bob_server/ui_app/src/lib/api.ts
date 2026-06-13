@@ -39,3 +39,16 @@ export async function putAPI<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
   return res.json();
 }
+
+export async function patchAPI<T>(path: string, body?: unknown): Promise<T> {
+  const secret = getSecret();
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${base}/api${path}${secret ? `${sep}secret=${encodeURIComponent(secret)}` : ""}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
+  return res.json();
+}

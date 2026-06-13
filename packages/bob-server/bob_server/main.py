@@ -27,7 +27,7 @@ from bob_server.heartbeat import (
 )
 from bob_server.services.routine_scheduler import RoutineSchedulerTask
 from bob_server.models import HealthResponse
-from bob_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, session_routes, webhooks, whatsapp
+from bob_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, persona, session_routes, webhooks, whatsapp
 from bob_server.services.event_bus import EventBus
 from bob_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
@@ -164,6 +164,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(session_routes.router)
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
+    app.include_router(persona.router, prefix="/api/v1")
     app.include_router(email.router)
 
     # Dashboard API (HTTP) + WebSocket (live events)

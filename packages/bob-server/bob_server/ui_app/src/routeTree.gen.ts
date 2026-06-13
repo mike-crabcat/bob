@@ -14,6 +14,7 @@ import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
 import { Route as SkillsIndexRouteImport } from './routes/skills/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as PhoneIndexRouteImport } from './routes/phone/index'
+import { Route as PersonaIndexRouteImport } from './routes/persona/index'
 import { Route as MemoryIndexRouteImport } from './routes/memory/index'
 import { Route as ContactsIndexRouteImport } from './routes/contacts/index'
 import { Route as SkillsDelegationIdRouteImport } from './routes/skills/$delegationId'
@@ -47,6 +48,11 @@ const SessionsIndexRoute = SessionsIndexRouteImport.update({
 const PhoneIndexRoute = PhoneIndexRouteImport.update({
   id: '/phone/',
   path: '/phone/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PersonaIndexRoute = PersonaIndexRouteImport.update({
+  id: '/persona/',
+  path: '/persona/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MemoryIndexRoute = MemoryIndexRouteImport.update({
@@ -104,6 +110,7 @@ export interface FileRoutesByFullPath {
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
   '/memory/': typeof MemoryIndexRoute
+  '/persona/': typeof PersonaIndexRoute
   '/phone/': typeof PhoneIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/skills/': typeof SkillsIndexRoute
@@ -119,6 +126,7 @@ export interface FileRoutesByTo {
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts': typeof ContactsIndexRoute
   '/memory': typeof MemoryIndexRoute
+  '/persona': typeof PersonaIndexRoute
   '/phone': typeof PhoneIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/skills': typeof SkillsIndexRoute
@@ -136,6 +144,7 @@ export interface FileRoutesById {
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
   '/memory/': typeof MemoryIndexRoute
+  '/persona/': typeof PersonaIndexRoute
   '/phone/': typeof PhoneIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/skills/': typeof SkillsIndexRoute
@@ -154,6 +163,7 @@ export interface FileRouteTypes {
     | '/skills/$delegationId'
     | '/contacts/'
     | '/memory/'
+    | '/persona/'
     | '/phone/'
     | '/sessions/'
     | '/skills/'
@@ -169,6 +179,7 @@ export interface FileRouteTypes {
     | '/skills/$delegationId'
     | '/contacts'
     | '/memory'
+    | '/persona'
     | '/phone'
     | '/sessions'
     | '/skills'
@@ -185,6 +196,7 @@ export interface FileRouteTypes {
     | '/skills/$delegationId'
     | '/contacts/'
     | '/memory/'
+    | '/persona/'
     | '/phone/'
     | '/sessions/'
     | '/skills/'
@@ -202,6 +214,7 @@ export interface RootRouteChildren {
   SkillsDelegationIdRoute: typeof SkillsDelegationIdRoute
   ContactsIndexRoute: typeof ContactsIndexRoute
   MemoryIndexRoute: typeof MemoryIndexRoute
+  PersonaIndexRoute: typeof PersonaIndexRoute
   PhoneIndexRoute: typeof PhoneIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
   SkillsIndexRoute: typeof SkillsIndexRoute
@@ -245,6 +258,13 @@ declare module '@tanstack/react-router' {
       path: '/phone'
       fullPath: '/phone/'
       preLoaderRoute: typeof PhoneIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/persona/': {
+      id: '/persona/'
+      path: '/persona'
+      fullPath: '/persona/'
+      preLoaderRoute: typeof PersonaIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/memory/': {
@@ -333,6 +353,7 @@ const rootRouteChildren: RootRouteChildren = {
   SkillsDelegationIdRoute: SkillsDelegationIdRoute,
   ContactsIndexRoute: ContactsIndexRoute,
   MemoryIndexRoute: MemoryIndexRoute,
+  PersonaIndexRoute: PersonaIndexRoute,
   PhoneIndexRoute: PhoneIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
   SkillsIndexRoute: SkillsIndexRoute,

@@ -174,6 +174,7 @@ async def get_home(request: Request) -> dict[str, Any]:
 
     # Recent bulletins
     recent_bulletins: list[dict[str, Any]] = []
+    bulletin_count = 0
     bulletins_table = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_bulletins'"
     )
@@ -192,6 +193,19 @@ async def get_home(request: Request) -> dict[str, Any]:
                 "content": row["content"],
                 "created_at": _utc(row["created_at"]),
             })
+        b_total = await db.fetch_one("SELECT COUNT(*) AS c FROM memory_bulletins")
+        bulletin_count = (b_total["c"] if b_total else 0) or 0
+
+    # Active entity count
+    entity_count = 0
+    entities_table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entities'"
+    )
+    if entities_table:
+        e_total = await db.fetch_one(
+            "SELECT COUNT(*) AS c FROM memory_entities WHERE status = 'active'"
+        )
+        entity_count = (e_total["c"] if e_total else 0) or 0
 
     # Estimated 24h costs by call category
     cost_by_category: list[dict[str, Any]] = []
@@ -239,6 +253,8 @@ async def get_home(request: Request) -> dict[str, Any]:
         "chart_buckets": chart_buckets,
         "chart_categories": chart_categories,
         "recent_bulletins": recent_bulletins,
+        "entity_count": entity_count,
+        "bulletin_count": bulletin_count,
         "cost_by_category": cost_by_category,
         "total_cost_24h": total_cost_24h,
     }
@@ -1974,3 +1990,75 @@ async def get_phone_recording(request: Request, call_id: str) -> Any:
     if not rec_path.is_file():
         return {"error": "Recording file not found"}
     return FileResponse(rec_path, media_type="audio/wav")
+
+
+# ── Persona ──────────────────────────────────────────────────────────
+
+@router.get("/api/persona")
+async def dashboard_get_persona(request: Request) -> dict[str, Any]:
+    db = _db(request)
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE is_active = 1")
+    if row is None:
+        return {"data": None}
+    return {"data": _persona_row_to_dict(row)}
+
+
+@router.get("/api/persona/history")
+async def dashboard_get_persona_history(request: Request) -> dict[str, Any]:
+    db = _db(request)
+    rows = await db.fetch_all("SELECT * FROM persona_records ORDER BY revision DESC")
+    return {"data": [_persona_row_to_dict(r) for r in rows]}
+
+
+@router.post("/api/persona")
+async def dashboard_create_persona(request: Request) -> dict[str, Any]:
+    import uuid
+    from bob_server.models import PersonaUpdate
+    db = _db(request)
+    body = await request.json()
+    payload = PersonaUpdate(**body)
+
+    max_row = await db.fetch_one("SELECT MAX(revision) as max_rev FROM persona_records")
+    next_revision = (max_row["max_rev"] or 0) + 1
+
+    record_id = str(uuid.uuid4())
+    config_json = json.dumps(payload.config.model_dump())
+
+    await db.execute("UPDATE persona_records SET is_active = 0 WHERE is_active = 1")
+    await db.execute(
+        """INSERT INTO persona_records (id, revision, soul, identity, agents, user_content, config, is_active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))""",
+        (record_id, next_revision, payload.soul, payload.identity, payload.agents, payload.user_content, config_json),
+    )
+
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE id = ?", (record_id,))
+    return {"data": _persona_row_to_dict(row)}
+
+
+@router.patch("/api/persona/{revision}/activate")
+async def dashboard_activate_persona(request: Request, revision: int) -> dict[str, Any]:
+    db = _db(request)
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE revision = ?", (revision,))
+    if row is None:
+        return {"error": f"Revision r{revision} not found"}
+
+    await db.execute("UPDATE persona_records SET is_active = 0 WHERE is_active = 1")
+    await db.execute("UPDATE persona_records SET is_active = 1 WHERE revision = ?", (revision,))
+
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE revision = ?", (revision,))
+    return {"data": _persona_row_to_dict(row)}
+
+
+def _persona_row_to_dict(row: Any) -> dict[str, Any]:
+    config = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+    return {
+        "id": row["id"],
+        "revision": row["revision"],
+        "soul": row["soul"],
+        "identity": row["identity"],
+        "agents": row["agents"],
+        "user_content": row["user_content"],
+        "config": config,
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"],
+    }

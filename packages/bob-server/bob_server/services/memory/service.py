@@ -70,6 +70,7 @@ class MemoryService(BaseService):
         occurred_at: str | None = None,
         session_range_start: str = "",
         session_range_end: str = "",
+        format: str = "llm_summary",
     ) -> str:
         """Write an immutable plain-text bulletin to the database."""
         now = utcnow()
@@ -80,8 +81,8 @@ class MemoryService(BaseService):
         await self.db.execute(
             "INSERT INTO memory_bulletins "
             "(id, created_at, channel_id, source_type, source_id, visibility, content, "
-            " session_range_start, session_range_end) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " session_range_start, session_range_end, format) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 bulletin_id,
                 ts,
@@ -92,6 +93,7 @@ class MemoryService(BaseService):
                 content,
                 session_range_start,
                 session_range_end,
+                format,
             ),
         )
 
@@ -163,6 +165,7 @@ class MemoryService(BaseService):
                 for eid in entity_ids:
                     result = await reconcile_entity(
                         self.db, llm, eid,
+                        settings=self.ctx.settings,
                         update_fts_fn=self._update_entity_fts,
                         schedule_reconciliation_fn=self._schedule_reconciliation,
                     )
@@ -200,6 +203,7 @@ class MemoryService(BaseService):
         for eid in entity_ids:
             result = await reconcile_entity(
                 self.db, llm, eid,
+                settings=self.ctx.settings,
                 update_fts_fn=self._update_entity_fts,
                 schedule_reconciliation_fn=self._schedule_reconciliation,
             )
@@ -340,16 +344,18 @@ class MemoryService(BaseService):
         limit: int = 100,
         run_dream: bool = True,
     ) -> dict[str, Any]:
-        """Generate bulletins for a session from recent messages."""
-        from bob_server.services.memory.bulletin_generator import (
-            build_generator_input,
-            generate_bulletins,
-        )
+        """Generate a raw-transcript bulletin for a session window.
+
+        Emits a single bulletin per window. The content is a literal transcript
+        of the window's messages, prefixed with N prior messages under a
+        "context only, do not extract" header. Assistant messages whose turn
+        used memory-read tools are tagged [SYNTHETIC] so the extraction LLM
+        can skip them.
+        """
         from bob_server.services.memory.channels import (
             derive_visibility,
             resolve_channel_id,
         )
-        from bob_server.services.llm_dispatch import LLMDispatchService
 
         if active_from == "1970-01-01":
             row = await self.db.fetch_one(
@@ -368,19 +374,19 @@ class MemoryService(BaseService):
         if not active_to:
             return {"status": "empty", "bulletins_generated": 0, "reason": "no messages"}
 
-        rows = await self.db.fetch_all(
-            "SELECT role, content, sender_id, created_at FROM session_messages "
+        window_rows = await self.db.fetch_all(
+            "SELECT role, content, sender_id, created_at, synthetic "
+            "FROM session_messages "
             "WHERE session_key = ? AND created_at > ? AND created_at <= ? "
             "AND role IN ('user', 'assistant') ORDER BY created_at ASC",
             (session_key, active_from, active_to),
         )
-        if not rows:
+        if not window_rows:
             return {"status": "empty", "bulletins_generated": 0, "reason": "no new messages"}
 
-        messages = [dict(r) for r in rows]
-        if sum(len(m.get("content", "") or "") for m in messages) < 50:
-            return {"status": "empty", "bulletins_generated": 0, "reason": "content too short"}
+        window_messages = [dict(r) for r in window_rows]
 
+        # Build participant name map (sender_id -> display name).
         participant_rows = await self.db.fetch_all(
             "SELECT contact_id, identifier, display_name FROM session_participants "
             "WHERE session_key = ?",
@@ -392,74 +398,61 @@ class MemoryService(BaseService):
             if name and r["contact_id"]:
                 contact_to_name[r["contact_id"]] = name
 
-        participants = [
-            {"id": canonical_contact_id(cid), "name": name}
-            for cid, name in contact_to_name.items()
-        ]
-
-        gen_input = build_generator_input(
-            session_key=session_key,
-            messages=[
-                {
-                    "sender_contact_id": m.get("sender_id", "assistant"),
-                    "timestamp": m.get("created_at", ""),
-                    "content": (m.get("content") or "")[:500],
-                }
-                for m in messages[-limit:]
-            ],
-            participants=participants,
+        # Fetch N prior messages for context (configurable).
+        prior_n = self._get_settings().bulletin_prior_context_messages
+        prior_rows = await self.db.fetch_all(
+            "SELECT role, content, sender_id, created_at, synthetic "
+            "FROM session_messages "
+            "WHERE session_key = ? AND created_at <= ? "
+            "AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT ?",
+            (session_key, active_from, prior_n),
         )
+        prior_messages = [dict(r) for r in reversed(prior_rows)] if prior_rows else []
 
-        llm = LLMDispatchService(self.ctx)
-        bulletin_texts = await generate_bulletins(llm, gen_input)
+        def _format_line(m: dict[str, Any]) -> str:
+            ts = m.get("created_at", "") or ""
+            sender_id = m.get("sender_id") or ""
+            name = contact_to_name.get(sender_id) or m.get("role") or "user"
+            cid = canonical_contact_id(sender_id) if sender_id else ""
+            label = f"[{name} {cid}]" if cid else f"[{name}]"
+            tag = "[SYNTHETIC]" if m.get("synthetic") else ""
+            content = (m.get("content") or "").replace("\n", " ")
+            return f"[{ts}] {label}{tag}: {content}"
+
+        parts: list[str] = []
+        if prior_messages:
+            parts.append("Prior messages (context only, do not extract):")
+            parts.extend(_format_line(m) for m in prior_messages)
+            parts.append("")
+
+        parts.append("Window messages:")
+        parts.extend(_format_line(m) for m in window_messages)
+        content = "\n".join(parts)
 
         channel_id = resolve_channel_id(session_key)
         visibility = derive_visibility(session_key)
 
-        if not bulletin_texts:
-            bulletin_id = await self.write_bulletin(
-                workspace_dir,
-                channel_id=channel_id,
-                source_type="session",
-                source_id=session_key,
-                content="",
-                visibility=visibility,
-                occurred_at=active_to,
-                session_range_start=active_from,
-                session_range_end=active_to,
-            )
-            await self.db.execute(
-                "UPDATE memory_bulletins SET digested = 1 WHERE id = ?",
-                (bulletin_id,),
-            )
-            await self.ensure_group_entity(
-                workspace_dir, session_key=session_key, bulletin_id=bulletin_id,
-            )
-            return {"status": "empty", "bulletins_generated": 0, "reason": "nothing memory-worthy"}
-
-        bulletin_ids = []
-        for text in bulletin_texts:
-            bid = await self.write_bulletin(
-                workspace_dir,
-                channel_id=channel_id,
-                source_type="session",
-                source_id=session_key,
-                content=text,
-                visibility=visibility,
-                occurred_at=active_to,
-                session_range_start=active_from,
-                session_range_end=active_to,
-            )
-            bulletin_ids.append(bid)
-            await self.ensure_group_entity(
-                workspace_dir, session_key=session_key, bulletin_id=bid,
-            )
+        bulletin_id = await self.write_bulletin(
+            workspace_dir,
+            channel_id=channel_id,
+            source_type="session",
+            source_id=session_key,
+            content=content,
+            visibility=visibility,
+            occurred_at=active_to,
+            session_range_start=active_from,
+            session_range_end=active_to,
+            format="raw_transcript",
+        )
+        await self.ensure_group_entity(
+            workspace_dir, session_key=session_key, bulletin_id=bulletin_id,
+        )
 
         result: dict[str, Any] = {
             "status": "ok",
-            "bulletins_generated": len(bulletin_texts),
-            "bulletin_ids": bulletin_ids,
-            "messages_processed": len(messages),
+            "bulletins_generated": 1,
+            "bulletin_ids": [bulletin_id],
+            "messages_processed": len(window_messages),
             "active_from": active_from,
             "active_to": active_to,
         }

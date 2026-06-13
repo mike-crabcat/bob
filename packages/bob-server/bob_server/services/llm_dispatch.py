@@ -30,6 +30,13 @@ from bob_server.services.openai_service import OpenAIService, StreamResult
 logger = logging.getLogger(__name__)
 
 
+# Tracks whether memory-read tools were used during a given dispatch, so that
+# the resulting assistant message can be flagged as synthetic (an echo of
+# existing memory rather than new ground truth). Keyed on dispatch_id.
+_memory_tool_used: dict[str, bool] = {}
+_MEMORY_TOOL_NAMES = frozenset({"recall", "find", "memory_read"})
+
+
 def _sanitize_for_json(obj: Any) -> Any:
     """Recursively convert non-serializable objects to plain dicts."""
     if isinstance(obj, dict):
@@ -160,8 +167,16 @@ class LLMDispatchService(BaseService):
     def _get_service(self) -> OpenAIService:
         return OpenAIService(self.ctx)
 
-    def _make_tool_callback(self, session_key: str | None, call_category: str, log_id: str | None = None) -> Any:
+    def _make_tool_callback(
+        self,
+        session_key: str | None,
+        call_category: str,
+        log_id: str | None = None,
+        dispatch_id: str | None = None,
+    ) -> Any:
         async def _on_tool_call(name: str, args: dict, result_summary: str) -> None:
+            if dispatch_id and name in _MEMORY_TOOL_NAMES:
+                _memory_tool_used[dispatch_id] = True
             if self.ctx.event_bus is None:
                 return
             payload: dict[str, Any] = {
@@ -175,6 +190,16 @@ class LLMDispatchService(BaseService):
                 payload["log_id"] = log_id
             await self.ctx.event_bus.publish("llm.call.tool_completed", payload)
         return _on_tool_call
+
+    @staticmethod
+    def pop_memory_used(dispatch_id: str | None) -> bool:
+        """Return and clear the memory-used flag for a dispatch.
+
+        Returns False when dispatch_id is None or no memory-read tool fired.
+        """
+        if not dispatch_id:
+            return False
+        return _memory_tool_used.pop(dispatch_id, False)
 
     def _resolve_model(self, model: str | None = None) -> str:
         if model:
@@ -455,7 +480,7 @@ class LLMDispatchService(BaseService):
                 model=resolved_model,
                 max_iterations=max_iterations,
                 stream_result=stream_result,
-                on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
+                on_tool_call=self._make_tool_callback(session_key, call_category, log_id, dispatch_id),
                 on_iteration_complete=_on_iteration,
             )
             elapsed = time.monotonic() - t0
@@ -566,7 +591,7 @@ class LLMDispatchService(BaseService):
                 tool_handlers=tool_handlers,
                 model=resolved_model,
                 max_iterations=max_iterations,
-                on_tool_call=self._make_tool_callback(session_key, call_category, log_id),
+                on_tool_call=self._make_tool_callback(session_key, call_category, log_id, dispatch_id),
                 on_iteration_complete=_on_iteration,
             ):
                 if chunk:

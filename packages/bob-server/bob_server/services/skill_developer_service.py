@@ -103,7 +103,7 @@ Do NOT reference BOB_-prefixed variable names OTHER THAN `BOB_WORKSPACE_DIR`.
 
 When asked to create a skill:
 1. Use Read or Glob to examine existing skills in `skills/` for patterns
-2. Read workspace files (SOUL.md, IDENTITY.md, USER.md) for context about Bob's persona
+2. Read existing skills in `skills/` for format and patterns
 3. Design the skill: name, trigger, what the Python script will do
 4. Use Write to create ALL of these files:
    - `skills/{name}/skill.md` — trigger + instructions referencing run_script
@@ -158,7 +158,7 @@ class SkillDeveloperService(BaseService):
             "\n\nTASK: Plan a new skill for this request.\n\n"
             "Steps:\n"
             "1. Read 1-2 existing skills to understand the format and patterns\n"
-            "2. Read relevant workspace files (SOUL.md, IDENTITY.md) for persona context\n"
+            "2. Read existing skills for format and patterns\n"
             "3. Describe your plan: skill name, trigger, what the instructions will cover, "
             "whether any helper scripts are needed\n\n"
             "Do NOT create any files yet. Output your plan as clear text that can be "

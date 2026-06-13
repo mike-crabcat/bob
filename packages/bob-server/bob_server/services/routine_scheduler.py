@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from uuid import uuid4
 
 from bob_server.services.routine_service import RoutineService
 
@@ -100,13 +101,15 @@ class RoutineSchedulerTask:
                     handler=_send_whatsapp_message,
                 ))
 
+            dispatch_id = str(uuid4())
             response = await LLMDispatchService(ctx).chat_with_tools(
                 messages, tools,
                 call_category="routine",
                 session_key=session_key,
+                dispatch_id=dispatch_id,
             )
 
-            await session_svc.add_message(session_key, "assistant", response, channel="routine")
+            await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id)
 
             # Compute next run time
             from bob_server.cron import next_cron_occurrence

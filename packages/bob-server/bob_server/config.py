@@ -219,6 +219,18 @@ class PatienceSettings:
 
 
 @dataclass(slots=True)
+class ReconciliationSettings:
+    """Configuration for memory reconciliation model selection.
+
+    large_model_types: entity types (e.g. trip, connection) whose reconciliation
+    should use the large model (openai.default_model) instead of the small model
+    (openai.memory_model).
+    """
+
+    large_model_types: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -241,10 +253,12 @@ class Settings:
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     patience: PatienceSettings = field(default_factory=PatienceSettings)
+    reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
     session_summary_idle_minutes: float = 5.0
+    bulletin_prior_context_messages: int = 5
 
     @property
     def dashboard_secret_configured(self) -> bool:
@@ -346,6 +360,10 @@ class Settings:
             os.getenv("BOB_SESSION_SUMMARY_IDLE_MINUTES", "5.0")
         )
 
+        bulletin_prior_context_messages = int(
+            os.getenv("BOB_BULLETIN_PRIOR_CONTEXT_MESSAGES", "5")
+        )
+
         phone = PhoneSettings(
             enabled=os.getenv("BOB_PHONE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             twilio_account_sid=os.getenv("BOB_PHONE_TWILIO_ACCOUNT_SID", ""),
@@ -395,6 +413,12 @@ class Settings:
             max_context_messages=int(os.getenv("BOB_PATIENCE_MAX_CONTEXT", "10")),
         )
 
+        recon_large_types_raw = os.getenv("BOB_RECON_LARGE_MODEL_TYPES", "")
+        recon_large_types = [t.strip() for t in recon_large_types_raw.split(",") if t.strip()]
+        reconciliation = ReconciliationSettings(
+            large_model_types=recon_large_types,
+        )
+
         return cls(
             host=host,
             port=port,
@@ -413,11 +437,13 @@ class Settings:
             public_url=public_url,
             dashboard_secret=dashboard_secret,
             session_summary_idle_minutes=session_summary_idle_minutes,
+            bulletin_prior_context_messages=bulletin_prior_context_messages,
             phone=phone,
             openai=openai_llm,
             harness=harness,
             whatsapp_bridge=whatsapp_bridge,
             patience=patience,
+            reconciliation=reconciliation,
         )
 
     def ensure_directories(self) -> None:

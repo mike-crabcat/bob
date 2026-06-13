@@ -782,7 +782,7 @@ class EmailPollingService(BaseService):
                 # Merge LLM text output with actual email reply body (like WhatsApp sent_texts)
                 parts = [p for p in ([result] if result.strip() else []) + reply_bodies if p.strip()]
                 assistant_text = "\n\n".join(parts) if parts else result
-                await session_svc.add_message(session_key, "assistant", assistant_text, channel="email")
+                await session_svc.add_message(session_key, "assistant", assistant_text, channel="email", dispatch_id=dispatch_id)
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("email.message.received", {
                         "session_key": session_key,

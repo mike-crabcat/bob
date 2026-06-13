@@ -39,10 +39,6 @@ export function LLMChart({ buckets, categories }: Props) {
     return () => ro.disconnect();
   }, []);
 
-  if (buckets.length === 0) {
-    return <div className="text-xs text-muted text-center py-3">no data</div>;
-  }
-
   const data = buckets.map((b) => ({
     time: b.interval_start?.slice(11, 16) ?? "",
     ...Object.fromEntries(categories.map((c) => [c, (b[c] as number) ?? 0])),
@@ -50,7 +46,9 @@ export function LLMChart({ buckets, categories }: Props) {
 
   return (
     <div ref={ref} className="bg-surface border border-border p-2">
-      {w > 0 && (
+      {buckets.length === 0 ? (
+        <div className="text-xs text-muted text-center py-3">no data</div>
+      ) : w > 0 ? (
         <BarChart width={w} height={195} data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
           <XAxis
             dataKey="time"
@@ -86,7 +84,7 @@ export function LLMChart({ buckets, categories }: Props) {
             <Bar key={cat} dataKey={cat} stackId="calls" fill={categoryColor(cat)} radius={0} />
           ))}
         </BarChart>
-      )}
+      ) : null}
     </div>
   );
 }
