@@ -16,6 +16,33 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def iso_utc(value: str | datetime | None = None) -> str:
+    """Normalize a timestamp to canonical 'YYYY-MM-DDTHH:MM:SSZ' UTC.
+
+    Accepts ISO 8601 variants (T or space separator, optional microseconds,
+    optional +00:00 or Z suffix) and naive datetimes (assumed UTC). Strings
+    that fail to parse are returned unchanged so we never silently corrupt data.
+    """
+
+    if value is None:
+        return utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        candidate = value.strip()
+        if not candidate:
+            return value
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(candidate)
+        except ValueError:
+            return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def json_dumps(value: Any) -> str | None:
     """Encode a JSON-compatible value for SQLite storage."""
 

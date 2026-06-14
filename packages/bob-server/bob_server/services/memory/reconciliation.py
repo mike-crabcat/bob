@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from bob_server.services.memory.claim_types import (
@@ -67,6 +67,38 @@ async def resolve_reconciliation_model(
         return settings.openai.default_model
 
     return None
+
+
+async def filter_due_for_reconciliation(
+    db: Any, entity_ids: list[str], min_interval_hours: float
+) -> list[str]:
+    """Return entity_ids that have not been reconciled within min_interval_hours.
+
+    Entities with NULL last_reconciled_at are always due. Pass min_interval_hours <= 0
+    to bypass (returns all ids unchanged). Order-preserving, deduplicated.
+    """
+    if not entity_ids:
+        return []
+    if min_interval_hours <= 0:
+        # Bypass: return unique ids in caller order
+        seen: set[str] = set()
+        return [eid for eid in entity_ids if not (eid in seen or seen.add(eid))]
+    cutoff = (datetime.now() - timedelta(hours=min_interval_hours)).isoformat()
+    placeholders = ",".join("?" for _ in entity_ids)
+    rows = await db.fetch_all(
+        f"SELECT entity_id FROM memory_entities "
+        f"WHERE entity_id IN ({placeholders}) "
+        f"AND (last_reconciled_at IS NULL OR last_reconciled_at < ?)",
+        (*entity_ids, cutoff),
+    )
+    due_set = {r["entity_id"] for r in rows}
+    seen_set: set[str] = set()
+    out: list[str] = []
+    for eid in entity_ids:
+        if eid in due_set and eid not in seen_set:
+            seen_set.add(eid)
+            out.append(eid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -382,18 +414,6 @@ sub-entities, checking for inconsistencies against a set of rules.
 You have tools to look up other entities and apply fixes. Use them freely — \
 prefer acting over asking.
 
-## Entity Under Review
-
-{entity_view}
-
-## Source Bulletins (ground truth reference material)
-
-{bulletins}
-
-## Answered Questions (ground truth from the user)
-
-{answers}
-
 ## Reconciliation Rules for {entity_type}
 
 {rules}
@@ -434,6 +454,18 @@ When you are done applying fixes (or if no fixes were needed), respond with a JS
 
 Apply all fixes using tools FIRST, then return the JSON summary.
 If no issues found: {{"issues": [], "questions": []}}
+
+## Answered Questions (ground truth from the user)
+
+{answers}
+
+## Source Bulletins (ground truth reference material)
+
+{bulletins}
+
+## Entity Under Review
+
+{entity_view}
 """
 
 
@@ -752,6 +784,18 @@ async def reconcile_entity(
         call_category="memory_reconciliation",
         model=resolved_model,
     )
+
+    # Mark this entity as reconciled so the auto scheduler's backoff applies.
+    # Written immediately after the LLM call returns — even if post-processing
+    # below raises, the cost has already been incurred and we don't want a
+    # retry storm on the next cycle.
+    try:
+        await db.execute(
+            "UPDATE memory_entities SET last_reconciled_at = ? WHERE entity_id = ?",
+            (datetime.now().isoformat(), entity_id),
+        )
+    except Exception:
+        logger.warning("Failed to update last_reconciled_at for %s", entity_id, exc_info=True)
 
     # Parse the final JSON response for issues and questions
     issues: list[dict] = []

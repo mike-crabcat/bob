@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from bob_server.services.base import iso_utc
 from bob_server.services.memory.claim_types import render_entity
 from bob_server.services.memory.models import ENTITY_TYPES
 
@@ -156,7 +157,7 @@ async def note(
         "VALUES (?, ?, ?, ?, '', ?, ?, 0)",
         (
             bulletin_id,
-            datetime.now(timezone.utc).isoformat(),
+            iso_utc(),
             channel_id,
             source_type,
             visibility,

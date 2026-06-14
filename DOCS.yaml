@@ -4,20 +4,32 @@
           description suitable for a software developer to understand the system and how it works. It should also start with the purpose and intent of the feature.
 - path: ./docs/memory.md
   prompt: |
-          This document must describe the memory system. It should start with the purpose and intent of the feature.
-          It must cover: the SQLite-backed storage architecture (memory_bulletins, memory_claims, memory_entities,
-          memory_entity_relations, memory_aliases tables defined in schemas/307_memory_tables.sql and
-          schemas/311_entity_bulletin_links.sql), the four-stage pipeline (channel -> bulletin -> claim -> entity document),
-          how memory entries are authored (real-time via memory_write tool during conversations, and post-session
-          bulletin generation triggered by heartbeat), how retrieval works (on-demand semantic search via memory_search
-          tool using an LLM, memory_read for full documents, memory_browse for listing by type, memory_graph for
-          graph traversal), visibility and scope (private/contact/group/channel/public levels derived from session keys),
-          the CLI commands (bob memory seed/seed-email/seed-manual/rebuild/validate/cleanup-contacts/query),
-          the contact reconciliation pipeline (reconcile.py, cleanup.py, contact_directory.py),
-          the search logging (memory_search_log table), dream logging (memory_dream_log table),
-          and the dashboard memory page with API endpoints.
-          Include high level ascii architecture diagrams showing how memory integrates into the prompt assembly and LLM dispatch flow.
-          Suitable for a software developer to understand the system end-to-end.
+          This document must describe the memory system. It should start with the purpose and intent of the feature:
+          why persistent memory exists, what problem it solves, and the core design tradeoffs (e.g. claim-centric
+          storage vs. free-text documents, extraction-on-write vs. retrieval-time reasoning).
+          It must cover the following topics at an architectural level. Specific table names, tool names, file paths,
+          and CLI subcommands should be discovered from the codebase at write time rather than asserted from memory,
+          so the doc stays correct as the implementation evolves.
+          - The data model: the pipeline from raw session messages to bulletins to atomic claims to rendered entity
+            views. Explain what each stage holds and why the separation exists.
+          - Authoring paths: how facts enter memory both during a live conversation (agent-driven writes) and after
+            a session goes idle (background bulletin generation from session transcripts). Cover how prior-context
+            windows and synthetic-echo flagging prevent the extraction pipeline from re-ingesting recalled facts.
+          - The curation pipeline: how raw bulletins become clean entity state — extraction, supplemental gap-filling,
+            and reconciliation. Explain what each stage is responsible for and how it interacts with the LLM.
+          - Retrieval: how the agent accesses memory at runtime — semantic search, ID lookup, graph traversal — and
+            how retrieval results are injected back into the conversation.
+          - Visibility and scope: how the same fact can be private to a contact, scoped to a group, or public, and
+            how that boundary is enforced.
+          - Operability: how an operator inspects, repairs, and reprocesses memory (CLI tooling, dashboard pages,
+            per-entity model overrides) without a full rebuild.
+          - Integration points: where memory plugs into prompt assembly and LLM dispatch.
+          Include high-level ASCII architecture diagrams showing (at minimum) the bulletin→claim→entity pipeline and
+          the prompt-assembly / LLM-dispatch integration. Diagrams should make the data flow obvious to a reader
+          skimming the doc.
+          Aim for quality technical documentation: precise nouns for concepts, consistent terminology throughout,
+          concrete examples where they help, and prose that flows between sections rather than reading as a checklist.
+          Suitable for a software engineer to understand the system end-to-end and confidently modify it.
 - path: ./docs/skills.md
   prompt: |
           This document must describe how skills work in Bob. It should start with the purpose and intent of the feature.

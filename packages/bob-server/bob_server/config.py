@@ -228,6 +228,7 @@ class ReconciliationSettings:
     """
 
     large_model_types: list[str] = field(default_factory=list)
+    min_interval_hours: float = 6.0
 
 
 @dataclass(slots=True)
@@ -417,6 +418,7 @@ class Settings:
         recon_large_types = [t.strip() for t in recon_large_types_raw.split(",") if t.strip()]
         reconciliation = ReconciliationSettings(
             large_model_types=recon_large_types,
+            min_interval_hours=float(os.getenv("BOB_RECON_MIN_INTERVAL_HOURS", "6.0")),
         )
 
         return cls(

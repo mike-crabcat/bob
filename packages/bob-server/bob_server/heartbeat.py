@@ -234,11 +234,10 @@ class LLMCallStalenessTask:
     STALE_MINUTES = 30
 
     async def run(self, ctx: AppContext) -> None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=self.STALE_MINUTES)).isoformat()
         count = await ctx.db.execute(
             "UPDATE llm_call_log SET status = 'failed', error_message = 'Stale running call — timed out' "
-            "WHERE status = 'running' AND created_at < ?",
-            (cutoff,),
+            "WHERE status = 'running' AND created_at < datetime('now', ?)",
+            (f'-{self.STALE_MINUTES} minutes',),
         )
         if count:
             logger.warning("Marked %d stale LLM call(s) as failed", count)
