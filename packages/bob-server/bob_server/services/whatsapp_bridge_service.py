@@ -7,8 +7,10 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import websockets
 
@@ -37,6 +39,15 @@ def _jid_to_phone(jid: str) -> str:
         return "+" + digits
     if len(digits) > 8:
         return "+" + digits
+
+
+_PERTH = ZoneInfo("Australia/Perth")
+
+
+def _format_created_at(iso_utc: str) -> str:
+    """Render a UTC ISO timestamp as Perth-local 'YYYY-MM-DD HH:MM'."""
+    dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
+    return dt.astimezone(_PERTH).strftime("%Y-%m-%d %H:%M")
 
 
 # The Go bridge has a 1 MB WebSocket read limit.
@@ -1073,6 +1084,8 @@ class WhatsAppBridgeService(BaseService):
             await self._cmd_patience(args, session_key, chat_id)
         elif command == "/bulletin":
             await self._cmd_bulletin(args, session_key, chat_id, chat_kind)
+        elif command == "/who":
+            await self._cmd_who(chat_id)
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -1100,6 +1113,17 @@ class WhatsAppBridgeService(BaseService):
 
         status = "enabled — waiting for silence before responding" if enabled else "disabled — responding immediately"
         await self.send_message(chat_id, f"Patience {status}")
+
+    async def _cmd_who(self, chat_id: str) -> None:
+        """Reply with the active persona revision and creation timestamp."""
+        row = await self.db.fetch_one(
+            "SELECT revision, created_at FROM persona_records WHERE is_active = 1"
+        )
+        if row is None:
+            await self.send_message(chat_id, "no active persona — using built-in defaults")
+            return
+        created = _format_created_at(row["created_at"])
+        await self.send_message(chat_id, f"r{row['revision']} (created {created})")
 
     async def _cmd_bulletin(self, args: str, session_key: str, chat_id: str, chat_kind: str) -> None:
         """Generate bulletins for the current session on demand."""

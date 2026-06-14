@@ -45,7 +45,7 @@ export interface BulletinItem {
   id: string;
   channel_id: string;
   source_type: string;
-  content: string;
+  content_length: number;
   created_at: string;
 }
 

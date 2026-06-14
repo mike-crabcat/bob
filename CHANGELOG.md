@@ -2,6 +2,44 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-06-13
+
+### Added
+- Add persona configuration system with versioned DB records: SOUL, IDENTITY, AGENTS, and USER sections are stored as revision-tracked records editable through a new dashboard page, with framing headers hardcoded so users cannot accidentally modify them
+- Add raw-transcript bulletin format replacing LLM-summarized bulletins: each bulletin captures the actual session messages with name/contact_id/timestamp labels, plus N prior context messages marked "do not extract", eliminating information loss from the summary stage
+- Add synthetic flag on assistant messages whose dispatch used memory-read tools (recall, find, memory_read), keyed per-dispatch_id so concurrent dispatches cannot cross-pollute; extraction prompts skip these lines to prevent recalled facts being re-ingested as new ground truth
+- Add per-entity and per-entity-type model overrides for memory reconciliation: BOB_RECON_LARGE_MODEL_TYPES env var routes specific entity types to the large model, and the recon_model_overrides table plus `memory model-override-set/remove/list` CLI commands allow pinning specific entities
+- Add web_search citation rendering: OpenAI Responses API citation placeholders are now replaced with `[N]` markers in text plus a Sources list of bare URLs (WhatsApp renders bare URLs as clickable)
+- Add `bash` workspace tool replacing the previous ls/read/write/grep/glob/run_script toolset with a single flexible shell command tool (30k char output truncation, 900s timeout)
+
+### Changed
+- Migrate default runtime paths from `~/.config/cyborg`, `~/.openclaw` to `~/config`, `~/data`, `~/workspace` for a cleaner single-vendor layout
+- Move Memory into primary dashboard navigation and surface entity/bulletin counts on the home page
+- Add structured logging for incoming, outgoing, queued, and drained WhatsApp bridge messages with content previews
+- Drop persona-file references from skill developer prompts now that persona is DB-backed
+
+### Removed
+- Remove file-specific workspace tools (ls, read, write, grep, glob, run_script), replaced by the single bash tool
+
+## 2026-06-12
+
+### Changed
+- Rename Cyborg to Bob across the entire codebase: package names (cyborg-server→bob-server, cyborg-core→bob-core, cyborg-cli→bob-cli), import paths, environment variables, configuration references, and documentation
+
+## 2026-06-10
+
+### Added
+- Add local subagent execution mode: subagents can now run in-process via LLMDispatchService (default model gpt-5.5) instead of spawning external Claude CLI processes, with optional persona loading for full agent context
+- Add `cp` workspace tool for copying files; extend `mv` to accept source paths outside the workspace (e.g. incoming email attachments)
+- Add attraction and dayplan entity types with dedicated schemas and rendering templates
+- Add connection, stay, and trip entity templates for richer memory entity rendering
+
+### Changed
+- Update bulletin generation prompt to ignore assistant recall/reiteration, preventing memory echo from assistant messages that simply repeat existing memory
+- Expand email tools and delivery service
+- Revise routine scheduler and tools
+- Include full harness workspace directory in backup script
+
 ## 2026-06-09
 
 ### Added

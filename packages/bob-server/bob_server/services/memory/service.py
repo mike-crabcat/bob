@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bob_server.services.base import BaseService, utcnow
+from bob_server.services.base import BaseService, iso_utc, utcnow
 from bob_server.services.memory.claim_types import (
     ENTITY_REF_CLAIM_KEYS,
     ENTITY_TYPE_REGISTRY,
@@ -76,7 +76,9 @@ class MemoryService(BaseService):
         now = utcnow()
         date_str = now.strftime("%Y-%m-%d")
         bulletin_id = f"bulletin-{date_str}-{uuid.uuid4().hex[:6]}"
-        ts = occurred_at or now.isoformat()
+        ts = iso_utc(occurred_at or now)
+        range_start = iso_utc(session_range_start) if session_range_start else ""
+        range_end = iso_utc(session_range_end) if session_range_end else ""
 
         await self.db.execute(
             "INSERT INTO memory_bulletins "
@@ -91,8 +93,8 @@ class MemoryService(BaseService):
                 source_id,
                 visibility,
                 content,
-                session_range_start,
-                session_range_end,
+                range_start,
+                range_end,
                 format,
             ),
         )
@@ -142,9 +144,27 @@ class MemoryService(BaseService):
             if not entity_ids:
                 return
             try:
-                from bob_server.services.memory.reconciliation import reconcile_entity, deprecate_file_entities_without_path
+                from bob_server.services.memory.reconciliation import (
+                    reconcile_entity,
+                    deprecate_file_entities_without_path,
+                    filter_due_for_reconciliation,
+                )
                 from bob_server.services.llm_dispatch import LLMDispatchService
                 llm = LLMDispatchService(self.ctx)
+
+                # Backoff: skip entities reconciled within the min-interval window.
+                min_interval = getattr(
+                    getattr(self.ctx.settings, "reconciliation", None),
+                    "min_interval_hours", 0.0,
+                )
+                due = await filter_due_for_reconciliation(self.db, entity_ids, min_interval)
+                due_set = set(due)
+                skipped = [eid for eid in entity_ids if eid not in due_set]
+                if skipped:
+                    logger.info(
+                        "Reconciliation backoff: skipping %d entities (min_interval_hours=%.1f): %s",
+                        len(skipped), min_interval, skipped,
+                    )
 
                 # Phase 0: deprecate file entities with no valid file_path
                 deprecated = await deprecate_file_entities_without_path(self.db)
@@ -153,7 +173,7 @@ class MemoryService(BaseService):
 
                 # Phase 1: supplement — gap-fill from related bulletins
                 workspace = self.ctx.settings.harness.workspace_dir
-                for eid in entity_ids:
+                for eid in due:
                     result = await self.supplement_entity(workspace, entity_id=eid)
                     if result.get("claims_added"):
                         logger.info(
@@ -162,7 +182,7 @@ class MemoryService(BaseService):
                         )
 
                 # Phase 2: reconcile — consistency check on now-complete data
-                for eid in entity_ids:
+                for eid in due:
                     result = await reconcile_entity(
                         self.db, llm, eid,
                         settings=self.ctx.settings,

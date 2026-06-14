@@ -180,7 +180,7 @@ async def get_home(request: Request) -> dict[str, Any]:
     )
     if bulletins_table:
         b_rows = await db.fetch_all(
-            """SELECT id, channel_id, source_type, content, created_at
+            """SELECT id, channel_id, source_type, length(content) AS content_length, created_at
                FROM memory_bulletins
                ORDER BY created_at DESC
                LIMIT 5"""
@@ -190,7 +190,7 @@ async def get_home(request: Request) -> dict[str, Any]:
                 "id": row["id"],
                 "channel_id": row["channel_id"],
                 "source_type": row["source_type"],
-                "content": row["content"],
+                "content_length": row["content_length"],
                 "created_at": _utc(row["created_at"]),
             })
         b_total = await db.fetch_one("SELECT COUNT(*) AS c FROM memory_bulletins")
