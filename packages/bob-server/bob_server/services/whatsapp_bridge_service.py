@@ -1209,22 +1209,32 @@ class WhatsAppBridgeService(BaseService):
         mentioned_jids = payload.get("mentioned_jids", [])
         media = payload.get("media")
 
-        # Resolve image path from media metadata
+        # Resolve media path from media metadata. Image, video, and GIF all
+        # land in the same bridge media dir.
         image_path: str | None = None
         image_mime_type: str = "image/jpeg"
-        if media and media.get("media_type") == "image":
+        video_path: str | None = None
+        video_mime_type: str = "video/mp4"
+        is_gif = False
+        if media:
+            media_type = media.get("media_type")
             media_dir = settings.whatsapp_bridge.media_dir.expanduser().resolve()
             filename = media.get("filename", "")
-            if filename:
+            if filename and media_type in ("image", "video", "gif"):
                 resolved = (media_dir / filename).resolve()
                 if str(resolved).startswith(str(media_dir)) and resolved.is_file():
-                    image_path = str(resolved)
-                    image_mime_type = media.get("mime_type", "image/jpeg")
+                    if media_type == "image":
+                        image_path = str(resolved)
+                        image_mime_type = media.get("mime_type", "image/jpeg")
+                    else:
+                        video_path = str(resolved)
+                        video_mime_type = media.get("mime_type", "video/mp4")
+                        is_gif = media_type == "gif"
 
         # Ack receipt so the bridge clears it from the incoming queue
         await self._send_ack(wa_message_id)
 
-        if not text and not image_path:
+        if not text and not image_path and not video_path:
             return
 
         logger.info(
@@ -1460,8 +1470,18 @@ class WhatsAppBridgeService(BaseService):
                 "image_path": image_path,
                 "image_mime_type": image_mime_type,
             }
+        elif video_path:
+            message_metadata = {
+                "video_path": video_path,
+                "video_mime_type": video_mime_type,
+                "is_gif": is_gif,
+            }
+        if video_path:
+            fallback_text = "[GIF]" if is_gif else "[Video]"
+        else:
+            fallback_text = "[Image]"
         await SessionService(self.ctx).add_message(
-            session_key, "user", text or "[Image]",
+            session_key, "user", text or fallback_text,
             channel="whatsapp", sender_id=contact_id, dispatched=0,
             metadata=message_metadata,
         )

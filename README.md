@@ -267,13 +267,13 @@ make build
 make install   # copies binary to ~/.local/bin/whatsappbridge
 ```
 
-Configure the bridge. Create `~/.local/share/cyborg/whatsappbridge/.env` or set environment variables:
+Configure the bridge. Create `~/data/whatsappbridge/.env` (the bridge loads `.env` files at startup — same precedence as the Python service: existing env > `$BOB_ENV_FILE` > `./.env` > `$BOB_CONFIG_DIR/.env` > `$WHATSAPPBRIDGE_DATA_DIR/.env`):
 
 ```bash
-export WHATSAPPBRIDGE_HOST=127.0.0.1
-export WHATSAPPBRIDGE_PORT=8430
-export WHATSAPPBRIDGE_TOKEN=your-bridge-token    # must match BOB_WHATSAPP_BRIDGE_TOKEN
-export WHATSAPPBRIDGE_DATA_DIR=$HOME/.local/share/cyborg/whatsappbridge
+WHATSAPPBRIDGE_HOST=127.0.0.1
+WHATSAPPBRIDGE_PORT=8430
+WHATSAPPBRIDGE_TOKEN=your-bridge-token    # must match BOB_WHATSAPP_BRIDGE_TOKEN
+WHATSAPPBRIDGE_DATA_DIR=$HOME/data/whatsappbridge
 ```
 
 Start the bridge:
@@ -448,7 +448,7 @@ WhatsApp bridge (Go companion) variables:
 | `WHATSAPPBRIDGE_HOST` | `127.0.0.1` | Bridge listen host |
 | `WHATSAPPBRIDGE_PORT` | `8430` | Bridge listen port |
 | `WHATSAPPBRIDGE_TOKEN` | *(none)* | Auth token (must match Bob side) |
-| `WHATSAPPBRIDGE_DATA_DIR` | `~/.local/share/cyborg/whatsappbridge` | Data directory |
+| `WHATSAPPBRIDGE_DATA_DIR` | `~/data/whatsappbridge` | Data directory |
 | `WHATSAPPBRIDGE_LOG_LEVEL` | `info` | Log level |
 
 ### Voice
@@ -540,5 +540,5 @@ uv run pytest
 - Database: `~/.local/share/cyborg/cyborg.db`
 - Config: `~/.config/cyborg/`
 - Phone recordings: `~/.local/share/cyborg/calls/`
-- WhatsApp bridge data: `~/.local/share/cyborg/whatsappbridge/`
+- WhatsApp bridge data: `~/data/whatsappbridge/`
 - Service: systemd user service (`bob.service`)

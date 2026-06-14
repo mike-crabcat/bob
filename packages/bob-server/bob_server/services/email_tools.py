@@ -15,6 +15,40 @@ logger = logging.getLogger(__name__)
 
 MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25 MB
 
+# Attachments we never persist to disk — executables and code files. Bob can
+# bash to anything in his workspace, so downloaded code could be run; block at
+# the source rather than rely on Bob's judgment.
+_BLOCKED_ATTACHMENT_EXTENSIONS = {
+    # Windows executables / installers / scripts
+    ".exe", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1", ".vbs", ".wsf",
+    ".cpl", ".hta",
+    # Unix shells / scripts
+    ".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh", ".run", ".bin", ".command",
+    ".tool", ".app",
+    # Code files (Bob could execute or import these)
+    ".py", ".pyw", ".pyc", ".pyo",
+    ".js", ".mjs", ".cjs",
+    ".ts", ".tsx", ".jsx",
+    ".go", ".rs", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx",
+    ".java", ".class", ".jar",
+    ".rb", ".php", ".pl", ".pm", ".lua",
+    ".swift", ".kt", ".kts", ".scala", ".clj", ".cljs",
+    ".r", ".jl",
+    # Native libraries / bytecode / wasm
+    ".dll", ".so", ".dylib", ".wasm",
+    # Misc
+    ".jar", ".war", ".ear",
+}
+
+
+def is_blocked_attachment(filename: str) -> bool:
+    """True if the filename's extension is on the executable/code blocklist."""
+    name = filename.lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    dot = name.rfind(".")
+    if dot < 0:
+        return False
+    return name[dot:] in _BLOCKED_ATTACHMENT_EXTENSIONS
+
 
 def _read_file_as_attachment(
     file_path: str,
@@ -51,7 +85,6 @@ def make_email_tools(
     reply_tracker: list | None = None,
     reply_body_tracker: list | None = None,
     inbox_agentmail_id: str = "",
-    is_trusted: bool = False,
 ):
     """Create email reply/skip tools bound to the given thread.
 
@@ -139,13 +172,15 @@ def make_email_tools(
                 continue
 
             for att in attachments:
+                fname = att.get("filename", "")
                 all_attachments.append({
                     "attachment_id": att.get("attachment_id", ""),
-                    "filename": att.get("filename", ""),
+                    "filename": fname,
                     "content_type": att.get("content_type", ""),
                     "size": att.get("size"),
                     "downloaded": att.get("downloaded", False),
                     "path": att.get("path"),
+                    "blocked": is_blocked_attachment(fname),
                     "from_message": {
                         "sender": msg.get("sender_name") or msg.get("sender_email"),
                         "subject": msg.get("subject"),
@@ -156,17 +191,15 @@ def make_email_tools(
         return json.dumps({
             "thread_id": thread_id,
             "total_attachments": len(all_attachments),
-            "can_download": is_trusted,
             "attachments": all_attachments,
         })
 
     @tool
     async def download_attachment(attachment_id: str) -> str:
         """Download an email attachment to the workspace directory.
-        Use list_attachments first to find the attachment_id. Only available for trusted senders."""
-        if not is_trusted:
-            return "Error: Attachment downloads are not available for untrusted senders."
-
+        Use list_attachments first to find the attachment_id. Blocked for
+        executables and code files (they are filtered at the source); all other
+        types are available to any sender — Bob decides what to open."""
         if not attachment_id:
             return "Error: attachment_id is required."
 
@@ -199,6 +232,10 @@ def make_email_tools(
         if not target_msg_id or not target_att:
             return f"Error: Attachment {attachment_id} not found in this thread."
 
+        filename = target_att.get("filename", attachment_id)
+        if is_blocked_attachment(filename):
+            return f"Error: '{filename}' is an executable or code file and is blocked. Bob decides what to open, but code/executable payloads are never persisted to disk."
+
         # Already downloaded?
         if target_att.get("downloaded") and target_att.get("path"):
             existing_path = Path(target_att["path"])
@@ -206,7 +243,7 @@ def make_email_tools(
                 return json.dumps({
                     "ok": True,
                     "path": target_att["path"],
-                    "filename": target_att["filename"],
+                    "filename": filename,
                     "message": "Already downloaded",
                 })
 
@@ -232,9 +269,8 @@ def make_email_tools(
             await client.close()
 
         # Save to workspace
-        filename = target_att.get("filename", attachment_id)
         workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
-        dest_dir = workspace_dir / "attachments" / thread_id
+        dest_dir = workspace_dir / "email-attachments" / thread_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
 

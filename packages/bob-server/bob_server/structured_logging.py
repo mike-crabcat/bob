@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from functools import wraps
@@ -251,8 +254,109 @@ def configure_logging(settings: Settings | None = None) -> None:
         file_handler.setFormatter(StructuredFormatter())
         root_logger.addHandler(file_handler)
 
+    if settings.log_dir:
+        try:
+            rolling_handler = DailyRollingFileHandler(settings.log_dir, "bob-server")
+            rolling_handler.setFormatter(StructuredFormatter())
+            root_logger.addHandler(rolling_handler)
+        except Exception:
+            # Don't let a bad log dir prevent startup; console still works.
+            pass
+
     # Quieten noisy third-party loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# ============================================================================
+# Daily Rolling File Handler
+# ============================================================================
+
+
+_DATE_SOURCE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(.+)\.log$")
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _archive_previous_days(log_dir: Path, source: str, today: str) -> None:
+    """Move any {date}_{source}.log files in log_dir (where date != today) into log_dir/older/."""
+
+    older_dir = log_dir / "older"
+    older_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{source}.log"
+    for entry in log_dir.iterdir():
+        if not entry.is_file():
+            continue
+        match = _DATE_SOURCE_RE.match(entry.name)
+        if not match or match.group(2) != source:
+            continue
+        date_str = match.group(1)
+        if date_str == today:
+            continue
+        target = older_dir / entry.name
+        try:
+            os.replace(entry, target)
+        except OSError:
+            pass
+
+
+class DailyRollingFileHandler(logging.Handler):
+    """Append to `log_dir/{YYYY-MM-DD}_{source}.log`, rotating at local midnight.
+
+    On rollover the previous day's file is moved into `log_dir/older/`. Any stale
+    files from earlier days are also archived on startup so a service that was
+    down across a date boundary doesn't leave old files in the root.
+    """
+
+    def __init__(self, log_dir: Path, source: str) -> None:
+        super().__init__()
+        self.log_dir = Path(log_dir)
+        self.source = source
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._current_date = _today_str()
+        _archive_previous_days(self.log_dir, self.source, self._current_date)
+        self._current_path = self.log_dir / f"{self._current_date}_{self.source}.log"
+        self._fh = open(self._current_path, "a", encoding="utf-8")
+
+    def _maybe_rotate(self) -> None:
+        today = _today_str()
+        if today == self._current_date:
+            return
+        try:
+            self._fh.flush()
+            self._fh.close()
+        except OSError:
+            pass
+        older_dir = self.log_dir / "older"
+        older_dir.mkdir(parents=True, exist_ok=True)
+        target = older_dir / self._current_path.name
+        try:
+            os.replace(self._current_path, target)
+        except OSError:
+            pass
+        self._current_date = today
+        self._current_path = self.log_dir / f"{today}_{self.source}.log"
+        self._fh = open(self._current_path, "a", encoding="utf-8")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            with self._lock:
+                self._maybe_rotate()
+                self._fh.write(msg + "\n")
+                self._fh.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        try:
+            with self._lock:
+                self._fh.close()
+        except Exception:
+            pass
+        super().close()
 
 
 # ============================================================================

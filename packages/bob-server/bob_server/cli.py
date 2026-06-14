@@ -6,8 +6,10 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import shutil
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -27,6 +29,7 @@ from bob_server.main import create_app
 
 
 SERVICE_NAME = "bob.service"
+WHATSAPP_SERVICE_NAME = "whatsappbridge.service"
 app = typer.Typer(help="Bob - Bob's memory and communication service.")
 
 contact_app = typer.Typer(help="Contact operations")
@@ -110,6 +113,78 @@ Environment=BOB_CONFIG_DIR={settings.config_dir}
 [Install]
 WantedBy=default.target
 """
+
+
+def _whatsapp_service_file_path() -> Path:
+    return Path.home() / ".config/systemd/user" / WHATSAPP_SERVICE_NAME
+
+
+def _whatsapp_service_file_contents(binary_path: Path, config_dir: Path) -> str:
+    return f"""[Unit]
+Description=Bob WhatsApp Bridge
+After=default.target
+Wants={SERVICE_NAME}
+
+[Service]
+Type=simple
+ExecStart={binary_path}
+Restart=on-failure
+Environment=BOB_CONFIG_DIR={config_dir}
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _bridge_source_dir() -> Path:
+    """Locate the repo's services/whatsappbridge directory.
+
+    Checks CWD first (so `bob whatsapp service install` works from the repo root),
+    then walks up from this file's location (so it works from an installed `bob`
+    CLI as long as the source tree is still present on disk).
+    """
+
+    candidates: list[Path] = [Path.cwd()]
+    here = Path(__file__).resolve()
+    candidates.extend(here.parents)
+    for base in candidates:
+        candidate = base / "services" / "whatsappbridge"
+        if (candidate / "Makefile").is_file():
+            return candidate
+    raise typer.BadParameter(
+        "Could not locate services/whatsappbridge/. Run `bob whatsapp service install` "
+        "from the repo root, or ensure the source tree is present."
+    )
+
+
+_TOKEN_LINE_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?BOB_WHATSAPP_BRIDGE_TOKEN\s*=\s*(?P<value>.*?)\s*$"
+)
+
+
+def _bridge_token_in_env_file(config_dir: Path) -> str | None:
+    """Read BOB_WHATSAPP_BRIDGE_TOKEN from <config_dir>/.env directly.
+
+    Reads the file the bridge will actually read under systemd, bypassing
+    os.environ (which may have been polluted by import-time .env loading from
+    a different config dir). Returns the unquoted value or None if absent.
+    """
+
+    env_path = config_dir / ".env"
+    if not env_path.is_file():
+        return None
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        match = _TOKEN_LINE_PATTERN.match(line)
+        if not match:
+            continue
+        value = match.group("value")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        return value
+    return None
 
 
 def _health_status(settings: Settings) -> str:
@@ -1774,7 +1849,147 @@ def whatsapp_bridge_status() -> None:
     _echo_json(result)
 
 
+# ── WhatsApp bridge service lifecycle ─────────────────────────────
+
+whatsapp_service_app = typer.Typer(help="WhatsApp bridge systemd service lifecycle")
+
+
+def _bridge_reachable(settings: Settings) -> str:
+    """TCP-probe the bridge listen address from settings.whatsapp_bridge.url.
+
+    Returns 'reachable' or 'unreachable (<reason>)'. Uses a raw TCP connect so
+    the result reflects only the bridge process, not bob-server's WebSocket
+    client or HTTP proxy.
+    """
+
+    url = settings.whatsapp_bridge.url
+    # url looks like ws://127.0.0.1:8430/ws
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    host_port = url.split("/", 1)[0]
+    if ":" not in host_port:
+        return "unreachable (no port in bridge url)"
+    host, port_str = host_port.rsplit(":", 1)
+    try:
+        port = int(port_str)
+    except ValueError:
+        return f"unreachable (bad port: {port_str})"
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return "reachable"
+    except OSError as exc:
+        return f"unreachable ({exc})"
+
+
+@whatsapp_service_app.command("install")
+def whatsapp_service_install(
+    config_dir: Annotated[Path, typer.Option(help="Config directory where .env lives")] = Path("~/config"),
+) -> None:
+    """Build the bridge, write the systemd unit, enable and start it."""
+
+    resolved_config_dir = config_dir.expanduser()
+    if not _bridge_token_in_env_file(resolved_config_dir):
+        typer.echo(
+            f"Error: BOB_WHATSAPP_BRIDGE_TOKEN is not set in {resolved_config_dir / '.env'}. "
+            "Add it and re-run `bob whatsapp service install`.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    source_dir = _bridge_source_dir()
+    binary_path = (source_dir / "bin" / "whatsappbridge").resolve()
+
+    _run_command(["make", "-C", str(source_dir), "build"])
+    if not binary_path.exists():
+        typer.echo(f"Error: build did not produce binary at {binary_path}", err=True)
+        raise typer.Exit(code=1)
+
+    service_path = _whatsapp_service_file_path()
+    service_path.parent.mkdir(parents=True, exist_ok=True)
+    service_path.write_text(
+        _whatsapp_service_file_contents(binary_path, resolved_config_dir),
+        encoding="utf-8",
+    )
+    _systemctl("daemon-reload")
+    _systemctl("enable", "--now", WHATSAPP_SERVICE_NAME)
+
+    settings = Settings.from_env()
+    typer.echo(f"Installed {WHATSAPP_SERVICE_NAME}")
+    typer.echo(f"  Unit:   {service_path}")
+    typer.echo(f"  Binary: {binary_path}")
+    typer.echo(f"  Bridge: {settings.whatsapp_bridge.url}")
+
+
+@whatsapp_service_app.command("uninstall")
+def whatsapp_service_uninstall() -> None:
+    """Disable and remove the systemd unit. Keeps the binary and data."""
+
+    service_path = _whatsapp_service_file_path()
+    if service_path.exists():
+        try:
+            _systemctl("disable", "--now", WHATSAPP_SERVICE_NAME)
+        except typer.Exit:
+            pass
+        service_path.unlink()
+        _systemctl("daemon-reload")
+        _systemctl("reset-failed", WHATSAPP_SERVICE_NAME)
+        typer.echo(f"Removed {service_path}")
+    else:
+        typer.echo("Service file is not installed")
+
+
+@whatsapp_service_app.command("start")
+def whatsapp_service_start() -> None:
+    """Start the bridge systemd user service."""
+
+    _systemctl("start", WHATSAPP_SERVICE_NAME)
+    typer.echo("Bridge service started")
+
+
+@whatsapp_service_app.command("stop")
+def whatsapp_service_stop() -> None:
+    """Stop the bridge systemd user service."""
+
+    _systemctl("stop", WHATSAPP_SERVICE_NAME)
+    typer.echo("Bridge service stopped")
+
+
+@whatsapp_service_app.command("restart")
+def whatsapp_service_restart() -> None:
+    """Restart the bridge systemd user service."""
+
+    _systemctl("restart", WHATSAPP_SERVICE_NAME)
+    typer.echo("Bridge service restarted")
+
+
+@whatsapp_service_app.command("status")
+def whatsapp_service_status() -> None:
+    """Show systemd state and bridge reachability."""
+
+    settings = Settings.from_env()
+    result = _systemctl("status", "--no-pager", WHATSAPP_SERVICE_NAME)
+    typer.echo(result.stdout)
+    typer.echo(f"Bridge: {_bridge_reachable(settings)}")
+
+
+@whatsapp_service_app.command("logs")
+def whatsapp_service_logs(
+    follow: Annotated[bool, typer.Option("--follow", "-f", help="Follow logs")] = False,
+    lines: Annotated[int, typer.Option("--lines", "-n", help="Number of lines to show")] = 200,
+) -> None:
+    """Print journalctl logs for the bridge service."""
+
+    command = ["journalctl", "--user", "-u", WHATSAPP_SERVICE_NAME, "--no-pager", "-n", str(lines)]
+    if follow:
+        command.append("-f")
+        subprocess.run(command, check=False)
+        return
+    result = _run_command(command)
+    typer.echo(result.stdout)
+
+
 app.add_typer(whatsapp_app, name="whatsapp")
+whatsapp_app.add_typer(whatsapp_service_app, name="service")
 
 
 # ── Memory commands ─────────────────────────────────────────────

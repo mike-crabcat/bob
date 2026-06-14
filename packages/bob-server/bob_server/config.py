@@ -241,6 +241,7 @@ class Settings:
     config_dir: Path = Path("~/config")
     db_path: Path | None = None
     log_path: Path | None = None
+    log_dir: Path | None = None
     log_level: str = "info"
     debug: bool = False
     version: str = "0.2.0"  # Application version
@@ -274,6 +275,8 @@ class Settings:
             self.db_path = self.db_path.expanduser()
         if self.log_path is not None:
             self.log_path = self.log_path.expanduser()
+        if self.log_dir is not None:
+            self.log_dir = self.log_dir.expanduser()
 
     @property
     def resolved_public_url(self) -> str:
@@ -302,6 +305,7 @@ class Settings:
         # Logging settings
         log_path_value = os.getenv("BOB_LOG_PATH")
         log_path = Path(log_path_value).expanduser() if log_path_value else None
+        log_dir = _env_path("BOB_LOG_DIR", Path("~/logs"))
         debug = os.getenv("BOB_DEBUG", "").lower() in ("true", "1", "yes", "on")
 
         # Parse webhook configuration from environment
@@ -428,6 +432,7 @@ class Settings:
             config_dir=config_dir,
             db_path=db_path,
             log_path=log_path,
+            log_dir=log_dir,
             log_level=log_level,
             debug=debug,
             pool_size=pool_size,

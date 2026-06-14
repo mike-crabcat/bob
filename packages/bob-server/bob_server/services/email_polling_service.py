@@ -387,14 +387,7 @@ class EmailPollingService(BaseService):
         thread, is_new_thread = await self._resolve_or_create_thread(inbox, message, thread_id, now)
 
         # Build raw attachment metadata for all messages (needed by list_attachments tool)
-        saved_attachments = []
-        is_trusted = False
-        if thread.get("contact_id"):
-            trust_row = await self.db.fetch_one(
-                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL LIMIT 1",
-                (thread["contact_id"],),
-            )
-            is_trusted = bool(trust_row.get("is_trusted", 0)) if trust_row else False
+        saved_attachments: list[dict[str, str]] = []
         raw_attachments = message.get("attachments") or []
         if raw_attachments:
             raw_meta = []
@@ -408,23 +401,23 @@ class EmailPollingService(BaseService):
                 "UPDATE email_messages SET attachments_json = ? WHERE id = ?",
                 (json_dumps(raw_meta), message_id),
             )
-            # Auto-download for trusted senders, then merge paths into metadata
-            if is_trusted:
-                saved_attachments = await self._download_attachments(
-                    inbox, agentmail_message_id, thread_id, raw_attachments,
+            # Auto-download all attachments into the workspace; exec/code files
+            # are filtered inside _download_attachments.
+            saved_attachments = await self._download_attachments(
+                inbox, agentmail_message_id, thread_id, raw_attachments,
+            )
+            if saved_attachments:
+                saved_by_filename = {s["filename"]: s for s in saved_attachments}
+                for entry in raw_meta:
+                    if entry["filename"] in saved_by_filename:
+                        saved = saved_by_filename[entry["filename"]]
+                        entry["downloaded"] = True
+                        entry["path"] = saved["path"]
+                        entry["size"] = saved["size"]
+                await self.db.execute(
+                    "UPDATE email_messages SET attachments_json = ? WHERE id = ?",
+                    (json_dumps(raw_meta), message_id),
                 )
-                if saved_attachments:
-                    saved_by_filename = {s["filename"]: s for s in saved_attachments}
-                    for entry in raw_meta:
-                        if entry["filename"] in saved_by_filename:
-                            saved = saved_by_filename[entry["filename"]]
-                            entry["downloaded"] = True
-                            entry["path"] = saved["path"]
-                            entry["size"] = saved["size"]
-                    await self.db.execute(
-                        "UPDATE email_messages SET attachments_json = ? WHERE id = ?",
-                        (json_dumps(raw_meta), message_id),
-                    )
 
         # Mark message read in AgentMail (skip for backfill — already read)
         if not backfill:
@@ -517,10 +510,18 @@ class EmailPollingService(BaseService):
         thread_id: str,
         attachments: list[dict[str, Any]],
     ) -> list[dict[str, str]]:
-        """Download attachments from a trusted sender to the incoming directory."""
+        """Download attachments into the workspace so Bob's bash can reach them.
+
+        Executables and code files are filtered out — Bob decides what to open,
+        but code/exec payloads are never persisted. Everything else lands in
+        `<workspace>/email-attachments/<thread_id>/`.
+        """
+        from bob_server.services.email_tools import is_blocked_attachment
+
         settings = self._get_settings()
-        incoming_dir = settings.data_dir / "incoming" / thread_id
-        incoming_dir.mkdir(parents=True, exist_ok=True)
+        workspace_dir = settings.harness.workspace_dir.expanduser()
+        attach_dir = workspace_dir / "email-attachments" / thread_id
+        attach_dir.mkdir(parents=True, exist_ok=True)
 
         saved: list[dict[str, str]] = []
         for att in attachments:
@@ -529,21 +530,32 @@ class EmailPollingService(BaseService):
             content_type = att.get("content_type", "application/octet-stream")
             if not att_id:
                 continue
+            if is_blocked_attachment(filename):
+                logger.info(
+                    "Skipping blocked attachment %s from message %s (exec/code file)",
+                    filename, agentmail_message_id,
+                )
+                continue
             try:
                 content = await self.client.get_attachment(
                     inbox["agentmail_inbox_id"],
                     agentmail_message_id,
                     att_id,
                 )
-                dest = incoming_dir / filename
+                dest = attach_dir / filename
+                counter = 1
+                base_dest = dest
+                while dest.exists():
+                    dest = attach_dir / f"{base_dest.stem}_{counter}{base_dest.suffix}"
+                    counter += 1
                 dest.write_bytes(content)
                 saved.append({
-                    "filename": filename,
+                    "filename": dest.name,
                     "content_type": content_type,
                     "size": len(content),
                     "path": str(dest),
                 })
-                logger.debug("Saved attachment %s (%d bytes) to %s", filename, len(content), dest)
+                logger.debug("Saved attachment %s (%d bytes) to %s", dest.name, len(content), dest)
             except Exception:
                 logger.warning(
                     "Failed to download attachment %s from message %s",
@@ -646,22 +658,38 @@ class EmailPollingService(BaseService):
         ]
 
         if saved_attachments:
-            prompt_parts += [
+            blocked = [a.get("filename", "") for a in raw_attachments
+                       if a.get("filename") not in {s["filename"] for s in saved_attachments}]
+            lines = [
                 "",
-                f"### Attachments ({len(raw_attachments)} file(s), auto-downloaded)",
-                "Use the list_attachments tool to see all attachments across this thread.",
-                "Use download_attachment to re-download or retrieve others by attachment_id.",
+                f"### Attachments ({len(raw_attachments)} file(s) in this message)",
+                "Auto-downloaded into your workspace at:",
+                "",
             ]
+            for s in saved_attachments:
+                lines.append(f"- {s['path']}  ({s.get('content_type', '?')}, {s.get('size', 0)} bytes)")
+            if blocked:
+                lines += [
+                    "",
+                    "Blocked (executables / code files — never persisted):",
+                ]
+                for fname in blocked:
+                    lines.append(f"- {fname}")
+            lines += [
+                "",
+                "You can read these files directly with your file/bash tools. "
+                "Use list_attachments to see all attachments across this thread, "
+                "and download_attachment to re-fetch by attachment_id if needed.",
+            ]
+            prompt_parts += lines
         elif raw_attachments:
+            # All filtered out as exec/code
             prompt_parts += [
                 "",
-                f"### Attachments ({len(raw_attachments)} file(s) attached)",
-                "Use the list_attachments tool to see all attachments across this thread.",
+                f"### Attachments ({len(raw_attachments)} file(s))",
+                "All attachments in this message were blocked (executables / code files).",
+                "Use list_attachments to see metadata across the thread.",
             ]
-            if is_trusted:
-                prompt_parts.append("Use download_attachment to save a specific attachment to the workspace.")
-            else:
-                prompt_parts.append("Attachments from untrusted senders cannot be downloaded.")
 
         prompt_parts += [
             "",
@@ -725,7 +753,6 @@ class EmailPollingService(BaseService):
             reply_tracker=reply_sent,
             reply_body_tracker=reply_bodies,
             inbox_agentmail_id=inbox["agentmail_inbox_id"],
-            is_trusted=is_trusted,
         )
         tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
 

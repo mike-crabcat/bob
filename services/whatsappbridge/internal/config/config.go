@@ -16,6 +16,7 @@ type Config struct {
 	DevDir  string // BOB_CONFIG_DIR for reading shared .env
 
 	LogLevel string
+	LogDir   string
 
 	IncomingQueueTTL   time.Duration
 	OutgoingMaxRetries int
@@ -28,11 +29,12 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Host:    envOrDefault("WHATSAPPBRIDGE_HOST", "127.0.0.1"),
 		Port:    envInt("WHATSAPPBRIDGE_PORT", 8430),
-		Token:   os.Getenv("WHATSAPPBRIDGE_TOKEN"),
+		Token:   os.Getenv("BOB_WHATSAPP_BRIDGE_TOKEN"),
 		DataDir: envOrDefault("WHATSAPPBRIDGE_DATA_DIR", filepath.Join(os.Getenv("HOME"), "data", "whatsappbridge")),
 		DevDir:  envOrDefault("BOB_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), "config")),
 
 		LogLevel: envOrDefault("WHATSAPPBRIDGE_LOG_LEVEL", "info"),
+		LogDir:   envOrDefault("WHATSAPPBRIDGE_LOG_DIR", filepath.Join(os.Getenv("HOME"), "logs")),
 
 		IncomingQueueTTL:   envDuration("WHATSAPPBRIDGE_INCOMING_QUEUE_TTL", 24*time.Hour),
 		OutgoingMaxRetries: envInt("WHATSAPPBRIDGE_OUTGOING_MAX_RETRIES", 5),
@@ -42,7 +44,7 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.Token == "" {
-		return nil, fmt.Errorf("WHATSAPPBRIDGE_TOKEN is required")
+		return nil, fmt.Errorf("BOB_WHATSAPP_BRIDGE_TOKEN is required")
 	}
 
 	return cfg, nil
@@ -61,7 +63,12 @@ func (c *Config) QueueDBPath() string {
 }
 
 func (c *Config) EnsureDirs() error {
-	return os.MkdirAll(c.DataDir, 0755)
+	for _, dir := range []string{c.DataDir, c.LogDir, filepath.Join(c.LogDir, "older")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func envOrDefault(key, fallback string) string {

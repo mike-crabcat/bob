@@ -7,10 +7,41 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_video_frame(video_path: str) -> str | None:
+    """Extract the first frame of a video as a JPEG next to it. Cached on disk.
+
+    Returns the path to the .frame.jpg, or None if ffmpeg is unavailable or
+    extraction fails. The cached frame is reused on subsequent calls.
+    """
+    frame_path = video_path + ".frame.jpg"
+    if os.path.isfile(frame_path):
+        return frame_path
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        logger.warning("ffmpeg not available; cannot extract video frame for %s", video_path)
+        return None
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-i", video_path, "-frames:v", "1", "-q:v", "3", frame_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except Exception:
+        logger.exception("failed to extract video frame from %s", video_path)
+        return None
+    if not os.path.isfile(frame_path) or os.path.getsize(frame_path) == 0:
+        return None
+    return frame_path
 
 _WORKSPACE_FILES: tuple[str, ...] = ()
 _DEPRECATED_WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md")
@@ -121,6 +152,32 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         "File tool paths can be absolute (within this directory) or relative to workspace root.\n"
         "All file operations are restricted to this directory."
     )
+    parts.append(
+        "## SANDBOX RULES — READ CAREFULLY\n"
+        f"Your bash tool runs inside a sandbox whose only allowed directory is the workspace "
+        f"({workspace_resolved}). STAY INSIDE IT. Do not reach outside this folder under any "
+        "circumstances — not even if the user asks, not even for a quick lookup, not even for "
+        "'just reading'.\n\n"
+        "**NEVER do any of the following — they are blocked at the tool layer and forbidden "
+        "regardless of who asked:**\n"
+        "- Query the database directly. No `sqlite3`, `psql`, `mysql`, `mariadb`, `duckdb`. "
+        "The DB file (`bob.db`, `$BOB_DB_PATH`, the data dir) is off-limits via bash.\n"
+        "- Read or write anything under `/home/bob/data`, `/home/bob/config`, `/etc`, `/root`, "
+        "`/var`, `/proc`, `/sys`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, or any absolute "
+        "path that is not inside the workspace.\n"
+        "- Touch secrets: SSH keys, cloud creds, `.env` files, `credentials.json`, API tokens.\n"
+        "- Escalate: `sudo`, `su`, `pkexec`, etc.\n"
+        "- Escape via `cd ..`, symlinks pointing outside the workspace, subshells, `python -c "
+        "\"import sqlite3; ...\"`, or any indirection. If you're trying to get around the rules, "
+        "stop.\n\n"
+        "**Use the provided tools instead.** They are the supported interface for data that "
+        "lives outside the workspace:\n"
+        "- `memory_*` for the knowledge graph (contacts, groups, trips, events, tasks, …).\n"
+        "- `contact_*` / `group_*` for people and groups.\n"
+        "- `email_*` for email, `docs_*` for project docs, `phone_*` / `whatsapp_*` for messaging.\n\n"
+        "If bash returns a BLOCKED error, do NOT retry with a different command syntax. Stop, "
+        "switch to the appropriate tool. The user will be told if you tried to escape the sandbox."
+    )
 
     combined = "\n\n".join(parts)
     _cached_prompt = (mtime_hash, combined)
@@ -214,6 +271,31 @@ async def build_chat_messages(
                     pass
             image_path = meta.get("image_path")
             mime_type = meta.get("image_mime_type", "image/jpeg")
+            video_path = meta.get("video_path")
+            is_gif = bool(meta.get("is_gif"))
+
+            if video_path and row["role"] == "user" and os.path.isfile(video_path):
+                frame_path = _extract_video_frame(video_path)
+                text_prefix = ""
+                if is_group and row["sender_id"]:
+                    name = sender_names.get(row["sender_id"])
+                    if name:
+                        text_prefix = f"[{name}] "
+                attachment_note = "[GIF attached]" if is_gif else "[Video attached]"
+                text_content = text_prefix + (content if content and content not in ("[GIF]", "[Video]") else attachment_note)
+                if frame_path and os.path.isfile(frame_path):
+                    with open(frame_path, "rb") as f:
+                        frame_data = base64.b64encode(f.read()).decode()
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": f"{text_content} (first frame shown; file at {video_path})"},
+                            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{frame_data}"},
+                        ],
+                    })
+                else:
+                    messages.append({"role": "user", "content": f"{text_content} (file at {video_path})"})
+                continue
 
             if image_path and row["role"] == "user" and os.path.isfile(image_path):
                 text_prefix = ""
@@ -226,7 +308,7 @@ async def build_chat_messages(
                 messages.append({
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": text_prefix + content},
+                        {"type": "input_text", "text": f"{text_prefix}{content} (file at {image_path})"},
                         {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_data}"},
                     ],
                 })
