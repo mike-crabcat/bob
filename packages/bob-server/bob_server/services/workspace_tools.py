@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from pathlib import Path
 
 from bob_server.context import AppContext
@@ -21,6 +22,88 @@ logger = logging.getLogger(__name__)
 
 _BASH_TIMEOUT_SECONDS = 900
 _BASH_MAX_OUTPUT_CHARS = 30_000
+
+# Sandbox guardrails. The bash tool is not chrooted — these checks catch the
+# obvious escape vectors (direct DB clients, system paths, traversal). The
+# system prompt carries the matching language. A determined agent can still
+# evade regex filtering; stronger confinement (bubblewrap/seccomp) is the next
+# layer if needed.
+
+_DB_CLIENT_RE = re.compile(
+    r"\b(sqlite3|psql|mysql|mariadb|duckdb|sqliteman|sqlitebrowser|dbeaver)\b",
+    re.IGNORECASE,
+)
+_PRIVILEGE_RE = re.compile(r"(^|[\s;&|()`])(sudo|su|pkexec|doas)\b", re.IGNORECASE)
+_DB_TOKEN_RE = re.compile(r"\b(bob\.db|bob_db_path)\b", re.IGNORECASE)
+_TRAVERSAL_RE = re.compile(r"(^|[\s/\"'`=(])\.\.(?=[\s/\"'`)]|$)")
+_SENSITIVE_PATH_RE = re.compile(
+    r"(^|[\s\"'`=(])("
+    r"/etc(?=[/\s\"'`)]|$)"
+    r"|/root(?=[/\s\"'`)]|$)"
+    r"|/var/lib(?=[/\s\"'`)]|$)"
+    r"|/proc(?=[/\s\"'`)]|$)"
+    r"|/sys(?=[/\s\"'`)]|$)"
+    r"|/boot(?=[/\s\"'`)]|$)"
+    r"|~/?\.ssh"
+    r"|~/?\.aws"
+    r"|~/?\.gnupg"
+    r"|~/?\.config"
+    r"|~/?\.env(?=[\s\"'`)]|$)"
+    r"|\.env(?=[\s\"'`)]|$)"
+    r"|credentials\.json"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _check_command_safety(command: str, *, db_path: Path | None,
+                          data_dir: Path, config_dir: Path) -> str | None:
+    """Return a reason string if the command violates sandbox rules, else None.
+
+    Layered checks: DB clients, DB file references, configured sensitive paths
+    (db_path / data_dir / config_dir), system/sensitive path patterns,
+    path traversal, and privilege escalation.
+    """
+    if _DB_CLIENT_RE.search(command):
+        return (
+            "BLOCKED: direct database client detected. Do not query databases via bash. "
+            "Use memory_*/contact_*/group_*/docs_* tools instead."
+        )
+
+    if _DB_TOKEN_RE.search(command):
+        return (
+            "BLOCKED: command references the bob database file or BOB_DB_PATH. "
+            "The DB is off-limits via bash — use memory_*/contact_*/group_* tools."
+        )
+
+    if _PRIVILEGE_RE.search(command):
+        return "BLOCKED: privilege escalation (sudo/su/pkexec/doas) is not allowed in the sandbox."
+
+    for sensitive in (db_path, data_dir, config_dir):
+        if sensitive is None:
+            continue
+        sp = str(sensitive)
+        if not sp:
+            continue
+        if re.search(re.escape(sp) + r"(?=[\s\"'`)]|$|/)", command):
+            return (
+                f"BLOCKED: command references a path outside the workspace ({sp}). "
+                "Stay inside the workspace directory; use the provided tools for data outside it."
+            )
+
+    if _SENSITIVE_PATH_RE.search(command):
+        return (
+            "BLOCKED: command references system paths, secrets, or config outside the workspace. "
+            "Stay inside the workspace directory."
+        )
+
+    if _TRAVERSAL_RE.search(command):
+        return (
+            "BLOCKED: path traversal (..) is not allowed. Stay inside the workspace; "
+            "use absolute workspace paths if you need to reach a subdirectory."
+        )
+
+    return None
 
 
 def _resolve_path(ctx: AppContext, path: str) -> Path:
@@ -60,8 +143,24 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         through large files. Times out after 900s.
 
         Do NOT write files under memory/ with this tool — use memory_write instead, or
-        the memory index (claims, entities) will not pick them up."""
+        the memory index (claims, entities) will not pick them up.
+
+        SANDBOX: The workspace is the only allowed directory. Reaching outside it
+        (DB clients, /etc, /home/bob/data, /home/bob/config, ~, .., sudo, secrets)
+        is blocked. Use memory_*/contact_*/group_*/docs_* tools for data outside
+        the workspace — do not try to bypass blocks via subshells, python, or
+        symlinks."""
         workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
+        settings = ctx.settings
+        violation = _check_command_safety(
+            command,
+            db_path=settings.db_path,
+            data_dir=settings.data_dir,
+            config_dir=settings.config_dir,
+        )
+        if violation:
+            logger.warning("bash blocked by sandbox: %r — %s", command, violation)
+            return f"Error: {violation}"
         logger.info("bash: %s", command)
         proc = await asyncio.create_subprocess_exec(
             "bash", "-c", command,

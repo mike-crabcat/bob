@@ -36,6 +36,7 @@ function fileIcon(name: string): string {
   if (name.endsWith(".js")) return "js";
   if (name.endsWith(".sql")) return "db";
   if (/\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(name)) return "img";
+  if (/\.(mp4|webm|mov|m4v)$/i.test(name)) return "vid";
   if (name.endsWith(".pdf")) return "pdf";
   if (name.endsWith(".txt")) return "txt";
   return "~";
@@ -43,6 +44,10 @@ function fileIcon(name: string): string {
 
 function isImageFile(name: string): boolean {
   return /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(name);
+}
+
+function isVideoFile(name: string): boolean {
+  return /\.(mp4|webm|mov|m4v)$/i.test(name);
 }
 
 function isPdfFile(name: string): boolean {
@@ -64,7 +69,7 @@ function WorkspacePage() {
   const { data: fileData, isLoading: fileLoading } = useQuery<FileResult>({
     queryKey: ["workspace-file", selectedFile],
     queryFn: () => fetchAPI<FileResult>(`/workspace/file?path=${encodeURIComponent(selectedFile!)}`),
-    enabled: selectedFile !== null && !isImageFile(selectedFile) && !isPdfFile(selectedFile),
+    enabled: selectedFile !== null && !isImageFile(selectedFile) && !isVideoFile(selectedFile) && !isPdfFile(selectedFile),
   });
 
   const saveMutation = useMutation({
@@ -113,6 +118,7 @@ function WorkspacePage() {
   const sorted = [...dirs, ...files];
 
   const selectedIsImage = selectedFile ? isImageFile(selectedFile) : false;
+  const selectedIsVideo = selectedFile ? isVideoFile(selectedFile) : false;
   const selectedIsPdf = selectedFile ? isPdfFile(selectedFile) : false;
 
   return (
@@ -185,6 +191,20 @@ function WorkspacePage() {
                 src={`/dashboard/api/workspace/file?path=${encodeURIComponent(selectedFile)}`}
                 alt={selectedFile}
                 className="max-w-full object-contain"
+              />
+            </div>
+          ) : selectedIsVideo ? (
+            <div className="flex-1 overflow-auto p-3 flex flex-col gap-2">
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-xs text-muted">{selectedFile.split("/").pop()}</span>
+                <button onClick={copyPath} className="text-[10px] text-accent hover:underline">copy path</button>
+              </div>
+              <video
+                src={`/dashboard/api/workspace/file?path=${encodeURIComponent(selectedFile)}`}
+                controls
+                autoPlay
+                loop
+                className="max-w-full max-h-[calc(100vh-200px)] object-contain"
               />
             </div>
           ) : selectedIsPdf ? (

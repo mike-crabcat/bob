@@ -33,6 +33,13 @@ type Client struct {
 }
 
 func NewClient(sessionDBPath string, mediaDir string, log *slog.Logger) (*Client, error) {
+	// Resolve the actual media directory: explicit env var wins, otherwise use
+	// <dataDir>/media for backward compatibility.
+	resolvedMediaDir := os.Getenv("WHATSAPPBRIDGE_MEDIA_DIR")
+	if resolvedMediaDir == "" {
+		resolvedMediaDir = filepath.Join(mediaDir, "media")
+	}
+
 	container, err := sqlstore.New(
 		context.Background(),
 		"sqlite3",
@@ -56,7 +63,7 @@ func NewClient(sessionDBPath string, mediaDir string, log *slog.Logger) (*Client
 		log:       log,
 		client:    client,
 		container: container,
-		mediaDir:  mediaDir,
+		mediaDir:  resolvedMediaDir,
 	}
 
 	client.AddEventHandler(c.handleEvent)
@@ -176,11 +183,16 @@ func (c *Client) SendDocument(jid types.JID, data []byte, mimeType, fileName, ca
 func (c *Client) SendGIF(jid types.JID, gifData []byte, caption string) (string, error) {
 	mp4Data, err := gifToMP4(gifData)
 	if err != nil {
-		// Fall back to sending as document if conversion fails
 		c.log.Warn("gif to mp4 conversion failed, sending as document", "error", err)
 		return c.SendDocument(jid, gifData, "image/gif", "animation.gif", caption)
 	}
+	return c.SendVideoAsGif(jid, mp4Data, caption)
+}
 
+// SendVideoAsGif uploads MP4 data as a VideoMessage with GifPlayback=true so
+// WhatsApp renders it inline as an animated GIF. Used for MP4 files that are
+// already in the right format (e.g. GIFs received from WhatsApp and re-sent).
+func (c *Client) SendVideoAsGif(jid types.JID, mp4Data []byte, caption string) (string, error) {
 	uploaded, err := c.client.Upload(context.Background(), mp4Data, whatsmeow.MediaVideo)
 	if err != nil {
 		return "", fmt.Errorf("upload gif video: %w", err)
@@ -346,7 +358,8 @@ func (c *Client) handleMessage(evt *events.Message) {
 	text, contacts := extractTextAndContacts(evt.Message)
 
 	img := evt.Message.GetImageMessage()
-	if text == "" && img == nil {
+	vid := evt.Message.GetVideoMessage()
+	if text == "" && img == nil && vid == nil {
 		return
 	}
 
@@ -381,10 +394,9 @@ func (c *Client) handleMessage(evt *events.Message) {
 		if err != nil {
 			c.log.Warn("failed to download image", "error", err, "msg_id", info.ID)
 		} else {
-			mediaDir := filepath.Join(c.mediaDir, "media")
-			os.MkdirAll(mediaDir, 0755)
+			os.MkdirAll(c.mediaDir, 0755)
 			filename := info.ID + ".jpg"
-			fullPath := filepath.Join(mediaDir, filename)
+			fullPath := filepath.Join(c.mediaDir, filename)
 			if err := os.WriteFile(fullPath, data, 0644); err != nil {
 				c.log.Warn("failed to save image", "error", err)
 			} else {
@@ -400,6 +412,39 @@ func (c *Client) handleMessage(evt *events.Message) {
 					FilePath:  fullPath,
 				}
 				c.log.Info("saved incoming image", "msg_id", info.ID, "size", len(data), "path", fullPath)
+			}
+		}
+	}
+
+	// Download and save video or GIF if present. WhatsApp encodes animated GIFs
+	// as VideoMessage with GifPlayback=true; bytes are always MP4-encoded.
+	if vid != nil {
+		data, err := c.client.Download(context.Background(), vid)
+		if err != nil {
+			c.log.Warn("failed to download video", "error", err, "msg_id", info.ID)
+		} else {
+			os.MkdirAll(c.mediaDir, 0755)
+			filename := info.ID + ".mp4"
+			fullPath := filepath.Join(c.mediaDir, filename)
+			if err := os.WriteFile(fullPath, data, 0644); err != nil {
+				c.log.Warn("failed to save video", "error", err)
+			} else {
+				mimeType := vid.GetMimetype()
+				if mimeType == "" {
+					mimeType = "video/mp4"
+				}
+				mediaType := "video"
+				if vid.GetGifPlayback() {
+					mediaType = "gif"
+				}
+				msgEvt.Media = &MediaInfo{
+					MediaType: mediaType,
+					MimeType:  mimeType,
+					Filename:  filename,
+					SizeBytes: int64(len(data)),
+					FilePath:  fullPath,
+				}
+				c.log.Info("saved incoming video", "msg_id", info.ID, "kind", mediaType, "size", len(data), "path", fullPath)
 			}
 		}
 	}
@@ -436,6 +481,9 @@ func extractTextAndContacts(msg *waE2E.Message) (string, []SharedContact) {
 	}
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetCaption(), nil
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		return vid.GetCaption(), nil
 	}
 	if contact := msg.GetContactMessage(); contact != nil {
 		c := parseContact(contact.GetDisplayName(), contact.GetVcard())

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_STREAMABLE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".pdf"}
+_STREAMABLE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".pdf", ".mp4", ".webm", ".mov", ".m4v"}
 
 
 def _resolve_workspace_path(settings: Any, path: str) -> Path:
@@ -926,12 +926,14 @@ async def read_workspace_file(request: Request, path: str = "") -> Any:
     size = resolved.stat().st_size
     suffix = resolved.suffix.lower()
 
-    # Images/PDFs: stream directly via FileResponse
+    # Images/videos/PDFs: stream directly via FileResponse
     if suffix in _STREAMABLE_EXTENSIONS:
         mime_map = {
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
             ".bmp": "image/bmp", ".ico": "image/x-icon", ".pdf": "application/pdf",
+            ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+            ".m4v": "video/x-m4v",
         }
         content_type = mime_map.get(suffix, "application/octet-stream")
         return FileResponse(resolved, media_type=content_type)

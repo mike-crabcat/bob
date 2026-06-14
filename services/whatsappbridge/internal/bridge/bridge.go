@@ -402,6 +402,10 @@ func (b *Bridge) handleSendMedia(payload wsproto.SendMediaPayload) {
 	mime := strings.ToLower(payload.MimeType)
 	if mime == "image/gif" {
 		msgID, err = b.wa.SendGIF(jid, data, payload.Caption)
+	} else if strings.HasPrefix(mime, "video/") {
+		// WhatsApp stores/transmits GIFs as MP4; send all video/* as animated
+		// GIFs so they render inline in chat instead of as file attachments.
+		msgID, err = b.wa.SendVideoAsGif(jid, data, payload.Caption)
 	} else if strings.HasPrefix(mime, "image/") {
 		msgID, err = b.wa.SendImage(jid, data, payload.MimeType, payload.Caption)
 	} else {
