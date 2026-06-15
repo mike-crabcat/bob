@@ -18,19 +18,20 @@ This is a Python monorepo managed with `uv`. The main package is `bob-server`, a
 
 - **Default host/port**: `127.0.0.1:8420` (override with `BOB_HOST` / `BOB_PORT`)
 - **Entry point**: `packages/bob-server/bob_server/main.py`
-- **Dashboard**: Served at `/`, `/emails`, `/contacts`, `/projects`, etc.
-- **API**: REST endpoints under `/api/v1/`
+- **Dashboard**: React SPA built into `ui_dist/` and served at `/dashboard`. Dev server runs from `packages/bob-server/bob_server/ui_app/`.
+- **API**: REST endpoints under `/api/v1/` plus `/dashboard/api/*` for the SPA
 
 ## Key Directories
 
 - `packages/bob-server/bob_server/` - Main server package
-  - `routers/` - FastAPI routers (dashboard, contacts, etc.)
+  - `routers/` - FastAPI routers (dashboard_api is itself a package split by domain)
+  - `cli/` - Typer CLI split by subapp
   - `models.py` - Pydantic models
   - `config.py` - Settings (env vars, paths)
   - `database.py` - Database connection pool
   - `schemas/` - SQL migration files
-  - `templates/dashboard/` - Jinja2 HTML templates (cyberpunk dark theme with Tailwind CSS, HTMX)
-  - `services/` - Background services (email polling, etc.)
+  - `ui_app/` - React SPA source (Vite + TypeScript + Tailwind)
+  - `services/` - Background services (email polling, whatsapp bridge, etc.)
 
 ## Runtime paths
 

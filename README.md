@@ -212,8 +212,8 @@ Legend: 1 --< many, >--< many-to-many, self = self-reference
 ### Install Bob Server
 
 ```bash
-git clone <repo-url> cyborg
-cd cyborg
+git clone <repo-url> bob
+cd bob
 uv sync --extra dev
 ```
 
@@ -226,13 +226,13 @@ Load order:
 1. Existing process environment
 2. `BOB_ENV_FILE`, if set
 3. `.env` in the current working directory
-4. `.env` in the resolved config directory, usually `~/.config/cyborg/.env`
+4. `.env` in the resolved config directory, usually `~/config/.env`
 
 Create the config directory and env file:
 
 ```bash
-mkdir -p ~/.config/cyborg
-cat > ~/.config/cyborg/.env <<'EOF'
+mkdir -p ~/config
+cat > ~/config/.env <<'EOF'
 # Core
 BOB_PORT=8420
 BOB_DASHBOARD_SECRET=your-dashboard-secret
@@ -412,9 +412,9 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks/process-pending
 |---|---|---|
 | `BOB_HOST` | `127.0.0.1` | Bind address |
 | `BOB_PORT` | `8420` | Port |
-| `BOB_DATA_DIR` | `~/.local/share/cyborg` | Data directory |
-| `BOB_CONFIG_DIR` | `~/.config/cyborg` | Config directory |
-| `BOB_DB_PATH` | `{data_dir}/cyborg.db` | Database path |
+| `BOB_DATA_DIR` | `~/data` | Data directory |
+| `BOB_CONFIG_DIR` | `~/config` | Config directory |
+| `BOB_DB_PATH` | `{data_dir}/bob.db` | Database path |
 | `BOB_LOG_LEVEL` | `info` | Logging level |
 | `BOB_LOG_PATH` | *(none)* | Log file path |
 | `BOB_DB_POOL_SIZE` | `4` | Connection pool size |
@@ -502,12 +502,12 @@ WhatsApp bridge (Go companion) variables:
 
 ### Skill Environment Variables
 
-Skills run as subprocesses and need API keys in standard env var names (e.g. `OPENAI_API_KEY`). Since Bob runs as a systemd user service, it does not inherit your shell environment -- it reads `~/.config/cyborg/.env` at startup. To make an API key available to skills:
+Skills run as subprocesses and need API keys in standard env var names (e.g. `OPENAI_API_KEY`). Since Bob runs as a systemd user service, it does not inherit your shell environment -- it reads `~/config/.env` at startup. To make an API key available to skills:
 
-1. Add the key to `~/.config/cyborg/.env` with the `BOB_` prefix:
+1. Add the key to `~/config/.env` with the `BOB_` prefix:
 
 ```bash
-echo 'BOB_GOOGLE_PLACES_API_KEY=AIza...' >> ~/.config/cyborg/.env
+echo 'BOB_GOOGLE_PLACES_API_KEY=AIza...' >> ~/config/.env
 ```
 
 2. Register the mapping in `packages/bob-server/bob_server/services/skill_env.py` so the subprocess sees the standard name:
@@ -537,8 +537,8 @@ uv run pytest
 
 ## Data Storage
 
-- Database: `~/.local/share/cyborg/cyborg.db`
-- Config: `~/.config/cyborg/`
-- Phone recordings: `~/.local/share/cyborg/calls/`
+- Database: `~/data/bob.db`
+- Config: `~/config/`
+- Phone recordings: `~/data/calls/`
 - WhatsApp bridge data: `~/data/whatsappbridge/`
 - Service: systemd user service (`bob.service`)
