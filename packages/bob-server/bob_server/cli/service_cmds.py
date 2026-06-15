@@ -7,12 +7,28 @@ import them) and registered onto the main ``app`` via :func:`register`.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from pathlib import Path
 from typing import Annotated
 
 from bob_server.cli._helpers import *  # noqa: F403,F405
+
+
+class _PreserveLoggingConfig(uvicorn.Config):
+    """Uvicorn Config that does NOT call logging.config.dictConfig().
+
+    uvicorn's default ``Config.configure_logging()`` applies ``LOGGING_CONFIG``
+    via ``dictConfig()``, which clears the root logger handlers we set up in
+    ``bob_server.structured_logging.configure_logging()`` (notably the daily
+    rolling file handler). Skipping it preserves our setup so file logging
+    keeps working through the lifetime of the server.
+    """
+
+    def configure_logging(self) -> None:  # type: ignore[override]
+        # Skip uvicorn's default dictConfig — would clobber root handlers.
+        return
 
 
 def install(
@@ -122,6 +138,9 @@ def serve(
         config_dir=config_dir,
         db_path=db_path,
         log_level=log_level,
+        log_path=env_settings.log_path,
+        log_dir=env_settings.log_dir,
+        debug=env_settings.debug,
         pool_size=env_settings.pool_size,
         webhooks=env_settings.webhooks,
         agentmail=env_settings.agentmail,
@@ -135,7 +154,13 @@ def serve(
         harness=env_settings.harness,
         whatsapp_bridge=env_settings.whatsapp_bridge,
     )
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=settings.log_level)
+    config = _PreserveLoggingConfig(
+        app=create_app(settings),
+        host=settings.host,
+        port=settings.port,
+        log_level=settings.log_level,
+    )
+    uvicorn.Server(config).run()
 
 
 _COMMANDS = [install, uninstall, start, stop, restart, status, logs, serve]

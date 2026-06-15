@@ -159,7 +159,9 @@ def configure_logging(settings: Settings | None = None) -> None:
             root_logger.addHandler(rolling_handler)
         except Exception:
             # Don't let a bad log dir prevent startup; console still works.
-            pass
+            logging.getLogger(__name__).exception(
+                "failed to add DailyRollingFileHandler for log_dir=%s", settings.log_dir
+            )
 
     # Quieten noisy third-party loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
