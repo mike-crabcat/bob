@@ -191,7 +191,12 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "'coeliac/GF' and 'coeliac-safe options') should be retracted in favor of "
             "the most specific/sourced version.\n"
             "4. Inferred claims with no source bulletin are less reliable than "
-            "bulletin-grounded claims. If they conflict, prefer the sourced claim."
+            "bulletin-grounded claims. If they conflict, prefer the sourced claim.\n"
+            "5. A `preference` claim must reflect a general, root preference of the person "
+            "(e.g. 'prefers dark mode', 'morning person'). It must NOT describe a specific "
+            "event, outcome, request, or one-off action (e.g. 'wants the meeting moved to Tuesday', "
+            "'asked for the report by Friday'). Retract preference claims that are tied to a "
+            "specific incident or outcome."
         ),
         skip_expand=True,
         follow_for_bulletins=False,

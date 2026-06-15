@@ -84,10 +84,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 logger.exception("Voice engine preload failed — disabling voice")
                 resolved_settings.voice.enabled = False
 
-        # Attach database log handler for structured logging
-        from bob_server.structured_logging import attach_database_handler
-        attach_database_handler(database)
-
         # Conditional WhatsApp bridge service
         wa_bridge_service = None
         if resolved_settings.whatsapp_bridge.enabled:
