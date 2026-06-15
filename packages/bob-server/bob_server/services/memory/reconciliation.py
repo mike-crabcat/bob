@@ -18,6 +18,7 @@ from bob_server.services.memory.claim_types import (
     ENTITY_TYPE_PREFIXES,
     ENTITY_TYPE_REGISTRY,
     ENTITY_TYPES,
+    get_claim_types_for_entity,
     render_entity,
 )
 from bob_server.services.memory.claim_service import (
@@ -407,6 +408,24 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
 # LLM prompt
 # ---------------------------------------------------------------------------
 
+def _render_claim_type_glossary(entity_type: str) -> str:
+    """Render applicable claim type keys + descriptions for the reconciliation prompt.
+
+    Single source of truth is CLAIM_TYPE_REGISTRY. Keeping this in the prompt lets
+    the LLM detect claims whose values violate their type's definition (e.g. a
+    `contact_method` holding a conversation summary instead of a phone/email/handle).
+    """
+    types = get_claim_types_for_entity(entity_type)
+    if not types:
+        return "(no claim type definitions registered for this entity type)"
+    lines = []
+    for ct in types:
+        lines.append(f"- `{ct.key}` — {ct.description}")
+        if ct.example:
+            lines.append(f"    example: {ct.example}")
+    return "\n".join(lines)
+
+
 RECONCILIATION_PROMPT = """\
 You are a Memory Reconciliation Agent. You review an entity and its related \
 sub-entities, checking for inconsistencies against a set of rules.
@@ -418,19 +437,34 @@ prefer acting over asking.
 
 {rules}
 
+## Claim Type Definitions for {entity_type}
+
+Each claim on the entity has a `claim_type_key`. The value MUST match the \
+semantic contract below. A claim whose value violates its type's definition \
+(e.g. a `contact_method` holding a conversation summary, instruction, or action \
+instead of a phone number / email / handle; a `birthday` holding a place name; \
+an `address` holding a person's name) is invalid and should be retracted.
+
+{claim_types_glossary}
+
 ## Your Task
 
 1. Check the entity data against each rule above.
-2. Use the Source Bulletins and claim provenance to resolve conflicts — claims with \
+2. Validate every claim against its Claim Type Definition. If a value clearly \
+violates the definition (wrong semantic category, a summary where a discrete \
+value is required, a free-form note where a reference is required), retract it. \
+Do not retract claims merely because they are short, informal, or unstylized — \
+only retract when the value does not fit the type at all.
+3. Use the Source Bulletins and claim provenance to resolve conflicts — claims with \
 no source bulletin are inferred and less reliable than claims grounded in bulletins.
-3. If you can determine a clear fix, use the tools to apply it — prefer acting over asking.
-4. Answered questions are ground truth from the user — act on them directly, do not re-ask.
-5. If a child entity has been split or merged, update the parent's composition claims (e.g. trip.leg) accordingly.
-6. When splitting a stay into multiple new stays, create the new entities first, then \
+4. If you can determine a clear fix, use the tools to apply it — prefer acting over asking.
+5. Answered questions are ground truth from the user — act on them directly, do not re-ask.
+6. If a child entity has been split or merged, update the parent's composition claims (e.g. trip.leg) accordingly.
+7. When splitting a stay into multiple new stays, create the new entities first, then \
 retract the parent's leg claim pointing to the original and delete the original entity.
-7. If the fix is truly ambiguous with no answered question guiding it, raise a question instead.
-8. Use list_entities and get_entity to discover and inspect related entities when needed.
-9. If the entity is consistent and no fixes are needed, respond with an empty issues list.
+8. If the fix is truly ambiguous with no answered question guiding it, raise a question instead.
+9. Use list_entities and get_entity to discover and inspect related entities when needed.
+10. If the entity is consistent and no fixes are needed, respond with an empty issues list.
 
 ## Output Format
 
@@ -732,6 +766,7 @@ async def reconcile_entity(
         answers=answers,
         entity_type=entity_type,
         rules=rules,
+        claim_types_glossary=_render_claim_type_glossary(entity_type),
     )
 
     # Build tools for the reconciliation LLM
