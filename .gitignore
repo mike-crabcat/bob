@@ -2,9 +2,24 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# Runtime databases (live in ~/.local/share/bob/ or BOB_DATA_DIR)
+*.db
+
+# Local data/config roots (these hold runtime artifacts, not source)
+data/
+config/
+
+# Scripts that hold deployment-specific secrets
 scripts/publish.sh
 scripts/rollout.sh
+
+# Editor/agent local state
 .claude/
+.understand-anything/
+.superpowers/
+
+# Build outputs
+packages/bob-server/bob_server/ui_dist
 services/whatsappbridge/bin
 services/whatsappbridge/whatsappbridge
-packages/bob-server/bob_server/ui_dist
