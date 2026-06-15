@@ -52,3 +52,34 @@
           - The dashboard integration: the /api/skills/installed endpoint lists all skills for the UI.
           Include high level ascii architecture diagrams showing the skill discovery, index injection, and on-demand loading flow.
           Suitable for a software engineer to understand the system end-to-end.
+- path: ./docs/datamodel.md
+  prompt: |
+          This document is the canonical reference for Bob's SQLite schema. It should start with a one-paragraph purpose
+          statement: that the schema is the persistent backbone of the system (every channel — WhatsApp, email, voice,
+          phone — writes here), that migrations live under packages/bob-server/bob_server/schemas/ as numbered .sql files
+          applied in order at startup via Database.apply_migrations(), and that the document is grouped by domain so a
+          reader can find the tables they care about without scanning a 500-line CREATE TABLE dump.
+          The body must cover, grouped by domain (sessions & messaging, dispatches, phone calls, email, calendars & events,
+          contacts, memory, notifications, webhooks, skills, audit/utility):
+          - A per-domain entity-relationship diagram. Use Mermaid `erDiagram` blocks so they render on GitHub and in any
+            Markdown viewer that supports Mermaid. Show the tables in that domain, their columns (at least PK, FK, and
+            the load-bearing uniqueness/scoping columns — skip incidental metadata like created_at/updated_at unless they
+            drive behavior), and the relationships between them (one-to-many, many-to-many, self-reference).
+          - A "Purpose" subsection per table: one or two sentences on what the table is for and why it exists, in terms of
+            the feature it backs. Frame it as "X is the source of truth for Y" or "X records Y so that Z can happen" — not
+            as a column-by-column description.
+          - Where useful, a "Lifecycle" or "How it gets written" note explaining when rows are inserted, who owns the
+            writes (a service, a background task, a CLI subcommand), and any retention/cleanup trigger that prunes them.
+          Conventions to call out once near the top:
+          - Session keys: their format (channel:scope:peer identifiers, e.g. agent:main:whatsapp:dm:+61400111222) and the
+            role they play as the join key across session_messages, dispatches, session_agendas, session_participants,
+            session_summaries, and elsewhere.
+          - JSON metadata columns: where they appear, what they typically carry, and the convention of co-locating
+            channel-specific data instead of adding new top-level columns.
+          - Soft delete vs hard delete: which tables use which, and why.
+          Specific table names, column names, FK relationships, and migration file numbers should be discovered from the
+          codebase (schemas/*.sql and services/*.py) at write time rather than asserted from memory, so the doc stays
+          correct as the schema evolves. Do not list every column of every table — list the columns that matter for
+          understanding relationships and behavior.
+          Aim for a document a software engineer can skim to find "where does X live" and "what relates to Y", with
+          enough diagram detail to navigate without opening the migration files.
