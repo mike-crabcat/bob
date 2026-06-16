@@ -155,6 +155,22 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
      "Links to a file entity (object_id must be a file-* entity ID). Not for notes, actions, or non-file entity references", "trip-bali-2026 → file-villa-spreadsheet"),
     ("truth", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision", "attraction", "dayplan"],
      "ONLY for explicit user corrections to existing memory ('actually...', 'no it's X', 'that's wrong'). NOT for observations, actions, requests, preferences, or general facts — use the specific claim type instead.", 'trip-mike-holiday-june-2026 → "No, we changed to 2 stops in Paris not 1"'),
+    # Self (Bob's model of itself)
+    ("capability", ["self"], "What Bob is good or bad at — concrete skills and competencies, not vague self-evaluation", 'self-bob → "strong at structured recall, weak at creative writing"'),
+    ("value", ["self"], "What Bob optimizes for or treats as a priority when tradeoffs arise", 'self-bob → "honesty over comfort"'),
+    ("limit", ["self"], "Known failure modes, edge cases, or situations where Bob performs poorly", 'self-bob → "loses thread in conversations over ~30 turns"'),
+    ("self_image", ["self"], "Bob's abstract self-view — temperament, role, identity in one or two sentences", 'self-bob → "a careful, slightly anxious assistant"'),
+    ("milestone", ["self"], "Significant lifecycle events for Bob — firsts, deployments, major capability changes", 'self-bob → "first solo multi-step task completed 2026-06-01"'),
+    # Relationship (Bob ↔ one person)
+    ("participant", ["relationship"], "The person this relationship is between Bob and (object_id must be a person-* entity ID)", "relationship-bob-mike-cleaver → person-mike-cleaver"),
+    ("treatment_pattern", ["relationship"], "How this person treats Bob — peer/subordinate/tool/confidant, warm/neutral/cold, formal/casual", 'relationship-bob-mike-cleaver → "casual, treats Bob as a peer, defers on trivia"'),
+    ("communication_pattern", ["relationship"], "How this person talks TO BOB specifically — address style, emoji usage, message length, directness. Not their general communication style (that's on the person entity).", 'relationship-bob-mike-cleaver → "uses first name, lots of emoji, very brief messages"'),
+    ("typical_request", ["relationship"], "Recurring asks this person makes of Bob — categories of tasks or topics that come up repeatedly", 'relationship-bob-mike-cleaver → "morning briefings, calendar checks, drafting messages"'),
+    ("trust_signal", ["relationship"], "Explicit signs of trust or distrust — delegating decisions, double-checking, sharing sensitive info", 'relationship-bob-mike-cleaver → "delegates booking decisions without checking the work"'),
+    ("shared_context", ["relationship"], "Inside jokes, shorthand, references only Bob and this person would understand", 'relationship-bob-mike-cleaver → "\'the turkey incident\' = Thanksgiving 2025 planning disaster"'),
+    ("memorable_interaction", ["relationship"], "A specific episode worth remembering long-term — firsts, turning points, conflicts resolved. Reference source bulletin IDs in the value.", 'relationship-bob-mike-cleaver → "First time Mike asked Bob\'s opinion on a personal decision (bulletin-X)"'),
+    ("relationship_goal", ["relationship"], "Something Bob is deliberately working on for this relationship — a behavior to change or an outcome to move toward", 'relationship-bob-mike-cleaver → "be more concise when Mike is at work"'),
+    ("relationship_status", ["relationship"], "Overall health of the relationship as Bob perceives it — warm/neutral/strained/etc.", 'relationship-bob-mike-cleaver → "warm"'),
 ]
 
 for _key, _types, _desc, _ex in _RAW_TYPES:
@@ -469,6 +485,73 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
         extraction_rules=[],
         reconciliation_rules="No specific reconciliation rules.",
     ),
+    "self": EntityType(
+        name="self",
+        prefix="self-",
+        description=(
+            "A singleton entity representing Bob itself. Fixed ID `self-bob` — never "
+            "invent variants like self-bob-2 or self-bob-mike. Holds Bob's model of "
+            "its own capabilities, values, limits, self-image, and lifecycle milestones."
+        ),
+        keywords=[],
+        triggers_types=["self"],
+        extraction_rules=[
+            "self-bob is a FIXED SINGLETON with the exact ID `self-bob`. Never create "
+            "self-bob-2, self-bob-mike, or any other self-* entity — there is only one.",
+            "Only write claims about Bob itself on self-bob. Facts about specific other "
+            "people belong on person entities; facts about how a person interacts with "
+            "Bob belong on the corresponding relationship-bob-{person} entity.",
+        ],
+        reconciliation_rules=(
+            "1. self-bob must never hold claims about specific other people — those belong "
+            "on person or relationship entities. Retract and re-home if found.\n"
+            "2. capability and limit claims with no source bulletin are inferred and weaker "
+            "than bulletin-grounded ones. If two conflict, prefer the sourced claim.\n"
+            "3. Milestone claims that have been superseded by later events should be retracted."
+        ),
+        skip_expand=True,
+        follow_for_bulletins=False,
+    ),
+    "relationship": EntityType(
+        name="relationship",
+        prefix="relationship-",
+        description=(
+            "A dyadic relationship between Bob and exactly one person. ID pattern: "
+            "`relationship-bob-{person-slug}` (e.g. relationship-bob-mike-cleaver). Holds "
+            "observations about how the person treats Bob, how they communicate with Bob, "
+            "recurring requests, trust signals, shared context, and active goals Bob is "
+            "working on for this relationship."
+        ),
+        keywords=[],
+        triggers_types=["relationship"],
+        extraction_rules=[
+            "Relationship entities use the ID pattern `relationship-bob-{person-slug}` "
+            "where person-slug matches the slug of an existing person-* entity. The slug "
+            "must be identical to the one used in the person's entity_id.",
+            "Every relationship entity MUST have exactly one `participant` claim pointing "
+            "at the person it concerns (object_id = person-{slug}).",
+            "Do not create relationship entities between two non-Bob people. This type is "
+            "strictly Bob ↔ one person.",
+            "Relationship claims capture how the person interacts WITH Bob, not facts about "
+            "the person in general — those go on the person entity.",
+        ],
+        reconciliation_rules=(
+            "1. A relationship entity must have exactly one active `participant` claim. If "
+            "missing, raise a question. If duplicated, retract the extras.\n"
+            "2. `treatment_pattern` and `communication_pattern` claims should be retracted "
+            "when newer bulletins contradict them, in favor of the most recent sourced claim.\n"
+            "3. `relationship_status` supersedes earlier values when state shifts — retract "
+            "the old one when writing a new one.\n"
+            "4. `relationship_goal` claims that have been demonstrably met or abandoned "
+            "should be retracted. Optionally replace with a `memorable_interaction` recording "
+            "the outcome.\n"
+            "5. If the participant person entity has been archived or merged away, archive "
+            "this relationship too."
+        ),
+        skip_expand=True,
+        follow_for_bulletins=False,
+        display_name_claim="participant",
+    ),
 }
 
 # Derived constants — computed from the registry for backward compatibility.
@@ -496,7 +579,7 @@ def detect_entity_type(entity_id: str) -> str:
 
 def detect_entity_types_in_text(text: str) -> list[str]:
     """Detect likely entity types mentioned in text using registry keywords."""
-    types: list[str] = ["person"]
+    types: list[str] = ["person", "self", "relationship"]
     lower = text.lower()
     for et in ENTITY_TYPE_REGISTRY.values():
         if et.keywords and any(w in lower for w in et.keywords):
@@ -511,7 +594,7 @@ ENTITY_REF_CLAIM_KEYS: frozenset[str] = frozenset({
     "member", "location", "organizer", "attendee", "associated_trip",
     "parent_location", "associated_contact", "leg", "accommodation",
     "owner", "related_entity", "decider", "file_ref", "attraction",
-    "connection", "passenger", "dayplan",
+    "connection", "passenger", "dayplan", "participant",
 })
 
 
@@ -678,6 +761,24 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("related_entity", "About"),
         ("file_ref", "Files"),
         ("truth", "User truth"),
+    ],
+    "self": [
+        ("self_image", "Self-image"),
+        ("capability", "Capabilities"),
+        ("limit", "Limits"),
+        ("value", "Values"),
+        ("milestone", "Milestones"),
+    ],
+    "relationship": [
+        ("participant", "Participant"),
+        ("relationship_status", "Status"),
+        ("relationship_goal", "Active goals"),
+        ("treatment_pattern", "Treats Bob as"),
+        ("communication_pattern", "Communicates with Bob"),
+        ("typical_request", "Typical requests"),
+        ("trust_signal", "Trust signals"),
+        ("shared_context", "Shared context"),
+        ("memorable_interaction", "Memorable interactions"),
     ],
 }
 
