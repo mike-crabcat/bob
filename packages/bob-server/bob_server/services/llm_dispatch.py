@@ -36,6 +36,105 @@ logger = logging.getLogger(__name__)
 _memory_tool_used: dict[str, bool] = {}
 _MEMORY_TOOL_NAMES = frozenset({"recall", "find", "memory_read"})
 
+# Per-dispatch tool-call trace, populated after chat_with_tools completes and
+# consumed by SessionService.add_message via pop_tool_trace(). Mirrors the
+# _memory_tool_used pattern. Each value is {"items": [...], "summary": str}.
+_dispatch_tool_trace: dict[str, dict[str, Any]] = {}
+
+# Item types from the Responses API output that we persist for replay.
+# Reasoning items and unknown types are dropped — they bloat rows and aren't
+# load-bearing for next-turn tool context.
+_PERSISTED_ITEM_TYPES = frozenset({"function_call", "function_call_output", "message"})
+
+# Per-string cap on function_call.arguments and function_call_output.output,
+# and whole-row cap on the serialized items JSON. Oversized rows fall back to
+# summary-only.
+_ITEM_CAP = 8192
+_WHOLE_TRACE_CAP = 65536
+
+
+def _truncate_str(s: Any, limit: int) -> str:
+    if not isinstance(s, str):
+        try:
+            s = json.dumps(s, default=str)
+        except Exception:
+            s = str(s)
+    return s if len(s) <= limit else s[:limit] + "…[truncated]"
+
+
+def _is_image_user_block(item: dict[str, Any]) -> bool:
+    """Detect the synthetic {role: user, content: [input_image, ...]} block
+    that OpenAIService appends after an ImageInjection tool result."""
+    if item.get("role") != "user":
+        return False
+    content = item.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(p, dict) and p.get("type") == "input_image" for p in content)
+
+
+def _cap_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of item with oversized string fields truncated."""
+    t = item.get("type")
+    if t == "function_call_output":
+        out = item.get("output")
+        if isinstance(out, str) and len(out) > _ITEM_CAP:
+            return {**item, "output": out[:_ITEM_CAP] + "…[truncated]"}
+    elif t == "function_call":
+        args = item.get("arguments")
+        if isinstance(args, str) and len(args) > _ITEM_CAP:
+            return {**item, "arguments": args[:_ITEM_CAP] + "…[truncated]"}
+    return item
+
+
+def _summarize_call(fc: dict[str, Any], fco: dict[str, Any]) -> str:
+    name = fc.get("name", "?")
+    args_raw = fc.get("arguments", "{}")
+    try:
+        args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    arg_parts = [f"{k}={_truncate_str(v, 80)}" for k, v in args.items()]
+    args_preview = ", ".join(arg_parts)
+    out_preview = _truncate_str(fco.get("output", ""), 80)
+    return f"{name}({args_preview}) → {out_preview}"
+
+
+def _build_tool_trace(new_items: list[Any]) -> dict[str, Any] | None:
+    """Filter, cap, and summarize the items a dispatch appended to messages.
+
+    Returns None when the dispatch made no function_call items (i.e. it was a
+    pure text reply with no tool work worth replaying).
+    """
+    filtered: list[dict[str, Any]] = []
+    for item in new_items:
+        if not isinstance(item, dict):
+            continue
+        if _is_image_user_block(item):
+            continue
+        if item.get("type") in _PERSISTED_ITEM_TYPES:
+            filtered.append(_cap_item(item))
+
+    if not any(it.get("type") == "function_call" for it in filtered):
+        return None
+
+    pending_fc: dict[str, dict[str, Any]] = {}
+    summary_parts: list[str] = []
+    for item in filtered:
+        t = item.get("type")
+        if t == "function_call":
+            call_id = item.get("call_id")
+            if call_id:
+                pending_fc[call_id] = item
+        elif t == "function_call_output":
+            call_id = item.get("call_id")
+            fc = pending_fc.pop(call_id, None) if call_id else None
+            if fc:
+                summary_parts.append(_summarize_call(fc, item))
+
+    summary = "[tools used: " + "; ".join(summary_parts) + "]" if summary_parts else ""
+    return {"items": filtered, "summary": summary}
+
 
 def _sanitize_for_json(obj: Any) -> Any:
     """Recursively convert non-serializable objects to plain dicts."""
@@ -200,6 +299,29 @@ class LLMDispatchService(BaseService):
         if not dispatch_id:
             return False
         return _memory_tool_used.pop(dispatch_id, False)
+
+    @staticmethod
+    def pop_tool_trace(dispatch_id: str | None) -> dict[str, Any] | None:
+        """Return and clear the tool trace for a dispatch.
+
+        Returns None when dispatch_id is None or no trace was captured.
+        Otherwise returns ``{"summary": str, "items_json": str | None}``.
+        ``items_json`` is None when the serialized items exceeded
+        ``_WHOLE_TRACE_CAP`` — caller falls back to summary-only.
+        """
+        if not dispatch_id:
+            return None
+        trace = _dispatch_tool_trace.pop(dispatch_id, None)
+        if trace is None:
+            return None
+        items_json: str | None
+        try:
+            items_json = json.dumps(_sanitize_for_json(trace.get("items", [])))
+        except Exception:
+            items_json = None
+        if items_json is not None and len(items_json) > _WHOLE_TRACE_CAP:
+            items_json = None
+        return {"summary": trace.get("summary", ""), "items_json": items_json}
 
     def _resolve_model(self, model: str | None = None) -> str:
         if model:
@@ -447,6 +569,7 @@ class LLMDispatchService(BaseService):
         tools_json = json.dumps(openai_tools) if openai_tools else None
 
         t0 = time.monotonic()
+        original_len = len(messages)
         log_id = await _record_log(
             self.db,
             provider="openai", model=resolved_model,
@@ -482,8 +605,16 @@ class LLMDispatchService(BaseService):
                 stream_result=stream_result,
                 on_tool_call=self._make_tool_callback(session_key, call_category, log_id, dispatch_id),
                 on_iteration_complete=_on_iteration,
+                dispatch_id=dispatch_id,
+                session_key=session_key,
+                log_id=log_id,
             )
             elapsed = time.monotonic() - t0
+
+            if dispatch_id:
+                trace = _build_tool_trace(messages[original_len:])
+                if trace is not None:
+                    _dispatch_tool_trace[dispatch_id] = trace
 
             await _record_log(self.db, log_id=log_id,
                 response_text=result,
@@ -515,6 +646,8 @@ class LLMDispatchService(BaseService):
             is_cancel = isinstance(exc, asyncio.CancelledError)
             if not is_cancel:
                 logger.error("LLM dispatch tools failed: model=%s error=%s", resolved_model, exc)
+            if dispatch_id:
+                _dispatch_tool_trace.pop(dispatch_id, None)
             await _record_log(self.db, log_id=log_id,
                 latency_seconds=elapsed,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
@@ -558,6 +691,7 @@ class LLMDispatchService(BaseService):
         tools_json = json.dumps(openai_tools) if openai_tools else None
 
         t0 = time.monotonic()
+        original_len = len(messages)
         log_id = await _record_log(
             self.db,
             provider="openai", model=resolved_model,
@@ -577,6 +711,7 @@ class LLMDispatchService(BaseService):
         )
         accumulated = ""
         ttft: float | None = None
+        stream_result = StreamResult()
 
         async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
             await _record_log(self.db, log_id=log_id,
@@ -593,6 +728,10 @@ class LLMDispatchService(BaseService):
                 max_iterations=max_iterations,
                 on_tool_call=self._make_tool_callback(session_key, call_category, log_id, dispatch_id),
                 on_iteration_complete=_on_iteration,
+                dispatch_id=dispatch_id,
+                session_key=session_key,
+                log_id=log_id,
+                stream_result=stream_result,
             ):
                 if chunk:
                     if ttft is None:
@@ -600,17 +739,27 @@ class LLMDispatchService(BaseService):
                     accumulated += chunk
                     yield chunk
 
+            if dispatch_id:
+                trace = _build_tool_trace(messages[original_len:])
+                if trace is not None:
+                    _dispatch_tool_trace[dispatch_id] = trace
+
             await _record_log(self.db, log_id=log_id,
                 response_text=accumulated,
                 latency_seconds=time.monotonic() - t0,
                 ttft_seconds=ttft,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
+                prompt_tokens=stream_result.prompt_tokens,
+                completion_tokens=stream_result.completion_tokens,
+                total_tokens=stream_result.total_tokens,
+                cached_tokens=stream_result.cached_tokens,
                 status="completed",
             )
             await self._publish_call(
                 status="completed", session_key=session_key,
                 call_category=call_category, model=resolved_model,
-                latency_seconds=time.monotonic() - t0, total_tokens=None,
+                latency_seconds=time.monotonic() - t0,
+                total_tokens=stream_result.total_tokens,
                 ttft_seconds=ttft,
             )
 
@@ -618,18 +767,25 @@ class LLMDispatchService(BaseService):
             is_cancel = isinstance(exc, asyncio.CancelledError)
             if not is_cancel:
                 logger.error("LLM dispatch stream+tools failed: model=%s error=%s", resolved_model, exc)
+            if dispatch_id:
+                _dispatch_tool_trace.pop(dispatch_id, None)
             await _record_log(self.db, log_id=log_id,
                 response_text=accumulated,
                 latency_seconds=time.monotonic() - t0,
                 ttft_seconds=ttft,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
+                prompt_tokens=stream_result.prompt_tokens,
+                completion_tokens=stream_result.completion_tokens,
+                total_tokens=stream_result.total_tokens,
+                cached_tokens=stream_result.cached_tokens,
                 status="failed",
                 error_message=f"Cancelled — server restart" if is_cancel else str(exc),
             )
             await self._publish_call(
                 status="failed", session_key=session_key,
                 call_category=call_category, model=resolved_model,
-                latency_seconds=time.monotonic() - t0, total_tokens=None,
+                latency_seconds=time.monotonic() - t0,
+                total_tokens=stream_result.total_tokens,
                 error_message=str(exc),
             )
             raise

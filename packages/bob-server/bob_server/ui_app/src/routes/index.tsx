@@ -91,8 +91,8 @@ function HomePage() {
                 <tr className="text-muted text-[10px] uppercase">
                   <th className="text-left px-2 pb-1">category</th>
                   <th className="text-right px-2 pb-1">calls</th>
-                  <th className="text-right px-2 pb-1">prompt</th>
-                  <th className="text-right px-2 pb-1">completion</th>
+                  <th className="text-right px-2 pb-1">input</th>
+                  <th className="text-right px-2 pb-1">output</th>
                   <th className="text-right px-2 pb-1">cost</th>
                 </tr>
               </thead>
