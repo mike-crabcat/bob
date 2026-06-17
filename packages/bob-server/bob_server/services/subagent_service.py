@@ -101,7 +101,6 @@ class SubagentService(BaseService):
                 result = await self._run_claude(
                     prompt=task,
                     cwd=workspace_dir,
-                    model=settings.harness.skill_dev_model,
                     max_budget=settings.harness.skill_dev_max_budget_usd,
                 )
         except Exception as e:
@@ -179,7 +178,6 @@ class SubagentService(BaseService):
                         prompt=message,
                         cwd=workspace_dir,
                         session_id=row["claude_session_id"],
-                        model=settings.harness.skill_dev_model,
                         max_budget=settings.harness.skill_dev_max_budget_usd,
                     )
             except Exception as e:
@@ -401,7 +399,7 @@ class SubagentService(BaseService):
         *,
         cwd: Path,
         session_id: str | None = None,
-        model: str = "sonnet",
+        model: str | None = None,
         max_budget: float = 5.0,
     ) -> dict[str, Any]:
         """Run Claude Code as a subprocess and return JSON output."""
@@ -412,11 +410,12 @@ class SubagentService(BaseService):
         cmd = [
             claude_bin, "-p",
             "--output-format", "json",
-            "--model", model,
             "--max-budget-usd", str(max_budget),
             "--allowed-tools", "Read Write Glob Grep Bash",
             "--system-prompt", SUBAGENT_SYSTEM_PROMPT,
         ]
+        if model:
+            cmd.extend(["--model", model])
         if session_id:
             cmd.extend(["--resume", session_id])
         cmd.append(prompt)

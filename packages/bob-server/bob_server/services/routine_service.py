@@ -71,9 +71,25 @@ class RoutineService(BaseService):
         )
         return [dict(r) for r in rows] if rows else []
 
-    async def mark_run(self, routine_id: str, next_run_at: str) -> None:
+    async def claim(self, routine_id: str, next_run_at: str) -> bool:
+        """Atomically advance next_run_at. Returns True if this caller won the claim.
+
+        Guards against duplicate dispatch when the heartbeat ticks faster than
+        the routine body runs: a second heartbeat's UPDATE matches zero rows
+        because next_run_at has already moved past `now`.
+        """
+        now = datetime.now().astimezone().isoformat()
+        count = await self.db.execute(
+            "UPDATE routines SET next_run_at = ?, updated_at = ? "
+            "WHERE id = ? AND next_run_at <= ?",
+            (next_run_at, now, routine_id, now),
+        )
+        return count > 0
+
+    async def mark_run(self, routine_id: str) -> None:
+        """Record last_run_at on a routine already claimed via claim()."""
         now = datetime.now().astimezone().isoformat()
         await self.db.execute(
-            "UPDATE routines SET last_run_at = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
-            (now, next_run_at, now, routine_id),
+            "UPDATE routines SET last_run_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, routine_id),
         )

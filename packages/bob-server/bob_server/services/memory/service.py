@@ -681,6 +681,7 @@ class MemoryService(BaseService):
             group_members=group_members_str,
             db=self.db,
             premapped_content=premapped_content,
+            bot_name=self.ctx.settings.patience.bot_name,
         )
 
         wrote_claims = 0

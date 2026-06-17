@@ -157,6 +157,37 @@ NEVER invent person IDs. Only slugs from tags, existing entities, or `person:new
 
 ---
 
+# Self & Relationship Claims — Addressing Guard
+
+The agent this memory belongs to is named **{bot_name}**. In raw transcripts, \
+{bot_name}'s own messages have sender tag `[assistant]` (or `[assistant][SYNTHETIC]` \
+when echoing recalled memory).
+
+`self-bob` and `relationship-bob-{{person-slug}}` claims describe {bot_name} itself, \
+or how a person interacts directly WITH {bot_name}. They must never be written from \
+conversations {bot_name} is not part of.
+
+**Before writing any claim whose subject is `self-bob` or `relationship-bob-*`:**
+
+1. **{bot_name} must be a participant.** If there are no `[assistant]` lines under \
+"Window messages:", {bot_name} is not in the conversation — skip ALL self and \
+relationship claims for this bulletin.
+2. **The person must be addressing {bot_name} specifically** — at least one of:
+   - Names {bot_name} in their message (e.g. "{bot_name}, what's my schedule?"), or
+   - Replies directly to an `[assistant]` line in a 1:1 DM, or
+   - Explicitly @-mentions or otherwise directs the message at {bot_name}.
+3. **Group chats are presumptively NOT addressed to {bot_name}.** In a group chat \
+with multiple humans, a message from person X is usually directed at the group or at \
+another human. Only treat it as addressing {bot_name} when (1) or (2) clearly applies.
+
+**Do NOT extract** a `relationship-bob-*` claim when the person is talking to another \
+human (e.g. organising squash with a third party, answering another human's question), \
+or when {bot_name} is silent in the window.
+
+If in doubt, omit the claim.
+
+---
+
 # Output Format
 
 Return a JSON array of claim objects. Example:
@@ -242,9 +273,12 @@ If no claims can be extracted, return `[]`.
 Return ONLY the JSON array. No other text."""
 
 
-def build_extraction_prompt(claim_types_section: str) -> str:
-    """Build the claim extraction prompt with injected claim types."""
-    return _CLAIM_EXTRACTION_TEMPLATE.format(claim_types_section=claim_types_section)
+def build_extraction_prompt(claim_types_section: str, bot_name: str = "Bob") -> str:
+    """Build the claim extraction prompt with injected claim types and bot name."""
+    return _CLAIM_EXTRACTION_TEMPLATE.format(
+        claim_types_section=claim_types_section,
+        bot_name=bot_name,
+    )
 
 
 RETRIEVAL_AGENT_PROMPT = """\

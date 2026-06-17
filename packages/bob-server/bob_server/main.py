@@ -205,5 +205,3 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.warning("OpenAI SDK not installed — install with: pip install bob-server[openai]")
 
     return app
-
-app = create_app()

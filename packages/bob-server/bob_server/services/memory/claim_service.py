@@ -207,6 +207,7 @@ async def extract_claims_from_bulletin(
     group_members: str = "",
     db: Any = None,
     premapped_content: str | None = None,
+    bot_name: str = "Bob",
 ) -> list[Claim]:
     """Use LLM to extract atomic claims from a bulletin."""
     if entity_types_in_bulletin:
@@ -214,7 +215,7 @@ async def extract_claims_from_bulletin(
     else:
         claim_types_section = build_extraction_prompt_section(["person", "trip", "event", "location"])
 
-    system_prompt = build_extraction_prompt(claim_types_section)
+    system_prompt = build_extraction_prompt(claim_types_section, bot_name=bot_name)
 
     existing_context = ""
     if existing_claims:

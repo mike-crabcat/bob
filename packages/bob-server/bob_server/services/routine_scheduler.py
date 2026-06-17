@@ -31,11 +31,19 @@ class RoutineSchedulerTask:
     name = "routine_scheduler"
 
     async def run(self, ctx) -> None:  # type: ignore[override]
+        from bob_server.cron import next_cron_occurrence
+
         svc = RoutineService(ctx)
         due = await svc.get_due_routines()
 
         for routine in due:
-            asyncio.create_task(self._fire_routine(ctx, routine))
+            # Claim before dispatch: advance next_run_at atomically so the next
+            # heartbeat tick no longer sees this routine as due. Without this,
+            # a 60s heartbeat can fire the same slow routine twice (the original
+            # mark_run only bumped next_run_at after the LLM finished ~30s later).
+            next_at = next_cron_occurrence(routine["schedule"]).isoformat()
+            if await svc.claim(routine["id"], next_at):
+                asyncio.create_task(self._fire_routine(ctx, routine))
 
     async def _fire_routine(self, ctx, routine: dict) -> None:
         from bob_server.services.session_service import SessionService
@@ -111,12 +119,10 @@ class RoutineSchedulerTask:
 
             await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id)
 
-            # Compute next run time
-            from bob_server.cron import next_cron_occurrence
-            next_at = next_cron_occurrence(routine["schedule"]).isoformat()
-
+            # next_run_at was already advanced by claim() before dispatch;
+            # just record when this run completed.
             svc = RoutineService(ctx)
-            await svc.mark_run(routine["id"], next_at)
+            await svc.mark_run(routine["id"])
 
             logger.info("Routine '%s' fired for session %s", name, session_key)
         except Exception:
