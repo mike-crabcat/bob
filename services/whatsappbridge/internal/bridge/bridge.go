@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -25,9 +26,11 @@ type Bridge struct {
 	inQ  *queue.PersistentQueue
 	outQ *queue.PersistentQueue
 
-	pairMu    sync.RWMutex
-	lastQR    string
-	lastPair  string
+	pairMu   sync.RWMutex
+	lastQR   string
+	lastPair string
+
+	uploads *UploadStore
 }
 
 func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
@@ -50,12 +53,13 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 	}
 
 	b := &Bridge{
-		cfg:  cfg,
-		log:  log.With("component", "bridge"),
-		srv:  server.New(cfg.ListenAddr(), cfg.Token, log.With("component", "server"), nil),
-		wa:   wa,
-		inQ:  inQ,
-		outQ: outQ,
+		cfg:     cfg,
+		log:     log.With("component", "bridge"),
+		srv:     server.New(cfg.ListenAddr(), cfg.Token, log.With("component", "server"), nil),
+		wa:      wa,
+		inQ:     inQ,
+		outQ:    outQ,
+		uploads: NewUploadStore(5*time.Minute, 100<<20),
 	}
 
 	// Wire event handlers
@@ -87,8 +91,23 @@ func (b *Bridge) Run(ctx context.Context) error {
 	// Start cleanup ticker
 	go b.cleanupLoop(ctx)
 
+	// Sweep expired media uploads periodically
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.uploads.Sweep()
+			}
+		}
+	}()
+
 	// Register extra HTTP handlers
 	b.srv.RegisterHandler("/pairing", b.handlePairingHTTP)
+	b.srv.RegisterHandler("/upload", b.handleUploadHTTP)
 
 	// Start server (blocks until ctx cancelled)
 	return b.srv.Start(ctx)
@@ -99,9 +118,61 @@ func (b *Bridge) handlePairingHTTP(w http.ResponseWriter, r *http.Request) {
 	defer b.pairMu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"qr_code":       b.lastQR,
-		"pairing_code":  b.lastPair,
+		"qr_code":      b.lastQR,
+		"pairing_code": b.lastPair,
 	})
+}
+
+// handleUploadHTTP accepts a multipart/form-encoded media upload and stores it
+// in memory, returning an upload_id that can be referenced by a subsequent
+// send_media WS message. This bypasses the WS frame size limit (~770KB usable
+// after base64 expansion) so large files like PDFs can be sent.
+func (b *Bridge) handleUploadHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Auth: reuse the same token as the WS endpoint.
+	if r.URL.Query().Get("token") != b.cfg.Token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// Cap request body to 100 MiB (WhatsApp's own document limit).
+	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		b.log.Warn("upload parse failed", "error", err, "remote", r.RemoteAddr)
+		http.Error(w, "upload parse failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing 'file' field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	data := make([]byte, header.Size)
+	if _, err := io.ReadFull(file, data); err != nil {
+		b.log.Warn("upload read failed", "error", err)
+		http.Error(w, "failed to read upload", http.StatusBadRequest)
+		return
+	}
+
+	mime := r.FormValue("mime_type")
+	if mime == "" {
+		mime = header.Header.Get("Content-Type")
+	}
+	filename := r.FormValue("filename")
+	if filename == "" {
+		filename = header.Filename
+	}
+
+	id := b.uploads.Put(data, mime, filename)
+	b.log.Info("upload received", "upload_id", id, "bytes", len(data), "mime_type", mime, "filename", filename)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"upload_id": id})
 }
 
 func (b *Bridge) handleWhatsAppEvent(event any) {
@@ -387,15 +458,37 @@ func (b *Bridge) handleSendMedia(payload wsproto.SendMediaPayload) {
 		return
 	}
 
-	data, err := base64.StdEncoding.DecodeString(payload.Data)
-	if err != nil {
-		b.log.Warn("invalid base64 data for media send", "error", err, "request_id", payload.RequestID)
-		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
-			RequestID: payload.RequestID,
-			Success:   false,
-			Error:     "invalid base64 data",
-		})
-		return
+	// Resolve media bytes: prefer upload_id (preferred path), fall back to legacy inline base64.
+	var (
+		data     []byte
+		fileName string
+		err      error
+	)
+	if payload.UploadID != "" {
+		entry, ok := b.uploads.Take(payload.UploadID)
+		if !ok {
+			b.log.Warn("upload not found or expired", "upload_id", payload.UploadID, "request_id", payload.RequestID)
+			b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+				RequestID: payload.RequestID,
+				Success:   false,
+				Error:     "upload not found or expired",
+			})
+			return
+		}
+		data = entry.Data
+		fileName = entry.FileName
+		b.log.Info("resolved upload", "upload_id", payload.UploadID, "bytes", len(data), "filename", fileName, "request_id", payload.RequestID)
+	} else {
+		data, err = base64.StdEncoding.DecodeString(payload.Data)
+		if err != nil {
+			b.log.Warn("invalid base64 data for media send", "error", err, "request_id", payload.RequestID)
+			b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+				RequestID: payload.RequestID,
+				Success:   false,
+				Error:     "invalid base64 data",
+			})
+			return
+		}
 	}
 
 	var msgID string
@@ -409,8 +502,11 @@ func (b *Bridge) handleSendMedia(payload wsproto.SendMediaPayload) {
 	} else if strings.HasPrefix(mime, "image/") {
 		msgID, err = b.wa.SendImage(jid, data, payload.MimeType, payload.Caption)
 	} else {
-		fileName := "file"
-		msgID, err = b.wa.SendDocument(jid, data, payload.MimeType, fileName, payload.Caption)
+		name := fileName
+		if name == "" {
+			name = "file"
+		}
+		msgID, err = b.wa.SendDocument(jid, data, payload.MimeType, name, payload.Caption)
 	}
 
 	if err != nil {
