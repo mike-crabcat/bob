@@ -64,6 +64,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.debug("Subagent cleanup skipped (table may not exist yet)")
 
+        # Ensure the self-bob singleton exists so self-relevant claims have a target
+        try:
+            from bob_server.services.memory.service import MemoryService
+            await MemoryService(app_ctx).ensure_self_entity()
+        except Exception:
+            logger.exception("Failed to ensure self-bob entity on startup")
+
         event_bus = EventBus()
         app_ctx.event_bus = event_bus
         app.state.event_bus = event_bus
@@ -198,5 +205,3 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.warning("OpenAI SDK not installed — install with: pip install bob-server[openai]")
 
     return app
-
-app = create_app()

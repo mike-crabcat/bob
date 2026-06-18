@@ -759,7 +759,7 @@ class EmailPollingService(BaseService):
         # If this thread was initiated from another session, inject the finish_email_thread tool
         if origin_session_key:
             from bob_server.services.email_thread_result_tools import make_email_thread_result_tools
-            wa_service = getattr(self.ctx, "_wa_service", None)
+            wa_service = getattr(self.ctx, "whatsapp_bridge", None)
             tools.extend(make_email_thread_result_tools(
                 self.ctx,
                 thread_id=thread["agentmail_thread_id"],

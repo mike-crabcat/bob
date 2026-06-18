@@ -47,20 +47,32 @@ class SessionService(BaseService):
         auto-detected from the dispatch's memory-tool usage via
         ``LLMDispatchService.pop_memory_used(dispatch_id)``. Explicit values
         are honoured as-is.
+
+        When ``role == "assistant"`` and ``dispatch_id`` is set, the dispatch's
+        tool-call trace is also pulled via ``pop_tool_trace`` and persisted to
+        ``tool_summary`` / ``tool_blocks_json`` for replay in future dispatches.
         """
+        tool_summary: str | None = None
+        tool_blocks_json: str | None = None
         if synthetic is None:
             if role == "assistant" and dispatch_id:
                 from bob_server.services.llm_dispatch import LLMDispatchService
                 synthetic = LLMDispatchService.pop_memory_used(dispatch_id)
+                trace = LLMDispatchService.pop_tool_trace(dispatch_id)
+                if trace is not None:
+                    tool_summary = trace["summary"] or None
+                    tool_blocks_json = trace["items_json"]
             else:
                 synthetic = False
         msg_id = str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
         await self.db.execute(
             """INSERT INTO session_messages
-               (id, session_key, role, content, sender_id, channel, metadata, dispatched, synthetic)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, session_key, role, content, sender_id, channel, meta_json, dispatched, 1 if synthetic else 0),
+               (id, session_key, role, content, sender_id, channel, metadata,
+                dispatched, synthetic, tool_summary, tool_blocks_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, session_key, role, content, sender_id, channel, meta_json,
+             dispatched, 1 if synthetic else 0, tool_summary, tool_blocks_json),
         )
         return msg_id
 

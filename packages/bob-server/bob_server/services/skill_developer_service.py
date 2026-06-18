@@ -169,7 +169,6 @@ class SkillDeveloperService(BaseService):
             result = await self._run_claude(
                 prompt,
                 cwd=workspace_dir,
-                model=settings.harness.skill_dev_model,
                 max_budget=settings.harness.skill_dev_max_budget_usd,
             )
         except Exception as e:
@@ -234,7 +233,6 @@ class SkillDeveloperService(BaseService):
                 ),
                 cwd=workspace_dir,
                 session_id=claude_session_id,
-                model=settings.harness.skill_dev_model,
                 max_budget=settings.harness.skill_dev_max_budget_usd,
             )
         except Exception as e:

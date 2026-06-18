@@ -20,6 +20,14 @@ interface Props {
   categories: string[];
 }
 
+function localHHMM(iso: string): string {
+  // Server emits interval_start as a UTC "YYYY-MM-DDTHH:MM" string (no offset).
+  // Tag it as UTC so the browser converts to the viewer's local timezone.
+  const d = new Date(`${iso}Z`);
+  if (isNaN(d.getTime())) return iso.slice(11, 16);
+  return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+}
+
 function categoryLabel(cat: string): string {
   return cat.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -40,7 +48,7 @@ export function LLMChart({ buckets, categories }: Props) {
   }, []);
 
   const data = buckets.map((b) => ({
-    time: b.interval_start?.slice(11, 16) ?? "",
+    time: b.interval_start ? localHHMM(b.interval_start) : "",
     ...Object.fromEntries(categories.map((c) => [c, (b[c] as number) ?? 0])),
   }));
 

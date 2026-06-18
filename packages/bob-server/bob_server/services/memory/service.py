@@ -485,6 +485,20 @@ class MemoryService(BaseService):
 
     # ── Entities ──────────────────────────────────────────────────
 
+    async def ensure_self_entity(self) -> None:
+        """Create the singleton self-bob entity if it does not exist.
+
+        Called on service startup so that self-bob is always present as a
+        write target for self-relevant claims. Idempotent via INSERT OR IGNORE.
+        """
+        now = utcnow()
+        await self.db.execute(
+            "INSERT OR IGNORE INTO memory_entities "
+            "(entity_id, entity_type, display_name, status, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("self-bob", "self", "Bob", "active", now.isoformat()),
+        )
+
     async def write_entity(self, workspace_dir: Path, entity: EntityDocument) -> str:
         """Write an entity record (identity only) to the database."""
         now = utcnow()
@@ -502,6 +516,34 @@ class MemoryService(BaseService):
                 now.isoformat(),
             ),
         )
+
+        # Auto-create relationship-bob-{slug} when a person entity is written.
+        # Gives extraction a stable target for relationship claims from day one.
+        if entity.entity_type == "person" and entity.entity_id.startswith("person-"):
+            person_slug = entity.entity_id.removeprefix("person-")
+            relationship_id = f"relationship-bob-{person_slug}"
+            await self.db.execute(
+                "INSERT OR IGNORE INTO memory_entities "
+                "(entity_id, entity_type, display_name, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    relationship_id,
+                    "relationship",
+                    f"Bob ↔ {entity.display_name}",
+                    "active",
+                    now.isoformat(),
+                ),
+            )
+            participant_claim = Claim(
+                id=f"claim-participant-{uuid.uuid4().hex[:8]}",
+                claim_type_key="participant",
+                subject_id=relationship_id,
+                object_id=entity.entity_id,
+            )
+            try:
+                await write_claim(self.db, participant_claim)
+            except Exception:
+                logger.exception("Failed to write participant claim for %s", relationship_id)
 
         # Update aliases
         await self.db.execute(
@@ -639,6 +681,7 @@ class MemoryService(BaseService):
             group_members=group_members_str,
             db=self.db,
             premapped_content=premapped_content,
+            bot_name=self.ctx.settings.patience.bot_name,
         )
 
         wrote_claims = 0

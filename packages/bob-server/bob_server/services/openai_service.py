@@ -391,6 +391,9 @@ class OpenAIService(BaseService):
         stream_result: StreamResult | None = None,
         on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
         on_iteration_complete: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+        dispatch_id: str | None = None,
+        session_key: str | None = None,
+        log_id: str | None = None,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -401,12 +404,22 @@ class OpenAIService(BaseService):
         merged_tools = self._merge_tools(tools)
         t0 = time.monotonic()
 
+        total_input = total_output = total_total = 0
+        total_cached = 0
+
         for iteration in range(max_iterations):
             response = await self.client.responses.create(
                 model=resolved_model,
                 input=messages,
                 tools=merged_tools,
             )
+
+            usage = getattr(response, "usage", None)
+            if usage:
+                total_input  += usage.input_tokens or 0
+                total_output += usage.output_tokens or 0
+                total_total  += usage.total_tokens or 0
+                total_cached += self._extract_cached_tokens(usage) or 0
 
             # Check for function calls in output
             function_calls = [
@@ -428,20 +441,18 @@ class OpenAIService(BaseService):
                              if getattr(item, "type", None) == "message"), None
                         ),
                     )
-                usage = getattr(response, "usage", None)
-                cached_tokens = self._extract_cached_tokens(usage)
                 logger.info(
                     "OpenAI tool call finished: model=%s iterations=%d latency=%.2fs "
-                    "tool_calls_in_turn=%d tokens=%s cached_tokens=%s",
+                    "tool_calls_in_turn=%d tokens=%d (in=%d out=%d cached=%d)",
                     resolved_model, iteration + 1, elapsed,
                     iteration,
-                    usage.total_tokens if usage else None,
-                    cached_tokens,
+                    total_total, total_input, total_output, total_cached,
                 )
                 if stream_result is not None:
-                    stream_result.prompt_tokens = usage.input_tokens if usage else None
-                    stream_result.completion_tokens = usage.output_tokens if usage else None
-                    stream_result.total_tokens = usage.total_tokens if usage else None
+                    stream_result.prompt_tokens = total_input
+                    stream_result.completion_tokens = total_output
+                    stream_result.total_tokens = total_total
+                    stream_result.cached_tokens = total_cached
                     stream_result.latency_seconds = elapsed
                 return content
 
@@ -454,13 +465,24 @@ class OpenAIService(BaseService):
                 tool_args: dict = {}
                 if handler is None:
                     result = f"Error: unknown tool '{fc.name}'"
+                    logger.error(
+                        "Unknown tool requested: tool=%s call_id=%s dispatch_id=%s "
+                        "session_key=%s log_id=%s iteration=%d",
+                        fc.name, fc.call_id, dispatch_id, session_key, log_id, iteration,
+                    )
                 else:
                     try:
                         tool_args = json.loads(fc.arguments)
                         result = await handler(**tool_args)
                     except Exception as e:
                         result = f"Error: {e}"
-                        logger.warning("Tool %s failed: %s", fc.name, e)
+                        logger.error(
+                            "Tool call failed: tool=%s call_id=%s dispatch_id=%s "
+                            "session_key=%s log_id=%s iteration=%d args=%s error=%s",
+                            fc.name, fc.call_id, dispatch_id, session_key, log_id,
+                            iteration, json.dumps(tool_args, default=str)[:500], e,
+                            exc_info=True,
+                        )
 
                 if isinstance(result, ImageInjection):
                     messages.append({
@@ -514,11 +536,28 @@ class OpenAIService(BaseService):
         max_iterations: int = 100,
         on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
         on_iteration_complete: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+        dispatch_id: str | None = None,
+        session_key: str | None = None,
+        log_id: str | None = None,
+        stream_result: StreamResult | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat with tool calling. Runs tool calls non-streamingly,
         then streams the final text response for real-time consumption."""
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools)
+        t0 = time.monotonic()
+
+        total_input = total_output = total_total = 0
+        total_cached = 0
+
+        def _flush_stream_result() -> None:
+            if stream_result is None:
+                return
+            stream_result.prompt_tokens = total_input
+            stream_result.completion_tokens = total_output
+            stream_result.total_tokens = total_total
+            stream_result.cached_tokens = total_cached
+            stream_result.latency_seconds = time.monotonic() - t0
 
         # Tool loop: non-streaming rounds until LLM gives a text response
         for iteration in range(max_iterations):
@@ -527,6 +566,13 @@ class OpenAIService(BaseService):
                 input=messages,
                 tools=merged_tools,
             )
+
+            usage = getattr(response, "usage", None)
+            if usage:
+                total_input  += usage.input_tokens or 0
+                total_output += usage.output_tokens or 0
+                total_total  += usage.total_tokens or 0
+                total_cached += self._extract_cached_tokens(usage) or 0
 
             function_calls = [
                 item for item in response.output
@@ -538,6 +584,7 @@ class OpenAIService(BaseService):
                 content = response.output_text or ""
                 if content:
                     yield content
+                _flush_stream_result()
                 return
 
             # Append output items and execute tool calls
@@ -547,13 +594,24 @@ class OpenAIService(BaseService):
                 tool_args: dict = {}
                 if handler is None:
                     result = f"Error: unknown tool '{fc.name}'"
+                    logger.error(
+                        "Unknown tool requested: tool=%s call_id=%s dispatch_id=%s "
+                        "session_key=%s log_id=%s iteration=%d",
+                        fc.name, fc.call_id, dispatch_id, session_key, log_id, iteration,
+                    )
                 else:
                     try:
                         tool_args = json.loads(fc.arguments)
                         result = await handler(**tool_args)
                     except Exception as e:
                         result = f"Error: {e}"
-                        logger.warning("Tool %s failed: %s", fc.name, e)
+                        logger.error(
+                            "Tool call failed: tool=%s call_id=%s dispatch_id=%s "
+                            "session_key=%s log_id=%s iteration=%d args=%s error=%s",
+                            fc.name, fc.call_id, dispatch_id, session_key, log_id,
+                            iteration, json.dumps(tool_args, default=str)[:500], e,
+                            exc_info=True,
+                        )
 
                 messages.append({
                     "type": "function_call_output",
@@ -579,14 +637,23 @@ class OpenAIService(BaseService):
                 except Exception:
                     pass
 
-        # Hit max iterations — make one final streaming call
+        # Hit max iterations — make one final streaming call.
+        # Pass a child StreamResult so we can merge its usage into the running totals
+        # rather than overwriting the intermediate iterations.
         logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)
+        fallback_result = StreamResult()
         async for chunk in self.chat_stream(
             messages=messages,
             model=resolved_model,
+            stream_result=fallback_result,
         ):
             if chunk:
                 yield chunk
+        total_input  += fallback_result.prompt_tokens or 0
+        total_output += fallback_result.completion_tokens or 0
+        total_total  += fallback_result.total_tokens or 0
+        total_cached += fallback_result.cached_tokens or 0
+        _flush_stream_result()
 
     async def quick_prompt(self, prompt: str) -> str:
         """Send a bare prompt string and return the response."""

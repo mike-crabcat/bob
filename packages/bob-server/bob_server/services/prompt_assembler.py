@@ -241,7 +241,8 @@ async def build_chat_messages(
                         mention_names[digits] = p["display_name"]
 
         rows = await db.fetch_all(
-            "SELECT role, content, sender_id, metadata FROM session_messages "
+            "SELECT role, content, sender_id, metadata, tool_summary, tool_blocks_json "
+            "FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
             "AND rowid IN (SELECT rowid FROM session_messages "
             "WHERE session_key = ? AND role IN ('user', 'assistant') "
@@ -249,7 +250,19 @@ async def build_chat_messages(
             "ORDER BY created_at ASC",
             (session_key, session_key, max_history),
         )
-        for row in rows:
+
+        # Indices of the last N assistant rows — these get full tool-block
+        # replay. Older rows fall back to the short summary prefix.
+        last_assistant_indices: set[int] = set()
+        seen = 0
+        for i in range(len(rows) - 1, -1, -1):
+            if rows[i]["role"] == "assistant":
+                last_assistant_indices.add(i)
+                seen += 1
+                if seen >= 3:
+                    break
+
+        for i, row in enumerate(rows):
             if not row["content"]:
                 continue
             # Skip stale NO_REPLY entries that poison future decisions
@@ -319,6 +332,31 @@ async def build_chat_messages(
                 if name:
                     messages.append({"role": "user", "content": f"[{name}] {content}"})
                     continue
+
+            if row["role"] == "assistant":
+                # Tool trace replay. Last 3 assistant rows expand full
+                # function_call / function_call_output items inline; older
+                # rows with a summary get a bracketed prefix.
+                expanded = False
+                if i in last_assistant_indices and row.get("tool_blocks_json"):
+                    try:
+                        items = json.loads(row["tool_blocks_json"])
+                    except (json.JSONDecodeError, TypeError):
+                        items = None
+                    if isinstance(items, list) and items:
+                        for item in items:
+                            if isinstance(item, dict):
+                                messages.append(item)
+                        if content:
+                            messages.append({"role": "assistant", "content": content})
+                        expanded = True
+                if not expanded:
+                    summary = row.get("tool_summary")
+                    if summary:
+                        content = f"{summary}\n\n{content}" if content else summary
+                    messages.append({"role": "assistant", "content": content})
+                continue
+
             messages.append({"role": row["role"], "content": content})
 
     if user_message is not None:
