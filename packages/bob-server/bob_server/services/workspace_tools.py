@@ -142,6 +142,10 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         Output above 30000 chars is truncated — use head/tail/sed -n/grep to page
         through large files. Times out after 900s.
 
+        Bob's Python venv at ~/bobenv is active — `python` and `pip` resolve there,
+        and `pip install <pkg>` lands in ~/bobenv (shared across all skills; skills
+        do not get their own venvs).
+
         Do NOT write files under memory/ with this tool — use memory_write instead, or
         the memory index (claims, entities) will not pick them up.
 
@@ -162,12 +166,13 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
             logger.warning("bash blocked by sandbox: %r — %s", command, violation)
             return f"Error: {violation}"
         logger.info("bash: %s", command)
+        venv_dir = settings.harness.venv_dir.expanduser()
         proc = await asyncio.create_subprocess_exec(
             "bash", "-c", command,
             cwd=str(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=build_skill_env(workspace_dir=str(workspace)),
+            env=build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
         )
         try:
             stdout, stderr = await asyncio.wait_for(

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 from typing import Any
 
 
@@ -187,6 +190,7 @@ class HarnessSettings:
 
     enabled: bool = False
     workspace_dir: Path = Path("~/workspace")
+    venv_dir: Path = Path("~/bobenv")
     default_model: str = "gpt-5.4-mini"
     max_history_messages: int = 20
     skill_dev_enabled: bool = False
@@ -392,6 +396,7 @@ class Settings:
         harness = HarnessSettings(
             enabled=os.getenv("BOB_HARNESS_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             workspace_dir=_env_path("BOB_HARNESS_WORKSPACE_DIR", Path("~/workspace")),
+            venv_dir=_env_path("BOB_HARNESS_VENV_DIR", Path("~/bobenv")),
             default_model=os.getenv("BOB_HARNESS_DEFAULT_MODEL", "gpt-5.4-mini"),
             max_history_messages=int(os.getenv("BOB_HARNESS_MAX_HISTORY_MESSAGES", "20")),
             skill_dev_enabled=os.getenv("BOB_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
@@ -458,3 +463,29 @@ class Settings:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         if self.phone.enabled:
             (self.data_dir / "calls").mkdir(parents=True, exist_ok=True)
+        self._ensure_venv()
+
+    def _ensure_venv(self) -> None:
+        """Create the harness venv if missing. Non-fatal on failure.
+
+        Skills and bash-spawned scripts install into this venv. If creation
+        fails, we leave it missing — build_skill_env guards on <venv>/bin/python
+        and falls back to system PATH, so the bash tool still works.
+        """
+        log = logging.getLogger(__name__)
+        venv = self.harness.venv_dir.expanduser()
+        if (venv / "bin" / "python").exists():
+            return
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv)],
+                check=False,
+                timeout=30,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except Exception as e:
+            log.warning("Failed to create harness venv at %s: %s", venv, e)
+            return
+        if not (venv / "bin" / "python").exists():
+            log.warning("Harness venv creation did not produce a python binary at %s", venv)

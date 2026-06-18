@@ -36,8 +36,7 @@ how to use it.
 
     skills/{skill_name}/
       skill.md          (required — trigger + instructions for Bob)
-      helper.py         (required — the Python script Bob runs via run_script)
-      pyproject.toml    (optional — if the script needs third-party dependencies)
+      helper.py         (required — the Python script Bob runs via bash)
 
 ### skill.md format
 
@@ -50,7 +49,8 @@ how to use it.
     ## Instructions
 
     Step-by-step instructions for Bob to follow when this skill activates.
-    Must include a step that calls `run_script` to execute helper.py.
+    Must include a step that calls \
+`bash("python skills/{skill_name}/helper.py ...")` to execute helper.py.
 
     ## Example
 
@@ -66,30 +66,35 @@ The script should:
 - Be self-contained — avoid assuming a specific working directory
 - Do NOT resolve paths internally — use the paths passed as arguments directly
 
-### pyproject.toml (optional)
+### Third-party dependencies
 
-If the script needs third-party packages (e.g. `requests`, `beautifulsoup4`), \
-create a minimal pyproject.toml in the skill directory so `uv run` installs them:
+Bob has a single shared Python venv at `~/bobenv`. All skills install into it — \
+skills do NOT get their own per-skill venvs or pyproject.toml files. If your \
+helper.py needs a third-party package (e.g. `requests`, `beautifulsoup4`), the \
+skill.md instructions should tell Bob to install it once before first use:
 
-    [project]
-    name = "skill_name"
-    version = "0.1.0"
-    dependencies = ["requests"]
+    pip install requests
+
+This lands in `~/bobenv` automatically because the bash tool activates that venv. \
+Prefer the Python standard library where possible to avoid this step entirely.
 
 ## Bob's Runtime Tools (Reference Only)
 
 Skills can instruct Bob to use these tools. You cannot call them yourself:
 
-- **run_script(path, args)**: Run a Python script in the workspace. \
-  Use this to execute your helper.py.
+- **bash(command)**: Run a shell command in the workspace (`~/workspace` is the cwd). \
+  Bob's venv at `~/bobenv` is active, so `python` and `pip` resolve there. \
+  Use this to execute your helper.py: `bash("python skills/{name}/helper.py <args>")`.
 - Communication: send_whatsapp_message, send_whatsapp_to_contact, email_reply, email_skip
 - Workspace: ls, read_file, write_file, rm, mv, find, update_agenda
 - Search: search_contacts
 
 ## Available Environment Variables
 
-When helper.py runs via run_script, these standard environment variables are available:
+When helper.py runs via bash, these standard environment variables are available:
 
+- `VIRTUAL_ENV`: Path to Bob's Python venv (`~/bobenv`). Packages installed via \
+  `pip` land here. The venv's `bin/` is on PATH.
 - `OPENAI_API_KEY`: OpenAI API key (if configured). Use with `OpenAI()` directly.
 - `OPENAI_BASE_URL`: Custom OpenAI API base URL (if configured).
 - `AGENTMAIL_API_KEY`: AgentMail API key (if configured).
@@ -105,12 +110,12 @@ When asked to create a skill:
 1. Use Read or Glob to examine existing skills in `skills/` for patterns
 2. Read existing skills in `skills/` for format and patterns
 3. Design the skill: name, trigger, what the Python script will do
-4. Use Write to create ALL of these files:
-   - `skills/{name}/skill.md` — trigger + instructions referencing run_script
+4. Use Write to create these files:
+   - `skills/{name}/skill.md` — trigger + instructions referencing \
+`bash("python skills/{name}/helper.py ...")`
    - `skills/{name}/helper.py` — the Python script with the actual logic
-   - `skills/{name}/pyproject.toml` — only if third-party dependencies are needed
 5. Test mentally: trace through what happens when Bob follows skill.md's \
-   instructions and calls run_script on helper.py
+   instructions and runs helper.py via bash
 
 Keep skills focused on a single capability. The helper.py must actually work — \
 write real, runnable Python code, not pseudocode or stubs.

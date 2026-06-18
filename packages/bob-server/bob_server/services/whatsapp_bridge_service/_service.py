@@ -458,7 +458,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Auto-create person memory entry
         from bob_server.services.memory import MemoryService
         mem_svc = MemoryService(self.ctx)
-        mem_svc.ensure_person_entry(
+        await mem_svc.ensure_person_entry(
             self.ctx.settings.harness.workspace_dir,
             contact_id=new_id, name=display_name or phone_number,
             phone_number=phone_number, channel="WhatsApp",
@@ -651,7 +651,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             # Auto-create person memory entry for new contacts
             from bob_server.services.memory import MemoryService
             mem_svc = MemoryService(self.ctx)
-            mem_svc.ensure_person_entry(
+            await mem_svc.ensure_person_entry(
                 settings.harness.workspace_dir,
                 contact_id=contact_id, name=sender_name or phone_number,
                 phone_number=phone_number, channel="WhatsApp",
