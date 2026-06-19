@@ -107,15 +107,18 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         return request_id
 
     async def send_media(self, chat_id: str, file_path: str, *, caption: str = "") -> str:
-        """Send an image file to a WhatsApp chat."""
-        import base64
+        """Send a media file to a WhatsApp chat.
+
+        Always uploads via HTTP /upload, then sends a small WS message referencing
+        the upload_id. Avoids the Go bridge's ~1MiB WebSocket frame cap, which
+        capped inline base64 sends at ~770KB and killed the WS session on overflow.
+        """
         import mimetypes
 
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-        with open(file_path, "rb") as f:
-            data = base64.b64encode(f.read()).decode()
-
         request_id = str(uuid4())
+        upload_id = await self._upload_media(file_path, mime, caption)
+
         payload = {
             "type": "send_media",
             "id": request_id,
@@ -123,7 +126,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             "payload": {
                 "chat_id": chat_id,
                 "mime_type": mime,
-                "data": data,
+                "upload_id": upload_id,
                 "caption": caption,
                 "request_id": request_id,
             },
@@ -133,6 +136,31 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         else:
             logger.warning("cannot send media, not connected to bridge")
         return request_id
+
+    async def _upload_media(self, file_path: str, mime: str, caption: str) -> str:
+        """POST a file to the bridge's /upload endpoint and return its upload_id."""
+        import os
+
+        import httpx
+
+        settings = self._get_settings()
+        ws_url = settings.whatsapp_bridge.url  # e.g. ws://127.0.0.1:8430/ws
+        http_url = (
+            ws_url.replace("ws://", "http://")
+            .replace("wss://", "https://")
+            .replace("/ws", "/upload")
+        )
+        token = settings.whatsapp_bridge.token
+        with open(file_path, "rb") as f:
+            resp = await httpx.AsyncClient().post(
+                http_url,
+                params={"token": token} if token else {},
+                files={"file": (os.path.basename(file_path), f, mime)},
+                data={"mime_type": mime, "caption": caption},
+                timeout=120.0,
+            )
+        resp.raise_for_status()
+        return resp.json()["upload_id"]
 
     async def request_pairing(self, *, method: str = "qr", phone_number: str | None = None) -> dict[str, Any]:
         msg_id = str(uuid4())
@@ -424,8 +452,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 lines.append(f"- {name} ({r['identifier']}, not in contacts)")
         return "\n".join(lines)
 
-    async def _resolve_or_seed_contact(self, phone_number: str, display_name: str = "") -> tuple[str, bool]:
-        """Find an existing contact by phone or auto-seed an untrusted one. Returns (contact_id, is_trusted)."""
+    async def _lookup_contact(self, phone_number: str) -> tuple[str, bool] | None:
+        """Return (contact_id, is_trusted) for an existing contact, or None.
+
+        Exact match first, then prefix-match fallback to catch WhatsApp JIDs with
+        extra trailing digits (e.g. +614154068544 should match existing +61415406854).
+        """
         contact = await self.db.fetch_one(
             "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
             (phone_number,),
@@ -433,8 +465,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         if contact:
             return contact["id"], bool(contact.get("is_trusted", 0))
 
-        # Fallback: prefix match to catch JIDs with extra trailing digits
-        # e.g. +614154068544 should match existing +61415406854
         if len(phone_number) > 6:
             prefix_matches = await self.db.fetch_all(
                 "SELECT id, is_trusted, phone_number FROM contacts WHERE deleted_at IS NULL "
@@ -446,6 +476,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 best = prefix_matches[0]
                 logger.info("resolved contact %s via prefix match: %s → %s", best["id"], phone_number, best["phone_number"])
                 return best["id"], bool(best.get("is_trusted", 0))
+        return None
+
+    async def _resolve_or_seed_contact(self, phone_number: str, display_name: str = "") -> tuple[str, bool]:
+        """Find an existing contact by phone or auto-seed an untrusted one. Returns (contact_id, is_trusted)."""
+        existing = await self._lookup_contact(phone_number)
+        if existing:
+            return existing
         new_id = str(uuid4())
         now_iso = utcnow().isoformat()
         await self.db.execute(
@@ -458,7 +495,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Auto-create person memory entry
         from bob_server.services.memory import MemoryService
         mem_svc = MemoryService(self.ctx)
-        mem_svc.ensure_person_entry(
+        await mem_svc.ensure_person_entry(
             self.ctx.settings.harness.workspace_dir,
             contact_id=new_id, name=display_name or phone_number,
             phone_number=phone_number, channel="WhatsApp",
@@ -634,6 +671,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
                     (sender_name, utcnow().isoformat(), contact_id),
                 )
+        elif chat_kind == "dm":
+            # Security gate: drop DMs from numbers with no contact row.
+            # Group sync auto-seeds contacts for everyone Bob has seen in a group,
+            # so any legitimate acquaintance already has a row. Pure unknowns get
+            # logged and never become a session.
+            logger.warning(
+                "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
+                phone_number, sender_jid, sender_name, text[:80],
+            )
+            return
         else:
             logger.info("no contact found for phone %s", phone_number)
             # Auto-seed an untrusted contact for unknown WhatsApp senders
@@ -651,7 +698,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             # Auto-create person memory entry for new contacts
             from bob_server.services.memory import MemoryService
             mem_svc = MemoryService(self.ctx)
-            mem_svc.ensure_person_entry(
+            await mem_svc.ensure_person_entry(
                 settings.harness.workspace_dir,
                 contact_id=contact_id, name=sender_name or phone_number,
                 phone_number=phone_number, channel="WhatsApp",

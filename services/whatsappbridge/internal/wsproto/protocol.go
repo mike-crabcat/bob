@@ -141,7 +141,8 @@ type SendMessagePayload struct {
 type SendMediaPayload struct {
 	ChatID    string `json:"chat_id"`
 	MimeType  string `json:"mime_type"`
-	Data      string `json:"data"`      // base64-encoded
+	Data      string `json:"data,omitempty"`      // base64-encoded (legacy inline path, still accepted)
+	UploadID  string `json:"upload_id,omitempty"` // references a previous POST /upload result (preferred)
 	Caption   string `json:"caption,omitempty"`
 	RequestID string `json:"request_id"`
 }

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+from uuid import uuid4
 
 from bob_server.services.base import utcnow
-from bob_server.services.whatsapp_bridge_service._media import _format_created_at
+from bob_server.services.whatsapp_bridge_service._media import _format_created_at, _jid_to_phone
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ class SlashCommandsMixin:
             await self._cmd_bulletin(args, session_key, chat_id, chat_kind)
         elif command == "/who":
             await self._cmd_who(chat_id)
+        elif command == "/approve":
+            await self._cmd_approve(args, chat_id)
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -73,6 +76,56 @@ class SlashCommandsMixin:
             return
         created = _format_created_at(row["created_at"])
         await self.send_message(chat_id, f"r{row['revision']} (created {created})")
+
+    async def _cmd_approve(self, args: str, chat_id: str) -> None:
+        """Pre-create a contact so an unknown number can DM Bob.
+
+        Usage: /approve <phone> [name...]
+        Trust flag stays at 0 — the gate is contact existence, not trust.
+        """
+        parts = args.strip().split(None, 1)
+        if not parts or not parts[0]:
+            await self.send_message(chat_id, "Usage: /approve <phone> [name]")
+            return
+        raw_phone = parts[0]
+        name = parts[1].strip() if len(parts) > 1 else ""
+        # _jid_to_phone handles +CC, leading-0, and bare international forms.
+        phone_number = _jid_to_phone(raw_phone)
+        if not phone_number:
+            await self.send_message(chat_id, f"Could not parse phone: {raw_phone}")
+            return
+
+        existing = await self.db.fetch_one(
+            "SELECT id FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+            (phone_number,),
+        )
+        if existing:
+            if name:
+                await self.db.execute(
+                    "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, utcnow().isoformat(), existing["id"]),
+                )
+            await self.send_message(chat_id, f"/approve: already a contact ({phone_number})")
+            return
+
+        new_id = str(uuid4())
+        now_iso = utcnow().isoformat()
+        await self.db.execute(
+            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
+               VALUES (?, ?, ?, 0, ?, ?)""",
+            (new_id, name or phone_number, phone_number, now_iso, now_iso),
+        )
+
+        from bob_server.services.memory import MemoryService
+        mem_svc = MemoryService(self.ctx)
+        await mem_svc.ensure_person_entry(
+            self.ctx.settings.harness.workspace_dir,
+            contact_id=new_id, name=name or phone_number,
+            phone_number=phone_number, channel="WhatsApp",
+        )
+
+        logger.info("/approve: created contact %s for phone %s", new_id, phone_number)
+        await self.send_message(chat_id, f"/approve: added {name or phone_number} ({phone_number})")
 
     async def _cmd_bulletin(self, args: str, session_key: str, chat_id: str, chat_kind: str) -> None:
         """Generate bulletins for the current session on demand."""
