@@ -21,7 +21,7 @@ async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
                   system_prompt, user_message, messages_json, tools_json,
                   response_text, latency_seconds, ttft_seconds,
                   prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                  status, error_message
+                  status, error_message, tool_blocks_json
            FROM llm_call_log WHERE id = ?""",
         (call_id,),
     )
@@ -32,6 +32,15 @@ async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
     if row["messages_json"]:
         try:
             messages = json.loads(row["messages_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    tool_calls: list[dict[str, Any]] | None = None
+    if row["tool_blocks_json"]:
+        try:
+            parsed = json.loads(row["tool_blocks_json"])
+            if isinstance(parsed, list):
+                tool_calls = parsed
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -57,6 +66,7 @@ async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
         "total_tokens": row["total_tokens"],
         "cached_tokens": row["cached_tokens"],
         "messages": messages,
+        "tool_calls": tool_calls,
         "tools": tools,
         "response_text": row["response_text"],
         "user_message": row["user_message"],

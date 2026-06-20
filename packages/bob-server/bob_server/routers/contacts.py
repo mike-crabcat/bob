@@ -144,6 +144,7 @@ async def get_contact(
 async def update_contact(
     contact_id: UUID,
     payload: ContactUpdate,
+    request: Request,
     database: Database = Depends(get_database),
 ) -> ContactResponse:
     """Update a contact."""
@@ -152,16 +153,16 @@ async def update_contact(
         "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
         (str(contact_id),),
     )
-    
+
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Contact {contact_id} not found",
         )
-    
+
     # Build update fields
     updates: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
-    
+
     if payload.name is not None:
         updates["name"] = payload.name
     if payload.phone_number is not None:
@@ -172,11 +173,11 @@ async def update_contact(
         updates["is_trusted"] = 1 if payload.is_trusted else 0
     if payload.metadata is not None:
         updates["metadata"] = json.dumps(payload.metadata)
-    
+
     # Build SET clause
     set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
     values = list(updates.values()) + [str(contact_id)]
-    
+
     try:
         await database.execute(
             f"UPDATE contacts SET {set_clause} WHERE id = ?",
@@ -189,7 +190,16 @@ async def update_contact(
                 detail="Contact with this phone number or email already exists",
             )
         raise
-    
+
+    # Propagate name change to linked person entity's display_name snapshot
+    if payload.name is not None:
+        from bob_server.context import AppContext
+        from bob_server.services.memory import MemoryService
+        ctx = AppContext(settings=request.app.state.settings, db=database)
+        await MemoryService(ctx).sync_person_display_name_for_contact(
+            str(contact_id), payload.name,
+        )
+
     row = await database.fetch_one(
         "SELECT * FROM contacts WHERE id = ?",
         (str(contact_id),),
@@ -200,6 +210,7 @@ async def update_contact(
 @router.delete("/{contact_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_contact(
     contact_id: UUID,
+    request: Request,
     database: Database = Depends(get_database),
 ) -> Response:
     """Soft delete a contact."""
@@ -208,20 +219,26 @@ async def delete_contact(
         "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
         (str(contact_id),),
     )
-    
+
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Contact {contact_id} not found",
         )
-    
+
     # Soft delete
     now = datetime.now(timezone.utc).isoformat()
     await database.execute(
         "UPDATE contacts SET deleted_at = ? WHERE id = ?",
         (now, str(contact_id)),
     )
-    
+
+    # Retire the contact_id claim so the link doesn't dangle
+    from bob_server.context import AppContext
+    from bob_server.services.memory import MemoryService
+    ctx = AppContext(settings=request.app.state.settings, db=database)
+    await MemoryService(ctx).retire_contact_id_claim(str(contact_id))
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

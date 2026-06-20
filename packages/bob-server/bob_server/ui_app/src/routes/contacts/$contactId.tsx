@@ -130,6 +130,8 @@ function ContactDetailPage() {
       putAPI<{ ok: boolean }>(`/contacts/${contactId}`, body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["contact-detail", contactId] });
+      queryClient.invalidateQueries({ queryKey: ["contact-entity", contactId] });
+      queryClient.invalidateQueries({ queryKey: ["contact-claims", contactId] });
       queryClient.invalidateQueries({ queryKey: ["contacts"] });
       setEditing(false);
     },

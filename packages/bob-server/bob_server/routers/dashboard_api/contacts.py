@@ -144,6 +144,17 @@ async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
         f"UPDATE contacts SET {set_clause} WHERE id = ? AND deleted_at IS NULL",
         tuple(values),
     )
+
+    # Propagate name change to linked person entity's display_name snapshot
+    if "name" in updates:
+        from bob_server.context import AppContext
+        from bob_server.services.memory import MemoryService
+        settings = request.app.state.settings
+        ctx = AppContext(settings=settings, db=db)
+        await MemoryService(ctx).sync_person_display_name_for_contact(
+            contact_id, updates["name"],
+        )
+
     return {"ok": True, "updated": True}
 
 

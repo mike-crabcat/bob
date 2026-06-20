@@ -45,6 +45,7 @@ interface CallDetail {
   total_tokens: number | null;
   cached_tokens: number | null;
   messages: MessageItem[] | null;
+  tool_calls: MessageItem[] | null;
   tools: { type: string; name: string; description: string; parameters?: Record<string, unknown> }[] | null;
   response_text: string;
   user_message: string;
@@ -180,8 +181,9 @@ function CallDetailPage() {
 
   const allMsgs = call.messages ?? [];
   const priorMessages = allMsgs.filter((m) => isChat(m) && m.role !== "system").slice(0, -1) as ChatMessage[];
-  const toolCalls = allMsgs.filter(isToolCall);
-  const toolOutputs = allMsgs.filter(isToolOutput);
+  const toolItems = call.tool_calls ?? [];
+  const toolCalls = toolItems.filter(isToolCall);
+  const toolOutputs = toolItems.filter(isToolOutput);
   const webSearches = allMsgs.filter(isWebSearch);
   const liveToolEntries = [...liveTools.current.values()];
 

@@ -2,6 +2,42 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-06-18
+
+### Added
+- Add `self` and `relationship` memory entity types with 14 new claim types (migration 342), giving Bob a self-model and per-person relationship records populated through the existing dream/extraction pipeline
+- Add `/approve <phone> [name]` slash command letting trusted contacts pre-authorize unknown numbers so their WhatsApp DMs are not dropped by the contact-existence gate
+- Add WhatsApp bridge HTTP `/upload` endpoint with single-use in-memory UploadStore (5m TTL, 100 MiB cap) so large media like PDFs can bypass the ~770KB WebSocket frame ceiling via `upload_id`
+- Add shared harness venv at `~/bobenv`, auto-created on startup, that the bash tool activates so `python`/`pip` resolve consistently across skills (replaces per-skill pyproject.toml)
+- Add WhatsApp bridge lifecycle CLI (`bob whatsapp service install|uninstall|start|stop|restart|status|logs`): builds the Go binary, writes the systemd unit, probes the bridge over TCP for status
+- Add unified bridge auth via `BOB_WHATSAPP_BRIDGE_TOKEN` (replaces `WHATSAPPBRIDGE_TOKEN`) read from the shared config dir by both processes, plus shared `.env` loading with first-definition-wins precedence mirroring the Python service
+- Add daily-rotating file logs: Python writes to `~/logs/{YYYY-MM-DD}_bob-server.log`, Go bridge to `~/logs/{YYYY-MM-DD}_whatsappbridge.log`, both archiving prior days to `~/logs/older/` at midnight and on startup
+- Persist tool-call traces (`tool_summary`, `tool_blocks_json`) on assistant session_messages via migration 343; last 3 assistant rows expand inline during prompt assembly, older rows fall back to bracketed summaries
+- Add per-iteration LLM usage accumulation across tool-call rounds in `chat_with_tools` and `chat_stream_with_tools` (previously dropped intermediate tokens, undercounting by 30-60%)
+- Add claim-type glossary to memory reconciliation so the LLM can detect and retract claims whose values violate their type definition
+- Add `docs/datamodel.md` reference with 6 Mermaid ERDs (sessions/messaging, dispatches, phone calls, email, calendars/events, notifications/webhooks)
+
+### Changed
+- Refactor three oversized modules (`cli.py` 2516 lines, `dashboard_api.py` 2066 lines, `whatsapp_bridge_service.py` 1691 lines) into per-domain package layouts; public APIs unchanged, the WhatsApp service now composes `GroupEventsMixin` + `SlashCommandsMixin` via MRO
+- Rename dashboard cost-table columns from `prompt`/`completion` to `input`/`output` to match OpenAI API terminology
+- Move data-model section out of README into `docs/datamodel.md`, registered in `DOCS.yaml`
+- Finish Cyborg→Bob rename in README and AGENTS.md (clone URL, env defaults, paths) and replace stale Jinja2/dashboard description with the actual React SPA at `ui_app/`/`ui_dist/`
+
+### Fixed
+- Fix file logging going silent after startup: `serve()` now carries `log_path`/`log_dir`/`debug` into the explicit `Settings`, and uvicorn runs via a `_PreserveLoggingConfig` subclass whose `configure_logging()` is a no-op so it cannot clobber root handlers mid-runtime
+- Fix routine scheduler double-fire race by advancing `next_run_at` atomically in `claim()` before dispatch
+- Add memory addressing guard so `self-bob` and `relationship-bob-*` claims are only written when Bob is actually being addressed (not during human-to-human conversation or when silent)
+- Fix two un-awaited `ensure_person_entry` async calls and the stale `_wa_service` reference in the WhatsApp bridge email polling path
+- Remove eager module-level `create_app()` call at import in `main.py`
+- Fix broken `pytest` collection at HEAD by deleting stale tests referencing removed `DispatchStatus`/`BlockedProjectCheckTask` symbols
+
+### Security
+- Block WhatsApp DMs from numbers with no contact row: previously any unknown sender was auto-seeded as an untrusted contact and dispatched; now their messages are logged as warnings and dropped before session creation. Group members remain unaffected since group sync auto-seeds contacts.
+
+### Removed
+- Drop `DatabaseLogHandler` and the `structured_logs` table: the handler's asyncio task was never tracked, writes were silently dropped, and nothing queried the table (migration 341 drops it)
+- Remove committed artifacts (`data/cyborg.db`, `packages/bob-server/cyborg.db`, three `cyborg-*.png` branding assets), dead `memory_service.py`/`memory_service_v1.py` (zero references), and the stale `persona-plan.md`
+
 ## 2026-06-13
 
 ### Added

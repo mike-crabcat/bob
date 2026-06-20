@@ -105,6 +105,10 @@ class SlashCommandsMixin:
                     "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
                     (name, utcnow().isoformat(), existing["id"]),
                 )
+                from bob_server.services.memory import MemoryService
+                await MemoryService(self.ctx).sync_person_display_name_for_contact(
+                    existing["id"], name,
+                )
             await self.send_message(chat_id, f"/approve: already a contact ({phone_number})")
             return
 

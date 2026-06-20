@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from bob_server.services.tools import tool
+from bob_server.services.openai_service import strip_citation_markers
 
 if TYPE_CHECKING:
     from bob_server.context import AppContext
@@ -371,6 +372,7 @@ def make_outreach_reply_tools(
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
+            text = strip_citation_markers(text)
             if not origin_chat_id:
                 return "Error: cannot resolve chat for source session"
             if not wa_service.connected:

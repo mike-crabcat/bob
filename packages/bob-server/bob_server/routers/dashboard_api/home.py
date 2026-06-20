@@ -163,10 +163,11 @@ async def get_home(request: Request) -> dict[str, Any]:
                GROUP BY call_category, model
                ORDER BY call_category, model"""
         )
-        # Pricing per 1M tokens (input, output)
+        # Pricing per 1M tokens (input, output). Cached input is billed at 10%
+        # of the input rate (OpenAI's 90% prompt-cache discount).
         _PRICING: dict[str, tuple[float, float]] = {
-            "gpt-5.4-mini": (1.50, 6.00),
-            "gpt-5.5": (6.00, 24.00),
+            "gpt-5.4-mini": (0.75, 4.50),
+            "gpt-5.5": (5.00, 30.00),
         }
         category_totals: dict[str, dict[str, Any]] = {}
         for row in cost_rows:
@@ -175,8 +176,8 @@ async def get_home(request: Request) -> dict[str, Any]:
             prompt = row["total_prompt_tokens"] or 0
             completion = row["total_completion_tokens"] or 0
             cached = row["total_cached_tokens"] or 0
-            rate_in, rate_out = _PRICING.get(model, _PRICING.get("gpt-5.4-mini", (1.50, 6.00)))
-            cost = ((prompt - cached) * rate_in + cached * rate_in * 0.5 + completion * rate_out) / 1_000_000
+            rate_in, rate_out = _PRICING.get(model, _PRICING.get("gpt-5.4-mini", (0.75, 4.50)))
+            cost = ((prompt - cached) * rate_in + cached * rate_in * 0.1 + completion * rate_out) / 1_000_000
             cost = max(cost, 0)
             if cat not in category_totals:
                 category_totals[cat] = {"category": cat, "cost": 0.0, "call_count": 0, "prompt_tokens": 0, "completion_tokens": 0}

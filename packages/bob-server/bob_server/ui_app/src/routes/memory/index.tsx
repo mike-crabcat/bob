@@ -425,6 +425,15 @@ function EntityDetailView({
   const [merging, setMerging] = useState(false);
   const [mergeTarget, setMergeTarget] = useState("");
   const [mergeBusy, setMergeBusy] = useState(false);
+  const [idCopied, setIdCopied] = useState(false);
+
+  const copyEntityId = async () => {
+    try {
+      await navigator.clipboard.writeText(entity.entity_id);
+      setIdCopied(true);
+      setTimeout(() => setIdCopied(false), 1200);
+    } catch { /* clipboard blocked — ignore */ }
+  };
 
   const fetchBulletins = async () => {
     if (fetchedBulletins || !(entity.source_bulletins?.length)) return;
@@ -456,17 +465,38 @@ function EntityDetailView({
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
-        <button onClick={onBack} className="text-[10px] text-accent hover:underline">&larr; all entities</button>
-        <span className="text-xs text-text font-medium truncate flex-1">{entity.display_name}</span>
-        <span className="text-[8px] text-accent/60 bg-accent/10 px-1.5 py-0.5 rounded">{entity.entity_type}</span>
-        <span className="text-[8px] text-success/60 bg-success/10 px-1.5 py-0.5 rounded">{entity.status}</span>
-        {!merging && (
+      <div className="border-b border-border shrink-0">
+        <div className="flex items-center gap-2 px-3 py-1.5">
+          <button onClick={onBack} className="text-[10px] text-accent hover:underline">&larr; all entities</button>
+          <span className="text-xs text-text font-medium truncate flex-1">{entity.display_name}</span>
+          <span className="text-[8px] text-accent/60 bg-accent/10 px-1.5 py-0.5 rounded">{entity.entity_type}</span>
+          <span className="text-[8px] text-success/60 bg-success/10 px-1.5 py-0.5 rounded">{entity.status}</span>
+          {!merging && (
+            <button
+              onClick={() => setMerging(true)}
+              className="text-[8px] text-muted hover:text-accent bg-surface/50 border border-border/50 px-1.5 py-0.5 rounded hover:border-accent/30 transition-colors"
+            >merge</button>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 px-3 pb-1.5">
+          <span className="text-[9px] text-muted font-mono truncate">{entity.entity_id}</span>
           <button
-            onClick={() => setMerging(true)}
-            className="text-[8px] text-muted hover:text-accent bg-surface/50 border border-border/50 px-1.5 py-0.5 rounded hover:border-accent/30 transition-colors"
-          >merge</button>
-        )}
+            onClick={copyEntityId}
+            title="Copy entity ID"
+            className="text-muted hover:text-accent shrink-0 transition-colors"
+          >
+            {idCopied ? (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Merge bar */}
