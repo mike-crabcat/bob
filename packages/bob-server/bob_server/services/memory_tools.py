@@ -12,8 +12,6 @@ import logging
 from bob_server.context import AppContext
 from bob_server.services.memory import MemoryService
 from bob_server.services.memory.channels import resolve_channel_id
-from bob_server.services.memory.claim_types import render_entity
-from bob_server.services.memory.claim_service import get_active_claims
 from bob_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -55,6 +53,17 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         return await _note(ctx.db, text, context_entity_id or None, channel_id=channel_id)
 
     @tool
+    async def remember(hint: str = "") -> str:
+        """Flag the current conversation as worth capturing now. Queues a memory
+        extraction turn that runs immediately after this reply completes (silent
+        extraction mode only). Optional `hint` steers the extractor toward a topic
+        (e.g. "user updated their email"). Use sparingly — only when something
+        genuinely memory-worthy just happened; idle conversations are already
+        mined automatically once they go quiet."""
+        MemoryService.queue_remember_extraction(session_key, svc, hint=hint or None)
+        return json.dumps({"ok": True, "queued": True, "hint": bool(hint)})
+
+    @tool
     async def memory_write(
         content: str,
         channel_id: str = "",
@@ -75,29 +84,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             visibility=visibility,
         )
         return json.dumps({"ok": True, "bulletin_id": bulletin_id, "queued": True})
-
-    @tool
-    async def memory_read(entity_id: str) -> str:
-        """Read a specific memory entity by ID. Returns rendered claims."""
-        workspace = ctx.settings.harness.workspace_dir
-
-        entity = await svc.read_entity(workspace, entity_id)
-        if entity is None:
-            return json.dumps({"error": f"Entity not found: {entity_id}"})
-
-        # Fetch and render claims
-        claims = await get_active_claims(ctx.db, entity_id)
-        claim_dicts = [
-            {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
-            for c in claims
-        ]
-        rendered = await render_entity(entity.entity_type, entity.display_name, claim_dicts, entity_id=entity.entity_id, db=ctx.db)
-        return json.dumps({
-            "entity_id": entity.entity_id,
-            "entity_type": entity.entity_type,
-            "display_name": entity.display_name,
-            "rendered": rendered,
-        })
 
     @tool
     async def memory_correct(
@@ -239,4 +225,10 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         else:
             return json.dumps({"error": f"Unknown action: {action}. Use remove_entity, remove_claim, or set_truth."})
 
-    return [recall, find, note, memory_write, memory_read, memory_correct]
+    # In silent extraction mode the bulletin-writing tools (note, memory_write)
+    # are superseded by the remember tool — Bob flags the conversation for the
+    # extractor instead of authoring a bulletin that the dream pipeline digests.
+    # In bulletin mode the legacy note/memory_write tools are offered.
+    mode = ctx.settings.memory_extraction.mode
+    capture_tools = [remember] if mode == "silent" else [note, memory_write]
+    return [recall, find, *capture_tools, memory_correct]

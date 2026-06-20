@@ -841,7 +841,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 group_memory_hint = (
                     "## Group Memory\n\n"
                     f"This is a WhatsApp group with accumulated memory entity `{eid}`.\n"
-                    f"Use `memory_read('{eid}')` or `memory_graph('{eid}')` to look up group knowledge."
+                    f"Use `recall('{eid}')` to look up group knowledge."
                 )
 
         # Handle shared contacts — auto-seed into contacts table

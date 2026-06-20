@@ -148,36 +148,84 @@ class SessionIdleSummaryTask:
         )
         return [dict(r) for r in rows] if rows else []
 
+    async def _find_idle_sessions_silent(
+        self, db: Database, idle_threshold_minutes: float
+    ) -> list[dict]:
+        """Silent-mode idle detection.
+
+        Same shape as `_find_idle_sessions`, but the "messages since last
+        extraction" anchor reads MAX(ran_at) from memory_extraction_turns
+        instead of memory_bulletins.session_range_end.
+        """
+        rows = await db.fetch_all(
+            """
+            SELECT
+                sm.session_key,
+                MAX(sm.created_at) AS last_message_at,
+                COALESCE(
+                    (SELECT MAX(ran_at) FROM memory_extraction_turns
+                     WHERE session_key = sm.session_key),
+                    '1970-01-01'
+                ) AS active_from,
+                COUNT(*) AS message_count
+            FROM session_messages sm
+            WHERE sm.session_key NOT LIKE 'subagent:%'
+              AND datetime(sm.created_at) > datetime(COALESCE(
+                (SELECT MAX(ran_at) FROM memory_extraction_turns
+                 WHERE session_key = sm.session_key),
+                '1970-01-01'
+              ))
+            GROUP BY sm.session_key
+            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
+            """,
+            (idle_threshold_minutes,),
+        )
+        return [dict(r) for r in rows] if rows else []
+
     async def run(self, ctx: AppContext) -> None:
         from bob_server.services.memory import MemoryService
 
         idle_threshold = ctx.settings.session_summary_idle_minutes
-        idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
+        mode = ctx.settings.memory_extraction.mode
+
+        if mode == "silent":
+            idle_sessions = await self._find_idle_sessions_silent(ctx.db, idle_threshold)
+        else:
+            idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
 
         if not idle_sessions:
             return
 
-        workspace = ctx.settings.harness.workspace_dir
         svc = MemoryService(ctx)
 
         for session in idle_sessions:
+            session_key = session["session_key"]
             try:
-                result = await svc.generate_session_bulletins(
-                    workspace,
-                    session["session_key"],
-                    active_from=session["active_from"],
-                    run_dream=False,
-                )
-                n = result.get("bulletins_generated", 0)
-                if n:
+                if mode == "silent":
+                    result = await svc.run_silent_turn_extraction(session_key)
                     logger.info(
-                        "Generated %d bulletin(s) for session %s (%d messages)",
-                        n, session["session_key"], session["message_count"],
+                        "Silent extraction %s for session %s: %s claim(s)",
+                        result.get("status"), session_key,
+                        result.get("claims_created", 0),
                     )
+                else:
+                    workspace = ctx.settings.harness.workspace_dir
+                    result = await svc.generate_session_bulletins(
+                        workspace,
+                        session_key,
+                        active_from=session["active_from"],
+                        run_dream=False,
+                    )
+                    n = result.get("bulletins_generated", 0)
+                    if n:
+                        logger.info(
+                            "Generated %d bulletin(s) for session %s (%d messages)",
+                            n, session_key, session["message_count"],
+                        )
             except Exception:
                 logger.exception(
                     "Failed to process session %s",
-                    session["session_key"],
+                    session_key,
                 )
 
 

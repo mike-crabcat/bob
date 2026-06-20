@@ -36,7 +36,7 @@ async def write_claim(db: Any, claim: Claim) -> str:
     # active claim, merge bulletin sources instead of creating a duplicate.
     if claim.status == "active":
         existing = await db.fetch_one(
-            "SELECT id, source_bulletins FROM memory_claims "
+            "SELECT id, source_bulletins, source_messages FROM memory_claims "
             "WHERE status = 'active' AND claim_type_key = ? AND subject_id = ? "
             "AND COALESCE(object_id, '') = COALESCE(?, '') "
             "AND COALESCE(value, '') = COALESCE(?, '')",
@@ -46,18 +46,20 @@ async def write_claim(db: Any, claim: Claim) -> str:
             existing_id = existing["id"]
             existing_bullets: list[str] = json.loads(existing["source_bulletins"]) if existing["source_bulletins"] else []
             merged = list(dict.fromkeys(existing_bullets + claim.source_bulletins))
-            if len(merged) > len(existing_bullets):
+            existing_messages: list[str] = json.loads(existing["source_messages"]) if existing.get("source_messages") else []
+            merged_messages = list(dict.fromkeys(existing_messages + claim.source_messages))
+            if len(merged) > len(existing_bullets) or len(merged_messages) > len(existing_messages):
                 await db.execute(
-                    "UPDATE memory_claims SET source_bulletins = ? WHERE id = ?",
-                    (json.dumps(merged), existing_id),
+                    "UPDATE memory_claims SET source_bulletins = ?, source_messages = ? WHERE id = ?",
+                    (json.dumps(merged), json.dumps(merged_messages), existing_id),
                 )
             return existing_id
 
     await db.execute(
         "INSERT OR REPLACE INTO memory_claims "
         "(id, claim_type_key, subject_id, object_id, value, status, "
-        "source_bulletins, visibility, scope, created_at, superseded_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_bulletins, source_messages, visibility, scope, created_at, superseded_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             claim.id,
             claim.claim_type_key,
@@ -66,6 +68,7 @@ async def write_claim(db: Any, claim: Claim) -> str:
             claim.value,
             claim.status,
             json.dumps(claim.source_bulletins),
+            json.dumps(claim.source_messages),
             claim.visibility,
             json.dumps(claim.scope),
             claim.created_at.isoformat(),

@@ -40,6 +40,7 @@ class SessionService(BaseService):
         dispatched: int = 1,
         dispatch_id: str | None = None,
         synthetic: bool | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Store a message. Returns the message ID.
 
@@ -51,6 +52,10 @@ class SessionService(BaseService):
         When ``role == "assistant"`` and ``dispatch_id`` is set, the dispatch's
         tool-call trace is also pulled via ``pop_tool_trace`` and persisted to
         ``tool_summary`` / ``tool_blocks_json`` for replay in future dispatches.
+
+        ``message_id`` lets a caller pre-set the id (e.g. a silent extraction
+        turn that threads its own message id as claim provenance before the
+        message row exists). Defaults to a freshly generated uuid.
         """
         tool_summary: str | None = None
         tool_blocks_json: str | None = None
@@ -64,7 +69,7 @@ class SessionService(BaseService):
                     tool_blocks_json = trace["items_json"]
             else:
                 synthetic = False
-        msg_id = str(uuid4())
+        msg_id = message_id or str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
         await self.db.execute(
             """INSERT INTO session_messages

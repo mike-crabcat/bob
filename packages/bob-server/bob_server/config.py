@@ -235,6 +235,19 @@ class ReconciliationSettings:
 
 
 @dataclass(slots=True)
+class MemoryExtractionSettings:
+    """Configuration for the idle-triggered memory extractor.
+
+    mode selects which extractor runs when a session goes idle:
+        'bulletin' — legacy single-shot JSON extraction over a transcript window.
+        'silent'   — agent tool-loop "silent turn" that calls claim-creation tools
+                     and links provenance to the turn's session_message id.
+    """
+
+    mode: str = "bulletin"
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -259,6 +272,7 @@ class Settings:
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     patience: PatienceSettings = field(default_factory=PatienceSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
+    memory_extraction: MemoryExtractionSettings = field(default_factory=MemoryExtractionSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
@@ -428,6 +442,11 @@ class Settings:
             min_interval_hours=float(os.getenv("BOB_RECON_MIN_INTERVAL_HOURS", "6.0")),
         )
 
+        memory_extraction_mode = os.getenv("BOB_MEMORY_EXTRACTION_MODE", "bulletin").strip().lower()
+        if memory_extraction_mode not in ("bulletin", "silent"):
+            memory_extraction_mode = "bulletin"
+        memory_extraction = MemoryExtractionSettings(mode=memory_extraction_mode)
+
         return cls(
             host=host,
             port=port,
@@ -454,6 +473,7 @@ class Settings:
             whatsapp_bridge=whatsapp_bridge,
             patience=patience,
             reconciliation=reconciliation,
+            memory_extraction=memory_extraction,
         )
 
     def ensure_directories(self) -> None:

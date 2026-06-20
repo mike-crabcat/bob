@@ -105,28 +105,42 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
 
-    # Load memory index from SQLite
+    # Memory tool guidance. The available capture tool depends on the extraction
+    # mode (read from env, the same source make_memory_tools uses). A full memory
+    # index dump used to be appended here but was disabled — Bob discovers
+    # entities on demand via these tools instead.
     if db is not None:
-        from bob_server.services.memory.service import build_memory_index_text_db
-        # TODO: The full memory index dump was ~22KB+ and mostly artifact noise.
-        # The memory tools (search/read/browse/write/graph) still work — agents
-        # discover entities on demand rather than via a prompt dump that probably
-        # didn't help anyway. Re-enable if we build a compact, useful index.
-        # memory_index = await build_memory_index_text_db(db)
+        mode = os.getenv("BOB_MEMORY_EXTRACTION_MODE", "bulletin").strip().lower()
+        if mode == "silent":
+            capture_line = (
+                "- **remember(hint?)** — Flag the current conversation as worth "
+                "capturing; an extraction turn runs right after your reply and "
+                "decides what to record. Use sparingly — idle conversations are "
+                "mined automatically.\n"
+            )
+        else:
+            capture_line = (
+                "- **note(text)** — Queue a snippet as a bulletin for digestion.\n"
+                "- **memory_write(content, channel_id?, visibility?)** — Queue a "
+                "markdown bulletin for digestion.\n"
+            )
         memory_section = (
             "## Memory\n\n"
             "You have persistent memory with these tools:\n"
-            "- **memory_search(query, entity_type?)** — Always start here. Searches all entities and returns an abstract with matches.\n"
-            "- **memory_read(entity_id)** — Read a specific entity in full (e.g. contact-7c9f0fd7).\n"
-            "- **memory_browse(entity_type)** — List all entities of a type.\n"
-            "- **memory_write(content, channel_id?, visibility?)** — Write a new bulletin (queued, curated by dream process).\n"
-            "- **memory_graph(entity_id, depth?)** — Explore related entities.\n"
-            "- **memory_correct(action, entity_id?, claim_type_key?, value?, reason)** — Correct wrong memory. Actions: remove_entity (archive entity + all claims), remove_claim (supersede a specific claim), set_truth (write a user correction). Always provide a reason.\n"
+            "- **recall(query)** — Look up an entity by ID, name, or natural-language "
+            "query; returns its claims rendered as text plus reverse references. "
+            "Start here for \"what do I know about X\".\n"
+            "- **find(entity_type, claim_type_key?, value?)** — List entities of a "
+            "type, optionally filtered by a claim.\n"
+            f"{capture_line}"
+            "- **memory_correct(action, entity_id?, claim_type_key?, value?, reason)** "
+            "— Fix wrong memory: remove_entity (archive an entity and its claims), "
+            "remove_claim (supersede one claim), set_truth (write a user correction). "
+            "Always give a reason.\n"
             "\n"
-            "Entity types: contacts, groups, channels, trips, locations, events, tasks, artifacts, decisions.\n"
+            "Entity types: person, group, trip, stay, connection, location, event, "
+            "task, file, thing, decision.\n"
         )
-        # if memory_index:
-        #     memory_section += "\n" + memory_index
         parts.append(memory_section)
 
     # Append grounding rules to reduce hallucinated tool claims

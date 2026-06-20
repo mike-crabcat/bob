@@ -17,7 +17,6 @@ from bob_server.services.memory.claim_types import (
     ENTITY_REF_CLAIM_KEYS,
     ENTITY_TYPE_PREFIXES,
     ENTITY_TYPE_REGISTRY,
-    ENTITY_TYPES,
     get_claim_types_for_entity,
     render_entity,
 )
@@ -28,6 +27,7 @@ from bob_server.services.memory.claim_service import (
 )
 from bob_server.services.memory.models import Claim
 from bob_server.services.memory.merge import _execute_merge, _deduplicate_claims
+from bob_server.services.memory.entity_tools import make_list_entities_tool, make_get_entity_tool
 from bob_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -114,89 +114,8 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
                       used to queue reconciliation on the resulting entity.
     """
 
-    @tool
-    async def list_entities(entity_type: str) -> str:
-        """List active entities of a given type. Returns entity IDs and display names.
-
-        Use this to discover related entities (e.g. find all trips, all connections).
-        """
-        if entity_type not in ENTITY_TYPES:
-            return f"Unknown entity type: {entity_type}. Valid types: {', '.join(ENTITY_TYPES)}"
-        rows = await db.fetch_all(
-            "SELECT entity_id, display_name FROM memory_entities "
-            "WHERE entity_type = ? AND status = 'active'",
-            (entity_type,),
-        )
-        if not rows:
-            return f"No active {entity_type} entities found."
-        lines = [f"{r['entity_id']} ({r['display_name'] or r['entity_id']})" for r in rows]
-        return "\n".join(lines)
-
-    @tool
-    async def get_entity(entity_id: str) -> str:
-        """Get full rendered details of an entity including all its claims.
-
-        Returns the entity's type, display name, all claim values, and provenance.
-        """
-        row = await db.fetch_one(
-            "SELECT entity_id, entity_type, display_name FROM memory_entities "
-            "WHERE entity_id = ? AND status = 'active'",
-            (entity_id,),
-        )
-        if not row:
-            return f"Entity not found: {entity_id}"
-
-        claims = await db.fetch_all(
-            "SELECT claim_type_key, object_id, value, source_bulletins FROM memory_claims "
-            "WHERE status = 'active' AND subject_id = ?",
-            (entity_id,),
-        )
-        claim_dicts = [
-            {"claim_type_key": r["claim_type_key"], "object_id": r["object_id"], "value": r["value"]}
-            for r in claims
-        ]
-
-        rendered = await render_entity(
-            row["entity_type"], row["display_name"], claim_dicts,
-            entity_id=entity_id, db=db,
-        )
-
-        # Append provenance
-        prov_lines: list[str] = []
-        for r in claims:
-            val = r["value"] or r["object_id"] or ""
-            src = r["source_bulletins"] or ""
-            src_label = ""
-            if src:
-                try:
-                    bids = json.loads(src) if isinstance(src, str) else src
-                    if bids:
-                        src_label = f"  [source: {', '.join(bids)}]"
-                    else:
-                        src_label = "  [source: none — inferred]"
-                except (json.JSONDecodeError, TypeError):
-                    src_label = f"  [source: {src}]"
-            elif r["claim_type_key"] not in ("truth",):
-                src_label = "  [source: none — inferred]"
-            prov_lines.append(f"  {r['claim_type_key']}: {val}{src_label}")
-        if prov_lines:
-            rendered += "\n\nProvenance:\n" + "\n".join(prov_lines)
-
-        # Also show reverse references (entities that reference this one)
-        reverse = await db.fetch_all(
-            "SELECT c.claim_type_key, c.subject_id, e.display_name "
-            "FROM memory_claims c "
-            "LEFT JOIN memory_entities e ON e.entity_id = c.subject_id "
-            "WHERE c.status = 'active' AND c.object_id = ?",
-            (entity_id,),
-        )
-        if reverse:
-            rendered += "\n\nReferenced by:"
-            for rc in reverse:
-                label = rc["display_name"] or rc["subject_id"]
-                rendered += f"\n  - {label} [{rc['claim_type_key']}]"
-
-        return rendered
+    list_entities = make_list_entities_tool(db)
+    get_entity = make_get_entity_tool(db)
 
     @tool
     async def add_claim(
