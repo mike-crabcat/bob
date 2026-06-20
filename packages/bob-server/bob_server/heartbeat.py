@@ -135,14 +135,14 @@ class SessionIdleSummaryTask:
                 COUNT(*) AS message_count
             FROM session_messages sm
             WHERE sm.session_key NOT LIKE 'subagent:%'
-              AND sm.created_at > COALESCE(
+              AND datetime(sm.created_at) > datetime(COALESCE(
                 (SELECT MAX(session_range_end) FROM memory_bulletins
                  WHERE source_id = sm.session_key
                    AND session_range_end != ''),
                 '1970-01-01'
-            )
+              ))
             GROUP BY sm.session_key
-            HAVING MAX(sm.created_at) < datetime('now', '-' || ? || ' minutes')
+            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
             """,
             (idle_threshold_minutes,),
         )

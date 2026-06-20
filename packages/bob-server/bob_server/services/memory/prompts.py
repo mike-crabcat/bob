@@ -188,6 +188,39 @@ If in doubt, omit the claim.
 
 ---
 
+# Person-Level Claims — Preferences, Interests & Attributes
+
+When a human mentions what they like, dislike, own, play, follow, or do for fun or work, \
+extract it as a `person-*` claim. These describe WHO THE PERSON IS and are independent of \
+any interaction with {bot_name}. Use subject_id `person-{{slug}}` — NOT `relationship-bob-*`.
+
+How casual utterances map to claim types:
+
+- drink_preference: "I don't really like Pilsner, I'd much prefer a hazy juicy IPA" → \
+  value="prefers hazy juicy IPA; dislikes Pilsner"
+- food_preference: "I hate coriander" → value="hates coriander"
+- dietary_restriction: "I'm coeliac" → value="coeliac"
+- sport_preference: "I play squash Tuesdays" → value="plays social squash (Tuesdays)"
+- interest: "I drive a Prado 150, love the outdoors" → \
+  value="4WDing; outdoors; Toyota Prado 150"
+- entertainment_preference: "Big Eagles fan" → value="AFL — Eagles supporter"
+- music_preference: "I play guitar, mostly indie rock" → value="plays guitar; indie rock"
+- pet: "My golden retriever Bella" → value="golden retriever named Bella"
+- job: "I'm a software engineer at Google" → value="Software Engineer, Google"
+- workplace: (same utterance) → value="Google"
+- hometown: "Grew up in Perth" → value="Perth"
+- appearance: "tall bloke, glasses" → value="tall, wears glasses"
+
+**Before finalizing output:** re-scan each non-SYNTHETIC human message and ask: \
+"does this reveal a fact about who this person IS — a taste, hobby, possession, trait, \
+relationship, or affiliation?" If yes, emit a `person-*` claim. Most casual human \
+messages carry at least one such fact, even when the surface topic looks like banter.
+
+Preferences and interests are durable — extracting them is high-value even when the \
+surrounding message is joking, sarcastic, or addressed to {bot_name}.
+
+---
+
 # Output Format
 
 Return a JSON array of claim objects. Example:
@@ -206,6 +239,22 @@ Return a JSON array of claim objects. Example:
     "claim_type_key": "spouse",
     "subject_id": "person-mike-cleaver",
     "object_id": "person:new:Blair",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "drink_preference",
+    "subject_id": "person-ryan",
+    "value": "prefers hazy juicy IPA or Corona on the water; dislikes Pilsner",
+    "status": "active",
+    "source_bulletin_id": "bulletin-2026-06-01-001",
+    "visibility": "group"
+  }},
+  {{
+    "claim_type_key": "interest",
+    "subject_id": "person-david-curnow",
+    "value": "4WDing; outdoors; drives Toyota Prado 150; doesn't drink beer",
     "status": "active",
     "source_bulletin_id": "bulletin-2026-06-01-001",
     "visibility": "group"

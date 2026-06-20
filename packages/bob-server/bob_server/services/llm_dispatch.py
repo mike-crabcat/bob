@@ -136,6 +136,23 @@ def _build_tool_trace(new_items: list[Any]) -> dict[str, Any] | None:
     return {"items": filtered, "summary": summary}
 
 
+def _serialize_trace_items(trace: dict[str, Any] | None) -> str | None:
+    """Serialize a trace's items list to JSON, capped at _WHOLE_TRACE_CAP.
+
+    Returns None when trace is None, on serialization failure, or when the
+    serialized form exceeds the cap (caller falls back to summary-only).
+    """
+    if trace is None:
+        return None
+    try:
+        items_json = json.dumps(_sanitize_for_json(trace.get("items", [])))
+    except Exception:
+        return None
+    if len(items_json) > _WHOLE_TRACE_CAP:
+        return None
+    return items_json
+
+
 def _sanitize_for_json(obj: Any) -> Any:
     """Recursively convert non-serializable objects to plain dicts."""
     if isinstance(obj, dict):
@@ -194,6 +211,7 @@ async def _record_log(
     task_id: str | None = None,
     dispatch_id: str | None = None,
     contact_id: str | None = None,
+    tool_blocks_json: str | None = None,
 ) -> str:
     """Record or update an LLM call log entry. Returns the log_id.
 
@@ -210,12 +228,14 @@ async def _record_log(
                     """UPDATE llm_call_log SET
                        response_text=?, latency_seconds=?, ttft_seconds=?,
                        prompt_tokens=?, completion_tokens=?, total_tokens=?, cached_tokens=?,
-                       status=?, error_message=?, messages_json=COALESCE(?, messages_json)
+                       status=?, error_message=?, messages_json=COALESCE(?, messages_json),
+                       tool_blocks_json=COALESCE(?, tool_blocks_json)
                        WHERE id = ?""",
                     (
                         response_text, latency_seconds, ttft_seconds,
                         prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                         status, error_message, messages_json,
+                        tool_blocks_json,
                         log_id,
                     ),
                 )
@@ -228,14 +248,16 @@ async def _record_log(
                 system_prompt, user_message, messages_json, tools_json,
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                status, error_message, project_id, task_id, dispatch_id, contact_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                status, error_message, project_id, task_id, dispatch_id, contact_id,
+                tool_blocks_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row_id, provider, model, call_category, session_key,
                 system_prompt, user_message, messages_json, tools_json,
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                 status, error_message, project_id, task_id, dispatch_id, contact_id,
+                tool_blocks_json,
             ),
         )
         return row_id
@@ -314,14 +336,10 @@ class LLMDispatchService(BaseService):
         trace = _dispatch_tool_trace.pop(dispatch_id, None)
         if trace is None:
             return None
-        items_json: str | None
-        try:
-            items_json = json.dumps(_sanitize_for_json(trace.get("items", [])))
-        except Exception:
-            items_json = None
-        if items_json is not None and len(items_json) > _WHOLE_TRACE_CAP:
-            items_json = None
-        return {"summary": trace.get("summary", ""), "items_json": items_json}
+        return {
+            "summary": trace.get("summary", ""),
+            "items_json": _serialize_trace_items(trace),
+        }
 
     def _resolve_model(self, model: str | None = None) -> str:
         if model:
@@ -611,6 +629,7 @@ class LLMDispatchService(BaseService):
             )
             elapsed = time.monotonic() - t0
 
+            trace: dict[str, Any] | None = None
             if dispatch_id:
                 trace = _build_tool_trace(messages[original_len:])
                 if trace is not None:
@@ -625,6 +644,7 @@ class LLMDispatchService(BaseService):
                 cached_tokens=stream_result.cached_tokens,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="completed",
+                tool_blocks_json=_serialize_trace_items(trace),
             )
 
             logger.info(
@@ -739,6 +759,7 @@ class LLMDispatchService(BaseService):
                     accumulated += chunk
                     yield chunk
 
+            trace: dict[str, Any] | None = None
             if dispatch_id:
                 trace = _build_tool_trace(messages[original_len:])
                 if trace is not None:
@@ -754,6 +775,7 @@ class LLMDispatchService(BaseService):
                 total_tokens=stream_result.total_tokens,
                 cached_tokens=stream_result.cached_tokens,
                 status="completed",
+                tool_blocks_json=_serialize_trace_items(trace),
             )
             await self._publish_call(
                 status="completed", session_key=session_key,

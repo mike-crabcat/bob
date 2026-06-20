@@ -20,6 +20,7 @@ from bob_server.config import Settings
 from bob_server.context import AppContext
 from bob_server.models import SessionRouteCreate, SessionRouteKind
 from bob_server.services.base import BaseService, utcnow
+from bob_server.services.openai_service import strip_citation_markers
 from bob_server.services.session_route_service import SessionRouteService
 from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
 
@@ -331,6 +332,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
+            text = strip_citation_markers(text)
             sent_texts.append(text)
             request_id = await wa_service.send_message(chat_id, text)
             return f"Message sent (request_id={request_id})"
@@ -671,6 +673,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
                     (sender_name, utcnow().isoformat(), contact_id),
                 )
+                from bob_server.services.memory import MemoryService
+                await MemoryService(self.ctx).sync_person_display_name_for_contact(
+                    contact_id, sender_name,
+                )
         elif chat_kind == "dm":
             # Security gate: drop DMs from numbers with no contact row.
             # Group sync auto-seeds contacts for everyone Bob has seen in a group,
@@ -974,6 +980,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
+            text = strip_citation_markers(text)
             if media_path:
                 workspace = settings.harness.workspace_dir.expanduser().resolve()
                 resolved = (workspace / media_path).resolve()

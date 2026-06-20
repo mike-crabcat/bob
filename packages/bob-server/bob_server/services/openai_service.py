@@ -186,6 +186,18 @@ def _response_text_with_citations(response: Any) -> str:
     return _render_citations(text, ref_map)
 
 
+def strip_citation_markers(text: str) -> str:
+    """Remove OpenAI web_search citation blocks from arbitrary text.
+
+    Use this on LLM-produced text that bypasses `output_text` — e.g. tool-call
+    arguments for send_message-style tools. Without a ref_map we can't render
+    `[N]` markers or a Sources list, so blocks are dropped entirely.
+    """
+    if not text:
+        return text
+    return _render_citations(text, {})
+
+
 @dataclass
 class StreamResult:
     """Stats from a completed streaming call."""

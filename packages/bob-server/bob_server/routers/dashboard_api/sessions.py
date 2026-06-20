@@ -165,7 +165,7 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
         rows = await db.fetch_all(
             """SELECT l.id, l.created_at, l.call_category, l.status, l.latency_seconds,
                       l.ttft_seconds, l.total_tokens, l.prompt_tokens, l.completion_tokens,
-                      l.messages_json, l.user_message, l.response_text,
+                      l.tool_blocks_json, l.user_message, l.response_text,
                       l.error_message, l.contact_id, l.model,
                       c.name as contact_name
                FROM llm_call_log l
@@ -178,10 +178,13 @@ async def get_session_detail(request: Request, session_key: str) -> dict[str, An
         for row in rows:
             is_reflection = row.get("call_category") == "reflection"
             tool_count = 0
-            msgs_raw = row.get("messages_json")
-            if msgs_raw:
+            trace_raw = row.get("tool_blocks_json")
+            if trace_raw:
                 try:
-                    tool_count = json.loads(msgs_raw).count('"function_call"')
+                    tool_count = sum(
+                        1 for it in json.loads(trace_raw)
+                        if isinstance(it, dict) and it.get("type") == "function_call"
+                    )
                 except (json.JSONDecodeError, TypeError):
                     pass
             calls.append({

@@ -397,7 +397,8 @@ class MemoryService(BaseService):
         window_rows = await self.db.fetch_all(
             "SELECT role, content, sender_id, created_at, synthetic "
             "FROM session_messages "
-            "WHERE session_key = ? AND created_at > ? AND created_at <= ? "
+            "WHERE session_key = ? "
+            "AND datetime(created_at) > datetime(?) AND datetime(created_at) <= datetime(?) "
             "AND role IN ('user', 'assistant') ORDER BY created_at ASC",
             (session_key, active_from, active_to),
         )
@@ -423,7 +424,7 @@ class MemoryService(BaseService):
         prior_rows = await self.db.fetch_all(
             "SELECT role, content, sender_id, created_at, synthetic "
             "FROM session_messages "
-            "WHERE session_key = ? AND created_at <= ? "
+            "WHERE session_key = ? AND datetime(created_at) <= datetime(?) "
             "AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT ?",
             (session_key, active_from, prior_n),
         )
@@ -1052,7 +1053,21 @@ class MemoryService(BaseService):
         email: str = "",
         channel: str = "",
     ) -> str | None:
-        """Create a minimal person entity record if one doesn't exist."""
+        """Create a minimal person entity record if one doesn't exist.
+
+        Lookup order: contact_id claim first (survives renames), then slug.
+        Without the contact_id check, renaming a contact and then triggering
+        this path (e.g. WhatsApp re-handshake) would create a duplicate
+        person entity under the new slug with a second contact_id claim
+        pointing at the same hex8.
+        """
+        if contact_id:
+            existing_by_cid = await self.find_person_entry(
+                workspace_dir, contact_id=contact_id,
+            )
+            if existing_by_cid:
+                return existing_by_cid
+
         import re
         slug = re.sub(r"[^a-z0-9\-]", "", name.strip().lower().replace(" ", "-"))
         person_id = f"person-{slug}"
@@ -1109,6 +1124,56 @@ class MemoryService(BaseService):
             if rows:
                 return rows[0]["subject_id"]
         return None
+
+    async def sync_person_display_name_for_contact(
+        self, contact_id: str, new_name: str
+    ) -> str | None:
+        """Update display_name on person entities linked to this contact.
+
+        Called whenever a contact is renamed so the linked entity's frozen
+        display_name snapshot stays in sync. Refreshes FTS + embedding via
+        _update_entity_fts.
+        """
+        if not contact_id or not new_name:
+            return None
+        hex8 = contact_id[:8]
+        rows = await self.db.fetch_all(
+            "SELECT subject_id FROM memory_claims "
+            "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active'",
+            (hex8,),
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            logger.warning(
+                "multiple entities linked to contact %s: %s",
+                contact_id, [r["subject_id"] for r in rows],
+            )
+        for row in rows:
+            eid = row["subject_id"]
+            await self.db.execute(
+                "UPDATE memory_entities SET display_name = ? "
+                "WHERE entity_id = ? AND status = 'active'",
+                (new_name, eid),
+            )
+            await self._update_entity_fts(eid)
+        return rows[0]["subject_id"]
+
+    async def retire_contact_id_claim(self, contact_id: str) -> int:
+        """Mark active contact_id claims for this contact as superseded.
+
+        Called when a contact is soft-deleted so the link doesn't dangle
+        and resolve to a missing row. Mirrors reconciliation.py's pattern
+        of retiring claims without writing a replacement.
+        """
+        if not contact_id:
+            return 0
+        hex8 = contact_id[:8]
+        return await self.db.execute(
+            "UPDATE memory_claims SET status = 'superseded' "
+            "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active'",
+            (hex8,),
+        )
 
     # ── Group helpers ─────────────────────────────────────────────
 
@@ -1397,6 +1462,18 @@ class MemoryService(BaseService):
             return {"status": "no_op", "reason": "entity not found"}
 
         entity_type = entity_row["entity_type"]
+
+        # Supplement's inference license only pays off for compositional entity
+        # types (trip/stay) where claims legitimately derive from related
+        # entities (e.g. a connection's arrival_time implies a stay's
+        # arrival_date). For atomic types — person, group, connection, etc. —
+        # the 2-hop bulletin walk mostly surfaces text about *other* entities,
+        # which produces misattributions (a person's mother's birthday lifted
+        # onto the person). Extraction + reconciliation cover these types.
+        et_def = ENTITY_TYPE_REGISTRY.get(entity_type)
+        if not (et_def and et_def.compositional):
+            logger.info("Supplement: skipping non-compositional entity %s (%s)", entity_id, entity_type)
+            return {"status": "no_op", "reason": f"entity type '{entity_type}' is not compositional"}
 
         # File entities: skip supplement if no valid file_path exists
         if entity_type == "file":

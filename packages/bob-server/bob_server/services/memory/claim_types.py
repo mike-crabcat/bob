@@ -38,6 +38,7 @@ class EntityType:
     display_name_claim: str | None = None  # claim key for display name lookup
     skip_new_patterns: list[str] | None = None  # patterns to skip during entity creation
     has_orphan_linker: bool = False      # needs orphan entity discovery in reconciliation
+    compositional: bool = False          # participates in supplement's cross-entity inference
 
 
 # Hardcoded registry — must match 317_claim_types.sql + 321 migration.
@@ -289,6 +290,7 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "raise a question rather than silently fixing."
         ),
         follow_for_bulletins=True,
+        compositional=True,
     ),
     "stay": EntityType(
         name="stay",
@@ -314,6 +316,7 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "If there are duplicates, keep the most specific/sourced one and retract the rest."
         ),
         follow_for_bulletins=True,
+        compositional=True,
     ),
     "attraction": EntityType(
         name="attraction",
