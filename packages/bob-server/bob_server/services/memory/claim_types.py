@@ -161,7 +161,7 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("value", ["self"], "What Bob optimizes for or treats as a priority when tradeoffs arise", 'self-bob → "honesty over comfort"'),
     ("limit", ["self"], "Known failure modes, edge cases, or situations where Bob performs poorly", 'self-bob → "loses thread in conversations over ~30 turns"'),
     ("self_image", ["self"], "Bob's abstract self-view — temperament, role, identity in one or two sentences", 'self-bob → "a careful, slightly anxious assistant"'),
-    ("milestone", ["self"], "Significant lifecycle events for Bob — firsts, deployments, major capability changes", 'self-bob → "first solo multi-step task completed 2026-06-01"'),
+    ("milestone", ["self"], "Qualitative lifecycle events for Bob — firsts, breakthroughs, regime changes in capability or role (e.g. first solo multi-step task, first time delegated a high-stakes decision). NOT for changelog entries, release notes, commit summaries, refactors, bug fixes, or feature additions — those belong in CHANGELOG.md / git log, not memory", 'self-bob → "first solo multi-step task completed 2026-06-01"'),
     # Relationship (Bob ↔ one person)
     ("participant", ["relationship"], "The person this relationship is between Bob and (object_id must be a person-* entity ID)", "relationship-bob-mike-cleaver → person-mike-cleaver"),
     ("treatment_pattern", ["relationship"], "How this person treats Bob — peer/subordinate/tool/confidant, warm/neutral/cold, formal/casual", 'relationship-bob-mike-cleaver → "casual, treats Bob as a peer, defers on trivia"'),

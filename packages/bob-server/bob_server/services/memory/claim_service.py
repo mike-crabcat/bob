@@ -24,6 +24,16 @@ _NEW_PERSON_ALT_RE = re.compile(r"^person-new[:\-](.+)$")
 
 async def write_claim(db: Any, claim: Claim) -> str:
     """Write a claim to the database. Deduplicates by merging bulletin sources."""
+    # The DB CHECK constraint allows at most one of object_id / value. If both
+    # were supplied (e.g. by supersede_claim_tool echoing the same string into
+    # both fields), prefer object_id when it is a well-formed entity reference;
+    # otherwise fall back to value.
+    if claim.object_id and claim.value:
+        if _is_valid_object_id(claim.object_id):
+            claim.value = None
+        else:
+            claim.object_id = None
+
     row = await db.fetch_one(
         "SELECT 1 FROM memory_claim_types WHERE key = ?",
         (claim.claim_type_key,),
@@ -162,6 +172,36 @@ _INVALID_PATH_VALUES: frozenset[str] = frozenset({
 })
 
 _URL_PREFIXES = ("https://", "http://", "s3://", "gs://")
+
+
+def _is_valid_object_id(object_id: str) -> bool:
+    """Return True if object_id looks like a valid entity reference (e.g. person-foo)."""
+    if not object_id:
+        return False
+    return any(object_id.startswith(f"{prefix}-") for prefix in _ENTITY_TYPE_PREFIXES)
+
+
+def validate_claim_for_write(claim: Claim) -> str | None:
+    """Return an error message if the claim violates a hard type contract, else None.
+
+    LLM-facing tools call this before ``write_claim`` to reject claims that are
+    structurally wrong (not just stylistically weak). Soft / stylistic checks
+    belong in the prompts, not here — this is for cases where the data is
+    categorically incorrect and storing it would pollute the entity.
+    """
+    if claim.claim_type_key == "file_ref":
+        obj = (claim.object_id or "").strip()
+        if not obj:
+            return (
+                "file_ref requires object_id pointing to a file-* entity. "
+                "Drop the claim or create the file entity first."
+            )
+        if obj.startswith("file-new:") or not obj.startswith("file-"):
+            return (
+                f"file_ref object_id {obj!r} is not a file-* entity. "
+                "Resolve the file reference first or drop the claim."
+            )
+    return None
 
 
 def _is_valid_file_path(path: str) -> bool:

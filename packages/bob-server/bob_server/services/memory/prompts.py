@@ -426,6 +426,73 @@ sport_preference, interest, etc.) rather than a generic "preference" when one fi
 Use conservative wording: a suggestion is not a decision, a mention is not a task, a \
 possible plan is not a confirmed booking. When in doubt, omit.
 
+---
+
+# Common miscategorization traps (read carefully)
+
+The `preference` and `truth` claim types have strict definitions that are easy to \
+violate by treating them as catch-alls. Do not do this.
+
+**`preference` is for DURABLE personal tastes ONLY** ("prefers dark mode", "prefers \
+red wine", "is an early bird"). It is NOT a junk drawer for anything Mike expresses \
+interest in. Specifically, do NOT record these as `preference`:
+
+- Skill feature requests or design asks — "wants the trip-planning skill to convert \
+  currencies to AUD", "wants the GIF skill changed back from random mode". These are \
+  one-off task asks about a tool, not personal tastes. Either record them as a `task` \
+  on the relevant skill, or skip them entirely.
+- Action items / one-off requests — "wants someone to tell David X", "wants a torrent \
+  link shared with David". These are tasks, not preferences.
+- Questions — "wants to know whether steaks should be salted immediately". A question \
+  is not a preference. Do not record it.
+- Scheduling chatter — "will miss pre-drinks on 2026-06-12", "in for Friday 12 June", \
+  "BYOB because he only had 5 beers left". Already excluded above. Skip.
+- Past actions — "requested an immediate call", "asked how to wire the image skill". \
+  These describe a single event in the past, not a stable taste. Skip.
+- Trivia disguised as preference — "favourite number is 42", "favourite animal tiger". \
+  These are not durable personal tastes in the intended sense. Skip.
+
+When a `preference` value starts with "wants", "wants the X skill", "wants to know", \
+"asked for", "requested", or "wants someone to" — that is almost always a miscategorization. \
+Re-read it and either route it to `task` or skip it.
+
+**`truth` is ONLY for explicit user corrections of existing memory** ("actually...", \
+"no, it's X", "that's wrong"). It is NOT a fact bucket. Do NOT record these as `truth`:
+
+- Narrative notes about what happened — "the assistant later confirmed the message was \
+  sent to David on 2026-05-11", "Claude was not actually invoked in the visible flow". \
+  These are observations, not corrections. Skip.
+- General facts — "There does not appear to be an official 'Qwen 3.6 120B' model", \
+  "the GIPHY API uses search terms". These belong on a relevant entity (file, thing, \
+  location) as an appropriate typed claim, or are not memory-worthy at all.
+- Past actions — "asked to get Claude to fix the BOM weather skill", "approved the \
+  Claude delegation". These are event logs, not corrections. Skip.
+- Meta-commentary — "the earlier claim was flippant", "misread the order of the \
+  exchange". Skip.
+
+A genuine `truth` correction reads like: "no, the message to Gareth went by WhatsApp, \
+not email", or "actually it's 2 stops in Paris, not 1". If the value does not contradict \
+a previously-recorded claim, it is not a `truth`.
+
+**`milestone` (on `self-bob`) is for qualitative lifecycle events ONLY** — firsts, \
+breakthroughs, regime changes in Bob's capability or role. Examples: "first solo \
+multi-step task completed", "first time Mike delegated a booking decision without \
+checking". It is NOT a place to record changes to Bob's code or configuration. Do NOT \
+record these as `milestone`:
+
+- Changelog entries or release notes — "Added a /approve slash command", "Added a \
+  WhatsApp media /upload endpoint". These belong in CHANGELOG.md, not memory.
+- Refactor descriptions — "Refactored huge modules into saner packages", "Renamed \
+  cost columns from prompt/completion to input/output". Belong in git log.
+- Bug-fix summaries — "Fixed file logging going silent after startup", "Fixed a \
+  routine scheduler double-fire race". Belong in git log.
+- Routine feature work — "Added daily rotating logs", "Added docs/datamodel.md with \
+  ERDs". Belong in CHANGELOG.md.
+
+The test: would this milestone change how Bob thinks about itself or how it should \
+behave? If it's just "we shipped X" or "we fixed Y", it fails the test — skip it. \
+When changelog text reaches you via a bulletin, do not extract it at all.
+
 {group_context}
 """
 

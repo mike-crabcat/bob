@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"mime"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,7 +360,8 @@ func (c *Client) handleMessage(evt *events.Message) {
 
 	img := evt.Message.GetImageMessage()
 	vid := evt.Message.GetVideoMessage()
-	if text == "" && img == nil && vid == nil {
+	doc := evt.Message.GetDocumentMessage()
+	if text == "" && img == nil && vid == nil && doc == nil {
 		return
 	}
 
@@ -449,6 +451,31 @@ func (c *Client) handleMessage(evt *events.Message) {
 		}
 	}
 
+	// Download and save document (PDF or any other file) if present.
+	if doc != nil {
+		data, err := c.client.Download(context.Background(), doc)
+		if err != nil {
+			c.log.Warn("failed to download document", "error", err, "msg_id", info.ID)
+		} else {
+			os.MkdirAll(c.mediaDir, 0755)
+			filename := sanitizeDocumentFilename(doc.GetFileName(), doc.GetMimetype(), info.ID)
+			fullPath := filepath.Join(c.mediaDir, filename)
+			if err := os.WriteFile(fullPath, data, 0644); err != nil {
+				c.log.Warn("failed to save document", "error", err)
+			} else {
+				mimeType := doc.GetMimetype()
+				msgEvt.Media = &MediaInfo{
+					MediaType: "document",
+					MimeType:  mimeType,
+					Filename:  filename,
+					SizeBytes: int64(len(data)),
+					FilePath:  fullPath,
+				}
+				c.log.Info("saved incoming document", "msg_id", info.ID, "mime", mimeType, "size", len(data), "path", fullPath)
+			}
+		}
+	}
+
 	if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
 		msgEvt.QuotedMessageID = ext.GetContextInfo().GetStanzaID()
 		for _, raw := range ext.GetContextInfo().GetMentionedJID() {
@@ -484,6 +511,9 @@ func extractTextAndContacts(msg *waE2E.Message) (string, []SharedContact) {
 	}
 	if vid := msg.GetVideoMessage(); vid != nil {
 		return vid.GetCaption(), nil
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		return doc.GetCaption(), nil
 	}
 	if contact := msg.GetContactMessage(); contact != nil {
 		c := parseContact(contact.GetDisplayName(), contact.GetVcard())
@@ -530,6 +560,31 @@ func formatContact(displayName, phone string) string {
 		return fmt.Sprintf("[Contact] %s (%s)", displayName, phone)
 	}
 	return fmt.Sprintf("[Contact] %s", displayName)
+}
+
+// sanitizeDocumentFilename returns a safe filename for an incoming document.
+// Prefers the user-supplied name, falls back to <msgID>.<ext> derived from the
+// mime type. Strips path components and traversal sequences so a malicious name
+// cannot escape c.mediaDir when joined.
+func sanitizeDocumentFilename(name, mimeType, msgID string) string {
+	base := filepath.Base(name)
+	// Drop any traversal / hidden-only segments.
+	for base == "." || base == ".." || base == "" {
+		exts, _ := mime.ExtensionsByType(mimeType)
+		ext := ".bin"
+		if len(exts) > 0 {
+			ext = exts[0]
+		}
+		return msgID + ext
+	}
+	// Replace any control chars / path separators that survived filepath.Base.
+	base = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		return r
+	}, base)
+	return base
 }
 
 func (c *Client) handleReceipt(evt *events.Receipt) {

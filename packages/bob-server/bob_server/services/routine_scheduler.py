@@ -41,7 +41,9 @@ class RoutineSchedulerTask:
             # heartbeat tick no longer sees this routine as due. Without this,
             # a 60s heartbeat can fire the same slow routine twice (the original
             # mark_run only bumped next_run_at after the LLM finished ~30s later).
-            next_at = next_cron_occurrence(routine["schedule"]).isoformat()
+            next_at = next_cron_occurrence(
+                routine["schedule"], timezone=routine.get("timezone")
+            ).isoformat()
             if await svc.claim(routine["id"], next_at):
                 asyncio.create_task(self._fire_routine(ctx, routine))
 

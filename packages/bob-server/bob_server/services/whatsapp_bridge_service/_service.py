@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import re
+import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -25,6 +27,24 @@ from bob_server.services.session_route_service import SessionRouteService
 from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_document_to_workspace(settings: Settings, src: Path, msg_id: str) -> str | None:
+    """Copy a received document into workspace/whatsapp_media/ and return the
+    workspace-relative path. Prefixes with a short slice of the WhatsApp message
+    ID so repeat filenames from different senders don't overwrite each other."""
+    workspace = settings.harness.workspace_dir.expanduser().resolve()
+    dest_dir = workspace / "whatsapp_media"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^\w.\-]", "_", src.name) or "document"
+    short_id = (msg_id or "").split("_")[-1][:8] or uuid4().hex[:8]
+    dest = dest_dir / f"{short_id}_{safe_name}"
+    try:
+        shutil.copy2(src, dest)
+    except Exception:
+        logger.exception("failed to copy document %s into workspace", src)
+        return None
+    return str(dest.relative_to(workspace))
 
 
 
@@ -46,6 +66,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         self._last_pairing_code: str | None = None
         self._subagent_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._subagent_listener_task: asyncio.Task | None = None
+        self._verbose_queue: asyncio.Queue[dict[str, Any]] | None = None
+        self._verbose_listener_task: asyncio.Task | None = None
         self._presence_subscribed: set[str] = set()
 
     @property
@@ -63,6 +85,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             self._subagent_queue = self.ctx.event_bus.subscribe()
             self._subagent_listener_task = asyncio.create_task(
                 self._subagent_event_loop(), name="subagent_listener"
+            )
+            # Subscribe to memory verbose notices and forward to WhatsApp.
+            self._verbose_queue = self.ctx.event_bus.subscribe()
+            self._verbose_listener_task = asyncio.create_task(
+                self._verbose_event_loop(), name="verbose_listener"
             )
 
     async def stop(self) -> None:
@@ -83,6 +110,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         if self._subagent_queue is not None and self.ctx.event_bus:
             self.ctx.event_bus.unsubscribe(self._subagent_queue)
             self._subagent_queue = None
+        if self._verbose_listener_task is not None:
+            self._verbose_listener_task.cancel()
+            try:
+                await self._verbose_listener_task
+            except asyncio.CancelledError:
+                pass
+            self._verbose_listener_task = None
+        if self._verbose_queue is not None and self.ctx.event_bus:
+            self.ctx.event_bus.unsubscribe(self._verbose_queue)
+            self._verbose_queue = None
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
@@ -264,6 +301,40 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     await self._dispatch_subagent_result(parent_session_key)
                 except Exception:
                     logger.exception("failed to dispatch subagent result for %s", parent_session_key)
+        except asyncio.CancelledError:
+            pass
+
+    async def _verbose_event_loop(self) -> None:
+        """Listen for memory.verbose_notice events and forward to WhatsApp.
+
+        Filters to WhatsApp-routed sessions; resolves the chat_id via
+        session_routes and calls send_message. Silently drops events for
+        other transports.
+        """
+        assert self._verbose_queue is not None
+        try:
+            while True:
+                event = await self._verbose_queue.get()
+                if event.get("type") != "memory.verbose_notice":
+                    continue
+                payload = event.get("payload", {})
+                session_key = payload.get("session_key", "")
+                if ":whatsapp:" not in session_key:
+                    continue
+                text = payload.get("text", "")
+                if not text:
+                    continue
+                try:
+                    route = await self.db.fetch_one(
+                        "SELECT chat_id FROM session_routes "
+                        "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+                        (session_key,),
+                    )
+                    if not route or not route["chat_id"]:
+                        continue
+                    await self.send_message(route["chat_id"], text)
+                except Exception:
+                    logger.exception("failed to forward verbose notice for %s", session_key)
         except asyncio.CancelledError:
             pass
 
@@ -621,23 +692,32 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         mentioned_jids = payload.get("mentioned_jids", [])
         media = payload.get("media")
 
-        # Resolve media path from media metadata. Image, video, and GIF all
-        # land in the same bridge media dir.
+        # Resolve media path from media metadata. Image, video, GIF, and
+        # documents all land in the same bridge media dir.
         image_path: str | None = None
         image_mime_type: str = "image/jpeg"
         video_path: str | None = None
         video_mime_type: str = "video/mp4"
         is_gif = False
+        document_path: str | None = None
+        document_workspace_path: str | None = None
+        document_filename: str = ""
         if media:
             media_type = media.get("media_type")
             media_dir = settings.whatsapp_bridge.media_dir.expanduser().resolve()
             filename = media.get("filename", "")
-            if filename and media_type in ("image", "video", "gif"):
+            if filename and media_type in ("image", "video", "gif", "document"):
                 resolved = (media_dir / filename).resolve()
                 if str(resolved).startswith(str(media_dir)) and resolved.is_file():
                     if media_type == "image":
                         image_path = str(resolved)
                         image_mime_type = media.get("mime_type", "image/jpeg")
+                    elif media_type == "document":
+                        document_path = str(resolved)
+                        document_filename = filename
+                        document_workspace_path = _copy_document_to_workspace(
+                            settings, resolved, wa_message_id,
+                        )
                     else:
                         video_path = str(resolved)
                         video_mime_type = media.get("mime_type", "video/mp4")
@@ -646,7 +726,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Ack receipt so the bridge clears it from the incoming queue
         await self._send_ack(wa_message_id)
 
-        if not text and not image_path and not video_path:
+        if not text and not image_path and not video_path and not document_path:
             return
 
         logger.info(
@@ -885,6 +965,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             user_content = agenda + "\n\n" + user_content
         if contacts_block:
             user_content += "\n\n" + contacts_block
+        if document_workspace_path:
+            user_content += (
+                "\n\n## Document attached"
+                f"\n- Filename: {document_filename}"
+                f"\n- Saved at: `{document_workspace_path}` (relative to workspace)"
+                f"\nUse `bash` to inspect it (e.g. `pdftotext {document_workspace_path} -`)."
+            )
         user_content += "\n\nRespond to this message by calling send_whatsapp_message with your reply."
 
         # Store user message immediately so queued messages are visible
@@ -902,10 +989,20 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 "video_mime_type": video_mime_type,
                 "is_gif": is_gif,
             }
-        if video_path:
-            fallback_text = "[GIF]" if is_gif else "[Video]"
-        else:
+        elif document_path:
+            message_metadata = {
+                "document_path": document_path,
+                "document_workspace_path": document_workspace_path,
+                "document_filename": document_filename,
+            }
+        if image_path:
             fallback_text = "[Image]"
+        elif video_path:
+            fallback_text = "[GIF]" if is_gif else "[Video]"
+        elif document_path:
+            fallback_text = f"[Document: {document_filename}]"
+        else:
+            fallback_text = ""
         await SessionService(self.ctx).add_message(
             session_key, "user", text or fallback_text,
             channel="whatsapp", sender_id=contact_id, dispatched=0,

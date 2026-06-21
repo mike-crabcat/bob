@@ -555,6 +555,10 @@ class MemoryService(BaseService):
         turn_message_id = f"msg-extr-{uuid.uuid4().hex[:12]}"
         dispatch_id = f"dispatch-silent-{uuid.uuid4().hex[:8]}"
         tools = make_extraction_tools(db, turn_message_id)
+        # Capture the turn start as a comparison-friendly UTC timestamp so we
+        # can find entities created during this turn (memory_entities.created_at
+        # uses SQLite's datetime('now'), so we use the same format).
+        turn_start_ts = utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
         result_text = ""
         async with SessionDispatchGate.get_lock(session_key):
@@ -614,6 +618,36 @@ class MemoryService(BaseService):
             )
             claims_created = count_row["n"] if count_row else 0
 
+            # Fetch the actual new-claim rows so we can surface them via the
+            # verbose notice. Each row carries the typed value (or object_id
+            # for entity-ref claims) so the user sees what was actually written.
+            new_claim_rows = await db.fetch_all(
+                "SELECT claim_type_key, subject_id, value, object_id "
+                "FROM memory_claims "
+                "WHERE status = 'active' AND source_messages LIKE ?",
+                (f'%"{turn_message_id}"%',),
+            ) if claims_created else []
+
+            # New entities: subjects of new claims whose entity row was created
+            # during this turn. Entities created via create_entity that did NOT
+            # receive any claim in the same turn would be missed; in practice
+            # the extractor always follows create_entity with add_claim calls,
+            # so this captures them.
+            new_entity_rows: list[dict[str, Any]] = []
+            if new_claim_rows:
+                subject_ids = list({r["subject_id"] for r in new_claim_rows})
+                placeholders = ",".join("?" for _ in subject_ids)
+                new_entity_rows = await db.fetch_all(
+                    "SELECT entity_id, entity_type, display_name "
+                    "FROM memory_entities "
+                    f"WHERE entity_id IN ({placeholders}) "
+                    "AND datetime(created_at) >= datetime(?) "
+                    "AND status = 'active'",
+                    (*subject_ids, turn_start_ts),
+                )
+
+            entities_created = len(new_entity_rows)
+
             # The model often ends with empty text after its tool calls; store a
             # meaningful summary rather than a misleading placeholder.
             if result_text and result_text.strip():
@@ -631,6 +665,15 @@ class MemoryService(BaseService):
                 metadata={"memory_extraction_turn": True, "trigger": trigger,
                           **({"hint": hint} if hint else {})},
             )
+
+            # Verbose surface: if the session has memory_verbose enabled and
+            # the turn actually recorded something, post a system-notice
+            # message and publish an event for active transports to deliver.
+            if entities_created or claims_created:
+                await self._maybe_emit_verbose_notice(
+                    session_key, turn_message_id, trigger,
+                    new_entity_rows, new_claim_rows,
+                )
 
         await db.execute(
             "INSERT INTO memory_extraction_turns "
@@ -653,7 +696,79 @@ class MemoryService(BaseService):
             "status": "ok",
             "turn_message_id": turn_message_id,
             "claims_created": claims_created,
+            "entities_created": entities_created,
         }
+
+    async def _maybe_emit_verbose_notice(
+        self,
+        session_key: str,
+        turn_message_id: str,
+        trigger: str,
+        new_entity_rows: list[dict[str, Any]],
+        new_claim_rows: list[dict[str, Any]],
+    ) -> None:
+        """If the session has memory_verbose on, surface what the turn wrote.
+
+        Posts a ``role='system'`` message in session_messages with metadata
+        ``{"system_notice": True, "kind": "memory_verbose", ...}`` and publishes
+        a ``memory.verbose_notice`` event on the event bus for active transports
+        to deliver. Silently no-ops when the flag is off or there's nothing to
+        report.
+        """
+        if not new_entity_rows and not new_claim_rows:
+            return
+
+        route = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes "
+            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if not route or not route["metadata"]:
+            return
+        try:
+            meta = json.loads(route["metadata"])
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not meta.get("memory_verbose"):
+            return
+
+        # Compose the human-readable notice.
+        lines: list[str] = ["[memory] extraction turn"]
+        if new_entity_rows:
+            lines.append("New entities:")
+            for e in new_entity_rows:
+                label = e["display_name"] or e["entity_id"]
+                lines.append(f"  - {e['entity_id']} ({e['entity_type']}) — {label}")
+        if new_claim_rows:
+            lines.append("New claims:")
+            for c in new_claim_rows:
+                if c["object_id"]:
+                    val = f"→ {c['object_id']}"
+                else:
+                    val = f"= {c['value']}"
+                lines.append(f"  - {c['subject_id']}.{c['claim_type_key']} {val}")
+        notice = "\n".join(lines)
+
+        from bob_server.services.session_service import SessionService
+        await SessionService(self.ctx).add_message(
+            session_key, "system", notice,
+            metadata={
+                "system_notice": True,
+                "kind": "memory_verbose",
+                "turn_message_id": turn_message_id,
+                "trigger": trigger,
+            },
+        )
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish(
+                "memory.verbose_notice",
+                {
+                    "session_key": session_key,
+                    "text": notice,
+                    "turn_message_id": turn_message_id,
+                    "trigger": trigger,
+                },
+            )
 
     # ── Session bulletin generation ───────────────────────────────
 

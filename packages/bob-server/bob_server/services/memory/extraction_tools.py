@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from bob_server.services.memory.claim_types import ENTITY_REF_CLAIM_KEYS
-from bob_server.services.memory.claim_service import write_claim
+from bob_server.services.memory.claim_service import validate_claim_for_write, write_claim
 from bob_server.services.memory.entity_tools import (
     make_get_entity_tool,
     make_list_entities_tool,
@@ -76,6 +76,9 @@ def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
             source_messages=[turn_message_id],
             created_at=datetime.now(),
         )
+        err = validate_claim_for_write(claim)
+        if err:
+            return f"Error: {err}"
         await write_claim(db, claim)
         return f"Recorded {claim_type_key} on {subject_id}" + (f" → {obj}" if obj else f" = {val}")
 
@@ -108,8 +111,19 @@ def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
         try:
             new_claims = json.loads(claims_json) if claims_json else []
         except json.JSONDecodeError:
-            return f"Created entity {entity_id} but claims_json was invalid."
+            return f"Created entity {entity_id} but claims_json was invalid JSON."
+        if isinstance(new_claims, dict):
+            return (
+                f"Created entity {entity_id}, but claims_json must be a JSON ARRAY of "
+                "claim objects (e.g. [{\"claim_type_key\": \"name\", \"value\": \"...\"}]), "
+                "not a single object. Use add_claim to add each property."
+            )
+        if not isinstance(new_claims, list):
+            return f"Created entity {entity_id} but claims_json was not a JSON array."
+        written = 0
         for cl in new_claims:
+            if not isinstance(cl, dict):
+                continue
             claim = Claim(
                 id=f"claim-extr-{uuid.uuid4().hex[:8]}",
                 claim_type_key=cl.get("claim_type_key", ""),
@@ -120,7 +134,14 @@ def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
                 source_messages=[turn_message_id],
                 created_at=datetime.now(),
             )
+            err = validate_claim_for_write(claim)
+            if err:
+                # Entity is already created; report but keep going so the
+                # remaining claims in the batch can still land.
+                logger.warning("Skipped invalid claim on %s: %s", entity_id, err)
+                continue
             await write_claim(db, claim)
-        return f"Created entity {entity_id} ({entity_type}) with {len(new_claims)} claims"
+            written += 1
+        return f"Created entity {entity_id} ({entity_type}) with {written} claims"
 
     return [list_entities, get_entity, create_entity, add_claim]

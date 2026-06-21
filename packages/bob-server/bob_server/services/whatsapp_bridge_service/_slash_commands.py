@@ -38,6 +38,10 @@ class SlashCommandsMixin:
             await self._cmd_who(chat_id)
         elif command == "/approve":
             await self._cmd_approve(args, chat_id)
+        elif command == "/verbose":
+            await self._cmd_verbose(args, session_key, chat_id)
+        elif command == "/silentmem":
+            await self._cmd_silentmem(session_key, chat_id)
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -164,5 +168,83 @@ class SlashCommandsMixin:
             chat_id,
             f"/bulletin: {n} bulletin(s) from {msgs} messages | "
             f"dream: {claims} claims, {entities} entity ops",
+        )
+
+    async def _cmd_verbose(self, args: str, session_key: str, chat_id: str) -> None:
+        """Toggle verbose memory-extraction notices for this session.
+
+        Usage: /verbose on|off|status
+        When on, every silent extraction turn that creates entities or claims
+        posts a [memory] system notice back to this chat listing them.
+        """
+        arg = args.strip().lower()
+        if arg not in ("on", "off", "status", ""):
+            await self.send_message(chat_id, "Usage: /verbose on|off|status")
+            return
+
+        route = await self.db.fetch_one(
+            "SELECT id, metadata FROM session_routes "
+            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if not route:
+            await self.send_message(chat_id, "No session route found")
+            return
+
+        meta = json.loads(route["metadata"]) if route["metadata"] else {}
+        current = bool(meta.get("memory_verbose", False))
+
+        if arg == "status" or arg == "":
+            state = "ON" if current else "OFF"
+            await self.send_message(chat_id, f"verbose {state}")
+            return
+
+        enabled = arg == "on"
+        if enabled == current:
+            state = "ON" if current else "OFF"
+            await self.send_message(chat_id, f"verbose already {state}")
+            return
+
+        meta["memory_verbose"] = enabled
+        await self.db.execute(
+            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(meta), utcnow().isoformat(), route["id"]),
+        )
+        logger.info("verbose %s for session %s (route %s)", arg, session_key, route["id"])
+        await self.send_message(chat_id, f"verbose {'ON' if enabled else 'OFF'}")
+
+    async def _cmd_silentmem(self, session_key: str, chat_id: str) -> None:
+        """Trigger a silent memory extraction turn on the current session now.
+
+        Runs immediately with force=True (bypasses the undigested-message
+        guard). Reply summarises what was recorded. If /verbose is on for the
+        session, the extraction turn itself surfaces the per-claim breakdown.
+        """
+        from bob_server.services.memory import MemoryService
+
+        svc = MemoryService(self.ctx)
+        try:
+            result = await svc.run_silent_turn_extraction(
+                session_key, force=True, trigger="silentmem",
+            )
+        except Exception as exc:
+            logger.exception("/silentmem failed for %s", session_key)
+            await self.send_message(chat_id, f"/silentmem error: {exc}")
+            return
+
+        status = result.get("status", "unknown")
+        if status != "ok":
+            reason = result.get("reason", "unknown")
+            await self.send_message(chat_id, f"/silentmem: {status} ({reason})")
+            return
+
+        claims = result.get("claims_created", 0)
+        entities = result.get("entities_created", 0)
+        if not claims and not entities:
+            await self.send_message(chat_id, "/silentmem: nothing recorded")
+            return
+        await self.send_message(
+            chat_id,
+            f"/silentmem: {claims} claim(s), {entities} entit(y/ies) recorded",
         )
 

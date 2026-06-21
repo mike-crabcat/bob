@@ -87,11 +87,11 @@ def make_get_entity_tool(db: Any) -> Tool:
                 bids, mids = [], []
             tags: list[str] = []
             if bids:
-                tags.append(f"bulletins: {', '.join(bids)}")
+                tags.append(f"{len(bids)} bulletin{'s' if len(bids) != 1 else ''}")
             if mids:
-                tags.append(f"messages: {', '.join(mids)}")
+                tags.append(f"{len(mids)} message{'s' if len(mids) != 1 else ''}")
             if tags:
-                src_label = f"  [source: {'; '.join(tags)}]"
+                src_label = f"  [source: {', '.join(tags)}]"
             elif r["claim_type_key"] not in ("truth",):
                 src_label = "  [source: none — inferred]"
             prov_lines.append(f"  {r['claim_type_key']}: {val}{src_label}")

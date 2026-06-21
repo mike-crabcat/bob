@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
 def validate_cron_expression(expression: str) -> str:
@@ -25,10 +26,26 @@ def validate_cron_expression(expression: str) -> str:
     return expression
 
 
-def next_cron_occurrence(expression: str, start: datetime | None = None) -> datetime:
-    """Compute the next timestamp matching a five-field cron rule."""
+def next_cron_occurrence(
+    expression: str,
+    start: datetime | None = None,
+    *,
+    timezone: str | None = None,
+) -> datetime:
+    """Compute the next timestamp matching a five-field cron rule.
 
-    reference = (start or datetime.now().astimezone()).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    If `timezone` is an IANA name (e.g. "Europe/Paris"), the cron wall-clock
+    fields are interpreted in that zone and the returned datetime is tz-aware.
+    If `timezone` is None, the server's local time is used (legacy behavior).
+    """
+
+    if start is None:
+        if timezone:
+            start = datetime.now(ZoneInfo(timezone))
+        else:
+            start = datetime.now().astimezone()
+
+    reference = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
     minute_values, hour_values, day_values, month_values, weekday_values = [
         _expand_cron_field(field, bounds)
         for field, bounds in zip(
