@@ -10,6 +10,7 @@ import pytest
 from bob_server.cron import next_cron_occurrence
 from bob_server.services.routine_service import (
     RoutineService,
+    _format_routine_now,
     _outside_validity_window,
 )
 
@@ -104,6 +105,66 @@ def test_validity_window_malformed_bound_treated_as_open():
 
 
 # ---------------------------------------------------------------------------
+# _format_routine_now — local-time header injection
+# ---------------------------------------------------------------------------
+
+
+def test_format_routine_now_named_timezone_carries_iana_and_offset():
+    row = {"timezone": "Australia/Perth"}
+    header = _format_routine_now(row)
+    assert header.startswith("[Routine local time: ")
+    assert "Australia/Perth" in header
+    # Perth is UTC+08:00 year-round (no DST)
+    assert "UTC+0800" in header
+    assert header.endswith("]")
+
+
+def test_format_routine_now_falls_back_to_server_local_with_offset():
+    row = {"timezone": None}
+    header = _format_routine_now(row)
+    assert "server local" in header
+    # Offset always present so the model can convert to other zones
+    assert "UTC+" in header or "UTC-" in header or "UTC+0000" in header
+
+
+def test_format_routine_now_uses_routine_tz_not_ambient_utc():
+    # 07:00 Perth is 23:00 UTC the prior day. The header must reflect Perth's
+    # wall clock, not the model's ambient UTC sense — that divergence is the
+    # whole reason the header exists.
+    import datetime as _dt
+
+    row = {"timezone": "Australia/Perth"}
+    header = _format_routine_now(row)
+    perth_now = _dt.datetime.now(ZoneInfo("Australia/Perth"))
+    assert perth_now.strftime("%d %B %Y") in header
+    assert perth_now.strftime("%H:%M") in header
+
+
+# ---------------------------------------------------------------------------
+# build_common_tools — routine tool gating
+# ---------------------------------------------------------------------------
+
+
+def test_build_common_tools_excludes_routine_tools_when_disabled(ctx):
+    from bob_server.services.tool_registry import build_common_tools
+
+    tools = build_common_tools(ctx, session_key="agent:main:test:x:x", include_routines=False)
+    names = {t.name for t in tools}
+    assert "read_routine" not in names
+    assert "write_routine" not in names
+    assert "delete_routine" not in names
+
+
+def test_build_common_tools_includes_routine_tools_by_default(ctx):
+    from bob_server.services.tool_registry import build_common_tools
+
+    tools = build_common_tools(ctx, session_key="agent:main:test:x:x")
+    names = {t.name for t in tools}
+    assert "read_routine" in names
+    assert "write_routine" in names
+
+
+# ---------------------------------------------------------------------------
 # RoutineService — DB integration
 # ---------------------------------------------------------------------------
 
@@ -181,6 +242,67 @@ async def test_get_due_routines_includes_inside_validity_window(svc, session_key
     due = await svc.get_due_routines()
     names = [r["name"] for r in due]
     assert "active" in names
+
+
+# ---------------------------------------------------------------------------
+# Cross-timezone due-ness — the continuous-fire regression
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_tz_future_routine_not_due_under_mismatched_offset(svc, session_key):
+    # A Europe/Paris routine due ~2h in the future. Under the old bare
+    # `next_run_at <= now` TEXT compare, the Paris ISO string (e.g. ...T18:30+02:00)
+    # sorts lexicographically below a Perth server now (...T...+08:00) on the
+    # same date and reads as "due" — firing every heartbeat. datetime() on both
+    # sides normalizes to UTC so the real-time answer wins.
+    paris = ZoneInfo("Europe/Paris")
+    future_paris = (datetime.now(UTC) + timedelta(hours=2)).astimezone(paris)
+    await svc.upsert_routine(
+        session_key=session_key,
+        name="paris-future",
+        schedule="30 6 * * *",
+        prompt="x",
+        next_run_at=future_paris.isoformat(),
+        timezone="Europe/Paris",
+    )
+    due = await svc.get_due_routines()
+    assert "paris-future" not in [r["name"] for r in due]
+
+
+async def test_cross_tz_past_routine_is_due_under_mismatched_offset(svc, session_key):
+    # Inverse: a Paris routine whose slot genuinely passed must still be due.
+    paris = ZoneInfo("Europe/Paris")
+    past_paris = (datetime.now(UTC) - timedelta(hours=2)).astimezone(paris)
+    await svc.upsert_routine(
+        session_key=session_key,
+        name="paris-past",
+        schedule="30 6 * * *",
+        prompt="x",
+        next_run_at=past_paris.isoformat(),
+        timezone="Europe/Paris",
+    )
+    due = await svc.get_due_routines()
+    assert "paris-past" in [r["name"] for r in due]
+
+
+async def test_claim_on_future_routine_returns_false_and_does_not_advance(svc, session_key):
+    # claim() must refuse a future routine, otherwise the per-heartbeat loop
+    # returns: claim "succeeds", rewrites next_run_at to the same future value,
+    # and the next heartbeat fires it again.
+    paris = ZoneInfo("Europe/Paris")
+    future_paris = (datetime.now(UTC) + timedelta(hours=2)).astimezone(paris)
+    routine = await svc.upsert_routine(
+        session_key=session_key,
+        name="paris-future-claim",
+        schedule="30 6 * * *",
+        prompt="x",
+        next_run_at=future_paris.isoformat(),
+        timezone="Europe/Paris",
+    )
+    won = await svc.claim(routine["id"], "2099-01-01T00:00:00+00:00")
+    assert won is False
+    refreshed = await svc.get_routine(session_key, "paris-future-claim")
+    assert refreshed["next_run_at"] == future_paris.isoformat()  # unchanged
 
 
 # ---------------------------------------------------------------------------

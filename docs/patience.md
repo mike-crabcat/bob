@@ -2,197 +2,246 @@
 
 ## Purpose
 
-Cyborg responds to every incoming WhatsApp message immediately by dispatching an LLM call. This creates two problems:
+Bob's patience system sits between incoming WhatsApp messages and the main LLM dispatch. It does two jobs:
 
-1. **Fragmented messages.** Humans type in multiple short bursts ("hey", "can you", "actually never mind", "do X instead"). Each fragment triggers a separate dispatch, wasting LLM calls and producing disjointed replies.
-2. **Overlapping conversations.** In group chats, multiple participants may type simultaneously. Responding to each message individually produces out-of-order or redundant replies.
+1. **Batching.** Instead of firing one LLM call per incoming message, the patience buffer accumulates messages and dispatches them together as a single coherent call. A user typing "hey", "can you", "actually do X" produces one dispatch, not three.
 
-The patience system introduces a per-session buffer between message storage and LLM dispatch. Instead of firing immediately, incoming messages accumulate while a fast LLM evaluates whether the sender appears finished. When the conversation settles, the buffered messages are dispatched together as a single coherent LLM call.
+2. **Relevance gating (optional).** When enabled, the patience LLM also decides whether Bob should respond at all. If the conversation is casual banter between other people and Bob isn't addressed, the main LLM is skipped entirely — no reply, no LLM cost.
 
 ## Architecture
 
 ```
-                          WhatsApp Bridge (Go)
-                                  |
-                          ChatPresence events
-                          IncomingMessage events
-                                  |
-                                  v
-                 +--------------------------------+
-                 |  WhatsAppBridgeService (Python) |
-                 |                                |
-                 |  1. Store message in DB        |
-                 |  2. Check patience enabled?    |
-                 |         |            |          |
-                 |        yes           no         |
-                 |         |            |          |
-                 |         v            v          |
-                 |  submit_to_patience  asyncio.create_task
-                 |         |            (_run_dispatch)
-                 |         v                        |
-                 |  +------------------+            |
-                 |  | PatienceBuffer   |            |
-                 |  |  (per session)   |            |
-                 |  |                  |            |
-                 |  | - items[]        |            |
-                 |  | - timer_handle   |            |
-                 |  | - last_activity  |            |
-                 |  +------------------+            |
-                 |         |                        |
-                 |         v                        |
-                 |  +------------------+            |
-                 |  | Patience Gate    |            |
-                 |  |  (_evaluate_     |            |
-                 |  |   urgency)       |            |
-                 |  |                  |            |
-                 |  | Fast LLM call    |            |
-                 |  | (gpt-5.4-mini)  |            |
-                 |  +------------------+            |
-                 |     |              |             |
-                 |  respond_now     wait            |
-                 |     |              |             |
-                 |     v              v             |
-                 |  1s delay     5s silence window  |
-                 |     |              |             |
-                 |     +-----+--------+             |
-                 |           |                      |
-                 |           v                      |
-                 |     _run_dispatch()              |
-                 |     (LLM call + reply)           |
-                 +--------------------------------+
-
-  Typing indicator flow:
-
-    Go whatsmeow Client
-         |  events.ChatPresence (composing)
-         v
-    Bridge forwards as whatsapp.chat_presence
-         |
-         v
-    _handle_chat_presence()
-         |
-         v
-    Add PendingItem(item_type="typing") to buffer
-    Reset silence timer to 5s
+                       WhatsApp Bridge (Go)
+                               |
+                       IncomingMessage events
+                               |
+                               v
+              +--------------------------------+
+              | WhatsAppBridgeService (Python) |
+              |                                |
+              |  1. Store message in DB        |
+              |     (session_messages,         |
+              |      dispatched=0)             |
+              |                                |
+              |  2. submit_to_patience()       |
+              |     (always — Phase 2)         |
+              |                                |
+              |     +---------------------+    |
+              |     | PatienceBuffer      |    |
+              |     |  (per session)      |    |
+              |     |  - items[]          |    |
+              |     |  - timer_handle     |    |
+              |     |  - last_activity    |    |
+              |     |  - last_evaluated_at|    |
+              |     |  - last_respond     |    |
+              |     +-----------+---------+    |
+              |                 |              |
+              |     patience_enabled?          |
+              |        |           |           |
+              |       yes          no          |
+              |        |           |           |
+              |        v           v           |
+              |   _evaluate_    fixed delay    |
+              |    urgency()    (settle_sec)   |
+              |   (LLM call)                   |
+              |        |                       |
+              |   respond=true|false           |
+              |    (only if relevance          |
+              |     gating is on)              |
+              |        |       |               |
+              |        |   respond=false        |
+              |        |       |               |
+              |        |       v               |
+              |        |   _flush_without_     |
+              |        |     dispatch()        |
+              |        |   (no main LLM)       |
+              |        v                       |
+              |   timer fires                  |
+              |        |                       |
+              |        v                       |
+              |   _run_dispatch()              |
+              |   (main LLM call + reply)      |
+              +--------------------------------+
 ```
 
-## How It Works
+## Two behavior modes
 
-### Message Flow
+| Mode | Trigger | Buffer? | Patience LLM? | Relevance gate? |
+|---|---|---|---|---|
+| Patience on | `patience_enabled: true` in route metadata | yes | yes (per batch) | optional (`patience_relevance_gating: true`) |
+| Patience off | `patience_enabled: false` or unset | yes | no | no |
 
-1. An incoming WhatsApp message arrives via the Go bridge WebSocket.
-2. `WhatsAppBridgeService._handle_incoming_message` stores the message in the database with `dispatched=0`.
-3. If patience is globally enabled (`CYBORG_PATIENCE_ENABLED=true`) and per-session enabled (`{"patience_enabled": true}` in the session route metadata), the message is wrapped in a `PendingItem` and submitted to `submit_to_patience()`.
-4. If patience is not enabled, `asyncio.create_task(_run_dispatch())` fires immediately, bypassing the buffer entirely.
+Both modes batch. Patience-on adds the LLM gate; patience-off uses a fixed short settle delay (default 1.5s) to absorb bursts.
 
-### Urgency Evaluation
+## Per-session flags (route metadata)
 
-When a `PendingItem` is submitted, `submit_to_patience` in `patience_gate.py` performs the following:
-
-1. Adds the item to the per-session `PatienceBuffer`.
-2. Cancels any existing timer for this session.
-3. Checks the safety cap: if `len(buffer.items) >= max_pending_items`, forces immediate dispatch.
-4. Calls `_evaluate_urgency()` which sends a fast LLM request to `gpt-5.4-mini` with a concise context summary and the `PATIENCE_SYSTEM_PROMPT`.
-5. The LLM returns a JSON decision: `{"decision": "respond_now" | "wait", "confidence": 0.0-1.0}`.
-6. Based on the decision:
-   - **`respond_now`**: Schedule dispatch after `quick_delay_seconds` (default 1s).
-   - **`wait`**: Schedule dispatch after `silence_timeout_seconds` (default 5s).
-7. If a new message or typing indicator arrives before the timer fires, the timer is reset.
-
-### Context Provided to the Patience LLM
-
-`_build_patience_context()` assembles a short text summary from three sources:
-
-- **Recent conversation**: The last `max_context_messages` (default 10) dispatched messages from `session_messages`, truncated to 200 chars each.
-- **Pending unprocessed messages**: All buffered items with `item_type == "message"`, up to the last 10.
-- **Active typing**: Names of unique senders with buffered `item_type == "typing"` items.
-
-The summary ends with the prompt "Should the assistant respond now or wait?".
-
-### Urgency Decision Factors
-
-The `PATIENCE_SYSTEM_PROMPT` instructs the LLM to consider:
-
-- Explicit questions, direct requests, or @mentions -> `respond_now`
-- Short fragments, mid-thought, trailing "..." or incomplete sentences -> `wait`
-- Multiple users actively chatting (typing indicators or rapid messages from different senders) -> `wait`
-- Complete, self-contained statements -> `respond_now`
-- Uncertain -> default to `wait`
-
-### WhatsApp Typing/Presence Integration
-
-The Go bridge (whatsmeow client) detects `events.ChatPresence` events when a user is composing. When the state is `ChatPresenceComposing`:
-
-1. The Go client emits a `ChatPresenceEvent` containing `ChatJID`, `SenderJID`, `Media`, and `Timestamp`.
-2. The bridge forwards this to the Python service as a `whatsapp.chat_presence` envelope.
-3. `WhatsAppBridgeService._handle_chat_presence()` checks if patience is enabled for the session.
-4. If enabled, it creates a `PendingItem(item_type="typing")`, adds it to the buffer, cancels the existing timer, and starts a new silence timer set to `silence_timeout_seconds`.
-
-This means that as long as someone in the chat is typing, the dispatch is delayed. The timer only fires when there is a full silence window with no messages and no typing indicators.
-
-Presence subscription is triggered automatically: when patience is enabled for a session, `subscribe_presence()` sends a `subscribe_presence` command to the Go bridge, which calls `whatsmeow.Client.SubscribePresence()` to register for typing notifications for that chat.
-
-## Per-Session Enablement
-
-Patience is controlled per session via the `session_routes.metadata` JSON field:
+Both flags live in `session_routes.metadata` JSON. Set via slash commands from a trusted contact in the chat.
 
 ```json
-{"patience_enabled": true}
+{
+  "patience_enabled": true,
+  "patience_relevance_gating": false
+}
 ```
 
-Two conditions must both be true for patience to activate on any message:
+- `patience_enabled` — enables the patience LLM timing gate.
+- `patience_relevance_gating` — extends the patience LLM to also decide whether to respond. Only meaningful when `patience_enabled` is also true. The `/relevance on` command warns if patience is off.
 
-1. **Global**: `CYBORG_PATIENCE_ENABLED=true` (the `PatienceSettings.enabled` field).
-2. **Per-session**: The session route's metadata JSON contains `"patience_enabled": true`.
+## Slash commands
 
-If either is false, the message is dispatched immediately via `asyncio.create_task(_run_dispatch())`.
+### `/patience on|off`
+Toggles `patience_enabled` for the current session.
 
-## Slash Commands
+### `/relevance on|off`
+Toggles `patience_relevance_gating` for the current session. Requires patience to be on for the flag to take effect; `/relevance on` warns if `/patience` is currently off.
 
-### /patience on|off
+Both commands are restricted to trusted contacts (same gate as all slash commands).
 
-Available only to trusted contacts. When a message starts with `/`:
+## How a batch flows through
 
-- If the sender is a trusted contact, `_handle_slash_command` is invoked.
-- If the sender is not trusted, the message is silently dropped (never stored or dispatched).
-- `/patience on` sets `patience_enabled: true` in the session route metadata.
-- `/patience off` sets `patience_enabled: false`.
-- An acknowledgment message is sent back (e.g., "Patience enabled -- waiting for silence before responding").
+For each incoming message:
 
-Any `/`-prefixed message is intercepted before storage and dispatch, regardless of trust level.
+1. **Storage.** Message is persisted to `session_messages` with `dispatched=0`.
+2. **Buffer.** Wrapped in a `PendingItem` and added to the per-session `PatienceBuffer`. Existing timer is cancelled.
+3. **Dispatch-in-progress check.** If a main LLM dispatch is already running for this session, the new item is buffered silently and the in-progress dispatch will claim it via `mark_dispatched`. No further evaluation.
+4. **Safety cap.** If the buffer has `>= max_pending_items` (default 20) messages, behavior splits:
+   - No prior relevance decision, or last decision was respond=true → force dispatch immediately.
+   - Last decision was respond=false → flush without dispatch (mark messages claimed, no main LLM call).
+5. **Gate.**
+   - **Patience on**: call `_evaluate_urgency` — the patience LLM (gpt-5.4-mini) returns `{respond, wait_seconds, reason}`.
+   - **Patience off**: skip the LLM; use a fixed `settle_seconds` delay (default 1.5s).
+6. **Mark batch evaluated.** `buffer.last_evaluated_at = buffer.last_activity` and `buffer.last_respond = effective_respond`. From this point, those items are no longer "pending" for future patience contexts (see Pending semantics below).
+7. **Decision branch.**
+   - `effective_respond=false` (only possible when relevance gating is on) → call `_flush_without_dispatch` (mark messages dispatched, no timer, no main LLM). Next arriving message re-runs the patience LLM.
+   - `effective_respond=true` → set timer for `wait_seconds`. On fire, run `_dispatch_and_cleanup` → `_run_dispatch` (main LLM call).
+8. **Re-evaluation during the wait.** If a new message arrives before the timer fires, the timer is cancelled and the gate runs again on the larger batch (today's behavior — explicitly preserved).
 
-## Global Kill Switch
+### Effective respond flag
 
-`CYBORG_PATIENCE_ENABLED` environment variable (default: `false`). When set to `false`, the patience system is completely bypassed and all messages are dispatched immediately. This is read once at startup into `Settings.patience.enabled`.
+When `patience_relevance_gating` is **off**, the LLM's `respond` field is ignored — `effective_respond` is always `true`. This preserves today's behavior exactly: the patience LLM only decides timing, never skipping.
+
+When `patience_relevance_gating` is **on**, `effective_respond = decision.respond` (the LLM's judgment).
+
+## Pending semantics
+
+"Pending" means *newly arrived, not yet evaluated by the patience LLM*. Once the patience LLM runs on a batch, those items are marked evaluated via `buffer.last_evaluated_at = buffer.last_activity`. Future patience contexts (`_build_patience_context`) only include items with `timestamp > last_evaluated_at`.
+
+This matters when a batch is skipped and then a new message arrives: the patience LLM sees only the *new* message (not the previously-skipped batch) in its "pending" section, even though all items are still in the buffer waiting to be claimed by the next dispatch.
+
+Recent dispatched history from `session_messages` (last 10, `dispatched=1`) is also included in the context for conversation continuity — that part is unaffected.
+
+## Safety and failure handling
+
+- **Buffer cap** (`max_pending_items`, default 20): forces dispatch or flush (per step 4 above). Prevents unbounded accumulation.
+- **LLM call failure**: defaults to `PatienceDecision(respond=True, wait_seconds=3.0, reason="llm-call-failed")`. Never skip on a fault — failures should not produce silence.
+- **Context-build failure**: same fallback.
+- **JSON parse failure**: extracts the first number from the response as `wait_seconds`; `respond=True` assumed.
+- **In-memory only**: `PatienceBufferRegistry._buffers` is a plain Python dict. Buffered state is lost on restart. Acceptable because messages are persisted with `dispatched=0` first; on restart, the next dispatch will claim them.
+- **Memory capture unaffected**: `run_silent_turn_extraction` reads `session_messages` directly and does not check the `dispatched` flag. Even skipped batches are captured for memory.
+
+## Expected log lines
+
+All patience activity is logged at INFO level. Filter with:
+
+```bash
+journalctl --user -u bob.service -f | grep -E "patience|relevance"
+```
+
+### Normal flow (patience on, respond=true)
+
+```
+patience: new message item for agent:main:whatsapp:group:GID from alice, buffer=1 messages + 0 typing
+patience LLM decided respond=True wait=8s for agent:main:whatsapp:group:GID (reason: direct question)
+patience: timer=8.0s for agent:main:whatsapp:group:GID (reason: direct question)
+patience timer fired for agent:main:whatsapp:group:GID, dispatching
+patience: buffer cleared for agent:main:whatsapp:group:GID after dispatch
+```
+
+### Skip flow (patience on + relevance on, respond=false)
+
+```
+patience: new message item for agent:main:whatsapp:group:GID from bob, buffer=1 messages + 0 typing
+patience LLM decided respond=False wait=0s for agent:main:whatsapp:group:GID (reason: casual banter, not addressed)
+patience: skip for agent:main:whatsapp:group:GID (reason: casual banter, not addressed), 1 messages marked dispatched without main LLM
+patience: flushed 1 message(s) for agent:main:whatsapp:group:GID without main LLM (skip)
+```
+
+### Burst during the wait (timer reset)
+
+```
+patience: new message item for ... from alice, buffer=1 messages + 0 typing
+patience LLM decided respond=True wait=10s for ... (reason: complete thought)
+patience: timer=10.0s for ... (reason: complete thought)
+patience: new message item for ... from alice, buffer=2 messages + 0 typing       # second message
+patience: new activity during evaluation for ..., skipping timer                  # if LLM still running
+patience LLM decided respond=True wait=5s for ... (reason: still going)
+patience: timer=5.0s for ... (reason: still going)
+```
+
+### Safety cap — force dispatch (no prior decision)
+
+```
+patience: new message item for ... from alice, buffer=20 messages + 0 typing
+patience buffer cap hit for ... (20 messages), forcing dispatch
+patience: buffer cleared for ... after dispatch
+```
+
+### Safety cap — flush after skip (relevance on, last decision was respond=false)
+
+```
+patience: new message item for ... from alice, buffer=20 messages + 0 typing
+patience buffer cap hit for ... (20 messages) after skip decision, flushing without dispatch
+patience: flushed 20 message(s) for ... without main LLM (skip)
+```
+
+### Dispatch in progress
+
+```
+patience: dispatch in progress for ..., buffering silently
+```
+
+## Verification cheatsheet
+
+| Question | Grep pattern | Expected |
+|---|---|---|
+| Is patience on for session X? | `patience check: session=X` | `enabled=True` in the log line |
+| Is relevance gating on for session X? | `patience check: session=X` | `relevance=True` in the log line |
+| Did the relevance gate skip a batch? | `patience: skip for` | count of skips per session |
+| Did the safety cap force-flush after skips? | `flushing without dispatch` | should be rare; investigate if frequent |
+| Are patience LLM calls failing? | `patience: LLM call failed` | should be near-zero; non-zero means degraded |
+| Is the main LLM running for skipped batches? | (cross-reference `LLM dispatch tools: ... category=whatsapp_incoming` against skip log lines) | should not appear immediately after a skip for the same session |
+
+### Counting skips vs dispatches per session (last hour)
+
+```bash
+journalctl --user -u bob.service --since "1 hour ago" --no-pager \
+  | grep -oE "patience: (skip|buffer cleared).*agent:main:whatsapp:group:[0-9]+" \
+  | sort | uniq -c
+```
+
+A healthy relevance-gated session shows a meaningful skip-to-clear ratio (e.g. 5–20 skips per clear). A ratio of 0:1 means relevance gating isn't doing anything (likely Bob is always being addressed, or the flag is off).
 
 ## Configuration
 
-All patience settings are configured via environment variables, loaded in `Settings.from_env()` into a `PatienceSettings` dataclass.
+All settings via env vars, loaded into `PatienceSettings` in `config.py`.
 
-| Environment Variable | Default | Description |
+| Env var | Default | Description |
 |---|---|---|
-| `CYBORG_PATIENCE_ENABLED` | `false` | Global enable/disable. Must be `true` for any patience behavior. |
-| `CYBORG_PATIENCE_MODEL` | `gpt-5.4-mini` | LLM model used for urgency evaluation. Should be fast and cheap. |
-| `CYBORG_PATIENCE_SILENCE_SECONDS` | `5` | Seconds of silence before dispatching when the LLM decides to wait. |
-| `CYBORG_PATIENCE_QUICK_DELAY_SECONDS` | `1` | Seconds to delay when the LLM decides to respond now. |
-| `CYBORG_PATIENCE_MAX_PENDING` | `20` | Maximum items in a per-session buffer before forcing immediate dispatch. |
-| `CYBORG_PATIENCE_MAX_CONTEXT` | `10` | Maximum recent messages included in the urgency evaluation context. |
+| `BOB_PATIENCE_ENABLED` | `false` | Loaded into `PatienceSettings.enabled` but **not currently consulted** by the dispatch path. Per-session route metadata is the real gate. |
+| `BOB_PATIENCE_MODEL` | `gpt-5.4-mini` | Model used for patience LLM calls. Keep this fast and cheap. |
+| `BOB_PATIENCE_MAX_PENDING` | `20` | Max messages in a per-session buffer before safety cap fires. |
+| `BOB_PATIENCE_MAX_CONTEXT` | `10` | Max recent dispatched messages included in the patience context. |
+| `BOB_PATIENCE_OFF_SETTLE_SECONDS` | `1.5` | Phase 2. Fixed delay used when patience is off (no LLM eval, just burst absorption). |
+| `BOB_PATIENCE_BOT_NAME` | `Bot` | Name substituted into the patience system prompt. |
 
-## Safety and Failure Handling
-
-- **Buffer cap**: If a buffer accumulates `max_pending_items` (default 20), dispatch is forced immediately regardless of the LLM decision. This prevents unbounded accumulation.
-- **LLM failure**: If the urgency evaluation LLM call fails (network error, timeout, invalid JSON response), the system defaults to `respond_now`, ensuring messages are never lost.
-- **JSON parsing fallback**: If the LLM response cannot be parsed as JSON, the system checks if the string contains "respond_now". If not found, it defaults to `wait`.
-- **In-memory only**: `PatienceBufferRegistry._buffers` is a plain Python dict. All buffered state is lost on process restart. This is acceptable because messages are already persisted to the database with `dispatched=0` before entering the patience system. On restart, the normal dispatch flow will pick them up.
-
-## Key Files
+## Key files
 
 | File | Purpose |
 |---|---|
-| `packages/cyborg-server/cyborg_server/services/patience_buffer.py` | `PendingItem`, `PatienceBuffer`, `PatienceBufferRegistry` -- per-session in-memory buffers |
-| `packages/cyborg-server/cyborg_server/services/patience_gate.py` | `submit_to_patience()`, `_evaluate_urgency()`, `PATIENCE_SYSTEM_PROMPT` -- the decision engine |
-| `packages/cyborg-server/cyborg_server/config.py` | `PatienceSettings` dataclass and env var loading in `Settings.from_env()` |
-| `packages/cyborg-server/cyborg_server/services/whatsapp_bridge_service.py` | Integration point: patience check, slash commands, typing indicator handling |
-| `services/whatsappbridge/internal/whatsapp/client.go` | whatsmeow `ChatPresence` event handling, presence subscription |
-| `services/whatsappbridge/internal/bridge/bridge.go` | Forwards `ChatPresenceEvent` as `whatsapp.chat_presence` envelope |
-| `services/whatsappbridge/internal/wsproto/protocol.go` | `ChatPresencePayload` type and `TypeChatPresence` constant |
+| `packages/bob-server/bob_server/services/patience_buffer.py` | `PendingItem`, `PatienceBuffer`, `PatienceBufferRegistry` — per-session in-memory state including `last_evaluated_at` / `last_respond` |
+| `packages/bob-server/bob_server/services/patience_gate.py` | `submit_to_patience`, `_evaluate_urgency`, `_patience_system_prompt`, `_flush_without_dispatch`, `PatienceDecision` |
+| `packages/bob-server/bob_server/services/whatsapp_bridge_service/_service.py` | Patience check at the dispatch fork (~line 1173); reads route metadata flags |
+| `packages/bob-server/bob_server/services/whatsapp_bridge_service/_slash_commands.py` | `/patience` and `/relevance` slash command handlers |
+| `packages/bob-server/bob_server/services/session_service.py` | `mark_dispatched` (UPDATE session_messages SET dispatched=1) — used by both `_run_dispatch` and `_flush_without_dispatch` |
+| `packages/bob-server/bob_server/config.py` | `PatienceSettings` dataclass + env var wiring |
+| `packages/bob-server/tests/services/test_patience_gate.py` | Unit tests covering both modes, skip path, safety cap, pending semantics |

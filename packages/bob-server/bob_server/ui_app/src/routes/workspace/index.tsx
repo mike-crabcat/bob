@@ -211,6 +211,14 @@ function WorkspacePage() {
             <div className="flex-1 min-h-0 flex flex-col">
               <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
                 <span className="text-xs text-muted">{selectedFile.split("/").pop()}</span>
+                <div className="flex-1" />
+                <a
+                  href={`/dashboard/api/workspace/file?path=${encodeURIComponent(selectedFile)}&download=1`}
+                  download={selectedFile.split("/").pop()}
+                  className="text-[10px] text-accent hover:underline"
+                >
+                  download
+                </a>
                 <button onClick={copyPath} className="text-[10px] text-accent hover:underline">copy path</button>
               </div>
               <iframe

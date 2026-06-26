@@ -32,6 +32,8 @@ class SlashCommandsMixin:
 
         if command == "/patience":
             await self._cmd_patience(args, session_key, chat_id)
+        elif command == "/relevance":
+            await self._cmd_relevance(args, session_key, chat_id)
         elif command == "/bulletin":
             await self._cmd_bulletin(args, session_key, chat_id, chat_kind)
         elif command == "/who":
@@ -69,6 +71,40 @@ class SlashCommandsMixin:
 
         status = "enabled — waiting for silence before responding" if enabled else "disabled — responding immediately"
         await self.send_message(chat_id, f"Patience {status}")
+
+    async def _cmd_relevance(self, args: str, session_key: str, chat_id: str) -> None:
+        """Toggle the patience relevance gate for the current session.
+
+        When enabled (and `/patience on`), the patience LLM also decides whether
+        to respond at all. Messages judged not addressed to Bob are marked
+        dispatched without invoking the main LLM. Requires patience to be on.
+        """
+        arg = args.strip().lower()
+        if arg not in ("on", "off"):
+            await self.send_message(chat_id, "Usage: /relevance on|off")
+            return
+
+        enabled = arg == "on"
+        route = await self.db.fetch_one(
+            "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if not route:
+            await self.send_message(chat_id, "No session route found")
+            return
+
+        meta = json.loads(route["metadata"]) if route["metadata"] else {}
+        patience_on = bool(meta.get("patience_enabled", False))
+        meta["patience_relevance_gating"] = enabled
+        await self.db.execute(
+            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(meta), utcnow().isoformat(), route["id"]),
+        )
+        logger.info("relevance %s for session %s (route %s)", arg, session_key, route["id"])
+
+        note = "" if patience_on else " (note: /patience is currently OFF — enable that first)"
+        status = "enabled — patience LLM may skip dispatch entirely" if enabled else "disabled — patience LLM only decides timing"
+        await self.send_message(chat_id, f"Relevance gate {status}{note}")
 
     async def _cmd_who(self, chat_id: str) -> None:
         """Reply with the active persona revision and creation timestamp."""

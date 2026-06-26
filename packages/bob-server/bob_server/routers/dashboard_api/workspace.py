@@ -52,7 +52,7 @@ async def list_workspace(request: Request, path: str = "", depth: int = 1) -> di
 
 
 @router.get("/api/workspace/file")
-async def read_workspace_file(request: Request, path: str = "") -> Any:
+async def read_workspace_file(request: Request, path: str = "", download: int = 0) -> Any:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     if not path:
@@ -78,7 +78,11 @@ async def read_workspace_file(request: Request, path: str = "") -> Any:
             ".m4v": "video/x-m4v",
         }
         content_type = mime_map.get(suffix, "application/octet-stream")
-        return FileResponse(resolved, media_type=content_type)
+        headers: dict[str, str] | None = None
+        if download:
+            filename = resolved.name
+            headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return FileResponse(resolved, media_type=content_type, headers=headers)
 
     # Text files
     data = resolved.read_bytes()

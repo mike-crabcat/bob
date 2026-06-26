@@ -219,6 +219,10 @@ class PatienceSettings:
     bot_name: str = "Bot"
     max_pending_items: int = 20
     max_context_messages: int = 10
+    # Fixed delay (seconds) used when patience is OFF. Messages still batch
+    # through the buffer but skip the LLM gate — the timer is just a short
+    # settle window to absorb bursts. Set to 0 to dispatch ASAP.
+    patience_off_settle_seconds: float = 1.5
 
 
 @dataclass(slots=True)
@@ -433,6 +437,7 @@ class Settings:
             bot_name=os.getenv("BOB_SELF_NAME", "Bob"),
             max_pending_items=int(os.getenv("BOB_PATIENCE_MAX_PENDING", "20")),
             max_context_messages=int(os.getenv("BOB_PATIENCE_MAX_CONTEXT", "10")),
+            patience_off_settle_seconds=float(os.getenv("BOB_PATIENCE_OFF_SETTLE_SECONDS", "1.5")),
         )
 
         recon_large_types_raw = os.getenv("BOB_RECON_LARGE_MODEL_TYPES", "")

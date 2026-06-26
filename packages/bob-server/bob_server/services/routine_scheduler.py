@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC
 from uuid import uuid4
 
 from bob_server.services.routine_service import RoutineService
@@ -43,7 +44,7 @@ class RoutineSchedulerTask:
             # mark_run only bumped next_run_at after the LLM finished ~30s later).
             next_at = next_cron_occurrence(
                 routine["schedule"], timezone=routine.get("timezone")
-            ).isoformat()
+            ).astimezone(UTC).isoformat()
             if await svc.claim(routine["id"], next_at):
                 asyncio.create_task(self._fire_routine(ctx, routine))
 
@@ -53,12 +54,15 @@ class RoutineSchedulerTask:
         from bob_server.services.llm_dispatch import LLMDispatchService
         from bob_server.services.tool_registry import build_common_tools
         from bob_server.services.tools import Tool
+        from bob_server.services.routine_service import _format_routine_now
 
         session_key = routine["session_key"]
         prompt = routine["prompt"]
         name = routine["name"]
 
         try:
+            prompt = f"{_format_routine_now(routine)}\n\n{prompt}"
+
             session_svc = SessionService(ctx)
             await session_svc.add_message(session_key, "user", prompt, channel="routine")
 
@@ -86,7 +90,10 @@ class RoutineSchedulerTask:
                 prompt, "",
                 system_content=workspace_prompt,
             )
-            tools = build_common_tools(ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id)
+            tools = build_common_tools(
+                ctx, session_key=session_key, is_trusted=is_trusted,
+                contact_id=contact_id, include_routines=False,
+            )
 
             # Add channel-specific delivery tools
             wa_bridge = ctx.whatsapp_bridge

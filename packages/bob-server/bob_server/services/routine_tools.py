@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from zoneinfo import available_timezones
 
@@ -130,7 +130,7 @@ def make_routine_tools(
         except ValueError as e:
             return json.dumps({"error": f"Invalid cron expression: {e}"})
 
-        next_at = next_cron_occurrence(schedule, timezone=timezone).isoformat()
+        next_at = next_cron_occurrence(schedule, timezone=timezone).astimezone(UTC).isoformat()
 
         routine = await svc.upsert_routine(
             session_key=session_key,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -37,6 +37,23 @@ def _parse_bound(value: str, tz: ZoneInfo) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=tz)
     return parsed
+
+
+def _format_routine_now(row: dict[str, Any]) -> str:
+    """Format the current wall-clock time in the routine's timezone.
+
+    Injected into the routine prompt at dispatch time so the LLM has an
+    unambiguous local-time anchor. Without it, the model defaults to its
+    UTC sense of "today," which is a day behind when the routine's tz is
+    far east of UTC (e.g. 07:00 Australia/Perth = 23:00 UTC the prior day).
+    The UTC offset is included so the model can convert to other zones itself.
+    """
+    tz = _routine_tz(row)
+    now_local = datetime.now(tz)
+    offset = now_local.strftime("%z")  # e.g. +0800
+    configured = row.get("timezone")
+    tz_label = f"{configured} (UTC{offset})" if configured else f"server local (UTC{offset})"
+    return f"[Routine local time: {now_local.strftime('%A %d %B %Y, %H:%M')} {tz_label}]"
 
 
 def _outside_validity_window(row: dict[str, Any]) -> bool:
@@ -124,11 +141,18 @@ class RoutineService(BaseService):
         )
         return count > 0
 
-    async def get_due_routines(self) -> list[dict[str, Any]]:
-        now = datetime.now().astimezone().isoformat()
+    async def get_due_routines(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        # Compare via datetime() on both sides: SQLite parses each ISO string
+        # (honoring its UTC offset) and normalizes to UTC for the TEXT compare.
+        # A bare `next_run_at <= ?` would compare offsets-naively and report a
+        # Europe/Paris routine (e.g. ...T06:30+02:00) as already due under a
+        # server clock in Australia/Perth (...T11:xx+08:00), because '06' < '11'
+        # lexicographically — causing continuous re-firing every heartbeat.
+        now_iso = (now or datetime.now(UTC)).isoformat()
         rows = await self.db.fetch_all(
-            f"SELECT {_ROUTINE_COLUMNS} FROM routines WHERE enabled = 1 AND next_run_at <= ?",
-            (now,),
+            f"SELECT {_ROUTINE_COLUMNS} FROM routines "
+            "WHERE enabled = 1 AND datetime(next_run_at) <= datetime(?)",
+            (now_iso,),
         )
         due: list[dict[str, Any]] = []
         for r in rows or []:
@@ -138,18 +162,18 @@ class RoutineService(BaseService):
             due.append(row)
         return due
 
-    async def claim(self, routine_id: str, next_run_at: str) -> bool:
+    async def claim(self, routine_id: str, next_run_at: str, *, now: datetime | None = None) -> bool:
         """Atomically advance next_run_at. Returns True if this caller won the claim.
 
         Guards against duplicate dispatch when the heartbeat ticks faster than
         the routine body runs: a second heartbeat's UPDATE matches zero rows
         because next_run_at has already moved past `now`.
         """
-        now = datetime.now().astimezone().isoformat()
+        now_iso = (now or datetime.now(UTC)).isoformat()
         count = await self.db.execute(
             "UPDATE routines SET next_run_at = ?, updated_at = ? "
-            "WHERE id = ? AND next_run_at <= ?",
-            (next_run_at, now, routine_id, now),
+            "WHERE id = ? AND datetime(next_run_at) <= datetime(?)",
+            (next_run_at, now_iso, routine_id, now_iso),
         )
         return count > 0
 
