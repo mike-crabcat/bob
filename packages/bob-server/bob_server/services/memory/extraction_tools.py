@@ -57,6 +57,19 @@ def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
         """
         if not subject_id or not claim_type_key:
             return "Error: subject_id and claim_type_key are required."
+        # Pre-check: subject must exist. write_claim enforces this too, but
+        # surfacing the error here lets the LLM recover by calling
+        # create_entity within the same turn instead of recording a claim
+        # that recall/find can never reach.
+        existing = await db.fetch_one(
+            "SELECT 1 FROM memory_entities WHERE entity_id = ?",
+            (subject_id,),
+        )
+        if not existing:
+            return (
+                f"Error: subject_id {subject_id!r} does not exist. "
+                f"Call create_entity(entity_id={subject_id!r}, entity_type=...) first."
+            )
         val = value if value else None
         obj = object_id if object_id else None
         if claim_type_key in ENTITY_REF_CLAIM_KEYS and val and not obj:

@@ -136,7 +136,7 @@ async def find(
 
     lines = [f"{entity_type.title()} entities:"]
     for r in rows:
-        lines.append(f"  - {r['display_name'] or r['entity_id']}")
+        lines.append(f"  - {r['display_name'] or r['entity_id']} [{r['entity_id']}]")
     return "\n".join(lines)
 
 

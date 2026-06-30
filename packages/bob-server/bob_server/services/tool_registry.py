@@ -81,4 +81,9 @@ def build_common_tools(
         _extend(make_contact_tools(ctx))
         _extend(make_phone_tools(ctx, session_key=session_key))
 
+    # Home Assistant — adds current_location() when configured
+    if ctx.settings.homeassistant.enabled:
+        from bob_server.services.location_tools import make_location_tools
+        _extend(make_location_tools(ctx))
+
     return tools

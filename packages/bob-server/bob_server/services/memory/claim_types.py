@@ -83,7 +83,7 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("organizer", ["event"], "Who is running or hosting it", "event-dinner-aug5 → person-mike-cleaver"),
     ("attendee", ["event"], "Who is attending", "event-dinner-aug5 → person-david-shedden"),
     ("recurrence", ["event"], "Recurring pattern or one-off", 'event-dinner-aug5 → "one-off"'),
-    ("associated_trip", ["event", "attraction", "dayplan"], "Trip this relates to", "event-dinner-aug5 → trip-bali-2026"),
+    ("associated_trip", ["event", "attraction", "dayplan", "daylog"], "Trip this relates to", "event-dinner-aug5 → trip-bali-2026"),
     # Location
     ("location_type", ["location"], "Kind of place", 'location-villa-sunset → "villa"'),
     ("parent_location", ["location"], "Location this is contained within", "location-villa-sunset → location-seminyak"),
@@ -95,6 +95,7 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("leg", ["trip"], "A Stay that is part of this trip", "trip-bali-2026 → stay-bali-day1-3"),
     ("attraction", ["trip"], "An Attraction entity — a thing to see or do on the trip", "trip-bali-2026 → attraction-tanah-lot"),
     ("dayplan", ["trip"], "A Dayplan entity — planned itinerary for a specific day", "trip-bali-2026 → dayplan-bali-aug3"),
+    ("daylog", ["trip"], "A Daylog entity — record of what happened on a specific day", "trip-bali-2026 → daylog-bali-aug3"),
     ("connection", ["trip"], "A Connection entity that is part of this trip",
      "trip-europe-france → connection-perth-geneva-outbound"),
     # Connection
@@ -125,8 +126,9 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("cost", ["attraction"], "Cost or ticket price", 'attraction-tanah-lot → "50k IDR"'),
     ("location", ["attraction"], "Where the attraction is", "attraction-tanah-lot → location-tanah-lot"),
     # Dayplan
-    ("date", ["dayplan"], "Date this dayplan covers", 'dayplan-bali-aug3 → "2026-08-03"'),
-    ("notes", ["dayplan"], "Ideas, plans, or notes for the day", 'dayplan-bali-aug3 → "Morning at beach, afternoon temple visit"'),
+    ("date", ["dayplan", "daylog"], "Date this covers", 'dayplan-bali-aug3 → "2026-08-03"'),
+    ("notes", ["dayplan", "daylog"], "Notes — plans for a dayplan, or what happened for a daylog", 'dayplan-bali-aug3 → "Morning at beach, afternoon temple visit"'),
+    ("media_ref", ["daylog"], "Workspace-relative path or URL to a media file (photo/video/audio) for this day", 'daylog-bali-aug3 → "photos/bali-aug3/beach.jpg"'),
     ("attraction", ["dayplan"], "Attraction planned for this day", "dayplan-bali-aug3 → attraction-tanah-lot"),
     # (associated_trip also applies to event and attraction — see Event section above)
     # Stay
@@ -352,17 +354,66 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "for a specific date. Include the trip and date in the slug for uniqueness "
             "(e.g. dayplan-bali-aug3, dayplan-paris-jun12). Created when planning days of a trip."
         ),
-        keywords=["day plan", "itinerary", "plan for", "agenda"],
+        keywords=[
+            "day plan", "itinerary", "plan for", "agenda",
+            "tomorrow", "tomorrow we", "we're going to", "we are going to",
+            "we plan to", "we'll be", "we will be", "we've booked",
+            "next tuesday", "next wednesday", "next week",
+            "on monday", "on tuesday", "on wednesday",
+        ],
         triggers_types=["dayplan"],
         extraction_rules=[
+            "TRIGGER: CREATE a new dayplan entity whenever the user states a forward-looking plan "
+            "for a specific day — phrases like 'tomorrow we...', 'we're going to X on Y', 'we plan "
+            "to...', 'we'll be at...', 'we've booked X for Z', 'next Tuesday we...'. This is ALWAYS "
+            "memory-worthy. Do not let general 'skip past actions' rules or 'a possible plan is not "
+            "a confirmed booking' conservatism suppress dayplan creation when the user has clearly "
+            "stated an intent — a stated plan counts as a plan even before it's booked.",
+            "DO NOT record forward-looking plans as truth/notes claims on the trip — always create a "
+            "dedicated dayplan entity. Forward-looking plans go on dayplan, retrospective accounts go on daylog.",
             "Each dayplan covers exactly one date. Create separate dayplan entities for each day. "
-            "Include attraction references for things planned for that day, and notes for ideas or free-text plans.",
+            "Resolve relative dates ('tomorrow', 'next Tuesday') to absolute calendar dates using "
+            "the message timestamp. Include attraction/location references for places planned, "
+            "and notes for times, transport, bookings, and free-text plans.",
         ],
         reconciliation_rules=(
             "1. There MUST be exactly one date claim. If there are duplicates, keep the most specific one.\n"
             "2. Attraction claims should reference existing attraction entities. If an attraction claim "
             "references a non-existent entity, raise a question.\n"
             "3. If the dayplan has no associated_trip, check if any trip references it in its dayplan claims. "
+            "If found, add the associated_trip claim."
+        ),
+        follow_for_bulletins=True,
+    ),
+    "daylog": EntityType(
+        name="daylog",
+        prefix="daylog-",
+        description=(
+            "A retrospective record of a single day of a trip — what actually happened. "
+            "Counterpart to dayplan (which is forward-looking). Holds a date, freeform notes, "
+            "media_refs (workspace paths to photos/videos), and can reference attractions/events "
+            "actually visited. Include trip and date in the slug for uniqueness "
+            "(e.g. daylog-bali-aug3, daylog-paris-jun12)."
+        ),
+        keywords=["daylog", "day log", "what we did", "what i did", "yesterday we", "yesterday i", "diary", "journal"],
+        triggers_types=["daylog"],
+        extraction_rules=[
+            "TRIGGER: CREATE a new daylog entity whenever the user describes what they did on a "
+            "specific past day — phrases like 'yesterday we...', 'on monday we went...', 'over the "
+            "weekend we...', 'today we did...'. This is ALWAYS memory-worthy even when other past "
+            "actions are not. Do not let general 'skip past actions' rules suppress daylog creation.",
+            "DO NOT record past-day activities as truth/notes claims on the trip — always create a "
+            "dedicated daylog entity. Forward-looking plans go on dayplan, retrospective accounts go on daylog.",
+            "Each daylog covers exactly one date. Create separate daylog entities for separate days. "
+            "Use notes for narrative (what happened, highlights, deviations from plan), "
+            "media_ref for workspace paths to photos/videos/audio (value = workspace-relative path or URL), "
+            "and attraction/event references for things actually visited.",
+        ],
+        reconciliation_rules=(
+            "1. There MUST be exactly one date claim. If there are duplicates, keep the most specific one.\n"
+            "2. media_ref values should be valid workspace paths or URLs. Retract vague values like 'photos' "
+            "or bare filenames with no directory.\n"
+            "3. If the daylog has no associated_trip, check if any trip references it in its daylog claims. "
             "If found, add the associated_trip claim."
         ),
         follow_for_bulletins=True,
@@ -411,15 +462,25 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
         name="event",
         prefix="event-",
         description=(
-            "A planned event: a dinner, a party, a meeting, a concert. "
-            "Has a time, a location, and attendees."
+            "A scheduled event with a specific time and attendees: a dinner reservation, "
+            "a party, a meeting, a concert, a wedding. Has a concrete start_time and usually "
+            "a location. NOT for trip day summaries, daily activity logs, or retrospective "
+            "accounts of what happened on a past day — those are daylog entities. NOT for "
+            "attractions or sights visited either — those are attraction entities."
         ),
         keywords=["event", "dinner", "party", "meeting", "concert"],
         triggers_types=["event"],
-        extraction_rules=[],
+        extraction_rules=[
+            "event entities require a specific scheduled time (start_time) and typically "
+            "attendees/location. Do NOT create an event to record what someone did on a past "
+            "day ('yesterday we went...', 'on monday we did...') — that is a daylog. Do NOT "
+            "create an event for a place visited on a trip — that is an attraction.",
+        ],
         reconciliation_rules=(
             "1. start_time must be before end_time.\n"
-            "2. If associated_trip is set, the event should fall within the trip date range."
+            "2. If associated_trip is set, the event should fall within the trip date range.\n"
+            "3. If an event looks like a past-day trip activity summary with no scheduled time, "
+            "it should be a daylog — raise a question."
         ),
         follow_for_bulletins=True,
     ),
@@ -597,7 +658,7 @@ ENTITY_REF_CLAIM_KEYS: frozenset[str] = frozenset({
     "member", "location", "organizer", "attendee", "associated_trip",
     "parent_location", "associated_contact", "leg", "accommodation",
     "owner", "related_entity", "decider", "file_ref", "attraction",
-    "connection", "passenger", "dayplan", "participant",
+    "connection", "passenger", "dayplan", "daylog", "participant",
 })
 
 
@@ -685,6 +746,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("leg", "Legs"),
         ("attraction", "Attractions"),
         ("dayplan", "Day plans"),
+        ("daylog", "Day logs"),
         ("connection", "Connections"),
         ("file_ref", "Files"),
         ("truth", "User truth"),
@@ -701,6 +763,15 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     "dayplan": [
         ("date", "Date"),
         ("notes", "Notes"),
+        ("attraction", "Attractions"),
+        ("associated_trip", "Trip"),
+        ("file_ref", "Files"),
+        ("truth", "User truth"),
+    ],
+    "daylog": [
+        ("date", "Date"),
+        ("notes", "Notes"),
+        ("media_ref", "Media"),
         ("attraction", "Attractions"),
         ("associated_trip", "Trip"),
         ("file_ref", "Files"),

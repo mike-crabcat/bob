@@ -1,26 +1,34 @@
-{{ display_name }} [{{ entity_id }}]
-{% for c in claims.get("transport_type", []) %}Type: {{ c.value }}
+# {{ display_name }} [{{ entity_id }}]
+
+{% set has_details = claims.get("transport_type") or claims.get("departure_location") or claims.get("arrival_location") or claims.get("departure_time") or claims.get("arrival_time") or claims.get("duration") or claims.get("booking_ref") or claims.get("passenger") or claims.get("seat") %}
+{% if has_details %}
+## Details
+
+{% for c in claims.get("transport_type", []) %}- **Type:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("departure_location", []) %}From: {{ c.value }}
+{% for c in claims.get("departure_location", []) %}- **From:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("arrival_location", []) %}To: {{ c.value }}
+{% for c in claims.get("arrival_location", []) %}- **To:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("departure_time", []) %}Departs: {{ c.value }}
+{% for c in claims.get("departure_time", []) %}- **Departs:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("arrival_time", []) %}Arrives: {{ c.value }}
+{% for c in claims.get("arrival_time", []) %}- **Arrives:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("duration", []) %}Duration: {{ c.value }}
+{% for c in claims.get("duration", []) %}- **Duration:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("booking_ref", []) %}Booking: {{ c.value }}
+{% for c in claims.get("booking_ref", []) %}- **Booking:** {{ c.value }}
 {% endfor %}
-{% for c in claims.get("passenger", []) %}Passenger: {{ c.value or c.object_id }}
+{% for c in claims.get("passenger", []) %}- **Passenger:** {{ c.value or c.object_id }}
 {% endfor %}
-{% for c in claims.get("seat", []) %}Seat: {{ c.value }}
+{% for c in claims.get("seat", []) %}- **Seat:** {{ c.value }}
 {% endfor %}
+{% endif %}
 {% if orphans %}
+## Additional
+
 {% for key, vals in orphans | dictsort %}
-{% if vals | length == 1 %}{{ key }}: {{ vals[0].value or vals[0].object_id }}
-{% else %}{{ key }}:
+{% if vals | length == 1 %}- **{{ key }}:** {{ vals[0].value or vals[0].object_id }}
+{% else %}- **{{ key }}:**
 {% for v in vals %}  - {{ v.value or v.object_id }}
 {% endfor %}
 {% endif %}

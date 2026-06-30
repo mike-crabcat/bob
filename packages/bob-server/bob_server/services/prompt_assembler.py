@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from bob_server.services.memory.claim_types import ENTITY_TYPES
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +112,36 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     # index dump used to be appended here but was disabled — Bob discovers
     # entities on demand via these tools instead.
     if db is not None:
+        # Location tool — only when Home Assistant is configured. Mirrors the
+        # gating in tool_registry.build_common_tools() so the prompt never
+        # advertises a tool that isn't actually registered.
+        ha_enabled = (
+            os.getenv("BOB_HA_ENABLED", "").lower() in ("true", "1", "yes", "on")
+            or (
+                bool(os.getenv("BOB_HA_URL", ""))
+                and bool(os.getenv("BOB_HA_BEARER_TOKEN", ""))
+                and bool(os.getenv("BOB_HA_DEVICE_TRACKER_ENTITY_ID", ""))
+            )
+        )
+        if ha_enabled:
+            location_section = (
+                "## Location\n\n"
+                "- **current_location()** — Return the user's current location "
+                "from Home Assistant (zone name, lat/lon, GPS accuracy, "
+                "last-updated). Call this BEFORE answering any "
+                "location-dependent question: \"where am I\", \"what's near "
+                "me\", \"find lunch nearby\", \"how far to X\", \"what should "
+                "we do this afternoon\". Cached for 2 min — do not guess "
+                "location from chat context.\n"
+                "- **location_history(hours=24)** — Return accumulated GPS "
+                "pings (every 15 min) from the location_history table. Use "
+                "for \"what was my day like\", \"where did we go yesterday\", "
+                "\"when did we arrive\", \"how long did we stay\". Lower "
+                "`hours` for tighter windows.\n"
+            )
+        else:
+            location_section = ""
+
         mode = os.getenv("BOB_MEMORY_EXTRACTION_MODE", "bulletin").strip().lower()
         if mode == "silent":
             capture_line = (
@@ -131,17 +163,34 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             "query; returns its claims rendered as text plus reverse references. "
             "Start here for \"what do I know about X\".\n"
             "- **find(entity_type, claim_type_key?, value?)** — List entities of a "
-            "type, optionally filtered by a claim.\n"
+            "type, optionally filtered by a claim. Useful for listing all dayplans "
+            "for a trip, finding a dayplan by date (find(\"dayplan\", \"date\", "
+            "\"2026-06-30\")), listing daylogs, finding a daylog by date "
+            "(find(\"daylog\", \"date\", \"2026-06-25\")), listing attractions at "
+            "a location, etc.\n"
             f"{capture_line}"
             "- **memory_correct(action, entity_id?, claim_type_key?, value?, reason)** "
             "— Fix wrong memory: remove_entity (archive an entity and its claims), "
             "remove_claim (supersede one claim), set_truth (write a user correction). "
             "Always give a reason.\n"
             "\n"
-            "Entity types: person, group, trip, stay, connection, location, event, "
-            "task, file, thing, decision.\n"
+            f"Entity types: {', '.join(ENTITY_TYPES)}.\n"
+            "\n"
+            "**When to consult memory** — ALWAYS use recall/find before answering "
+            "questions about: future plans or schedules (\"what's on tomorrow\", "
+            "\"what are we doing Tuesday\"), past events or activities (\"what did "
+            "I do yesterday\", \"when did we go to X\"), trip history, people, "
+            "places, or anything previously discussed. For future-plan questions, "
+            "call find(\"dayplan\", \"date\", \"<YYYY-MM-DD>\") for the resolved "
+            "date — and if no dayplan exists, also check the active trip via "
+            "recall before claiming there is \"nothing booked\". Do not say "
+            "\"I don't know\" or \"I don't have that\" until you have queried "
+            "memory. If recall returns nothing relevant, try find() with the "
+            "relevant entity type and date/topic filters.\n"
         )
         parts.append(memory_section)
+        if location_section:
+            parts.append(location_section)
 
     # Append grounding rules to reduce hallucinated tool claims
     parts.append(

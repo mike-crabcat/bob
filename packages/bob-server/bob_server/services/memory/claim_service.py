@@ -42,6 +42,23 @@ async def write_claim(db: Any, claim: Claim) -> str:
         logger.warning("Skipping claim %s: unknown claim_type_key %r", claim.id, claim.claim_type_key)
         return claim.id
 
+    # Orphan guard: subject_id must reference an existing entity row. Without
+    # this, add_claim against a never-created slug produces claims that are
+    # invisible to recall/find (both query memory_entities first). The check
+    # is row-existence only — any status — so legitimate flows like
+    # memory_correct's truth-claim-on-archived-entity still work.
+    subject_row = await db.fetch_one(
+        "SELECT 1 FROM memory_entities WHERE entity_id = ?",
+        (claim.subject_id,),
+    )
+    if not subject_row:
+        logger.warning(
+            "Skipping orphan claim %s: subject_id %r has no row in memory_entities "
+            "(call create_entity before add_claim)",
+            claim.id, claim.subject_id,
+        )
+        return claim.id
+
     # Deduplicate: if writing an active claim with the same content as an existing
     # active claim, merge bulletin sources instead of creating a duplicate.
     if claim.status == "active":
@@ -256,7 +273,8 @@ async def extract_claims_from_bulletin(
     if entity_types_in_bulletin:
         claim_types_section = build_extraction_prompt_section(entity_types_in_bulletin)
     else:
-        claim_types_section = build_extraction_prompt_section(["person", "trip", "event", "location"])
+        from bob_server.services.memory.claim_types import ENTITY_TYPES
+        claim_types_section = build_extraction_prompt_section(list(ENTITY_TYPES))
 
     system_prompt = build_extraction_prompt(claim_types_section, bot_name=bot_name)
 

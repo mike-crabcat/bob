@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useWSConnected } from "@/hooks/use-live-data";
 import { SessionList } from "@/components/home/session-list";
 import { LLMChart } from "@/components/home/llm-chart";
-import { BulletinCards } from "@/components/home/bulletin-cards";
+import { MemoryFeed } from "@/components/home/memory-feed";
 import { fetchAPI } from "@/lib/api";
 
 interface CostByCategory {
@@ -18,7 +18,7 @@ interface HomeSnapshot {
   active_sessions: SessionItem[];
   chart_buckets: ChartBucket[];
   chart_categories: string[];
-  recent_bulletins: BulletinItem[];
+  recent_memory: MemoryFeedItem[];
   active_dispatches: DispatchItem[];
   entity_count: number;
   bulletin_count: number;
@@ -41,11 +41,16 @@ export interface ChartBucket {
   [category: string]: string | number;
 }
 
-export interface BulletinItem {
+export interface MemoryFeedItem {
   id: string;
-  channel_id: string;
-  source_type: string;
-  content_length: number;
+  claim_type: string;
+  subject_id: string;
+  subject_name: string;
+  subject_type: string | null;
+  object_id: string | null;
+  object_name: string | null;
+  object_type: string | null;
+  value: string | null;
   created_at: string;
 }
 
@@ -118,8 +123,8 @@ function HomePage() {
       </section>
 
       <section>
-        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">bulletins</h2>
-        <BulletinCards bulletins={home?.recent_bulletins ?? []} />
+        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">recent memory</h2>
+        <MemoryFeed items={home?.recent_memory ?? []} />
       </section>
 
       <section>

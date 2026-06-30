@@ -12,6 +12,7 @@ import logging
 from bob_server.context import AppContext
 from bob_server.services.memory import MemoryService
 from bob_server.services.memory.channels import resolve_channel_id
+from bob_server.services.memory.models import ENTITY_TYPES
 from bob_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -29,17 +30,32 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         from bob_server.services.memory.tools import recall as _recall
         return await _recall(ctx.db, query)
 
-    @tool
-    async def find(
+    async def _find_handler(
         entity_type: str,
         claim_type_key: str = "",
         value: str = "",
     ) -> str:
-        """Find entities by type with optional claim filters.
-        Entity types: person, group, location, trip, stay, event, task, file, thing, decision.
-        Returns matching entity IDs and display names."""
         from bob_server.services.memory.tools import find as _find
         return await _find(ctx.db, entity_type, claim_type_key or None, value or None)
+
+    find = Tool(
+        name="find",
+        description=(
+            f"Find entities by type with optional claim filters. "
+            f"Entity types: {', '.join(ENTITY_TYPES)}. "
+            f"Use this to list dayplans for a trip, find a dayplan by date "
+            f"(find(\"dayplan\", \"date\", \"2026-06-30\")), list daylogs, "
+            f"find attractions at a location, etc. "
+            f"Returns matching entity IDs and display names."
+        ),
+        parameters={
+            "entity_type": {"type": "string"},
+            "claim_type_key": {"type": "string"},
+            "value": {"type": "string"},
+        },
+        required=["entity_type"],
+        handler=_find_handler,
+    )
 
     @tool
     async def note(

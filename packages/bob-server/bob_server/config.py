@@ -136,6 +136,26 @@ class AgentMailSettings:
 
 
 @dataclass(slots=True)
+class HomeAssistantSettings:
+    """Configuration for Home Assistant integration (pull-based location queries).
+
+    The Companion app on the user's phone publishes GPS to HA as a
+    ``device_tracker.*`` entity. Bob queries HA's REST API on demand via the
+    ``current_location()`` tool — see services/homeassistant_client.py and
+    services/location_tools.py.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    bearer_token: str = ""
+    device_tracker_entity_id: str = ""
+    # Scheduled background fetcher — appends a row to location_history every
+    # history_interval_seconds. See LocationFetchTask in heartbeat.py.
+    history_enabled: bool = True
+    history_interval_seconds: int = 900
+
+
+@dataclass(slots=True)
 class VoiceSettings:
     """Configuration for the voice chat subsystem."""
 
@@ -268,6 +288,7 @@ class Settings:
     pool_size: int = DEFAULT_POOL_SIZE
     webhooks: dict[str, WebhookConfig] = field(default_factory=dict)
     agentmail: AgentMailSettings = field(default_factory=AgentMailSettings)
+    homeassistant: HomeAssistantSettings = field(default_factory=HomeAssistantSettings)
     email_polling_enabled: bool = True
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     phone: PhoneSettings = field(default_factory=PhoneSettings)
@@ -368,6 +389,32 @@ class Settings:
             default_inbox_id=os.getenv("BOB_AGENTMAIL_DEFAULT_INBOX_ID", ""),
             poll_interval_seconds=float(os.getenv("BOB_AGENTMAIL_POLL_INTERVAL_SECONDS", "30")),
         )
+
+        # Home Assistant token: read directly from env, or from a file path
+        # supplied via BOB_HA_BEARER_TOKEN_FILE (avoids putting the secret in
+        # the environment directly).
+        ha_token = os.getenv("BOB_HA_BEARER_TOKEN", "")
+        ha_token_file = os.getenv("BOB_HA_BEARER_TOKEN_FILE", "")
+        if not ha_token and ha_token_file:
+            try:
+                ha_token = Path(ha_token_file).expanduser().read_text(encoding="utf-8").strip()
+            except OSError:
+                ha_token = ""
+
+        ha_url = os.getenv("BOB_HA_URL", "").rstrip("/")
+        ha_entity = os.getenv("BOB_HA_DEVICE_TRACKER_ENTITY_ID", "")
+        ha_explicitly_enabled = os.getenv("BOB_HA_ENABLED", "").lower() in ("true", "1", "yes", "on")
+        # Auto-enable when fully configured even if BOB_HA_ENABLED is unset.
+        ha_enabled = ha_explicitly_enabled or bool(ha_url and ha_token and ha_entity)
+        homeassistant = HomeAssistantSettings(
+            enabled=ha_enabled,
+            url=ha_url,
+            bearer_token=ha_token,
+            device_tracker_entity_id=ha_entity,
+            history_enabled=os.getenv("BOB_HA_HISTORY_ENABLED", "true").lower()
+                in ("true", "1", "yes", "on"),
+            history_interval_seconds=int(os.getenv("BOB_HA_HISTORY_INTERVAL_SECONDS", "900")),
+        )
         email_polling_enabled = os.getenv("BOB_EMAIL_POLLING_ENABLED", "true").lower() in ("true", "1", "yes", "on")
 
         voice = VoiceSettings(
@@ -465,6 +512,7 @@ class Settings:
             pool_size=pool_size,
             webhooks=webhooks,
             agentmail=agentmail,
+            homeassistant=homeassistant,
             email_polling_enabled=email_polling_enabled,
             voice=voice,
             heartbeat_interval_seconds=heartbeat_interval_seconds,

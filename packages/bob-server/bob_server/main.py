@@ -23,6 +23,7 @@ from bob_server.heartbeat import (
     EmailSyncTask,
     HeartbeatRunner,
     LLMCallStalenessTask,
+    LocationFetchTask,
     SessionIdleSummaryTask,
 )
 from bob_server.services.routine_scheduler import RoutineSchedulerTask
@@ -114,6 +115,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(CallCleanupTask())
         runner.register(SessionIdleSummaryTask())
         runner.register(LLMCallStalenessTask())
+        runner.register(LocationFetchTask())
         runner.register(RoutineSchedulerTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:

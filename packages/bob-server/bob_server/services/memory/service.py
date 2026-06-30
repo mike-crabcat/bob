@@ -543,10 +543,7 @@ class MemoryService(BaseService):
         if not force and not await self._has_undigested_messages(session_key):
             return {"status": "skipped", "reason": "no_new_messages"}
 
-        claim_types_section = build_extraction_prompt_section(
-            ["person", "group", "trip", "stay", "connection", "location",
-             "event", "task", "file", "thing", "decision"]
-        )
+        claim_types_section = build_extraction_prompt_section(list(ENTITY_TYPES))
         group_context = await self._build_silent_group_context(session_key)
         system_prompt = build_silent_turn_prompt(
             claim_types_section, bot_name=bot_name, group_context=group_context,
