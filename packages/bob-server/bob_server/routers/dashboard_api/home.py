@@ -113,32 +113,21 @@ async def get_home(request: Request) -> dict[str, Any]:
                 chart_buckets.append(entry)
         chart_categories = sorted(categories)
 
-    # Recent bulletins
-    recent_bulletins: list[dict[str, Any]] = []
+    # Bulletin total (still surfaced in the stats box even though the
+    # bulletins widget itself is gone — the pipeline hasn't fully retired)
     bulletin_count = 0
     bulletins_table = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_bulletins'"
     )
     if bulletins_table:
-        b_rows = await db.fetch_all(
-            """SELECT id, channel_id, source_type, length(content) AS content_length, created_at
-               FROM memory_bulletins
-               ORDER BY created_at DESC
-               LIMIT 5"""
-        )
-        for row in b_rows:
-            recent_bulletins.append({
-                "id": row["id"],
-                "channel_id": row["channel_id"],
-                "source_type": row["source_type"],
-                "content_length": row["content_length"],
-                "created_at": _utc(row["created_at"]),
-            })
         b_total = await db.fetch_one("SELECT COUNT(*) AS c FROM memory_bulletins")
         bulletin_count = (b_total["c"] if b_total else 0) or 0
 
-    # Active entity count
+    # Active entity count + recent memory activity (claims are the atomic unit
+    # now that extraction is going silent-per-turn; each row surfaces the
+    # subject entity plus object/value so the feed shows what was just learned)
     entity_count = 0
+    recent_memory: list[dict[str, Any]] = []
     entities_table = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entities'"
     )
@@ -147,6 +136,38 @@ async def get_home(request: Request) -> dict[str, Any]:
             "SELECT COUNT(*) AS c FROM memory_entities WHERE status = 'active'"
         )
         entity_count = (e_total["c"] if e_total else 0) or 0
+
+        claims_table = await db.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_claims'"
+        )
+        if claims_table:
+            c_rows = await db.fetch_all(
+                """SELECT c.id, c.claim_type_key, c.subject_id, c.object_id, c.value,
+                          c.created_at,
+                          se.display_name AS subject_name,
+                          se.entity_type  AS subject_type,
+                          oe.display_name AS object_name,
+                          oe.entity_type  AS object_type
+                   FROM memory_claims c
+                   LEFT JOIN memory_entities se ON se.entity_id = c.subject_id
+                   LEFT JOIN memory_entities oe ON oe.entity_id = c.object_id
+                   WHERE c.status = 'active'
+                   ORDER BY c.created_at DESC
+                   LIMIT 10"""
+            )
+            for row in c_rows:
+                recent_memory.append({
+                    "id": row["id"],
+                    "claim_type": row["claim_type_key"],
+                    "subject_id": row["subject_id"],
+                    "subject_name": row["subject_name"] or row["subject_id"],
+                    "subject_type": row["subject_type"],
+                    "object_id": row["object_id"],
+                    "object_name": row["object_name"] if row["object_id"] else None,
+                    "object_type": row["object_type"],
+                    "value": row["value"],
+                    "created_at": _utc(row["created_at"]),
+                })
 
     # Estimated 24h costs by call category
     cost_by_category: list[dict[str, Any]] = []
@@ -194,7 +215,7 @@ async def get_home(request: Request) -> dict[str, Any]:
         "active_sessions": active_sessions,
         "chart_buckets": chart_buckets,
         "chart_categories": chart_categories,
-        "recent_bulletins": recent_bulletins,
+        "recent_memory": recent_memory,
         "entity_count": entity_count,
         "bulletin_count": bulletin_count,
         "cost_by_category": cost_by_category,

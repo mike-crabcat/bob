@@ -21,6 +21,14 @@ class PatienceBuffer:
     items: list[PendingItem] = field(default_factory=list)
     timer_handle: asyncio.TimerHandle | None = None
     last_activity: float = 0.0
+    # Monotonic timestamp of the most recent patience-LLM evaluation. Items at
+    # or before this instant have been evaluated and drop out of future patience
+    # contexts (pending semantics: "evaluated" ≠ "pending"). 0.0 = no eval yet.
+    last_evaluated_at: float = 0.0
+    # Most recent relevance decision (`True` = respond, `False` = skip). Drives
+    # the safety-cap behavior: when the cap is hit after a skip, flush without
+    # dispatching instead of force-firing the main LLM. `None` = no decision.
+    last_respond: bool | None = None
 
     def add(self, item: PendingItem) -> None:
         self.items.append(item)

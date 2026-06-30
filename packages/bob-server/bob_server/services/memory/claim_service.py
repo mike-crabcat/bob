@@ -24,6 +24,16 @@ _NEW_PERSON_ALT_RE = re.compile(r"^person-new[:\-](.+)$")
 
 async def write_claim(db: Any, claim: Claim) -> str:
     """Write a claim to the database. Deduplicates by merging bulletin sources."""
+    # The DB CHECK constraint allows at most one of object_id / value. If both
+    # were supplied (e.g. by supersede_claim_tool echoing the same string into
+    # both fields), prefer object_id when it is a well-formed entity reference;
+    # otherwise fall back to value.
+    if claim.object_id and claim.value:
+        if _is_valid_object_id(claim.object_id):
+            claim.value = None
+        else:
+            claim.object_id = None
+
     row = await db.fetch_one(
         "SELECT 1 FROM memory_claim_types WHERE key = ?",
         (claim.claim_type_key,),
@@ -32,11 +42,28 @@ async def write_claim(db: Any, claim: Claim) -> str:
         logger.warning("Skipping claim %s: unknown claim_type_key %r", claim.id, claim.claim_type_key)
         return claim.id
 
+    # Orphan guard: subject_id must reference an existing entity row. Without
+    # this, add_claim against a never-created slug produces claims that are
+    # invisible to recall/find (both query memory_entities first). The check
+    # is row-existence only — any status — so legitimate flows like
+    # memory_correct's truth-claim-on-archived-entity still work.
+    subject_row = await db.fetch_one(
+        "SELECT 1 FROM memory_entities WHERE entity_id = ?",
+        (claim.subject_id,),
+    )
+    if not subject_row:
+        logger.warning(
+            "Skipping orphan claim %s: subject_id %r has no row in memory_entities "
+            "(call create_entity before add_claim)",
+            claim.id, claim.subject_id,
+        )
+        return claim.id
+
     # Deduplicate: if writing an active claim with the same content as an existing
     # active claim, merge bulletin sources instead of creating a duplicate.
     if claim.status == "active":
         existing = await db.fetch_one(
-            "SELECT id, source_bulletins FROM memory_claims "
+            "SELECT id, source_bulletins, source_messages FROM memory_claims "
             "WHERE status = 'active' AND claim_type_key = ? AND subject_id = ? "
             "AND COALESCE(object_id, '') = COALESCE(?, '') "
             "AND COALESCE(value, '') = COALESCE(?, '')",
@@ -46,18 +73,20 @@ async def write_claim(db: Any, claim: Claim) -> str:
             existing_id = existing["id"]
             existing_bullets: list[str] = json.loads(existing["source_bulletins"]) if existing["source_bulletins"] else []
             merged = list(dict.fromkeys(existing_bullets + claim.source_bulletins))
-            if len(merged) > len(existing_bullets):
+            existing_messages: list[str] = json.loads(existing["source_messages"]) if existing.get("source_messages") else []
+            merged_messages = list(dict.fromkeys(existing_messages + claim.source_messages))
+            if len(merged) > len(existing_bullets) or len(merged_messages) > len(existing_messages):
                 await db.execute(
-                    "UPDATE memory_claims SET source_bulletins = ? WHERE id = ?",
-                    (json.dumps(merged), existing_id),
+                    "UPDATE memory_claims SET source_bulletins = ?, source_messages = ? WHERE id = ?",
+                    (json.dumps(merged), json.dumps(merged_messages), existing_id),
                 )
             return existing_id
 
     await db.execute(
         "INSERT OR REPLACE INTO memory_claims "
         "(id, claim_type_key, subject_id, object_id, value, status, "
-        "source_bulletins, visibility, scope, created_at, superseded_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_bulletins, source_messages, visibility, scope, created_at, superseded_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             claim.id,
             claim.claim_type_key,
@@ -66,6 +95,7 @@ async def write_claim(db: Any, claim: Claim) -> str:
             claim.value,
             claim.status,
             json.dumps(claim.source_bulletins),
+            json.dumps(claim.source_messages),
             claim.visibility,
             json.dumps(claim.scope),
             claim.created_at.isoformat(),
@@ -161,6 +191,36 @@ _INVALID_PATH_VALUES: frozenset[str] = frozenset({
 _URL_PREFIXES = ("https://", "http://", "s3://", "gs://")
 
 
+def _is_valid_object_id(object_id: str) -> bool:
+    """Return True if object_id looks like a valid entity reference (e.g. person-foo)."""
+    if not object_id:
+        return False
+    return any(object_id.startswith(f"{prefix}-") for prefix in _ENTITY_TYPE_PREFIXES)
+
+
+def validate_claim_for_write(claim: Claim) -> str | None:
+    """Return an error message if the claim violates a hard type contract, else None.
+
+    LLM-facing tools call this before ``write_claim`` to reject claims that are
+    structurally wrong (not just stylistically weak). Soft / stylistic checks
+    belong in the prompts, not here — this is for cases where the data is
+    categorically incorrect and storing it would pollute the entity.
+    """
+    if claim.claim_type_key == "file_ref":
+        obj = (claim.object_id or "").strip()
+        if not obj:
+            return (
+                "file_ref requires object_id pointing to a file-* entity. "
+                "Drop the claim or create the file entity first."
+            )
+        if obj.startswith("file-new:") or not obj.startswith("file-"):
+            return (
+                f"file_ref object_id {obj!r} is not a file-* entity. "
+                "Resolve the file reference first or drop the claim."
+            )
+    return None
+
+
 def _is_valid_file_path(path: str) -> bool:
     """Return True if the file_path looks like a real workspace path or URL."""
     stripped = path.strip().strip("\"'").lower()
@@ -213,7 +273,8 @@ async def extract_claims_from_bulletin(
     if entity_types_in_bulletin:
         claim_types_section = build_extraction_prompt_section(entity_types_in_bulletin)
     else:
-        claim_types_section = build_extraction_prompt_section(["person", "trip", "event", "location"])
+        from bob_server.services.memory.claim_types import ENTITY_TYPES
+        claim_types_section = build_extraction_prompt_section(list(ENTITY_TYPES))
 
     system_prompt = build_extraction_prompt(claim_types_section, bot_name=bot_name)
 

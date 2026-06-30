@@ -121,6 +121,7 @@ class Claim:
     value: str | None = None
     status: str = "active"
     source_bulletins: list[str] = field(default_factory=list)
+    source_messages: list[str] = field(default_factory=list)
     visibility: str = "channel"
     scope: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)

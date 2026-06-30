@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
@@ -148,36 +150,84 @@ class SessionIdleSummaryTask:
         )
         return [dict(r) for r in rows] if rows else []
 
+    async def _find_idle_sessions_silent(
+        self, db: Database, idle_threshold_minutes: float
+    ) -> list[dict]:
+        """Silent-mode idle detection.
+
+        Same shape as `_find_idle_sessions`, but the "messages since last
+        extraction" anchor reads MAX(ran_at) from memory_extraction_turns
+        instead of memory_bulletins.session_range_end.
+        """
+        rows = await db.fetch_all(
+            """
+            SELECT
+                sm.session_key,
+                MAX(sm.created_at) AS last_message_at,
+                COALESCE(
+                    (SELECT MAX(ran_at) FROM memory_extraction_turns
+                     WHERE session_key = sm.session_key),
+                    '1970-01-01'
+                ) AS active_from,
+                COUNT(*) AS message_count
+            FROM session_messages sm
+            WHERE sm.session_key NOT LIKE 'subagent:%'
+              AND datetime(sm.created_at) > datetime(COALESCE(
+                (SELECT MAX(ran_at) FROM memory_extraction_turns
+                 WHERE session_key = sm.session_key),
+                '1970-01-01'
+              ))
+            GROUP BY sm.session_key
+            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
+            """,
+            (idle_threshold_minutes,),
+        )
+        return [dict(r) for r in rows] if rows else []
+
     async def run(self, ctx: AppContext) -> None:
         from bob_server.services.memory import MemoryService
 
         idle_threshold = ctx.settings.session_summary_idle_minutes
-        idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
+        mode = ctx.settings.memory_extraction.mode
+
+        if mode == "silent":
+            idle_sessions = await self._find_idle_sessions_silent(ctx.db, idle_threshold)
+        else:
+            idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
 
         if not idle_sessions:
             return
 
-        workspace = ctx.settings.harness.workspace_dir
         svc = MemoryService(ctx)
 
         for session in idle_sessions:
+            session_key = session["session_key"]
             try:
-                result = await svc.generate_session_bulletins(
-                    workspace,
-                    session["session_key"],
-                    active_from=session["active_from"],
-                    run_dream=False,
-                )
-                n = result.get("bulletins_generated", 0)
-                if n:
+                if mode == "silent":
+                    result = await svc.run_silent_turn_extraction(session_key)
                     logger.info(
-                        "Generated %d bulletin(s) for session %s (%d messages)",
-                        n, session["session_key"], session["message_count"],
+                        "Silent extraction %s for session %s: %s claim(s)",
+                        result.get("status"), session_key,
+                        result.get("claims_created", 0),
                     )
+                else:
+                    workspace = ctx.settings.harness.workspace_dir
+                    result = await svc.generate_session_bulletins(
+                        workspace,
+                        session_key,
+                        active_from=session["active_from"],
+                        run_dream=False,
+                    )
+                    n = result.get("bulletins_generated", 0)
+                    if n:
+                        logger.info(
+                            "Generated %d bulletin(s) for session %s (%d messages)",
+                            n, session_key, session["message_count"],
+                        )
             except Exception:
                 logger.exception(
                     "Failed to process session %s",
-                    session["session_key"],
+                    session_key,
                 )
 
 
@@ -241,3 +291,65 @@ class LLMCallStalenessTask:
         )
         if count:
             logger.warning("Marked %d stale LLM call(s) as failed", count)
+
+
+class LocationFetchTask:
+    """Fetch current location from Home Assistant on a fixed schedule and
+    append to location_history table for trip-journal use.
+
+    Self-gates on time.monotonic() so the cadence is robust to changes in
+    the heartbeat interval. Uses force_refresh=True to bypass the 2-min
+    cache on the HA client — we want fresh data on the schedule.
+    """
+
+    name = "location_fetch"
+
+    def __init__(self) -> None:
+        self._last_fetch_at: float = 0.0
+
+    async def run(self, ctx: AppContext) -> None:
+        ha = ctx.settings.homeassistant
+        if not (ha.enabled and ha.history_enabled and ha.history_interval_seconds > 0):
+            return
+        now_mono = time.monotonic()
+        if now_mono - self._last_fetch_at < ha.history_interval_seconds:
+            return
+        self._last_fetch_at = now_mono
+
+        from bob_server.services.location_tools import _get_ha_client
+
+        client = _get_ha_client(ctx)
+        try:
+            payload = await client.get_state(ha.device_tracker_entity_id, force_refresh=True)
+        except Exception as exc:
+            logger.warning("LocationFetchTask: HA query failed: %s", exc)
+            return
+        if not payload:
+            return
+        attrs = payload.get("attributes", {}) or {}
+        lat = attrs.get("latitude")
+        lon = attrs.get("longitude")
+        if lat is None or lon is None:
+            return  # nothing useful to record
+
+        await ctx.db.execute(
+            "INSERT INTO location_history "
+            "(fetched_at, device_tracker_entity_id, latitude, longitude, "
+            " gps_accuracy, zone_state, battery_level, ha_last_updated, raw_attributes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                ha.device_tracker_entity_id,
+                lat,
+                lon,
+                attrs.get("gps_accuracy"),
+                payload.get("state"),
+                attrs.get("battery_level"),
+                payload.get("last_updated"),
+                json.dumps(attrs),
+            ),
+        )
+        logger.debug(
+            "LocationFetchTask recorded ping: lat %.4f lon %.4f zone=%s",
+            lat, lon, payload.get("state"),
+        )

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # the resulting assistant message can be flagged as synthetic (an echo of
 # existing memory rather than new ground truth). Keyed on dispatch_id.
 _memory_tool_used: dict[str, bool] = {}
-_MEMORY_TOOL_NAMES = frozenset({"recall", "find", "memory_read"})
+_MEMORY_TOOL_NAMES = frozenset({"recall", "find"})
 
 # Per-dispatch tool-call trace, populated after chat_with_tools completes and
 # consumed by SessionService.add_message via pop_tool_trace(). Mirrors the

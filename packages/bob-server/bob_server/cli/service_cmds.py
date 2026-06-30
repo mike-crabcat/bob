@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -131,28 +132,19 @@ def serve(
         else:
             os.environ["BOB_CONFIG_DIR"] = previous_config_dir
 
-    settings = Settings(
+    # Start from the fully env-loaded settings and override only the fields the
+    # CLI accepts. Using replace() (not a hand-maintained allowlist) ensures
+    # every env-backed field — including ones added later, like
+    # memory_extraction and reconciliation — is preserved instead of silently
+    # defaulting.
+    settings = replace(
+        env_settings,
         host=host,
         port=port,
         data_dir=data_dir,
         config_dir=config_dir,
         db_path=db_path,
         log_level=log_level,
-        log_path=env_settings.log_path,
-        log_dir=env_settings.log_dir,
-        debug=env_settings.debug,
-        pool_size=env_settings.pool_size,
-        webhooks=env_settings.webhooks,
-        agentmail=env_settings.agentmail,
-        email_polling_enabled=env_settings.email_polling_enabled,
-        heartbeat_interval_seconds=env_settings.heartbeat_interval_seconds,
-        public_url=env_settings.public_url,
-        dashboard_secret=env_settings.dashboard_secret,
-        voice=env_settings.voice,
-        phone=env_settings.phone,
-        openai=env_settings.openai,
-        harness=env_settings.harness,
-        whatsapp_bridge=env_settings.whatsapp_bridge,
     )
     config = _PreserveLoggingConfig(
         app=create_app(settings),

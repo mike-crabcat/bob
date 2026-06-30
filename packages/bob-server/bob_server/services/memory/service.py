@@ -47,6 +47,10 @@ from bob_server.services.memory.entity_resolver import (
 
 logger = logging.getLogger(__name__)
 
+# Outstanding remember-tool-deferred extraction tasks. Holding references prevents
+# the asyncio scheduler from garbage-collecting them before they complete.
+_remember_tasks: set[asyncio.Task] = set()
+
 
 class MemoryService(BaseService):
     """Reads and writes v7 memory via SQLite: bulletins, claims, entities."""
@@ -352,6 +356,416 @@ class MemoryService(BaseService):
             visibility=row["visibility"] or "channel",
             content=row["content"] or "",
         )
+
+    # ── Silent-turn extraction ────────────────────────────────────
+
+    async def _last_silent_turn_at(self, session_key: str) -> str | None:
+        row = await self.db.fetch_one(
+            "SELECT MAX(ran_at) AS a FROM memory_extraction_turns WHERE session_key = ?",
+            (session_key,),
+        )
+        return row["a"] if row and row["a"] else None
+
+    async def _has_undigested_messages(self, session_key: str) -> bool:
+        """True if there are session messages newer than the last silent turn."""
+        active_from = await self._last_silent_turn_at(session_key)
+        if active_from:
+            row = await self.db.fetch_one(
+                "SELECT COUNT(*) AS n FROM session_messages "
+                "WHERE session_key = ? AND datetime(created_at) > datetime(?) "
+                "AND role IN ('user', 'assistant')",
+                (session_key, active_from),
+            )
+            return bool(row and row["n"])
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM session_messages "
+            "WHERE session_key = ? AND role IN ('user', 'assistant')",
+            (session_key,),
+        )
+        return bool(row and row["n"])
+
+    async def _render_silent_turn_history(
+        self, session_key: str, *, max_history: int = 30, since_hours: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Render recent session history as native role-structured messages.
+
+        Assistant messages generated via memory recall are prefixed
+        ``[SYNTHETIC]`` so the extractor can apply the corroboration rule;
+        group user messages are prefixed ``[Name]`` for attribution. Tool-call
+        replay is deliberately omitted — it is reply-turn noise for extraction.
+
+        ``since_hours`` optionally restricts the window to messages newer than
+        now - since_hours (used for one-off backfills like "process past 48h").
+        ``max_history`` always caps the count as a safety bound.
+        """
+        is_group = ":group:" in session_key
+        sender_names: dict[str, str] = {}
+        if is_group:
+            participants = await self.db.fetch_all(
+                "SELECT contact_id, display_name FROM session_participants "
+                "WHERE session_key = ?",
+                (session_key,),
+            )
+            for p in participants:
+                if p["contact_id"] and p["display_name"]:
+                    sender_names[p["contact_id"]] = p["display_name"]
+
+        since_clause = ""
+        since_param: list[Any] = []
+        if since_hours is not None:
+            since_clause = " AND datetime(created_at) > datetime('now', ?) "
+            since_param = [f"-{since_hours} hours"]
+
+        rows = await self.db.fetch_all(
+            "SELECT role, content, sender_id, synthetic FROM session_messages "
+            "WHERE session_key = ? AND role IN ('user', 'assistant') "
+            "AND rowid IN (SELECT rowid FROM session_messages "
+            "WHERE session_key = ? AND role IN ('user', 'assistant') "
+            f"{since_clause} ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
+            (session_key, session_key, *since_param, max_history),
+        )
+
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            content = (row["content"] or "").strip()
+            if not content:
+                continue
+            if row["role"] == "assistant":
+                if content.strip().upper().rstrip(".") in (
+                    "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
+                ):
+                    continue
+                if row["synthetic"]:
+                    content = f"[SYNTHETIC] {content}"
+                messages.append({"role": "assistant", "content": content})
+            else:
+                if is_group and row["sender_id"]:
+                    name = sender_names.get(row["sender_id"])
+                    if name:
+                        content = f"[{name}] {content}"
+                messages.append({"role": "user", "content": content})
+        return messages
+
+    async def _build_silent_group_context(self, session_key: str) -> str:
+        """Channel-type + participant roster block for the silent-turn prompt."""
+        is_group = ":group:" in session_key
+        if is_group:
+            members = await self.db.fetch_all(
+                "SELECT contact_id, display_name FROM session_participants "
+                "WHERE session_key = ?",
+                (session_key,),
+            )
+            roster = ", ".join(
+                (m["display_name"] or m["contact_id"])
+                for m in members
+                if m["contact_id"]
+            )
+            line = "This conversation is a group chat."
+            if roster:
+                line += f" Participants: {roster}."
+            line += (
+                " Use list_entities / get_entity to find existing person-* and "
+                "group-* entities before recording anything."
+            )
+            return f"# Channel context\n\n{line}"
+        row = await self.db.fetch_one(
+            "SELECT contact_id, display_name FROM session_participants "
+            "WHERE session_key = ? LIMIT 1",
+            (session_key,),
+        )
+        who = row["display_name"] if row and row["display_name"] else "the other participant"
+        return (
+            "# Channel context\n\n"
+            f"This is a 1:1 conversation with {who}. "
+            "Use list_entities / get_entity to find the existing person-* entity "
+            "for them before recording anything."
+        )
+
+    @staticmethod
+    def queue_remember_extraction(
+        session_key: str, svc: "MemoryService", *, hint: str | None = None,
+    ) -> None:
+        """Queue a silent extraction turn to run once the current reply releases
+        the session lock. Used by the ``remember`` tool.
+
+        The task calls ``run_silent_turn_extraction``, which acquires the
+        session's SessionDispatchGate internally; since the in-flight reply
+        holds that lock, the task blocks there until the reply finishes and
+        is stored, then proceeds. ``force=True`` honours Bob's explicit request
+        even if the undigested-message guard would otherwise skip.
+        """
+        async def _deferred() -> None:
+            try:
+                await svc.run_silent_turn_extraction(
+                    session_key, hint=hint, force=True, trigger="remember",
+                )
+            except Exception:
+                logger.exception(
+                    "Deferred remember extraction failed for %s", session_key,
+                )
+
+        task = asyncio.create_task(_deferred())
+        _remember_tasks.add(task)
+        task.add_done_callback(_remember_tasks.discard)
+
+    async def run_silent_turn_extraction(
+        self, session_key: str, *, max_history: int = 30, since_hours: float | None = None,
+        hint: str | None = None, force: bool = False, trigger: str = "idle",
+    ) -> dict[str, Any]:
+        """Run an idle-triggered silent extraction turn over recent history.
+
+        Drives an agent tool-loop on the memory model with a claim-creation
+        tool subset. Every claim written is attributed to the synthetic
+        assistant message this turn produces (``source_messages``). The turn
+        is serialized with live reply turns via SessionDispatchGate.
+
+        ``since_hours`` restricts the rendered window to messages newer than
+        now - since_hours (for one-off backfills); defaults to the last
+        ``max_history`` messages.
+
+        ``hint`` adds a steering note to the instruction (e.g. a topic Bob
+        flagged via the remember tool). ``force`` skips the undigested-message
+        guards (for explicit remember-triggered turns). ``trigger`` labels the
+        stored message metadata ("idle" vs "remember") for observability.
+        """
+        from bob_server.services.llm_dispatch import LLMDispatchService
+        from bob_server.services.session_service import SessionService
+        from bob_server.services.session_dispatch_gate import SessionDispatchGate
+        from bob_server.services.memory.extraction_tools import make_extraction_tools
+        from bob_server.services.memory.prompts import build_silent_turn_prompt
+        from bob_server.services.memory.claim_types import build_extraction_prompt_section
+
+        db = self.db
+        settings = self.ctx.settings
+        bot_name = getattr(settings.patience, "bot_name", None) or "Bob"
+
+        # Quick pre-check before acquiring the lock.
+        if not force and not await self._has_undigested_messages(session_key):
+            return {"status": "skipped", "reason": "no_new_messages"}
+
+        claim_types_section = build_extraction_prompt_section(list(ENTITY_TYPES))
+        group_context = await self._build_silent_group_context(session_key)
+        system_prompt = build_silent_turn_prompt(
+            claim_types_section, bot_name=bot_name, group_context=group_context,
+        )
+
+        turn_message_id = f"msg-extr-{uuid.uuid4().hex[:12]}"
+        dispatch_id = f"dispatch-silent-{uuid.uuid4().hex[:8]}"
+        tools = make_extraction_tools(db, turn_message_id)
+        # Capture the turn start as a comparison-friendly UTC timestamp so we
+        # can find entities created during this turn (memory_entities.created_at
+        # uses SQLite's datetime('now'), so we use the same format).
+        turn_start_ts = utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        result_text = ""
+        async with SessionDispatchGate.get_lock(session_key):
+            # Re-check under the lock: another heartbeat may have run a turn
+            # while we were waiting.
+            if not force and not await self._has_undigested_messages(session_key):
+                return {"status": "skipped", "reason": "race_handled"}
+
+            history = await self._render_silent_turn_history(
+                session_key, max_history=max_history, since_hours=since_hours
+            )
+            if not history:
+                return {"status": "skipped", "reason": "empty_history"}
+
+            # Final instruction triggers the tool loop. Without it the model sees
+            # a conversation with no action to take and returns empty. An optional
+            # hint (from the remember tool) steers attention without overriding
+            # the quality rules.
+            hint_block = ""
+            if hint:
+                hint_block = (
+                    f'Bob flagged this conversation as worth reviewing now and '
+                    f'pointed at: "{hint}". Give that particular attention — but '
+                    f'still apply every quality rule; do not create a claim unless '
+                    f'it genuinely holds up.\n\n'
+                )
+            instruction = (
+                hint_block
+                + "The messages above are the recent conversation in this channel, "
+                "now idle. Review them and use the memory tools to record anything "
+                "worth remembering about the people, groups, trips, or other "
+                "entities involved — following the rules in the system prompt "
+                "(only others' messages, never your own; weight replies to your "
+                "[SYNTHETIC] lines as corroboration). Look up existing entities "
+                "before writing to avoid duplicates. If genuinely nothing is worth "
+                "remembering, reply with exactly: Nothing to record."
+            )
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt}, *history,
+                {"role": "user", "content": instruction},
+            ]
+            llm = LLMDispatchService(self.ctx)
+            result_text = await llm.chat_with_tools(
+                messages, tools,
+                model=llm.memory_model,
+                max_iterations=25,
+                call_category="memory_silent_turn",
+                session_key=session_key,
+                dispatch_id=dispatch_id,
+            )
+
+            # Claims were written via tool calls during the loop (before this
+            # point), so count them now to store an accurate record.
+            count_row = await db.fetch_one(
+                "SELECT COUNT(*) AS n FROM memory_claims WHERE source_messages LIKE ?",
+                (f'%"{turn_message_id}"%',),
+            )
+            claims_created = count_row["n"] if count_row else 0
+
+            # Fetch the actual new-claim rows so we can surface them via the
+            # verbose notice. Each row carries the typed value (or object_id
+            # for entity-ref claims) so the user sees what was actually written.
+            new_claim_rows = await db.fetch_all(
+                "SELECT claim_type_key, subject_id, value, object_id "
+                "FROM memory_claims "
+                "WHERE status = 'active' AND source_messages LIKE ?",
+                (f'%"{turn_message_id}"%',),
+            ) if claims_created else []
+
+            # New entities: subjects of new claims whose entity row was created
+            # during this turn. Entities created via create_entity that did NOT
+            # receive any claim in the same turn would be missed; in practice
+            # the extractor always follows create_entity with add_claim calls,
+            # so this captures them.
+            new_entity_rows: list[dict[str, Any]] = []
+            if new_claim_rows:
+                subject_ids = list({r["subject_id"] for r in new_claim_rows})
+                placeholders = ",".join("?" for _ in subject_ids)
+                new_entity_rows = await db.fetch_all(
+                    "SELECT entity_id, entity_type, display_name "
+                    "FROM memory_entities "
+                    f"WHERE entity_id IN ({placeholders}) "
+                    "AND datetime(created_at) >= datetime(?) "
+                    "AND status = 'active'",
+                    (*subject_ids, turn_start_ts),
+                )
+
+            entities_created = len(new_entity_rows)
+
+            # The model often ends with empty text after its tool calls; store a
+            # meaningful summary rather than a misleading placeholder.
+            if result_text and result_text.strip():
+                content = result_text
+            elif claims_created:
+                content = f"[Silent extraction turn: recorded {claims_created} claim(s)]"
+            else:
+                content = "[Silent extraction turn: nothing memory-worthy]"
+
+            await SessionService(self.ctx).add_message(
+                session_key, "assistant", content,
+                dispatch_id=dispatch_id,
+                synthetic=True,
+                message_id=turn_message_id,
+                metadata={"memory_extraction_turn": True, "trigger": trigger,
+                          **({"hint": hint} if hint else {})},
+            )
+
+            # Verbose surface: if the session has memory_verbose enabled and
+            # the turn actually recorded something, post a system-notice
+            # message and publish an event for active transports to deliver.
+            if entities_created or claims_created:
+                await self._maybe_emit_verbose_notice(
+                    session_key, turn_message_id, trigger,
+                    new_entity_rows, new_claim_rows,
+                )
+
+        await db.execute(
+            "INSERT INTO memory_extraction_turns "
+            "(id, session_key, message_id, ran_at, claims_created) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                f"extr-{uuid.uuid4().hex[:10]}",
+                session_key,
+                turn_message_id,
+                iso_utc(utcnow()),
+                claims_created,
+            ),
+        )
+
+        logger.info(
+            "Silent turn %s: %d claim(s) recorded for session %s",
+            turn_message_id, claims_created, session_key,
+        )
+        return {
+            "status": "ok",
+            "turn_message_id": turn_message_id,
+            "claims_created": claims_created,
+            "entities_created": entities_created,
+        }
+
+    async def _maybe_emit_verbose_notice(
+        self,
+        session_key: str,
+        turn_message_id: str,
+        trigger: str,
+        new_entity_rows: list[dict[str, Any]],
+        new_claim_rows: list[dict[str, Any]],
+    ) -> None:
+        """If the session has memory_verbose on, surface what the turn wrote.
+
+        Posts a ``role='system'`` message in session_messages with metadata
+        ``{"system_notice": True, "kind": "memory_verbose", ...}`` and publishes
+        a ``memory.verbose_notice`` event on the event bus for active transports
+        to deliver. Silently no-ops when the flag is off or there's nothing to
+        report.
+        """
+        if not new_entity_rows and not new_claim_rows:
+            return
+
+        route = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes "
+            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if not route or not route["metadata"]:
+            return
+        try:
+            meta = json.loads(route["metadata"])
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not meta.get("memory_verbose"):
+            return
+
+        # Compose the human-readable notice.
+        lines: list[str] = ["[memory] extraction turn"]
+        if new_entity_rows:
+            lines.append("New entities:")
+            for e in new_entity_rows:
+                label = e["display_name"] or e["entity_id"]
+                lines.append(f"  - {e['entity_id']} ({e['entity_type']}) — {label}")
+        if new_claim_rows:
+            lines.append("New claims:")
+            for c in new_claim_rows:
+                if c["object_id"]:
+                    val = f"→ {c['object_id']}"
+                else:
+                    val = f"= {c['value']}"
+                lines.append(f"  - {c['subject_id']}.{c['claim_type_key']} {val}")
+        notice = "\n".join(lines)
+
+        from bob_server.services.session_service import SessionService
+        await SessionService(self.ctx).add_message(
+            session_key, "system", notice,
+            metadata={
+                "system_notice": True,
+                "kind": "memory_verbose",
+                "turn_message_id": turn_message_id,
+                "trigger": trigger,
+            },
+        )
+        if self.ctx.event_bus:
+            await self.ctx.event_bus.publish(
+                "memory.verbose_notice",
+                {
+                    "session_key": session_key,
+                    "text": notice,
+                    "turn_message_id": turn_message_id,
+                    "trigger": trigger,
+                },
+            )
 
     # ── Session bulletin generation ───────────────────────────────
 

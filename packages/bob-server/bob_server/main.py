@@ -23,6 +23,7 @@ from bob_server.heartbeat import (
     EmailSyncTask,
     HeartbeatRunner,
     LLMCallStalenessTask,
+    LocationFetchTask,
     SessionIdleSummaryTask,
 )
 from bob_server.services.routine_scheduler import RoutineSchedulerTask
@@ -105,12 +106,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 logger.exception("WhatsApp bridge service failed to start")
 
         stop_event = asyncio.Event()
+        logger.info(
+            "Memory extraction mode: %s", resolved_settings.memory_extraction.mode,
+        )
         runner = HeartbeatRunner(app_ctx, interval_seconds=resolved_settings.heartbeat_interval_seconds)
         runner.register(EmailPollingTask())
         runner.register(EmailSyncTask())
         runner.register(CallCleanupTask())
         runner.register(SessionIdleSummaryTask())
         runner.register(LLMCallStalenessTask())
+        runner.register(LocationFetchTask())
         runner.register(RoutineSchedulerTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:

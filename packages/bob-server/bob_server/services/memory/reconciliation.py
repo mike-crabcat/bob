@@ -17,17 +17,18 @@ from bob_server.services.memory.claim_types import (
     ENTITY_REF_CLAIM_KEYS,
     ENTITY_TYPE_PREFIXES,
     ENTITY_TYPE_REGISTRY,
-    ENTITY_TYPES,
     get_claim_types_for_entity,
     render_entity,
 )
 from bob_server.services.memory.claim_service import (
     write_claim,
     supersede_claim,
+    validate_claim_for_write,
     _is_valid_file_path,
 )
 from bob_server.services.memory.models import Claim
 from bob_server.services.memory.merge import _execute_merge, _deduplicate_claims
+from bob_server.services.memory.entity_tools import make_list_entities_tool, make_get_entity_tool
 from bob_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -114,89 +115,8 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
                       used to queue reconciliation on the resulting entity.
     """
 
-    @tool
-    async def list_entities(entity_type: str) -> str:
-        """List active entities of a given type. Returns entity IDs and display names.
-
-        Use this to discover related entities (e.g. find all trips, all connections).
-        """
-        if entity_type not in ENTITY_TYPES:
-            return f"Unknown entity type: {entity_type}. Valid types: {', '.join(ENTITY_TYPES)}"
-        rows = await db.fetch_all(
-            "SELECT entity_id, display_name FROM memory_entities "
-            "WHERE entity_type = ? AND status = 'active'",
-            (entity_type,),
-        )
-        if not rows:
-            return f"No active {entity_type} entities found."
-        lines = [f"{r['entity_id']} ({r['display_name'] or r['entity_id']})" for r in rows]
-        return "\n".join(lines)
-
-    @tool
-    async def get_entity(entity_id: str) -> str:
-        """Get full rendered details of an entity including all its claims.
-
-        Returns the entity's type, display name, all claim values, and provenance.
-        """
-        row = await db.fetch_one(
-            "SELECT entity_id, entity_type, display_name FROM memory_entities "
-            "WHERE entity_id = ? AND status = 'active'",
-            (entity_id,),
-        )
-        if not row:
-            return f"Entity not found: {entity_id}"
-
-        claims = await db.fetch_all(
-            "SELECT claim_type_key, object_id, value, source_bulletins FROM memory_claims "
-            "WHERE status = 'active' AND subject_id = ?",
-            (entity_id,),
-        )
-        claim_dicts = [
-            {"claim_type_key": r["claim_type_key"], "object_id": r["object_id"], "value": r["value"]}
-            for r in claims
-        ]
-
-        rendered = await render_entity(
-            row["entity_type"], row["display_name"], claim_dicts,
-            entity_id=entity_id, db=db,
-        )
-
-        # Append provenance
-        prov_lines: list[str] = []
-        for r in claims:
-            val = r["value"] or r["object_id"] or ""
-            src = r["source_bulletins"] or ""
-            src_label = ""
-            if src:
-                try:
-                    bids = json.loads(src) if isinstance(src, str) else src
-                    if bids:
-                        src_label = f"  [source: {', '.join(bids)}]"
-                    else:
-                        src_label = "  [source: none — inferred]"
-                except (json.JSONDecodeError, TypeError):
-                    src_label = f"  [source: {src}]"
-            elif r["claim_type_key"] not in ("truth",):
-                src_label = "  [source: none — inferred]"
-            prov_lines.append(f"  {r['claim_type_key']}: {val}{src_label}")
-        if prov_lines:
-            rendered += "\n\nProvenance:\n" + "\n".join(prov_lines)
-
-        # Also show reverse references (entities that reference this one)
-        reverse = await db.fetch_all(
-            "SELECT c.claim_type_key, c.subject_id, e.display_name "
-            "FROM memory_claims c "
-            "LEFT JOIN memory_entities e ON e.entity_id = c.subject_id "
-            "WHERE c.status = 'active' AND c.object_id = ?",
-            (entity_id,),
-        )
-        if reverse:
-            rendered += "\n\nReferenced by:"
-            for rc in reverse:
-                label = rc["display_name"] or rc["subject_id"]
-                rendered += f"\n  - {label} [{rc['claim_type_key']}]"
-
-        return rendered
+    list_entities = make_list_entities_tool(db)
+    get_entity = make_get_entity_tool(db)
 
     @tool
     async def add_claim(
@@ -233,6 +153,9 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             source_bulletins=[],
             created_at=datetime.now(),
         )
+        err = validate_claim_for_write(claim)
+        if err:
+            return f"Error: {err}"
         await write_claim(db, claim)
         return f"Added {claim_type_key} claim on {subject_id}" + (f" → {obj}" if obj else f" = {val}")
 
@@ -330,8 +253,19 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
         try:
             new_claims = json.loads(claims_json) if claims_json else []
         except json.JSONDecodeError:
-            return f"Created entity {entity_id} but claims_json was invalid."
+            return f"Created entity {entity_id} but claims_json was invalid JSON."
+        if isinstance(new_claims, dict):
+            return (
+                f"Created entity {entity_id}, but claims_json must be a JSON ARRAY of "
+                "claim objects (e.g. [{\"claim_type_key\": \"name\", \"value\": \"...\"}]), "
+                "not a single object. Use add_claim to add each property."
+            )
+        if not isinstance(new_claims, list):
+            return f"Created entity {entity_id} but claims_json was not a JSON array."
+        written = 0
         for cl in new_claims:
+            if not isinstance(cl, dict):
+                continue
             claim = Claim(
                 id=f"claim-recon-{uuid.uuid4().hex[:8]}",
                 claim_type_key=cl.get("claim_type_key", ""),
@@ -342,8 +276,13 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
                 source_bulletins=[],
                 created_at=datetime.now(),
             )
+            err = validate_claim_for_write(claim)
+            if err:
+                logger.warning("Skipped invalid claim on %s: %s", entity_id, err)
+                continue
             await write_claim(db, claim)
-        return f"Created entity {entity_id} ({entity_type}) with {len(new_claims)} claims"
+            written += 1
+        return f"Created entity {entity_id} ({entity_type}) with {written} claims"
 
     @tool
     async def delete_entity(entity_id: str) -> str:
@@ -450,11 +389,59 @@ an `address` holding a person's name) is invalid and should be retracted.
 ## Your Task
 
 1. Check the entity data against each rule above.
-2. Validate every claim against its Claim Type Definition. If a value clearly \
-violates the definition (wrong semantic category, a summary where a discrete \
-value is required, a free-form note where a reference is required), retract it. \
-Do not retract claims merely because they are short, informal, or unstylized — \
-only retract when the value does not fit the type at all.
+2. Validate every claim against its Claim Type Definition. A claim that violates its \
+type's MUST or MUST NOT is invalid and should be retracted — even if the value is \
+superficially well-formed (a grammatically correct sentence is not automatically a \
+valid `preference`). Length, style, and formatting do not rescue an invalid value. \
+The per-type failure modes below are NOT exhaustive — apply the definition's spirit.
+
+   **`preference`** is for DURABLE personal tastes ("prefers dark mode", "prefers red \
+   wine", "is an early bird"). Retract when the value is:
+   - A skill feature request or design ask ("wants the trip-planning skill to convert \
+     currencies to AUD", "wants the GIF skill changed back from random mode") — these \
+     are task asks, not tastes.
+   - A one-off action or request ("wants someone to tell David X", "wants a torrent \
+     link shared with David") — route to `task`, not `preference`.
+   - A question ("wants to know whether steaks should be salted immediately") — not a \
+     taste. Retract.
+   - Scheduling chatter ("will miss pre-drinks on Friday", "in for Friday 12 June", \
+     "BYOB because he only had 5 beers left") — not durable. Retract.
+   - A past action or event ("requested an immediate call", "asked how to wire the \
+     image skill") — not a stable taste. Retract.
+   - Trivia ("favourite number is 42") — not a durable personal taste. Retract.
+   - Any value starting with "wants", "wants the X skill", "wants to know", "asked \
+     for", "requested", or "wants someone to" should be treated as suspect and re-read \
+     against this list.
+
+   **`truth`** is ONLY for explicit user corrections of existing memory — a value that \
+   contradicts a previously-recorded claim ("actually, the message went by WhatsApp, \
+   not email"). Retract when the value is:
+   - A narrative note ("the assistant later confirmed the message was sent to David \
+     on 2026-05-11", "Claude was not actually invoked in the visible flow") — these \
+     are observations, not corrections.
+   - A general fact ("There does not appear to be an official 'Qwen 3.6 120B' model", \
+     "the GIPHY API uses search terms") — not a correction of an existing claim.
+   - A past action ("asked to get Claude to fix the BOM weather skill", "approved the \
+     Claude delegation") — not a correction.
+   - Meta-commentary ("the earlier claim was flippant", "misread the order of the \
+     exchange") — not a correction.
+   - Any value that does not explicitly contradict another claim on this entity (or a \
+     related one) is not a `truth`.
+
+   **`file_ref`** requires `object_id` to be a `file-*` entity ID. Retract any \
+   `file_ref` whose `object_id` is missing or starts with another prefix (`task-*`, \
+   `location-*`, `file-new:*`). A path string in `value` does not fix this — file_ref \
+   is a link, not a path holder.
+
+   **`milestone` (on `self-bob`)** is for qualitative lifecycle events only — firsts, \
+   breakthroughs, regime changes in Bob's capability or role. Retract when the value \
+   is a changelog entry, release note, commit summary, refactor description, bug-fix \
+   summary, or routine feature addition ("Added a /approve slash command", "Refactored \
+   huge modules", "Fixed file logging going silent", "Added daily rotating logs"). \
+   Those belong in CHANGELOG.md / git log, not memory. The test: would this entry \
+   change how Bob thinks about itself? If it's just "we shipped X" or "we fixed Y", \
+   retract.
+
 3. Use the Source Bulletins and claim provenance to resolve conflicts — claims with \
 no source bulletin are inferred and less reliable than claims grounded in bulletins.
 4. If you can determine a clear fix, use the tools to apply it — prefer acting over asking.

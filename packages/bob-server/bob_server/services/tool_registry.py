@@ -36,12 +36,18 @@ def build_common_tools(
     session_key: str,
     is_trusted: bool = False,
     contact_id: str | None = None,
+    include_routines: bool = True,
 ) -> list[Tool]:
     """Build the standard tool set shared across dispatch channels.
 
     Returns core tools (workspace, memory, docs, changelog, email_send)
     plus conditional tools based on trust level and config (contact, phone,
     reflection, delegation). Deduplicates by tool name.
+
+    Set ``include_routines=False`` for routine dispatch: a routine prompt
+    tends to drift toward editing routines (read_routine/write_routine)
+    instead of executing the action, so those tools are withheld from the
+    routine's own dispatch.
     """
     tools: list[Tool] = []
     seen: set[str] = set()
@@ -60,7 +66,8 @@ def build_common_tools(
     _extend(make_email_send_tools(ctx, session_key=session_key))
     _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
     _extend(make_session_tools(ctx, caller_session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
-    _extend(make_routine_tools(ctx, session_key=session_key))
+    if include_routines:
+        _extend(make_routine_tools(ctx, session_key=session_key))
 
     # Trust-escalated tools
     if is_trusted:
@@ -73,5 +80,10 @@ def build_common_tools(
     if ctx.settings.phone.enabled:
         _extend(make_contact_tools(ctx))
         _extend(make_phone_tools(ctx, session_key=session_key))
+
+    # Home Assistant — adds current_location() when configured
+    if ctx.settings.homeassistant.enabled:
+        from bob_server.services.location_tools import make_location_tools
+        _extend(make_location_tools(ctx))
 
     return tools

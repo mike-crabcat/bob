@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { fetchAPI, postAPI } from "@/lib/api";
@@ -800,10 +800,15 @@ function AnsweredQuestionCard({
 function MemoryPage() {
   const [tab, setTab] = useState<Tab>("entities");
   const [selectedType, setSelectedType] = useState<string | null>(null);
-  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
 
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const routeSearch = Route.useSearch() as { entity?: string };
+  const selectedEntity = routeSearch.entity ?? null;
+  const setSelectedEntity = (id: string | null) => {
+    navigate({ to: "/memory", search: id ? { entity: id } : {} });
+  };
 
   // ── Data fetching ──
 
@@ -1223,4 +1228,9 @@ function MemoryPage() {
   );
 }
 
-export const Route = createFileRoute("/memory/")({ component: MemoryPage });
+export const Route = createFileRoute("/memory/")({
+  component: MemoryPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    entity: typeof search.entity === "string" ? search.entity : undefined,
+  }),
+});
