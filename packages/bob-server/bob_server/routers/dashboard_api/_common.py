@@ -15,7 +15,7 @@ from bob_server.database import Database
 
 logger = logging.getLogger(__name__)
 
-_STREAMABLE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".pdf", ".mp4", ".webm", ".mov", ".m4v"}
+_STREAMABLE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".pdf", ".mp4", ".webm", ".mov", ".m4v", ".mkv"}
 
 
 def _resolve_workspace_path(settings: Any, path: str) -> Path:

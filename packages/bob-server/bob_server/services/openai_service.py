@@ -52,10 +52,19 @@ def _output_items_to_dicts(items: list[Any]) -> list[dict[str, Any]]:
                 "arguments": item.arguments,
             })
         elif item_type == "message":
+            content = []
+            if item.content:
+                for c in item.content:
+                    text = getattr(c, "text", "") or ""
+                    # Strip any Hermes-style <tool_call> XML so it can't poison
+                    # future turns via tool-block replay.
+                    if "<tool_call>" in text:
+                        text = _strip_hermes_tool_calls(text)
+                    content.append({"type": c.type, "text": text})
             result.append({
                 "type": "message",
                 "role": item.role,
-                "content": [{"type": c.type, "text": c.text} for c in item.content] if item.content else [],
+                "content": content,
             })
         else:
             # Fallback: try to serialize, skip if not possible
@@ -184,6 +193,48 @@ def _response_text_with_citations(response: Any) -> str:
         return ""
     ref_map = _extract_ref_map_from_response(response)
     return _render_citations(text, ref_map)
+
+
+# Hermes-style <tool_call> XML that some models emit as text instead of using
+# the native function_call API. We recover these by parsing + dispatching the
+# named handler, so the user-visible reply isn't lost.
+_HERMES_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*<tool_name>\s*(?P<name>[^<\s]+)\s*</tool_name>\s*"
+    r"<parameters>\s*(?P<args>\{.*?\})\s*</parameters>\s*</tool_call>",
+    re.DOTALL,
+)
+
+
+def _parse_hermes_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """Extract (tool_name, args) pairs from Hermes-style XML in text.
+
+    Strips a leading ``functions.`` (or similar) namespace prefix on the tool
+    name, since the model sometimes hallucinates ``functions.send_whatsapp_message``
+    when the actual registered handler key is ``send_whatsapp_message``.
+    """
+    calls: list[tuple[str, dict[str, Any]]] = []
+    if "<tool_call>" not in text:
+        return calls
+    for match in _HERMES_TOOL_CALL_RE.finditer(text):
+        raw_name = match.group("name").strip()
+        name = raw_name.split(".", 1)[1] if raw_name.startswith("functions.") else raw_name
+        try:
+            args = json.loads(match.group("args"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(args, dict):
+            calls.append((name, args))
+    return calls
+
+
+def _strip_hermes_tool_calls(text: str) -> str:
+    """Remove <tool_call>...</tool_call> blocks and trailing 'Done.' residue."""
+    if "<tool_call>" not in text:
+        return text
+    cleaned = _HERMES_TOOL_CALL_RE.sub("", text)
+    # Models often append "Done." or "Done!" after the XML block.
+    cleaned = re.sub(r"\s*\b[Dd]one!?\.?\s*", "", cleaned)
+    return cleaned.strip()
 
 
 def strip_citation_markers(text: str) -> str:
@@ -453,6 +504,51 @@ class OpenAIService(BaseService):
                              if getattr(item, "type", None) == "message"), None
                         ),
                     )
+                # Recover Hermes-style <tool_call> XML the model emitted as text
+                # instead of using the native function_call API. Parse, execute,
+                # and return the residual text so the user-visible reply isn't
+                # lost and the XML doesn't get persisted into future turns.
+                hermes_calls = _parse_hermes_tool_calls(content) if content else []
+                if hermes_calls:
+                    recovered_names: list[str] = []
+                    for hc_name, hc_args in hermes_calls:
+                        handler = tool_handlers.get(hc_name)
+                        if handler is None:
+                            logger.warning(
+                                "Hermes tool call referenced unknown tool: tool=%s "
+                                "dispatch_id=%s session_key=%s log_id=%s",
+                                hc_name, dispatch_id, session_key, log_id,
+                            )
+                            continue
+                        try:
+                            hc_result = await handler(**hc_args)
+                            recovered_names.append(hc_name)
+                            if on_tool_call:
+                                try:
+                                    summary = (
+                                        hc_result.text[:200]
+                                        if isinstance(hc_result, ImageInjection)
+                                        else hc_result[:200]
+                                    )
+                                    await on_tool_call(hc_name, hc_args, summary)
+                                except Exception:
+                                    pass
+                        except Exception as hc_exc:
+                            logger.error(
+                                "Hermes tool call failed: tool=%s dispatch_id=%s "
+                                "session_key=%s args=%s error=%s",
+                                hc_name, dispatch_id, session_key,
+                                json.dumps(hc_args, default=str)[:500], hc_exc,
+                                exc_info=True,
+                            )
+                    if recovered_names:
+                        logger.info(
+                            "Recovered %d Hermes tool call(s) from text: model=%s "
+                            "dispatch_id=%s session_key=%s tools=%s",
+                            len(recovered_names), resolved_model, dispatch_id,
+                            session_key, recovered_names,
+                        )
+                        content = _strip_hermes_tool_calls(content)
                 logger.info(
                     "OpenAI tool call finished: model=%s iterations=%d latency=%.2fs "
                     "tool_calls_in_turn=%d tokens=%d (in=%d out=%d cached=%d)",
@@ -594,6 +690,28 @@ class OpenAIService(BaseService):
             if not function_calls:
                 # No tool calls — stream the final text response
                 content = response.output_text or ""
+                # Recover Hermes-style <tool_call> XML before streaming out.
+                hermes_calls = _parse_hermes_tool_calls(content)
+                if hermes_calls:
+                    for hc_name, hc_args in hermes_calls:
+                        handler = tool_handlers.get(hc_name)
+                        if handler is None:
+                            logger.warning(
+                                "Hermes tool call (stream) referenced unknown tool: "
+                                "tool=%s dispatch_id=%s session_key=%s",
+                                hc_name, dispatch_id, session_key,
+                            )
+                            continue
+                        try:
+                            await handler(**hc_args)
+                        except Exception as hc_exc:
+                            logger.error(
+                                "Hermes tool call (stream) failed: tool=%s "
+                                "dispatch_id=%s session_key=%s error=%s",
+                                hc_name, dispatch_id, session_key, hc_exc,
+                                exc_info=True,
+                            )
+                    content = _strip_hermes_tool_calls(content)
                 if content:
                     yield content
                 _flush_stream_result()
