@@ -12,6 +12,7 @@ from bob_server.services.memory.claim_types import (
     get_all_keys,
     build_extraction_prompt_section,
     ENTITY_TYPE_REGISTRY,
+    render_entity,
 )
 from bob_server.services.memory.models import Claim, Bulletin
 from bob_server.services.memory.prompts import build_extraction_prompt
@@ -523,3 +524,55 @@ def _resolve_new_persons(claims: list[Claim]) -> None:
                 new_id = f"person-{slug}"
                 logger.info("Resolving new person: %s -> %s", val, new_id)
                 setattr(claim, attr, new_id)
+
+
+async def update_entity_fts(db: Any, entity_id: str) -> None:
+    """Render entity claims via template and refresh FTS + embedding indexes.
+
+    Standalone mirror of MemoryService._update_entity_fts. Call after any write
+    that changes an entity's claims or row, so recall-by-natural-language
+    (which falls through to FTS/embedding search) sees the update immediately
+    instead of waiting for the next dream cycle.
+    """
+    entity_row = await db.fetch_one(
+        "SELECT entity_id, entity_type, display_name FROM memory_entities WHERE entity_id = ?",
+        (entity_id,),
+    )
+    if not entity_row:
+        return
+
+    claims = await db.fetch_all(
+        "SELECT claim_type_key, object_id, value FROM memory_claims "
+        "WHERE status = 'active' AND subject_id = ?",
+        (entity_id,),
+    )
+
+    claim_dicts = [
+        {"claim_type_key": r["claim_type_key"], "object_id": r["object_id"], "value": r["value"]}
+        for r in claims
+    ]
+
+    rendered = await render_entity(
+        entity_row["entity_type"],
+        entity_row["display_name"],
+        claim_dicts,
+        entity_id=entity_id,
+        db=db,
+    )
+    await db.execute(
+        "DELETE FROM memory_entities_fts WHERE entity_id = ?",
+        (entity_id,),
+    )
+    await db.execute(
+        "INSERT INTO memory_entities_fts(entity_id, display_name, rendered_body) "
+        "VALUES (?, ?, ?)",
+        (entity_id, entity_row["display_name"], rendered),
+    )
+
+    try:
+        from bob_server.services.memory.embedding import embed_text, upsert_embedding
+        embedding = await embed_text(rendered)
+        if embedding:
+            await upsert_embedding(db, entity_id, embedding)
+    except Exception:
+        pass

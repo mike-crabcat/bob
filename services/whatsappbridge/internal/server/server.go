@@ -30,6 +30,7 @@ type Server struct {
 	started       time.Time
 	extraHandlers map[string]http.HandlerFunc
 	onConnect     ConnectHandler
+	waStatus      func() bool
 }
 
 type serverConfig struct {
@@ -55,6 +56,14 @@ func New(listenAddr, token string, log *slog.Logger, handler MessageHandler) *Se
 
 func (s *Server) OnConnect(h ConnectHandler) {
 	s.onConnect = h
+}
+
+// SetWhatsAppStatus installs a callback that reports whether the bridge's
+// WhatsApp websocket is connected. /health uses this for its
+// whatsapp_connected field, distinct from client_connected (the
+// bob-server↔bridge WS link).
+func (s *Server) SetWhatsAppStatus(fn func() bool) {
+	s.waStatus = fn
 }
 
 func (s *Server) RegisterHandler(path string, handler http.HandlerFunc) {
@@ -93,13 +102,19 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	waConnected := s.client != nil
+	clientConnected := s.client != nil
 	s.mu.RUnlock()
+
+	waConnected := false
+	if s.waStatus != nil {
+		waConnected = s.waStatus()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":             "ok",
 		"whatsapp_connected": waConnected,
+		"client_connected":   clientConnected,
 		"uptime_seconds":     int64(time.Since(s.started).Seconds()),
 	})
 }

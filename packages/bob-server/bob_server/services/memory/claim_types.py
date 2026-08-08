@@ -156,7 +156,7 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     # Cross-cutting
     ("file_ref", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision", "attraction", "dayplan"],
      "Links to a file entity (object_id must be a file-* entity ID). Not for notes, actions, or non-file entity references", "trip-bali-2026 → file-villa-spreadsheet"),
-    ("truth", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision", "attraction", "dayplan"],
+    ("truth", ["person", "group", "location", "trip", "stay", "event", "task", "file", "thing", "decision", "attraction", "dayplan", "daylog"],
      "ONLY for explicit user corrections to existing memory ('actually...', 'no it's X', 'that's wrong'). NOT for observations, actions, requests, preferences, or general facts — use the specific claim type instead.", 'trip-mike-holiday-june-2026 → "No, we changed to 2 stops in Paris not 1"'),
     # Self (Bob's model of itself)
     ("capability", ["self"], "What Bob is good or bad at — concrete skills and competencies, not vague self-evaluation", 'self-bob → "strong at structured recall, weak at creative writing"'),
@@ -749,7 +749,6 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("daylog", "Day logs"),
         ("connection", "Connections"),
         ("file_ref", "Files"),
-        ("truth", "User truth"),
     ],
     "attraction": [
         ("attraction_type", "Type"),
@@ -775,7 +774,6 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("attraction", "Attractions"),
         ("associated_trip", "Trip"),
         ("file_ref", "Files"),
-        ("truth", "User truth"),
     ],
     "stay": [
         ("accommodation", "Accommodation"),
@@ -784,7 +782,6 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("arrival_date", "Arriving"),
         ("departure_date", "Departing"),
         ("file_ref", "Files"),
-        ("truth", "User truth"),
     ],
     "connection": [
         ("transport_type", "Type"),
@@ -798,7 +795,6 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("passenger", "Passengers"),
         ("seat", "Seat"),
         ("file_ref", "Files"),
-        ("truth", "User truth"),
     ],
     "task": [
         ("name", "Task"),

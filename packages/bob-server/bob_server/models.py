@@ -503,7 +503,7 @@ class HealthResponse(BobModel):
 
 class PersonaConfig(BobModel):
     owner_name: str = "Mike"
-    model: str = "OpenAI 5.4 mini"
+    model: str = "OpenAI 5.6 Sol"
     channel: str = "WhatsApp"
     host: str = "mike-workstation"
 

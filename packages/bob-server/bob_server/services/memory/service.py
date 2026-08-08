@@ -1023,49 +1023,8 @@ class MemoryService(BaseService):
 
     async def _update_entity_fts(self, entity_id: str) -> None:
         """Render entity claims via template and update the FTS index."""
-        entity_row = await self.db.fetch_one(
-            "SELECT entity_id, entity_type, display_name FROM memory_entities WHERE entity_id = ?",
-            (entity_id,),
-        )
-        if not entity_row:
-            return
-
-        claims = await self.db.fetch_all(
-            "SELECT claim_type_key, object_id, value FROM memory_claims "
-            "WHERE status = 'active' AND subject_id = ?",
-            (entity_id,),
-        )
-
-        claim_dicts = [
-            {"claim_type_key": r["claim_type_key"], "object_id": r["object_id"], "value": r["value"]}
-            for r in claims
-        ]
-
-        rendered = await render_entity(
-            entity_row["entity_type"],
-            entity_row["display_name"],
-            claim_dicts,
-            entity_id=entity_id,
-            db=self.db,
-        )
-        await self.db.execute(
-            "DELETE FROM memory_entities_fts WHERE entity_id = ?",
-            (entity_id,),
-        )
-        await self.db.execute(
-            "INSERT INTO memory_entities_fts(entity_id, display_name, rendered_body) "
-            "VALUES (?, ?, ?)",
-            (entity_id, entity_row["display_name"], rendered),
-        )
-
-        # Upsert embedding for semantic search
-        try:
-            from bob_server.services.memory.embedding import embed_text, upsert_embedding
-            embedding = await embed_text(rendered)
-            if embedding:
-                await upsert_embedding(self.db, entity_id, embedding)
-        except Exception:
-            pass  # Non-critical — embedding failures shouldn't block FTS updates
+        from bob_server.services.memory.claim_service import update_entity_fts
+        await update_entity_fts(self.db, entity_id)
 
     # ── Dream Process ─────────────────────────────────────────────
 

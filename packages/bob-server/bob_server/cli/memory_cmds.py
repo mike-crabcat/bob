@@ -219,7 +219,7 @@ async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only
 @app.command("model-override-set")
 def memory_model_override_set(
     entity_id: Annotated[str, typer.Argument(help="Entity ID to override")],
-    model: Annotated[str, typer.Argument(help="Model name (e.g. gpt-5.5, o3)")],
+    model: Annotated[str, typer.Argument(help="Model name (e.g. gpt-5.6-sol, o3)")],
     reason: Annotated[str, typer.Option("--reason", help="Why this override exists")] = "",
 ) -> None:
     """Set a per-entity model override for reconciliation."""

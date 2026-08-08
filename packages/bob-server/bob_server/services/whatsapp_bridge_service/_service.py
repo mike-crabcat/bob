@@ -493,13 +493,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                             contact_id=contact_id,
                         )
 
-                parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
-                assistant_text = "\n\n".join(parts) if parts else result
-                if not message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in (
-                    "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
-                ):
-                    pass
-                else:
+                # Only delivered replies belong in replayed history; raw output can leak <tool_call> XML.
+                if message_was_sent[0] and sent_texts:
+                    assistant_text = "\n\n".join(p for p in sent_texts if p.strip())
                     await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
 
                 return result
@@ -1214,13 +1210,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 # Record to unified session history — combine LLM text output + all sent messages
                 # If nothing was sent and the result is just a NO_REPLY variant, skip recording
                 # to avoid poisoning future decisions with a pattern of non-responses.
-                parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
-                assistant_text = "\n\n".join(parts) if parts else result
-                if not message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in (
-                    "NO_REPLY", "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
-                ):
-                    pass  # Don't record NO_REPLY to session history
-                else:
+                # Only delivered replies belong in replayed history; raw output can leak <tool_call> XML.
+                if message_was_sent[0] and sent_texts:
+                    assistant_text = "\n\n".join(p for p in sent_texts if p.strip())
                     await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
                 if self.ctx.event_bus:
                     await self.ctx.event_bus.publish("whatsapp.message.received", {

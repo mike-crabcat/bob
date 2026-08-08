@@ -75,7 +75,7 @@ async def read_workspace_file(request: Request, path: str = "", download: int = 
             ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
             ".bmp": "image/bmp", ".ico": "image/x-icon", ".pdf": "application/pdf",
             ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
-            ".m4v": "video/x-m4v",
+            ".m4v": "video/x-m4v", ".mkv": "video/x-matroska",
         }
         content_type = mime_map.get(suffix, "application/octet-stream")
         headers: dict[str, str] | None = None
