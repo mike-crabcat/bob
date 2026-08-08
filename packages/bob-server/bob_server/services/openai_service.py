@@ -283,7 +283,7 @@ def _get_cached_client(api_key: str, base_url: str) -> Any:
 
 def _model_skips_temperature(model: str) -> bool:
     """Return True for models that don't accept the temperature parameter."""
-    return any(model.startswith(p) for p in ("gpt-5.5", "o1", "o3", "o4"))
+    return any(model.startswith(p) for p in ("gpt-5.5", "gpt-5.6", "o1", "o3", "o4"))
 
 
 class OpenAIService(BaseService):
@@ -318,6 +318,7 @@ class OpenAIService(BaseService):
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         stream_result: StreamResult | None = None,
     ) -> str:
         """Non-streaming chat completion via Responses API."""
@@ -330,6 +331,8 @@ class OpenAIService(BaseService):
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
+        if reasoning_effort is not None and _model_skips_temperature(resolved_model):
+            kwargs["reasoning"] = {"effort": reasoning_effort}
 
         tools = self._merge_tools()
         if tools:

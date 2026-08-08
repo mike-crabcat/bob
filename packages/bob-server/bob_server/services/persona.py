@@ -186,7 +186,7 @@ _(What do they care about? What projects are they working on? What annoys them? 
 
 _DEFAULTS = {
     "owner_name": "Mike",
-    "model": "OpenAI 5.4 mini",
+    "model": "OpenAI 5.6 Sol",
     "channel": "WhatsApp",
     "host": "mike-workstation",
 }

@@ -64,6 +64,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 
 	// Wire event handlers
 	b.srv = server.New(cfg.ListenAddr(), cfg.Token, log.With("component", "server"), b.handleClientMessage)
+	b.srv.SetWhatsAppStatus(func() bool { return b.wa.IsConnected() })
 	b.srv.OnConnect(func() {
 		b.log.Info("bob client connected")
 		b.drainIncoming()

@@ -357,6 +357,7 @@ class LLMDispatchService(BaseService):
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         call_category: str = "quick_prompt",
         session_key: str | None = None,
         project_id: str | None = None,
@@ -379,6 +380,7 @@ class LLMDispatchService(BaseService):
                 model=resolved_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
                 stream_result=stream_result,
             )
             elapsed = time.monotonic() - t0

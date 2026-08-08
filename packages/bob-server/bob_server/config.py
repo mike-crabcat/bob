@@ -191,7 +191,7 @@ class OpenAISettings:
 
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
-    default_model: str = "gpt-5.4-mini"
+    default_model: str = "gpt-5.6-sol"
     memory_model: str = ""
     timeout_seconds: float = 120.0
     web_search_enabled: bool = False
@@ -211,12 +211,12 @@ class HarnessSettings:
     enabled: bool = False
     workspace_dir: Path = Path("~/workspace")
     venv_dir: Path = Path("~/bobenv")
-    default_model: str = "gpt-5.4-mini"
+    default_model: str = "gpt-5.6-sol"
     max_history_messages: int = 20
     skill_dev_enabled: bool = False
     skill_dev_max_budget_usd: float = 5.0
     skill_dev_timeout_seconds: float = 300.0
-    local_subagent_model: str = "gpt-5.5"
+    local_subagent_model: str = "gpt-5.6-sol"
 
 
 @dataclass(slots=True)
@@ -235,7 +235,7 @@ class PatienceSettings:
     """Configuration for the patience dispatch system."""
 
     enabled: bool = False
-    model: str = "gpt-5.4-mini"
+    model: str = "gpt-5.6-luna"
     bot_name: str = "Bot"
     max_pending_items: int = 20
     max_context_messages: int = 10
@@ -452,7 +452,7 @@ class Settings:
         openai_llm = OpenAISettings(
             api_key=os.getenv("BOB_OPENAI_API_KEY", ""),
             base_url=os.getenv("BOB_OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            default_model=os.getenv("BOB_OPENAI_DEFAULT_MODEL", "gpt-5.4-mini"),
+            default_model=os.getenv("BOB_OPENAI_DEFAULT_MODEL", "gpt-5.6-sol"),
             memory_model=os.getenv("BOB_OPENAI_MEMORY_MODEL", ""),
             timeout_seconds=float(os.getenv("BOB_OPENAI_TIMEOUT_SECONDS", "120")),
             web_search_enabled=os.getenv("BOB_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
@@ -462,12 +462,12 @@ class Settings:
             enabled=os.getenv("BOB_HARNESS_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             workspace_dir=_env_path("BOB_HARNESS_WORKSPACE_DIR", Path("~/workspace")),
             venv_dir=_env_path("BOB_HARNESS_VENV_DIR", Path("~/bobenv")),
-            default_model=os.getenv("BOB_HARNESS_DEFAULT_MODEL", "gpt-5.4-mini"),
+            default_model=os.getenv("BOB_HARNESS_DEFAULT_MODEL") or os.getenv("BOB_OPENAI_DEFAULT_MODEL", "gpt-5.6-sol"),
             max_history_messages=int(os.getenv("BOB_HARNESS_MAX_HISTORY_MESSAGES", "20")),
             skill_dev_enabled=os.getenv("BOB_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             skill_dev_max_budget_usd=float(os.getenv("BOB_HARNESS_SKILL_DEV_MAX_BUDGET_USD", "5.0")),
             skill_dev_timeout_seconds=float(os.getenv("BOB_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "300")),
-            local_subagent_model=os.getenv("BOB_HARNESS_LOCAL_SUBAGENT_MODEL", "gpt-5.5"),
+            local_subagent_model=os.getenv("BOB_HARNESS_LOCAL_SUBAGENT_MODEL", "gpt-5.6-sol"),
         )
 
         whatsapp_bridge = WhatsAppBridgeSettings(
@@ -480,7 +480,7 @@ class Settings:
 
         patience = PatienceSettings(
             enabled=os.getenv("BOB_PATIENCE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
-            model=os.getenv("BOB_PATIENCE_MODEL", "gpt-5.4-mini"),
+            model=os.getenv("BOB_PATIENCE_MODEL", "gpt-5.6-luna"),
             bot_name=os.getenv("BOB_SELF_NAME", "Bob"),
             max_pending_items=int(os.getenv("BOB_PATIENCE_MAX_PENDING", "20")),
             max_context_messages=int(os.getenv("BOB_PATIENCE_MAX_CONTEXT", "10")),

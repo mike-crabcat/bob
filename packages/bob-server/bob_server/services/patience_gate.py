@@ -98,7 +98,7 @@ async def submit_to_patience(
     dispatch_fn: Callable[[], Coroutine],
     *,
     bot_name: str = "Bob",
-    model: str = "gpt-5.4-mini",
+    model: str = "gpt-5.6-luna",
     max_pending_items: int = 20,
     max_context_messages: int = 10,
     relevance_gating_enabled: bool = False,
@@ -286,7 +286,8 @@ async def _evaluate_urgency(
              {"role": "user", "content": context_text}],
             model=model,
             temperature=0.0,
-            max_tokens=50,
+            max_tokens=300,
+            reasoning_effort="low",
             call_category="patience_check",
             session_key=session_key,
         )

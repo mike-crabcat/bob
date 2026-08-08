@@ -22,7 +22,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         """Spawn a subagent to work on a task asynchronously. Returns subagent_id immediately.
         agent_type: 'claude' (spawns Claude CLI subprocess) or 'local' (runs in-process, faster).
         persona: if true and local, load full agent persona; if false, uses minimal system prompt.
-        model: override model for local subagents (default: gpt-5.5).
+        model: override model for local subagents (default: gpt-5.6-sol).
         After calling this, you MUST send a message to the user summarizing what you delegated.
         Use check_subagent to poll for results and message_subagent for follow-up."""
         from bob_server.services.subagent_service import SubagentService
