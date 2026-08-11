@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bob — Realtime Voice Test</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+<style>
+        body { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; font-family: system-ui, sans-serif; color: #eee; background: #15131a; }
+        h1 { font-size: 1.25rem; margin: 0 0 4px; }
+        .sub { color: #9a93a8; font-size: 0.85rem; margin-bottom: 20px; }
+        label { display: block; font-size: 0.8rem; color: #9a93a8; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+        textarea, input, select { width: 100%; box-sizing: border-box; background: #221f2a; border: 1px solid #34303f; color: #eee; border-radius: 8px; padding: 10px 12px; font-size: 0.9rem; font-family: inherit; }
+        textarea { min-height: 140px; resize: vertical; }
+        .row { display: flex; gap: 12px; }
+        .row > div { flex: 1; }
+        button { background: #e94560; color: white; border: none; border-radius: 8px; padding: 12px 20px; font-size: 0.95rem; font-weight: 600; cursor: pointer; width: 100%; margin-top: 18px; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button.secondary { background: #34303f; }
+        #status { margin: 18px 0; padding: 10px 14px; border-radius: 8px; background: #221f2a; font-size: 0.85rem; min-height: 18px; }
+        #status.connected { color: #5ad15a; }
+        #status.error { color: #e94560; }
+        #transcript { background: #1c1924; border-radius: 10px; padding: 16px; min-height: 80px; font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap; }
+        .cap-label { font-size: 0.7rem; color: #9a93a8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+        .result { margin-top: 16px; padding: 12px 14px; background: #221f2a; border-radius: 8px; font-size: 0.8rem; color: #c4bdcc; white-space: pre-wrap; display: none; }
+        .tools { display: none; margin-top: 8px; font-size: 0.75rem; color: #c4bdcc; }
+</style>
+</head>
+<body>
+<h1>Realtime Voice Test</h1>
+<div class="sub">Iterate on prompts/voice/tools against the OpenAI Realtime bridge — same code path as phone calls. Uses raw PCM16 24kHz audio.</div>
+
+<label for="instructions">Instructions (system prompt for the voice agent)</label>
+<textarea id="instructions" placeholder="You are calling to confirm a dentist appointment scheduled for Tuesday. Ask to move it to Thursday afternoon. Once confirmed, say goodbye and end the call."></textarea>
+
+<div class="row">
+<div>
+<label for="voice">Voice</label>
+<select id="voice">
+<option value="cedar">cedar</option>
+<option value="marin">marin</option>
+<option value="alloy">alloy</option>
+<option value="ash">ash</option>
+<option value="ballad">ballad</option>
+<option value="coral">coral</option>
+<option value="echo">echo</option>
+<option value="sage">sage</option>
+<option value="shimmer">shimmer</option>
+<option value="verse">verse</option>
+</select>
+</div>
+<div>
+<label for="maxdur">Max duration (s)</label>
+<input id="maxdur" type="number" value="120" min="10" max="300">
+</div>
+</div>
+
+<button id="connect">Start session</button>
+<button id="disconnect" class="secondary" disabled>End session</button>
+
+<div id="status">Idle</div>
+
+<div class="cap-label">Live transcript</div>
+<div id="transcript">(transcript will appear here)</div>
+
+<div class="tools" id="tools"></div>
+
+<div class="result" id="result"></div>
+
+<script src="realtime.js"></script>
+</body>
+</html>

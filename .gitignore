@@ -23,3 +23,6 @@ scripts/rollout.sh
 packages/bob-server/bob_server/ui_dist
 services/whatsappbridge/bin
 services/whatsappbridge/whatsappbridge
+
+# Stray dev DBs
+*.sqlite

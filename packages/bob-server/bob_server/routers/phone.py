@@ -245,11 +245,18 @@ async def initiate_outbound_call(
     agenda: str,
     app_state: Any | None = None,
     origin_session_key: str | None = None,
+    *,
+    engine: str = "default",
+    realtime_meta: dict | None = None,
 ) -> dict:
     """Initiate an outbound phone call via Twilio.
 
     Shared by the HTTP endpoint and the LLM phone tool.
     Returns {"call_id", "call_sid", "status"} on success or {"error": ...} on failure.
+
+    ``engine`` selects the voice pipeline: ``"default"`` (STT→LLM→TTS) or
+    ``"openai_realtime"`` (OpenAI Realtime bridge). When realtime, ``realtime_meta``
+    carries the voice-agent config (instructions, voice, max_duration, tools).
     """
     if not phone_settings.enabled:
         return {"error": "Phone subsystem is not enabled"}
@@ -276,15 +283,17 @@ async def initiate_outbound_call(
         "call_id": call_id,
         "session_key": session_key,
         "origin_session_key": origin_session_key,
+        "engine": engine,
+        "realtime_meta": realtime_meta or {},
     }
 
     await db.execute(
-        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at, origin_session_key)
-           VALUES (?, ?, ?, 'outbound', 'ringing', ?, datetime('now'), ?)""",
-        (call_id, call.sid, to_number, agenda, origin_session_key),
+        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, engine, started_at, origin_session_key)
+           VALUES (?, ?, ?, 'outbound', 'ringing', ?, ?, datetime('now'), ?)""",
+        (call_id, call.sid, to_number, agenda, engine, origin_session_key),
     )
 
-    logger.info("Initiated call %s to %s", call.sid, to_number)
+    logger.info("Initiated call %s to %s (engine=%s)", call.sid, to_number, engine)
 
     if app_state:
         await _emit_event(app_state, "phone.call.ringing", {
@@ -538,10 +547,6 @@ async def media_stream(websocket: WebSocket) -> None:
     logger.info("Twilio Media Stream connected")
 
     engines = getattr(websocket.app.state, "voice_engines", None)
-    if engines is None:
-        logger.error("Voice engines not loaded — cannot handle phone call")
-        await websocket.close()
-        return
 
     settings = websocket.app.state.settings.phone
     db = websocket.app.state.db
@@ -549,7 +554,7 @@ async def media_stream(websocket: WebSocket) -> None:
     from bob_server.context import AppContext
     from bob_server.services.voice_transport import TwilioTransport
 
-    ctx = AppContext(db=db, settings=websocket.app.state.settings, voice_engines=engines)
+    ctx = AppContext(db=db, settings=websocket.app.state.settings, voice_engines=engines) if engines else None
 
     transport: TwilioTransport | None = None
     agenda: str = ""
@@ -585,6 +590,15 @@ async def media_stream(websocket: WebSocket) -> None:
                 start_data = data.get("start", {})
                 stream_sid = data.get("streamSid", start_data.get("streamSid", ""))
                 call_sid = start_data.get("callSid", "")
+                stored = _call_agendas.get(call_sid, {})
+                if isinstance(stored, dict) and stored.get("engine") == "openai_realtime":
+                    # OpenAI Realtime path — own WS read loop, no local STT/TTS engines.
+                    await _run_realtime_call(websocket, call_sid, stream_sid, stored)
+                    return
+                if engines is None:
+                    logger.error("Voice engines not loaded — cannot handle default phone call")
+                    await websocket.close()
+                    return
                 transport = TwilioTransport(
                     websocket=websocket,
                     stream_sid=stream_sid,
@@ -736,6 +750,147 @@ async def media_stream(websocket: WebSocket) -> None:
             )
 
         logger.info("Twilio Media Stream disconnected")
+
+
+async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: str, stored: dict) -> None:
+    """Handle a Twilio Media Stream using the OpenAI Realtime bridge.
+
+    Reads Twilio media frames (μ-law), feeds them to a TwilioMediaSource, and
+    runs the RealtimeBridge concurrently. On stop/disconnect the bridge winds
+    down and the transcript/recording are persisted.
+    """
+    from bob_server.context import AppContext
+    from bob_server.services.realtime_bridge import RealtimeBridge, TwilioMediaSource
+    from bob_server.services.realtime_tools import make_realtime_tools
+
+    app_state = websocket.app.state
+    settings_full = app_state.settings
+    rt_settings = settings_full.openai_realtime
+    db = app_state.db
+
+    call_id = stored.get("call_id") or str(uuid4())
+    phone_number = stored.get("phone_number", "")
+    meta = stored.get("realtime_meta") or {}
+    instructions = meta.get("instructions") or stored.get("agenda", "")
+    voice = meta.get("voice") or rt_settings.voice
+    max_duration = min(
+        float(meta.get("max_duration") or rt_settings.max_call_duration_seconds),
+        rt_settings.max_call_duration_seconds,
+    )
+
+    ctx = AppContext(db=db, settings=settings_full, voice_engines=getattr(app_state, "voice_engines", None))
+    tools = make_realtime_tools(ctx, phone_number=phone_number)
+
+    source = TwilioMediaSource(websocket, stream_sid)
+    bridge = RealtimeBridge(
+        source,
+        api_key=settings_full.openai.api_key,
+        model=rt_settings.model,
+        instructions=instructions,
+        voice=voice,
+        tools=tools,
+        max_duration_seconds=max_duration,
+        turn_detection=rt_settings.turn_detection,
+    )
+
+    await db.execute(
+        "UPDATE phone_calls SET stream_sid = ?, status = 'active' WHERE id = ?",
+        (stream_sid, call_id),
+    )
+    await _emit_event(app_state, "phone.call.active", {"call_id": call_id})
+
+    await source.start()
+    bridge_task = asyncio.create_task(bridge.run())
+
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            if "text" not in msg:
+                continue
+            try:
+                data = json.loads(msg["text"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            event = data.get("event")
+            if event == "media":
+                payload = data.get("media", {}).get("payload", "")
+                if payload:
+                    source.feed_inbound_mulaw(base64.b64decode(payload))
+            elif event == "stop":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.error("Error in realtime media loop", exc_info=True)
+    finally:
+        source.signal_closed()
+        try:
+            result = await asyncio.wait_for(bridge_task, timeout=10)
+        except (asyncio.TimeoutError, Exception):
+            result = None
+        await source.aclose()
+
+        transcript = result.transcript if result else ""
+        duration = result.duration_seconds if result else 0.0
+
+        # Append structured tool outcomes (confirm_booking / report_blocker / etc.)
+        # to the stored transcript so the summariser and Bob can see the result,
+        # not just the conversation prose.
+        if result and result.tool_calls:
+            lines = [f"\n\n--- Tool outcomes ---"]
+            for tc in result.tool_calls:
+                args_str = json.dumps(tc.get("arguments", {}))
+                lines.append(f"{tc.get('name')}: {args_str} -> {tc.get('output')}")
+            transcript = (transcript + "\n".join(lines)).strip()
+
+        rec_path = None
+        try:
+            calls_dir = settings_full.config_dir / "harness" / "calls"
+            rec = source.finalize_recording(calls_dir, call_id)
+            if rec:
+                rec_path = str(calls_dir / rec[0])
+        except Exception:
+            logger.warning("Failed to finalize realtime recording", exc_info=True)
+
+        try:
+            await db.execute(
+                """UPDATE phone_calls
+                   SET status = 'completed', completed_at = datetime('now'),
+                       transcript = ?, recording_path = ?, duration_seconds = ?
+                   WHERE id = ?""",
+                (transcript, rec_path, duration, call_id),
+            )
+            await _emit_event(app_state, "phone.call.completed", {"call_id": call_id})
+        except Exception:
+            logger.warning("Failed to finalize realtime call record", exc_info=True)
+
+        # Mark the linked subagent completed so the parent sees a clean lifecycle.
+        subagent_id = (stored.get("realtime_meta") or {}).get("subagent_id")
+        if subagent_id:
+            try:
+                await db.execute(
+                    """UPDATE subagents
+                       SET status = 'completed', result = ?, updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (transcript[:4000], subagent_id),
+                )
+            except Exception:
+                logger.warning("Failed to mark realtime subagent completed", exc_info=True)
+
+        await _maybe_dispatch_call_result(
+            db=db,
+            settings=settings_full,
+            app_state=app_state,
+            call_sid=call_sid,
+            call_status="completed",
+            call_id_override=call_id,
+        )
+        logger.info(
+            "Realtime call %s ended (reason=%s, %.1fs)",
+            call_id, result.end_reason if result else "?", duration,
+        )
 
 
 async def _say_hello_if_silent(

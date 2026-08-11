@@ -22,8 +22,22 @@ async def generate_call_summary(
     agenda: str,
     status: str,
 ) -> str:
-    """Generate a summary of a phone call from its exchanges."""
+    """Generate a summary of a phone call from its transcript.
+
+    For default-pipeline calls, summarises the per-exchange rows in
+    ``phone_call_exchanges``. For OpenAI Realtime calls, summarises the
+    assistant-side transcript captured by the bridge (``phone_calls.transcript``).
+    """
     db = ctx.db
+
+    call_row = await db.fetch_one("SELECT engine, transcript FROM phone_calls WHERE id = ?", (call_id,))
+    engine = (call_row["engine"] if call_row else None) or "default"
+
+    if engine == "openai_realtime":
+        transcript = (call_row["transcript"] if call_row else "") or ""
+        if not transcript.strip():
+            return f"Call {status} before any conversation took place."
+        return await _summarize_transcript(ctx, agenda, transcript)
 
     exchanges = await db.fetch_all(
         """SELECT user_transcript, assistant_transcript
@@ -49,8 +63,11 @@ async def generate_call_summary(
         if assistant_text:
             transcript_lines.append(f"Agent: {assistant_text}")
 
-    transcript = "\n".join(transcript_lines)
+    return await _summarize_transcript(ctx, agenda, "\n".join(transcript_lines))
 
+
+async def _summarize_transcript(ctx: AppContext, agenda: str, transcript: str) -> str:
+    """Run the LLM summariser over a transcript block."""
     from bob_server.services.llm_dispatch import LLMDispatchService
 
     messages = [
