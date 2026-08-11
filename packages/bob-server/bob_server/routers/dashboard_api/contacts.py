@@ -260,7 +260,6 @@ async def get_contact_claims(request: Request, contact_id: str) -> Any:
             "object_id": c.object_id,
             "value": c.value,
             "status": c.status,
-            "source_bulletins": c.source_bulletins,
             "visibility": c.visibility,
             "created_at": c.created_at.isoformat() if c.created_at else None,
         }

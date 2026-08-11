@@ -113,16 +113,6 @@ async def get_home(request: Request) -> dict[str, Any]:
                 chart_buckets.append(entry)
         chart_categories = sorted(categories)
 
-    # Bulletin total (still surfaced in the stats box even though the
-    # bulletins widget itself is gone — the pipeline hasn't fully retired)
-    bulletin_count = 0
-    bulletins_table = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_bulletins'"
-    )
-    if bulletins_table:
-        b_total = await db.fetch_one("SELECT COUNT(*) AS c FROM memory_bulletins")
-        bulletin_count = (b_total["c"] if b_total else 0) or 0
-
     # Active entity count + recent memory activity (claims are the atomic unit
     # now that extraction is going silent-per-turn; each row surfaces the
     # subject entity plus object/value so the feed shows what was just learned)
@@ -220,7 +210,6 @@ async def get_home(request: Request) -> dict[str, Any]:
         "chart_categories": chart_categories,
         "recent_memory": recent_memory,
         "entity_count": entity_count,
-        "bulletin_count": bulletin_count,
         "cost_by_category": cost_by_category,
         "total_cost_24h": total_cost_24h,
     }

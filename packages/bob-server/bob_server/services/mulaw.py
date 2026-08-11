@@ -85,6 +85,23 @@ def resample_8k_to_16k(pcm: Any) -> Any:
     return np.interp(old_indices, np.arange(len(pcm)), pcm).astype(pcm.dtype)
 
 
+def resample_8k_to_24k(pcm: Any) -> Any:
+    """Upsample 8 kHz PCM16 to 24 kHz by linear interpolation.
+
+    Used by the Realtime bridge to convert Twilio μ-law (decoded to 8 kHz PCM)
+    up to OpenAI's 24 kHz input format.
+    """
+    np = _ensure_numpy()
+    if len(pcm) == 0:
+        return pcm
+    duration = len(pcm) / 8000.0
+    new_len = int(duration * 24000)
+    if new_len == 0:
+        return np.array([], dtype=pcm.dtype)
+    old_indices = np.linspace(0, len(pcm) - 1, new_len)
+    return np.interp(old_indices, np.arange(len(pcm)), pcm).astype(pcm.dtype)
+
+
 def resample_24k_to_8k(pcm: Any) -> Any:
     """Downsample 24 kHz PCM16 to 8 kHz."""
     if len(pcm) == 0:

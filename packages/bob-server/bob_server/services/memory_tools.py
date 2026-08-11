@@ -11,7 +11,6 @@ import logging
 
 from bob_server.context import AppContext
 from bob_server.services.memory import MemoryService
-from bob_server.services.memory.channels import resolve_channel_id
 from bob_server.services.memory.models import ENTITY_TYPES
 from bob_server.services.tools import Tool, tool
 
@@ -58,48 +57,15 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     )
 
     @tool
-    async def note(
-        text: str,
-        context_entity_id: str = "",
-    ) -> str:
-        """Accept new information from conversation. Queues as a bulletin for digestion.
-        Optionally link to a context entity ID (e.g. trip-bali-2026)."""
-        from bob_server.services.memory.tools import note as _note
-        channel_id = resolve_channel_id(session_key)
-        return await _note(ctx.db, text, context_entity_id or None, channel_id=channel_id)
-
-    @tool
     async def remember(hint: str = "") -> str:
         """Flag the current conversation as worth capturing now. Queues a memory
-        extraction turn that runs immediately after this reply completes (silent
-        extraction mode only). Optional `hint` steers the extractor toward a topic
-        (e.g. "user updated their email"). Use sparingly — only when something
-        genuinely memory-worthy just happened; idle conversations are already
-        mined automatically once they go quiet."""
+        extraction turn that runs immediately after this reply completes.
+        Optional `hint` steers the extractor toward a topic (e.g. "user updated
+        their email"). Use sparingly — only when something genuinely
+        memory-worthy just happened; idle conversations are already mined
+        automatically once they go quiet."""
         MemoryService.queue_remember_extraction(session_key, svc, hint=hint or None)
         return json.dumps({"ok": True, "queued": True, "hint": bool(hint)})
-
-    @tool
-    async def memory_write(
-        content: str,
-        channel_id: str = "",
-        visibility: str = "private",
-    ) -> str:
-        """Create a memory bulletin. Content is markdown.
-        Queued for digestion into claims. Use note() for simpler input."""
-        workspace = ctx.settings.harness.workspace_dir
-
-        cid = channel_id or resolve_channel_id(session_key)
-
-        bulletin_id = await svc.write_bulletin(
-            workspace,
-            channel_id=cid,
-            source_type="manual",
-            source_id=session_key,
-            content=content,
-            visibility=visibility,
-        )
-        return json.dumps({"ok": True, "bulletin_id": bulletin_id, "queued": True})
 
     @tool
     async def memory_correct(
@@ -493,10 +459,4 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         else:
             return json.dumps({"error": f"Unknown action: {action}. Use remove_entity, remove_claim, add_claim, replace_claim, set_truth, rename_entity, or create_entity."})
 
-    # In silent extraction mode the bulletin-writing tools (note, memory_write)
-    # are superseded by the remember tool — Bob flags the conversation for the
-    # extractor instead of authoring a bulletin that the dream pipeline digests.
-    # In bulletin mode the legacy note/memory_write tools are offered.
-    mode = ctx.settings.memory_extraction.mode
-    capture_tools = [remember] if mode == "silent" else [note, memory_write]
-    return [recall, find, *capture_tools, memory_correct]
+    return [recall, find, remember, memory_correct]

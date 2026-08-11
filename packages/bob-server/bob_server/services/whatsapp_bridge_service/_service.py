@@ -1087,6 +1087,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
+        # Voice outreach: Bob can offer a browser voice call in DMs.
+        if chat_kind == "dm":
+            from bob_server.services.voice_outreach_tools import make_voice_outreach_tools
+            tools.extend(make_voice_outreach_tools(self.ctx, self, session_key))
+            # reach_out_with_voice_call covers both modalities (voice link + phone).
+            # Drop the standalone phone-call tools so Bob isn't drawn to them by name
+            # when the user wants a browser voice link — they cause Bob to default to
+            # the phone path and hit Twilio instead of sending a link.
+            tools = [t for t in tools if t.name not in ("place_realtime_call", "make_phone_call")]
+
         # Outreach reply tool for active outreach targets
         route = await self.db.fetch_one(
             "SELECT metadata FROM session_routes WHERE session_key = ?",

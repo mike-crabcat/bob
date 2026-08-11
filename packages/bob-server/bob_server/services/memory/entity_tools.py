@@ -59,7 +59,7 @@ def make_get_entity_tool(db: Any) -> Tool:
             return f"Entity not found: {entity_id}"
 
         claims = await db.fetch_all(
-            "SELECT claim_type_key, object_id, value, source_bulletins, source_messages "
+            "SELECT claim_type_key, object_id, value, source_messages "
             "FROM memory_claims WHERE status = 'active' AND subject_id = ?",
             (entity_id,),
         )
@@ -77,17 +77,13 @@ def make_get_entity_tool(db: Any) -> Tool:
         prov_lines: list[str] = []
         for r in claims:
             val = r["value"] or r["object_id"] or ""
-            src = r["source_bulletins"] or ""
             msgs = r["source_messages"] or ""
             src_label = ""
             try:
-                bids = json.loads(src) if isinstance(src, str) else src
                 mids = json.loads(msgs) if isinstance(msgs, str) else msgs
             except (json.JSONDecodeError, TypeError):
-                bids, mids = [], []
+                mids = []
             tags: list[str] = []
-            if bids:
-                tags.append(f"{len(bids)} bulletin{'s' if len(bids) != 1 else ''}")
             if mids:
                 tags.append(f"{len(mids)} message{'s' if len(mids) != 1 else ''}")
             if tags:

@@ -142,20 +142,12 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         else:
             location_section = ""
 
-        mode = os.getenv("BOB_MEMORY_EXTRACTION_MODE", "bulletin").strip().lower()
-        if mode == "silent":
-            capture_line = (
-                "- **remember(hint?)** — Flag the current conversation as worth "
-                "capturing; an extraction turn runs right after your reply and "
-                "decides what to record. Use sparingly — idle conversations are "
-                "mined automatically.\n"
-            )
-        else:
-            capture_line = (
-                "- **note(text)** — Queue a snippet as a bulletin for digestion.\n"
-                "- **memory_write(content, channel_id?, visibility?)** — Queue a "
-                "markdown bulletin for digestion.\n"
-            )
+        capture_line = (
+            "- **remember(hint?)** — Flag the current conversation as worth "
+            "capturing; an extraction turn runs right after your reply and "
+            "decides what to record. Use sparingly — idle conversations are "
+            "mined automatically.\n"
+        )
         memory_section = (
             "## Memory\n\n"
             "You have persistent memory with these tools:\n"

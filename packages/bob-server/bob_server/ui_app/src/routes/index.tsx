@@ -21,7 +21,6 @@ interface HomeSnapshot {
   recent_memory: MemoryFeedItem[];
   active_dispatches: DispatchItem[];
   entity_count: number;
-  bulletin_count: number;
   cost_by_category: CostByCategory[];
   total_cost_24h: number;
 }
@@ -131,7 +130,6 @@ function HomePage() {
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">stats</h2>
         <div className="grid grid-cols-2 gap-2 text-xs">
           <StatBox label="entities" value={home?.entity_count ?? 0} />
-          <StatBox label="bulletins" value={home?.bulletin_count ?? 0} />
           <StatBox label="dispatches" value={home?.active_dispatches?.length ?? 0} />
           <StatBox label="sessions" value={home?.active_sessions?.length ?? 0} />
         </div>

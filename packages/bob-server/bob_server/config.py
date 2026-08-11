@@ -205,6 +205,29 @@ class OpenAISettings:
 
 
 @dataclass(slots=True)
+class OpenAIRealtimeSettings:
+    """Configuration for OpenAI Realtime API voice calls.
+
+    Reuses ``openai.api_key`` (same OpenAI account). The Realtime bridge is
+    audio-source-agnostic — see services/realtime_bridge.py — so the same
+    settings serve phone calls (Twilio μ-law) and the browser test harness.
+    """
+
+    model: str = "gpt-realtime-2.1"
+    voice: str = "cedar"
+    max_call_duration_seconds: float = 300.0
+    turn_detection: str = "server_vad"
+    input_audio_format: str = "pcm16"
+    output_audio_format: str = "pcm16"
+
+    @property
+    def enabled(self) -> bool:
+        # Relies on the shared OpenAI key; surfaced via the OpenAISettings at
+        # resolution time (realtime needs openai.api_key to be set).
+        return True
+
+
+@dataclass(slots=True)
 class HarnessSettings:
     """Configuration for the local LLM harness for voice/phone."""
 
@@ -256,19 +279,8 @@ class ReconciliationSettings:
 
     large_model_types: list[str] = field(default_factory=list)
     min_interval_hours: float = 6.0
-
-
-@dataclass(slots=True)
-class MemoryExtractionSettings:
-    """Configuration for the idle-triggered memory extractor.
-
-    mode selects which extractor runs when a session goes idle:
-        'bulletin' — legacy single-shot JSON extraction over a transcript window.
-        'silent'   — agent tool-loop "silent turn" that calls claim-creation tools
-                     and links provenance to the turn's session_message id.
-    """
-
-    mode: str = "bulletin"
+    daily_batch_enabled: bool = True
+    daily_batch_max_entities: int = 50
 
 
 @dataclass(slots=True)
@@ -293,16 +305,15 @@ class Settings:
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     phone: PhoneSettings = field(default_factory=PhoneSettings)
     openai: OpenAISettings = field(default_factory=OpenAISettings)
+    openai_realtime: OpenAIRealtimeSettings = field(default_factory=OpenAIRealtimeSettings)
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     patience: PatienceSettings = field(default_factory=PatienceSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
-    memory_extraction: MemoryExtractionSettings = field(default_factory=MemoryExtractionSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
     session_summary_idle_minutes: float = 5.0
-    bulletin_prior_context_messages: int = 5
 
     @property
     def dashboard_secret_configured(self) -> bool:
@@ -433,10 +444,6 @@ class Settings:
             os.getenv("BOB_SESSION_SUMMARY_IDLE_MINUTES", "5.0")
         )
 
-        bulletin_prior_context_messages = int(
-            os.getenv("BOB_BULLETIN_PRIOR_CONTEXT_MESSAGES", "5")
-        )
-
         phone = PhoneSettings(
             enabled=os.getenv("BOB_PHONE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             twilio_account_sid=os.getenv("BOB_PHONE_TWILIO_ACCOUNT_SID", ""),
@@ -456,6 +463,13 @@ class Settings:
             memory_model=os.getenv("BOB_OPENAI_MEMORY_MODEL", ""),
             timeout_seconds=float(os.getenv("BOB_OPENAI_TIMEOUT_SECONDS", "120")),
             web_search_enabled=os.getenv("BOB_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
+        )
+
+        openai_realtime = OpenAIRealtimeSettings(
+            model=os.getenv("BOB_OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
+            voice=os.getenv("BOB_OPENAI_REALTIME_VOICE", "cedar"),
+            max_call_duration_seconds=float(os.getenv("BOB_OPENAI_REALTIME_MAX_DURATION", "300")),
+            turn_detection=os.getenv("BOB_OPENAI_REALTIME_TURN_DETECTION", "server_vad"),
         )
 
         harness = HarnessSettings(
@@ -492,12 +506,9 @@ class Settings:
         reconciliation = ReconciliationSettings(
             large_model_types=recon_large_types,
             min_interval_hours=float(os.getenv("BOB_RECON_MIN_INTERVAL_HOURS", "6.0")),
+            daily_batch_enabled=os.getenv("BOB_RECON_DAILY_BATCH_ENABLED", "1").strip() not in ("0", "false", "no"),
+            daily_batch_max_entities=int(os.getenv("BOB_RECON_DAILY_BATCH_MAX_ENTITIES", "50")),
         )
-
-        memory_extraction_mode = os.getenv("BOB_MEMORY_EXTRACTION_MODE", "bulletin").strip().lower()
-        if memory_extraction_mode not in ("bulletin", "silent"):
-            memory_extraction_mode = "bulletin"
-        memory_extraction = MemoryExtractionSettings(mode=memory_extraction_mode)
 
         return cls(
             host=host,
@@ -519,14 +530,13 @@ class Settings:
             public_url=public_url,
             dashboard_secret=dashboard_secret,
             session_summary_idle_minutes=session_summary_idle_minutes,
-            bulletin_prior_context_messages=bulletin_prior_context_messages,
             phone=phone,
             openai=openai_llm,
+            openai_realtime=openai_realtime,
             harness=harness,
             whatsapp_bridge=whatsapp_bridge,
             patience=patience,
             reconciliation=reconciliation,
-            memory_extraction=memory_extraction,
         )
 
     def ensure_directories(self) -> None:

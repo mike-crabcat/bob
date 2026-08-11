@@ -135,8 +135,7 @@ def serve(
     # Start from the fully env-loaded settings and override only the fields the
     # CLI accepts. Using replace() (not a hand-maintained allowlist) ensures
     # every env-backed field — including ones added later, like
-    # memory_extraction and reconciliation — is preserved instead of silently
-    # defaulting.
+    # reconciliation — is preserved instead of silently defaulting.
     settings = replace(
         env_settings,
         host=host,

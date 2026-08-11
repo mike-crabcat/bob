@@ -516,7 +516,7 @@ async def render_entity_full(
         return f"[Unknown entity: {entity_id}]"
 
     claims = await db.fetch_all(
-        "SELECT claim_type_key, object_id, value, source_bulletins FROM memory_claims "
+        "SELECT claim_type_key, object_id, value, source_messages FROM memory_claims "
         "WHERE status = 'active' AND subject_id = ?",
         (entity_id,),
     )
@@ -533,21 +533,21 @@ async def render_entity_full(
         db=db,
     )
 
-    # Append provenance tags (source bulletins) to each claim line
+    # Append provenance tags (source messages) to each claim line
     provenance_lines: list[str] = []
     for r in claims:
         val = r["value"] or r["object_id"] or ""
-        src = r["source_bulletins"] or ""
+        msgs = r["source_messages"] or ""
         src_label = ""
-        if src:
+        if msgs:
             try:
-                bids = json.loads(src) if isinstance(src, str) else src
-                if bids:
-                    src_label = f"  [source: {', '.join(bids)}]"
+                mids = json.loads(msgs) if isinstance(msgs, str) else msgs
+                if mids:
+                    src_label = f"  [source: {len(mids)} message{'s' if len(mids) != 1 else ''}]"
                 else:
                     src_label = "  [source: none — inferred]"
             except (json.JSONDecodeError, TypeError):
-                src_label = f"  [source: {src}]"
+                src_label = f"  [source: {msgs}]"
         elif r["claim_type_key"] not in ("truth",):
             src_label = "  [source: none — inferred]"
         provenance_lines.append(f"  {r['claim_type_key']}: {val}{src_label}")
@@ -619,55 +619,6 @@ async def _write_questions(
         ids.append(qid)
         logger.info("Reconciliation question raised: %s", qid)
     return ids
-
-
-async def _collect_bulletin_text(db: Any, entity_id: str) -> str:
-    """Collect source bulletin text for all claims on an entity and its children.
-
-    Gathers bulletin IDs from claim source_bulletins, loads the bulletin content,
-    and returns a formatted block for the reconciliation prompt.
-    """
-    # Collect from direct claims
-    claim_rows = await db.fetch_all(
-        "SELECT source_bulletins FROM memory_claims "
-        "WHERE status = 'active' AND subject_id = ? AND source_bulletins IS NOT NULL",
-        (entity_id,),
-    )
-    bulletin_ids: set[str] = set()
-    for r in claim_rows:
-        try:
-            bids = json.loads(r["source_bulletins"]) if r["source_bulletins"] else []
-            bulletin_ids.update(bids)
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # Also from direct entity-bulletin links
-    eb_rows = await db.fetch_all(
-        "SELECT bulletin_id FROM memory_entity_bulletins WHERE entity_id = ?",
-        (entity_id,),
-    )
-    bulletin_ids.update(r["bulletin_id"] for r in eb_rows)
-
-    if not bulletin_ids:
-        return "(no source bulletins available)"
-
-    # Load bulletin content
-    placeholders = ",".join("?" for _ in bulletin_ids)
-    rows = await db.fetch_all(
-        f"SELECT id, content FROM memory_bulletins WHERE id IN ({placeholders})",
-        tuple(bulletin_ids),
-    )
-    if not rows:
-        return "(no source bulletins available)"
-
-    lines = []
-    for r in rows:
-        content = r["content"] or ""
-        # Truncate long bulletins to avoid bloating the prompt
-        if len(content) > 500:
-            content = content[:500] + "..."
-        lines.append(f"[{r['id']}] {content}")
-    return "\n\n".join(lines)
 
 
 async def deprecate_file_entities_without_path(db: Any) -> list[str]:
@@ -744,12 +695,9 @@ async def reconcile_entity(
 
     answers = await _load_answers(db, entity_id)
 
-    # Collect source bulletin text for provenance
-    bulletin_text = await _collect_bulletin_text(db, entity_id)
-
     system_prompt = RECONCILIATION_PROMPT.format(
         entity_view=entity_view,
-        bulletins=bulletin_text,
+        bulletins="(bulletin pipeline removed; per-turn silent extraction is the only source)",
         answers=answers,
         entity_type=entity_type,
         rules=rules,

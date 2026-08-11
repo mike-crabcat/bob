@@ -8,151 +8,6 @@ from bob_server.cli._helpers import *  # noqa: F403,F405
 app = typer.Typer(help="Memory wiki operations")
 
 
-
-@app.command("seed")
-def memory_seed(
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without calling LLM")] = False,
-) -> None:
-    """Regenerate memory from all session history using the bulletin generator."""
-    import asyncio
-    asyncio.run(_memory_seed(dry_run))
-
-
-async def _memory_seed(dry_run: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-
-    settings = Settings.from_env()
-    schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("bob.db")
-    db = Database(db_path, schema_dir)
-    await db.connect()
-    ctx = AppContext(settings=settings, db=db)
-
-    try:
-        from bob_server.services.memory.seed import seed_from_history
-
-        workspace = settings.harness.workspace_dir
-        result = await seed_from_history(ctx, workspace, dry_run=dry_run)
-
-        typer.echo(f"\nSeed result:")
-        typer.echo(f"  Sessions processed: {result.get('sessions_processed', 0)}")
-        typer.echo(f"  Bulletins generated: {result.get('bulletins_generated', 0)}")
-        typer.echo(f"  Bulletins skipped: {result.get('bulletins_skipped', 0)}")
-        typer.echo(f"  Errors: {len(result.get('errors', []))}")
-    finally:
-        await db.close()
-
-
-@app.command("seed-email")
-def memory_seed_email(
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without calling LLM")] = False,
-    thread_id: Annotated[Optional[str], typer.Option("--thread", help="Process a specific email thread by agentmail_thread_id")] = None,
-) -> None:
-    """Regenerate memory from email thread history using the bulletin generator."""
-    import asyncio
-    asyncio.run(_memory_seed_email(dry_run, thread_id))
-
-
-async def _memory_seed_email(dry_run: bool, thread_id: str | None) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-
-    settings = Settings.from_env()
-    schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("bob.db")
-    db = Database(db_path, schema_dir)
-    await db.connect()
-    ctx = AppContext(settings=settings, db=db)
-
-    try:
-        from bob_server.services.memory.seed_email import seed_from_email_history
-
-        workspace = settings.harness.workspace_dir
-        result = await seed_from_email_history(ctx, workspace, dry_run=dry_run, thread_id=thread_id)
-
-        typer.echo(f"\nSeed-email result:")
-        typer.echo(f"  Threads processed: {result.get('threads_processed', 0)}")
-        typer.echo(f"  Bulletins generated: {result.get('bulletins_generated', 0)}")
-        typer.echo(f"  Bulletins skipped: {result.get('bulletins_skipped', 0)}")
-        typer.echo(f"  Errors: {len(result.get('errors', []))}")
-    finally:
-        await db.close()
-
-
-@app.command("seed-manual")
-def memory_seed_manual(
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be processed without writing")] = False,
-) -> None:
-    """Replay memory_write tool calls from LLM logs as bulletins."""
-    import asyncio
-    asyncio.run(_memory_seed_manual(dry_run))
-
-
-async def _memory_seed_manual(dry_run: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-
-    settings = Settings.from_env()
-    schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("bob.db")
-    db = Database(db_path, schema_dir)
-    await db.connect()
-    ctx = AppContext(settings=settings, db=db)
-
-    try:
-        from bob_server.services.memory.seed_manual import seed_manual_bulletins
-
-        workspace = settings.harness.workspace_dir
-        result = await seed_manual_bulletins(ctx, workspace, dry_run=dry_run)
-
-        typer.echo(f"\nSeed-manual result:")
-        typer.echo(f"  Log rows scanned: {result.get('log_rows_scanned', 0)}")
-        typer.echo(f"  Bulletins generated: {result.get('bulletins_generated', 0)}")
-        typer.echo(f"  Errors: {len(result.get('errors', []))}")
-    finally:
-        await db.close()
-
-
-@app.command("rebuild")
-def memory_rebuild(
-    all: Annotated[bool, typer.Option("--all", help="Rebuild all derived data from bulletins")] = False,
-    entity_id: Annotated[Optional[str], typer.Option("--entity", help="Rebuild indexes for a specific entity")] = None,
-    full: Annotated[bool, typer.Option("--full", help="Use full-document mode instead of patches")] = False,
-) -> None:
-    """Rebuild memory indexes and derived data from bulletins."""
-    import asyncio
-    asyncio.run(_memory_rebuild(all, entity_id, full))
-
-
-async def _memory_rebuild(all: bool, entity_id: str | None, full: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-
-    settings = Settings.from_env()
-    schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("bob.db")
-    db = Database(db_path, schema_dir)
-    await db.connect()
-    await db.apply_migrations()
-    ctx = AppContext(settings=settings, db=db)
-
-    try:
-        from bob_server.services.memory import MemoryService
-
-        workspace = settings.harness.workspace_dir
-        svc = MemoryService(ctx)
-
-        result = await svc.rebuild(workspace, entity_id=entity_id, all=all)
-        typer.echo(f"Rebuild result: {json.dumps(result, indent=2)}")
-    finally:
-        await db.close()
-
-
 @app.command("reconcile")
 def memory_reconcile(
     entity_ids: Annotated[Optional[list[str]], typer.Argument(help="Entity IDs to reconcile")] = None,
@@ -162,15 +17,6 @@ def memory_reconcile(
     """Run entity reconciliation to detect and fix inconsistencies."""
     import asyncio
     asyncio.run(_memory_reconcile(entity_ids, all, render_only))
-
-
-@app.command("supplement")
-def memory_supplement(
-    entity_ids: Annotated[list[str], typer.Argument(help="Entity IDs to supplement with missing claims")],
-) -> None:
-    """Gap-fill: re-extract from source bulletins, only write missing claims."""
-    import asyncio
-    asyncio.run(_memory_supplement(entity_ids))
 
 
 async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only: bool) -> None:
@@ -303,32 +149,6 @@ async def _memory_model_override_list() -> None:
             return
         for r in rows:
             typer.echo(f"{r['entity_id']}\t{r['model']}\t{r['set_at']}" + (f"\t{r['reason']}" if r['reason'] else ""))
-    finally:
-        await db.close()
-
-
-async def _memory_supplement(entity_ids: list[str]) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-
-    settings = Settings.from_env()
-    schema_dir = Path(__file__).parent / "schemas"
-    db_path = settings.db_path or Path("bob.db")
-    db = Database(db_path, schema_dir)
-    await db.connect()
-    ctx = AppContext(settings=settings, db=db)
-
-    try:
-        from bob_server.services.memory import MemoryService
-
-        workspace = settings.harness.workspace_dir
-        svc = MemoryService(ctx)
-
-        for eid in entity_ids:
-            typer.echo(f"Supplementing {eid}...")
-            result = await svc.supplement_entity(workspace, entity_id=eid)
-            typer.echo(json.dumps(result, indent=2, default=str))
     finally:
         await db.close()
 
@@ -471,7 +291,6 @@ async def _memory_cleanup_contacts(dry_run: bool) -> None:
         typer.echo(f"  Merged:  {result['merged']}")
         typer.echo(f"  Deleted: {result['deleted']}")
         typer.echo(f"  Rewritten claims:     {result['rewritten_claims']}")
-        typer.echo(f"  Rewritten bulletins:  {result['rewritten_bulletins']}")
         typer.echo(f"  Rewritten related:    {result['rewritten_related']}")
         typer.echo(f"  Enriched with DB FK:  {result['enriched']}")
     finally:
