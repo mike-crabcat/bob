@@ -116,49 +116,14 @@ _last_call_cleanup: datetime | None = None
 
 
 class SessionIdleSummaryTask:
-    """Detect idle sessions and generate memory bulletins."""
+    """Detect idle sessions and trigger silent-turn memory extraction."""
 
     name = "session_idle_summary"
 
     async def _find_idle_sessions(
         self, db: Database, idle_threshold_minutes: float
     ) -> list[dict]:
-        rows = await db.fetch_all(
-            """
-            SELECT
-                sm.session_key,
-                MAX(sm.created_at) AS last_message_at,
-                COALESCE(
-                    (SELECT MAX(session_range_end) FROM memory_bulletins
-                     WHERE source_id = sm.session_key
-                       AND session_range_end != ''),
-                    '1970-01-01'
-                ) AS active_from,
-                COUNT(*) AS message_count
-            FROM session_messages sm
-            WHERE sm.session_key NOT LIKE 'subagent:%'
-              AND datetime(sm.created_at) > datetime(COALESCE(
-                (SELECT MAX(session_range_end) FROM memory_bulletins
-                 WHERE source_id = sm.session_key
-                   AND session_range_end != ''),
-                '1970-01-01'
-              ))
-            GROUP BY sm.session_key
-            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
-            """,
-            (idle_threshold_minutes,),
-        )
-        return [dict(r) for r in rows] if rows else []
-
-    async def _find_idle_sessions_silent(
-        self, db: Database, idle_threshold_minutes: float
-    ) -> list[dict]:
-        """Silent-mode idle detection.
-
-        Same shape as `_find_idle_sessions`, but the "messages since last
-        extraction" anchor reads MAX(ran_at) from memory_extraction_turns
-        instead of memory_bulletins.session_range_end.
-        """
+        """Find sessions with messages newer than the last silent extraction turn."""
         rows = await db.fetch_all(
             """
             SELECT
@@ -188,13 +153,7 @@ class SessionIdleSummaryTask:
         from bob_server.services.memory import MemoryService
 
         idle_threshold = ctx.settings.session_summary_idle_minutes
-        mode = ctx.settings.memory_extraction.mode
-
-        if mode == "silent":
-            idle_sessions = await self._find_idle_sessions_silent(ctx.db, idle_threshold)
-        else:
-            idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
-
+        idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
         if not idle_sessions:
             return
 
@@ -203,27 +162,12 @@ class SessionIdleSummaryTask:
         for session in idle_sessions:
             session_key = session["session_key"]
             try:
-                if mode == "silent":
-                    result = await svc.run_silent_turn_extraction(session_key)
-                    logger.info(
-                        "Silent extraction %s for session %s: %s claim(s)",
-                        result.get("status"), session_key,
-                        result.get("claims_created", 0),
-                    )
-                else:
-                    workspace = ctx.settings.harness.workspace_dir
-                    result = await svc.generate_session_bulletins(
-                        workspace,
-                        session_key,
-                        active_from=session["active_from"],
-                        run_dream=False,
-                    )
-                    n = result.get("bulletins_generated", 0)
-                    if n:
-                        logger.info(
-                            "Generated %d bulletin(s) for session %s (%d messages)",
-                            n, session_key, session["message_count"],
-                        )
+                result = await svc.run_silent_turn_extraction(session_key)
+                logger.info(
+                    "Silent extraction %s for session %s: %s claim(s)",
+                    result.get("status"), session_key,
+                    result.get("claims_created", 0),
+                )
             except Exception:
                 logger.exception(
                     "Failed to process session %s",
@@ -274,6 +218,82 @@ class CallCleanupTask:
 
         _last_call_cleanup = now
         logger.info("Cleaned up %d old phone call(s)", len(old_calls))
+
+
+_last_memory_reconcile: datetime | None = None
+
+
+class MemoryReconciliationTask:
+    """Heartbeat-triggered reconciliation of entities touched in the last 24h.
+
+    Replaces the post-dream reconciliation trigger that was removed with the
+    dream pipeline. Finds entities with claims/entities written today, filters
+    by min_interval_hours backoff, and runs reconcile_entity on each. Throttled
+    to 1h to avoid hammering the LLM on every heartbeat while still reacting
+    to new claims within the hour.
+    """
+
+    name = "memory_reconciliation"
+    _THROTTLE = timedelta(hours=1)
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_memory_reconcile
+        recon = ctx.settings.reconciliation
+        if not recon.daily_batch_enabled:
+            return
+
+        now = datetime.now(timezone.utc)
+        if _last_memory_reconcile and (now - _last_memory_reconcile) < self._THROTTLE:
+            return
+
+        from bob_server.services.memory import MemoryService
+        from bob_server.services.memory.reconciliation import filter_due_for_reconciliation
+
+        rows = await ctx.db.fetch_all(
+            """
+            SELECT entity_id, MAX(touched_at) AS last_touched FROM (
+                SELECT subject_id AS entity_id, created_at AS touched_at
+                FROM memory_claims
+                WHERE status = 'active'
+                  AND datetime(created_at) > datetime('now', '-24 hours')
+                UNION ALL
+                SELECT entity_id, created_at AS touched_at
+                FROM memory_entities
+                WHERE status = 'active'
+                  AND datetime(created_at) > datetime('now', '-24 hours')
+            )
+            GROUP BY entity_id
+            ORDER BY last_touched DESC
+            LIMIT ?
+            """,
+            (recon.daily_batch_max_entities,),
+        )
+        candidate_ids = [r["entity_id"] for r in rows] if rows else []
+        if not candidate_ids:
+            _last_memory_reconcile = now
+            return
+
+        due = await filter_due_for_reconciliation(ctx.db, candidate_ids, recon.min_interval_hours)
+        if not due:
+            _last_memory_reconcile = now
+            return
+
+        svc = MemoryService(ctx)
+        workspace = ctx.settings.harness.workspace_dir
+        try:
+            result = await svc.reconcile_entities(workspace, entity_ids=due)
+            logger.info(
+                "MemoryReconciliationTask: %d entit%s checked, %d op(s), %d question(s) raised",
+                result.get("entities_checked", 0),
+                "y" if result.get("entities_checked", 0) == 1 else "ies",
+                result.get("total_ops", 0),
+                result.get("total_questions", 0),
+            )
+        except Exception:
+            logger.exception("MemoryReconciliationTask failed")
+            return
+
+        _last_memory_reconcile = now
 
 
 class LLMCallStalenessTask:

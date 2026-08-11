@@ -29,48 +29,6 @@ interface MemoryStats {
 interface MemoryStatsResponse {
   stats: MemoryStats;
   recent: { path: string; wiki: string; category: string; slug: string; title: string; summary: string; modified: number }[];
-  pending_bulletins: number;
-  last_dream: string | null;
-}
-
-interface Bulletin {
-  slug: string;
-  source_session: string;
-  source_type: string;
-  channel_id: string;
-  participants: string;
-  content: string;
-  created_at: number;
-}
-
-interface DreamLog {
-  id: string;
-  bulletins_processed: number;
-  entries_created: number;
-  claims_extracted: number;
-  bulletin_slugs: string[];
-  operations: DreamOp[];
-  raw_response: string;
-  duration_seconds: number | null;
-  status: string;
-  created_at: string;
-}
-
-interface DreamOp {
-  bulletin: string;
-  source: string;
-  claims: number | ClaimSummary[];
-  entity_ops: number;
-  entities_updated?: string[];
-  content_preview: string;
-}
-
-interface ClaimSummary {
-  id: string;
-  claim_type_key: string;
-  subject_id: string;
-  object_id: string | null;
-  value: string | null;
 }
 
 interface EntityListItem {
@@ -90,7 +48,6 @@ interface EntityDetail {
   status: string;
   rendered: string;
   claims: ClaimDetail[];
-  source_bulletins?: string[];
 }
 
 interface ClaimDetail {
@@ -100,7 +57,6 @@ interface ClaimDetail {
   object_id: string | null;
   value: string | null;
   status: string;
-  source_bulletins: string[];
   visibility: string;
   created_at: string | null;
 }
@@ -193,221 +149,6 @@ interface QuestionsResponse {
   questions: Question[];
 }
 
-// ── BulletinCard ───────────────────────────────────────────────────────────
-
-function BulletinCard({ b }: { b: Bulletin }) {
-  const [expanded, setExpanded] = useState(false);
-  const firstLine = b.content.split("\n")[0].replace(/^#\s*/, "").replace(/^-\s*/, "");
-  return (
-    <div className="border-b border-border/50">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-start gap-2 px-3 py-2 hover:bg-surface/30 transition-colors text-left"
-      >
-        <span className="text-[8px] text-warning/80 bg-warning/10 px-1 rounded shrink-0 mt-0.5">queued</span>
-        <div className="flex flex-col min-w-0 flex-1">
-          <Link
-            to="/memory/bulletins/$bulletinId"
-            params={{ bulletinId: b.slug }}
-            onClick={(e) => e.stopPropagation()}
-            className="text-[11px] text-text hover:text-accent truncate"
-          >
-            {firstLine || b.slug}
-          </Link>
-          {b.participants && (
-            <span className="text-[9px] text-muted/60">{b.participants}</span>
-          )}
-        </div>
-        <span className="text-[9px] text-muted/50 shrink-0 mt-0.5">{relativeTimeEpoch(b.created_at)}</span>
-      </button>
-      {expanded && (
-        <div className="px-3 pb-2">
-          <div className="flex items-center gap-1.5 mb-1">
-            <Link to="/memory/bulletins/$bulletinId" params={{ bulletinId: b.slug }} className="text-[8px] text-accent/60 font-mono hover:underline">{b.slug}</Link>
-            <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{b.source_type}</span>
-          </div>
-          <pre className="text-[10px] text-text whitespace-pre-wrap break-words font-mono leading-relaxed max-h-48 overflow-y-auto">{b.content}</pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── DreamRunCard ───────────────────────────────────────────────────────────
-
-function DreamRunCard({
-  d,
-  onRedigest,
-  onNavigateEntity,
-}: {
-  d: DreamLog;
-  onRedigest: (slug: string) => void;
-  onNavigateEntity: (entityId: string) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [bulletinContent, setBulletinContent] = useState<Record<string, string>>({});
-  const [fetchedBulletins, setFetchedBulletins] = useState(false);
-
-  const statusColor =
-    d.status === "completed" ? "text-success bg-success/10" :
-    d.status === "failed" ? "text-error bg-error/10" :
-    "text-muted bg-muted/10";
-
-  const fetchBulletins = async () => {
-    if (fetchedBulletins || d.bulletin_slugs.length === 0) return;
-    try {
-      const secret = document.cookie.match(/bob_dashboard_secret=([^;]+)/)?.[1] ?? "";
-      const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/memory/digested?secret=${encodeURIComponent(secret)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slugs: d.bulletin_slugs }),
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      const map: Record<string, string> = {};
-      for (const b of data.bulletins ?? []) {
-        map[b.slug] = b.content;
-      }
-      setBulletinContent(map);
-      setFetchedBulletins(true);
-    } catch { /* ignore */ }
-  };
-
-  const toggleExpand = () => {
-    if (!expanded) fetchBulletins();
-    setExpanded(!expanded);
-  };
-
-  // Determine if ops have enriched data (new format) vs counts (old format)
-  const hasEnrichedOps = d.operations.length > 0 && Array.isArray(d.operations[0]?.claims);
-
-  return (
-    <div className="border-b border-border">
-      <button
-        onClick={toggleExpand}
-        className="w-full px-3 py-2 flex items-start gap-2 hover:bg-surface/30 transition-colors text-left"
-      >
-        <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <span className={`text-[8px] ${statusColor} px-1 rounded`}>{d.status}</span>
-            <span className="text-[11px] text-text">
-              {d.bulletins_processed} bulletin{d.bulletins_processed !== 1 ? "s" : ""} → {d.claims_extracted} claim{d.claims_extracted !== 1 ? "s" : ""} → {d.entries_created} entr{d.entries_created !== 1 ? "ies" : "y"}
-            </span>
-            {d.duration_seconds != null && (
-              <span className="text-[9px] text-muted/50">{d.duration_seconds.toFixed(1)}s</span>
-            )}
-          </div>
-          {d.operations.length > 0 && !expanded && (
-            <div className="flex items-center gap-1 flex-wrap">
-              {d.operations.slice(0, 4).map((op, i) => (
-                <span key={i} className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">
-                  {typeof op.claims === "number" ? op.claims : op.claims.length}c/{op.entity_ops}e
-                </span>
-              ))}
-              {d.operations.length > 4 && (
-                <span className="text-[8px] text-muted/40">+{d.operations.length - 4} more</span>
-              )}
-            </div>
-          )}
-        </div>
-        <span className="text-[9px] text-muted/50 shrink-0 mt-0.5">{relativeTime(d.created_at)}</span>
-      </button>
-
-      {expanded && (
-        <div className="px-3 pb-2">
-          {/* Per-bulletin breakdown with full content and claims */}
-          {d.operations.length > 0 && (
-            <div className="mb-2">
-              <span className="text-[9px] text-muted/50 uppercase tracking-wide">per-bulletin breakdown</span>
-              <div className="mt-1 flex flex-col gap-2">
-                {d.operations.map((op, i) => {
-                  const content = bulletinContent[op.bulletin];
-                  const claimList = Array.isArray(op.claims) ? op.claims : [];
-                  const claimCount = typeof op.claims === "number" ? op.claims : claimList.length;
-                  return (
-                    <div key={i} className="bg-surface/50 border border-border/50 rounded px-2 py-1.5">
-                      <div className="flex items-center gap-1.5 mb-1">
-                        <Link to="/memory/bulletins/$bulletinId" params={{ bulletinId: op.bulletin }} className="text-[8px] text-accent/60 font-mono hover:underline">{op.bulletin}</Link>
-                        <span className="text-[8px] text-accent/60 bg-accent/5 px-1 rounded">{claimCount} claims</span>
-                        <span className="text-[8px] text-success/60 bg-success/5 px-1 rounded">{op.entity_ops} entity ops</span>
-                        {op.source && (
-                          <span className="text-[8px] text-muted/40 truncate ml-auto">{op.source.split(":").slice(-1)[0]}</span>
-                        )}
-                        <button
-                          onClick={(e) => { e.stopPropagation(); onRedigest(op.bulletin); }}
-                          className="text-[8px] text-muted/40 hover:text-accent ml-1"
-                        >
-                          re-digest
-                        </button>
-                      </div>
-
-                      {/* Full bulletin content */}
-                      {content && (
-                        <pre className="text-[10px] text-text/80 whitespace-pre-wrap break-words font-mono leading-relaxed max-h-32 overflow-y-auto mb-1.5 bg-surface/80 border border-border/30 rounded px-1.5 py-1">
-                          {content}
-                        </pre>
-                      )}
-
-                      {/* Extracted claims (new format) */}
-                      {claimList.length > 0 && (
-                        <div className="flex flex-col gap-0.5 mb-1">
-                          <span className="text-[8px] text-muted/40 uppercase tracking-wide">extracted claims</span>
-                          {claimList.map((c, ci) => (
-                            <div key={ci} className="flex items-center gap-1.5 pl-1">
-                              <span className={`text-[8px] px-1 rounded ${CLAIM_COLORS[c.claim_type_key] ?? "bg-gray-900/40 text-gray-300"}`}>
-                                {c.claim_type_key}
-                              </span>
-                              <span className="text-[10px] text-text truncate">
-                                {c.subject_id}
-                                {c.object_id ? ` → ${c.object_id}` : c.value ? ` → ${c.value}` : ""}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Entities updated (new format) */}
-                      {op.entities_updated && op.entities_updated.length > 0 && (
-                        <div className="flex items-center gap-1 flex-wrap">
-                          <span className="text-[8px] text-muted/40">entities:</span>
-                          {op.entities_updated.map((eid, ei) => (
-                            <button
-                              key={ei}
-                              onClick={() => onNavigateEntity(eid)}
-                              className="text-[8px] text-accent hover:underline bg-accent/5 px-1 rounded"
-                            >
-                              {eid}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Raw LLM response */}
-          {d.raw_response && (
-            <div>
-              <details>
-                <summary className="text-[9px] text-muted/40 uppercase tracking-wide cursor-pointer hover:text-muted/70">
-                  raw response ({d.raw_response.length} chars)
-                </summary>
-                <pre className="mt-1 text-[9px] text-text/60 bg-surface/80 border border-border/30 rounded px-2 py-1 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono leading-relaxed">
-                  {d.raw_response}
-                </pre>
-              </details>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Entity Detail View ─────────────────────────────────────────────────────
 
 function EntityDetailView({
@@ -420,8 +161,6 @@ function EntityDetailView({
   onNavigateEntity: (entityId: string) => void;
 }) {
   const [expandedClaim, setExpandedClaim] = useState<string | null>(null);
-  const [bulletinContent, setBulletinContent] = useState<Record<string, string>>({});
-  const [fetchedBulletins, setFetchedBulletins] = useState(false);
   const [merging, setMerging] = useState(false);
   const [mergeTarget, setMergeTarget] = useState("");
   const [mergeBusy, setMergeBusy] = useState(false);
@@ -434,31 +173,6 @@ function EntityDetailView({
       setTimeout(() => setIdCopied(false), 1200);
     } catch { /* clipboard blocked — ignore */ }
   };
-
-  const fetchBulletins = async () => {
-    if (fetchedBulletins || !(entity.source_bulletins?.length)) return;
-    try {
-      const secret = document.cookie.match(/bob_dashboard_secret=([^;]+)/)?.[1] ?? "";
-      const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/memory/digested?secret=${encodeURIComponent(secret)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slugs: entity.source_bulletins ?? [] }),
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      const map: Record<string, string> = {};
-      for (const b of data.bulletins ?? []) {
-        map[b.slug] = b.content;
-      }
-      setBulletinContent(map);
-      setFetchedBulletins(true);
-    } catch { /* ignore */ }
-  };
-
-  useEffect(() => {
-    fetchBulletins();
-  }, [entity.entity_id]);
 
   const hasRelated = false;
 
@@ -643,32 +357,6 @@ function EntityDetailView({
             </div>
           </div>
         )}
-
-        {/* Source bulletins */}
-        {(entity.source_bulletins?.length ?? 0) > 0 && (
-          <div className="px-3 py-2">
-            <span className="text-[9px] text-muted/50 uppercase tracking-wide">source bulletins ({entity.source_bulletins?.length ?? 0})</span>
-            <div className="mt-1 flex flex-col gap-1">
-              {(entity.source_bulletins ?? []).map((slug) => (
-                <details key={slug}>
-                  <summary className="text-[9px] font-mono cursor-pointer hover:text-muted/70">
-                    <Link
-                      to="/memory/bulletins/$bulletinId"
-                      params={{ bulletinId: slug }}
-                      className="text-accent/60 hover:underline"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {slug}
-                    </Link>
-                  </summary>
-                  <pre className="mt-1 text-[10px] text-text/80 whitespace-pre-wrap break-words font-mono leading-relaxed max-h-32 overflow-y-auto bg-surface/50 border border-border/30 rounded px-1.5 py-1">
-                    {bulletinContent[slug] || "loading..."}
-                  </pre>
-                </details>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -817,16 +505,6 @@ function MemoryPage() {
     queryFn: () => fetchAPI<MemoryStatsResponse>("/memory/stats"),
   });
 
-  const { data: bulletinsData } = useQuery<{ bulletins: Bulletin[] }>({
-    queryKey: ["memory-bulletins"],
-    queryFn: () => fetchAPI<{ bulletins: Bulletin[] }>("/memory/bulletins"),
-  });
-
-  const { data: dreamsData } = useQuery<{ dreams: DreamLog[] }>({
-    queryKey: ["memory-dreams"],
-    queryFn: () => fetchAPI<{ dreams: DreamLog[] }>("/memory/dreams"),
-  });
-
   const { data: entitiesData } = useQuery<{ entities: EntityListItem[] }>({
     queryKey: ["memory-entities", selectedType],
     queryFn: () => {
@@ -852,24 +530,6 @@ function MemoryPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["memory-searches"] });
-    },
-  });
-
-  const redigestMutation = useMutation({
-    mutationFn: async (slug: string) => {
-      const secret = document.cookie.match(/bob_dashboard_secret=([^;]+)/)?.[1] ?? "";
-      const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/memory/redigest?secret=${encodeURIComponent(secret)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug }),
-      });
-      if (!res.ok) throw new Error(`API ${res.status}`);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory-bulletins"] });
-      queryClient.invalidateQueries({ queryKey: ["memory-stats"] });
     },
   });
 
@@ -909,11 +569,7 @@ function MemoryPage() {
   // ── Derived data ──
 
   const stats = statsData?.stats ?? { total_entries: 0, wikis: {} };
-  const bulletins = bulletinsData?.bulletins ?? [];
-  const dreams = dreamsData?.dreams ?? [];
   const entities = entitiesData?.entities ?? [];
-  const pendingCount = statsData?.pending_bulletins ?? 0;
-  const lastDream = statsData?.last_dream ?? null;
 
   const categories: { name: string; count: number }[] = [];
   for (const wiki of Object.values(stats.wikis)) {
@@ -1024,50 +680,8 @@ function MemoryPage() {
 
         {/* ── Pipeline Tab ── */}
         {tab === "pipeline" && (
-          <div className="flex flex-col h-full overflow-y-auto">
-            {/* Pending bulletins */}
-            {bulletins.length > 0 && (
-              <div className="shrink-0">
-                <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border">
-                  <span className="text-[10px] text-warning font-medium">{pendingCount} queued</span>
-                  <span className="text-[9px] text-muted/50">waiting for next dream</span>
-                  {lastDream && (
-                    <span className="text-[9px] text-muted/40 ml-auto">last dream {relativeTime(lastDream)}</span>
-                  )}
-                </div>
-                {bulletins.map((b) => (
-                  <BulletinCard key={b.slug} b={b} />
-                ))}
-              </div>
-            )}
-
-            {/* Dream feed */}
-            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
-              <span className="text-[10px] text-muted font-medium">dream log</span>
-              {dreams.length > 0 && (
-                <span className="text-[9px] text-muted/50">{dreams.length} runs</span>
-              )}
-              {bulletins.length === 0 && lastDream && (
-                <span className="text-[9px] text-muted/40 ml-auto">last {relativeTime(lastDream)}</span>
-              )}
-            </div>
-
-            {dreams.length === 0 ? (
-              <div className="p-4 text-muted text-center text-xs">
-                {bulletins.length > 0
-                  ? "bulletins queued — waiting for first dream"
-                  : "no dream activity yet"}
-              </div>
-            ) : (
-              dreams.map((d) => (
-                <DreamRunCard
-                  key={d.id}
-                  d={d}
-                  onRedigest={(slug) => redigestMutation.mutate(slug)}
-                  onNavigateEntity={navigateToEntity}
-                />
-              ))
-            )}
+          <div className="p-4 text-muted text-center text-xs">
+            Memory extraction is silent per-turn — there is no pipeline queue or dream log.
           </div>
         )}
 
@@ -1165,14 +779,6 @@ function MemoryPage() {
                       </button>
                     );
                   })}
-              </div>
-
-              <div className="mt-4 pt-3 border-t border-border">
-                <div className="text-[10px] text-muted uppercase mb-1">Pipeline</div>
-                <div className="flex items-center gap-3 text-[10px]">
-                  <span className="text-muted">pending bulletins: <span className="text-text">{pendingCount}</span></span>
-                  {lastDream && <span className="text-muted">last dream: <span className="text-text">{lastDream}</span></span>}
-                </div>
               </div>
 
               <div className="mt-4 pt-3 border-t border-border">

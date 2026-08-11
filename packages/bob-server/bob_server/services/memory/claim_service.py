@@ -15,7 +15,6 @@ from bob_server.services.memory.claim_types import (
     render_entity,
 )
 from bob_server.services.memory.models import Claim, Bulletin
-from bob_server.services.memory.prompts import build_extraction_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +60,10 @@ async def write_claim(db: Any, claim: Claim) -> str:
         return claim.id
 
     # Deduplicate: if writing an active claim with the same content as an existing
-    # active claim, merge bulletin sources instead of creating a duplicate.
+    # active claim, merge message provenance instead of creating a duplicate.
     if claim.status == "active":
         existing = await db.fetch_one(
-            "SELECT id, source_bulletins, source_messages FROM memory_claims "
+            "SELECT id, source_messages FROM memory_claims "
             "WHERE status = 'active' AND claim_type_key = ? AND subject_id = ? "
             "AND COALESCE(object_id, '') = COALESCE(?, '') "
             "AND COALESCE(value, '') = COALESCE(?, '')",
@@ -72,22 +71,20 @@ async def write_claim(db: Any, claim: Claim) -> str:
         )
         if existing:
             existing_id = existing["id"]
-            existing_bullets: list[str] = json.loads(existing["source_bulletins"]) if existing["source_bulletins"] else []
-            merged = list(dict.fromkeys(existing_bullets + claim.source_bulletins))
             existing_messages: list[str] = json.loads(existing["source_messages"]) if existing.get("source_messages") else []
             merged_messages = list(dict.fromkeys(existing_messages + claim.source_messages))
-            if len(merged) > len(existing_bullets) or len(merged_messages) > len(existing_messages):
+            if len(merged_messages) > len(existing_messages):
                 await db.execute(
-                    "UPDATE memory_claims SET source_bulletins = ?, source_messages = ? WHERE id = ?",
-                    (json.dumps(merged), json.dumps(merged_messages), existing_id),
+                    "UPDATE memory_claims SET source_messages = ? WHERE id = ?",
+                    (json.dumps(merged_messages), existing_id),
                 )
             return existing_id
 
     await db.execute(
         "INSERT OR REPLACE INTO memory_claims "
         "(id, claim_type_key, subject_id, object_id, value, status, "
-        "source_bulletins, source_messages, visibility, scope, created_at, superseded_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_messages, visibility, scope, created_at, superseded_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             claim.id,
             claim.claim_type_key,
@@ -95,7 +92,6 @@ async def write_claim(db: Any, claim: Claim) -> str:
             claim.object_id,
             claim.value,
             claim.status,
-            json.dumps(claim.source_bulletins),
             json.dumps(claim.source_messages),
             claim.visibility,
             json.dumps(claim.scope),
@@ -169,7 +165,6 @@ def _row_to_claim(row: dict) -> Claim:
         object_id=row["object_id"],
         value=row["value"],
         status=row["status"],
-        source_bulletins=json.loads(row["source_bulletins"]) if row["source_bulletins"] else [],
         visibility=row["visibility"],
         scope=json.loads(row["scope"]) if row["scope"] else [],
         created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
@@ -256,166 +251,6 @@ def _invalid_file_entities(
         if not _is_valid_file_path(path_val):
             invalid.add(sid)
     return invalid
-
-
-async def extract_claims_from_bulletin(
-    llm: Any,
-    bulletin: Bulletin,
-    entity_types_in_bulletin: list[str] | None = None,
-    existing_claims: list[Claim] | None = None,
-    known_group_entity_id: str | None = None,
-    contact_roster: str = "",
-    group_members: str = "",
-    db: Any = None,
-    premapped_content: str | None = None,
-    bot_name: str = "Bob",
-) -> list[Claim]:
-    """Use LLM to extract atomic claims from a bulletin."""
-    if entity_types_in_bulletin:
-        claim_types_section = build_extraction_prompt_section(entity_types_in_bulletin)
-    else:
-        from bob_server.services.memory.claim_types import ENTITY_TYPES
-        claim_types_section = build_extraction_prompt_section(list(ENTITY_TYPES))
-
-    system_prompt = build_extraction_prompt(claim_types_section, bot_name=bot_name)
-
-    existing_context = ""
-    if existing_claims:
-        lines = [
-            f"- {c.subject_id} [{c.claim_type_key}] {c.object_id or c.value or ''} ({c.status})"
-            for c in existing_claims[:50]
-        ]
-        existing_context = "\n\n## Existing Claims\n\n" + "\n".join(lines)
-
-    known_entities_section = ""
-    if db is not None:
-        entity_rows = await db.fetch_all(
-            "SELECT entity_id, entity_type, display_name FROM memory_entities WHERE status = 'active'"
-        )
-        if entity_rows:
-            lines = [f"- {r['entity_id']} ({r['entity_type']}) {r['display_name']}" for r in entity_rows]
-            known_entities_section = "\n\n## Known Entities\n\n" + "\n".join(lines)
-
-    group_hint = ""
-    if known_group_entity_id:
-        group_hint = (
-            f"\n\n## Group Context\n\n"
-            f"This bulletin originates from a group session. "
-            f"Use `subject_id: {known_group_entity_id}` for any claims about the group itself."
-        )
-
-    roster_section = ""
-    if contact_roster:
-        roster_section = "\n\n## Known Persons\n\n" + contact_roster
-    if group_members:
-        roster_section += "\n\n## Group Members\n\n" + group_members
-
-    content_for_extraction = premapped_content or bulletin.content
-    bulletin_text = f"[Bulletin: {bulletin.id}]\nChannel: {bulletin.channel_id}\nVisibility: {bulletin.visibility}\n\n{content_for_extraction}"
-
-    user_prompt = f"## Bulletin\n\n{bulletin_text}{roster_section}{known_entities_section}{existing_context}{group_hint}"
-
-    response = await llm.chat(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        model=llm.memory_model,
-        call_category="memory_claim_extraction",
-        temperature=0.2,
-        max_tokens=4000,
-    )
-
-    try:
-        text = response.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        items = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("Claim extraction: failed to parse LLM response")
-        return []
-
-    if not isinstance(items, list):
-        return []
-
-    from bob_server.services.memory.entity_resolver import normalize_entity_id
-
-    valid_keys = get_all_keys()
-
-    claims = []
-    file_subject_ids: set[str] = set()
-    file_path_values: dict[str, str] = {}  # subject_id -> file_path value
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        raw_key = item.get("claim_type_key", "")
-        if raw_key not in valid_keys:
-            logger.warning("Unknown claim type key: %s, skipping", raw_key)
-            continue
-
-        raw_object = item.get("object_id")
-        raw_value = item.get("value")
-
-        if isinstance(raw_object, str):
-            raw_object = normalize_entity_id(raw_object)
-
-        subject_id = normalize_entity_id(item.get("subject_id", ""))
-
-        # Track file subjects for file_path validation
-        if subject_id.startswith("file-"):
-            file_subject_ids.add(subject_id)
-            if raw_key == "file_path" and raw_value:
-                file_subject_ids.discard(subject_id)
-                file_path_values[subject_id] = raw_value
-
-        claim = Claim(
-            id=f"claim-{bulletin.id}-{len(claims) + 1:03d}",
-            claim_type_key=raw_key,
-            subject_id=subject_id,
-            object_id=raw_object if raw_object else None,
-            value=raw_value if raw_value else None,
-            status="active",
-            source_bulletins=[bulletin.id],
-            visibility=bulletin.visibility,
-            created_at=bulletin.created_at,
-            superseded_by=[],
-        )
-        claims.append(claim)
-
-    # Drop claims for file entities that have no file_path or invalid file_path
-    invalid_file_ids = _invalid_file_entities(file_subject_ids, file_path_values)
-    if invalid_file_ids:
-        logger.warning("Dropping file entities without valid file_path: %s", invalid_file_ids)
-        claims = [c for c in claims if c.subject_id not in invalid_file_ids]
-
-    # Normalize entity IDs (colon-based, :new: prefixes, double prefixes)
-    _normalize_entity_ids(claims)
-
-    # Resolve person:new:{Name} markers to slug-based person IDs
-    _resolve_new_persons(claims)
-
-    # Drop claims with null subject_id (set by _resolve_new_persons for non-person names)
-    claims = [c for c in claims if c.subject_id is not None]
-
-    # Enforce: exactly one of object_id or value must be set (not both, not neither)
-    valid_claims = []
-    for c in claims:
-        has_object = c.object_id is not None and c.object_id != ""
-        has_value = c.value is not None and c.value != ""
-        if has_object and has_value:
-            # Prefer value, drop object_id
-            c.object_id = None
-            valid_claims.append(c)
-        elif has_object or has_value:
-            valid_claims.append(c)
-        else:
-            logger.warning("Dropping claim with no object_id and no value: %s", c.id)
-    claims = valid_claims
-
-    return claims
-
 
 _ENTITY_TYPE_PREFIXES = tuple(ENTITY_TYPE_REGISTRY.keys())
 _ENTITY_COLON_RE = re.compile(r"^(" + "|".join(_ENTITY_TYPE_PREFIXES) + r"):(.+)$")

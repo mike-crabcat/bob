@@ -9,7 +9,6 @@ from typing import Any
 
 from bob_server.services.memory.claim_types import render_entity
 from bob_server.services.memory.cleanup import (
-    rewrite_bulletin_entities,
     rewrite_claims,
     rewrite_entity_relations,
 )
@@ -224,10 +223,9 @@ async def _execute_merge(db: Any, canonical_id: str, loser_id: str) -> dict[str,
 
     # Rewrite all references
     claims_rewritten = await rewrite_claims(db, rename)
-    bulletins_rewritten = await rewrite_bulletin_entities(db, rename)
     relations_rewritten = await rewrite_entity_relations(db, rename)
 
-    # Also rewrite object_id references in source_bulletins JSON
+    # Also rewrite object_id references in claim objects
     # (claims that reference loser_id as object)
     await db.execute(
         "UPDATE memory_claims SET object_id = ? WHERE object_id = ?",
@@ -258,7 +256,6 @@ async def _execute_merge(db: Any, canonical_id: str, loser_id: str) -> dict[str,
         "canonical": canonical_id,
         "loser": loser_id,
         "claims_rewritten": claims_rewritten,
-        "bulletins_rewritten": bulletins_rewritten,
         "relations_rewritten": relations_rewritten,
         "claims_deduplicated": deduped,
         "self_refs_removed": self_refs,

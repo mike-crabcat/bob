@@ -1,18 +1,15 @@
-"""Memory tools — recall, find, note.
+"""Memory tools — recall, find.
 
-Three minimal tools for the memory system:
+Two minimal tools for the memory system:
 - recall(query) — retrieve entity + claims by ID, name, or natural language
 - find(entity_type, claim_type_key?, value?) — structured search across claims
-- note(text, context?) — accept new information, queue as bulletin
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
-from bob_server.services.base import iso_utc
 from bob_server.services.memory.claim_types import render_entity
 from bob_server.services.memory.models import ENTITY_TYPES
 
@@ -138,44 +135,6 @@ async def find(
     for r in rows:
         lines.append(f"  - {r['display_name'] or r['entity_id']} [{r['entity_id']}]")
     return "\n".join(lines)
-
-
-async def note(
-    db: Any,
-    text: str,
-    context_entity_id: str | None = None,
-    channel_id: str = "manual",
-    source_type: str = "note",
-    visibility: str = "channel",
-) -> str:
-    """Accept new information from conversation. Queues as a bulletin for digestion."""
-    bulletin_id = f"bulletin-note-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-
-    await db.execute(
-        "INSERT OR IGNORE INTO memory_bulletins "
-        "(id, created_at, channel_id, source_type, source_id, visibility, content, digested) "
-        "VALUES (?, ?, ?, ?, '', ?, ?, 0)",
-        (
-            bulletin_id,
-            iso_utc(),
-            channel_id,
-            source_type,
-            visibility,
-            text,
-        ),
-    )
-
-    # Link to context entity if provided
-    if context_entity_id:
-        await db.execute(
-            "INSERT OR IGNORE INTO memory_bulletin_entities "
-            "(bulletin_id, category, entity_id, resolution_status) "
-            "VALUES (?, 'context', ?, 'known')",
-            (bulletin_id, context_entity_id),
-        )
-
-    logger.info("Note queued as bulletin: %s", bulletin_id)
-    return f"Noted: {bulletin_id}"
 
 
 async def _resolve_entity(db: Any, query: str) -> dict | None:

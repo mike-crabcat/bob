@@ -65,7 +65,7 @@ def build_common_tools(
     _extend(make_changelog_tools(ctx, session_key=session_key))
     _extend(make_email_send_tools(ctx, session_key=session_key))
     _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
-    _extend(make_session_tools(ctx, caller_session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
+    _extend(make_session_tools(ctx, is_trusted=is_trusted, contact_id=contact_id))
     if include_routines:
         _extend(make_routine_tools(ctx, session_key=session_key))
 

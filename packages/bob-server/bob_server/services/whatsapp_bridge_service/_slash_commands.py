@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class SlashCommandsMixin:
-    """Slash command handlers (`/patience`, `/who`, `/bulletin`)."""
+    """Slash command handlers (`/patience`, `/who`, etc.)."""
 
     async def _handle_slash_command(
         self, text: str, session_key: str, chat_id: str,
@@ -34,8 +34,6 @@ class SlashCommandsMixin:
             await self._cmd_patience(args, session_key, chat_id)
         elif command == "/relevance":
             await self._cmd_relevance(args, session_key, chat_id)
-        elif command == "/bulletin":
-            await self._cmd_bulletin(args, session_key, chat_id, chat_kind)
         elif command == "/who":
             await self._cmd_who(chat_id)
         elif command == "/approve":
@@ -170,41 +168,6 @@ class SlashCommandsMixin:
 
         logger.info("/approve: created contact %s for phone %s", new_id, phone_number)
         await self.send_message(chat_id, f"/approve: added {name or phone_number} ({phone_number})")
-
-    async def _cmd_bulletin(self, args: str, session_key: str, chat_id: str, chat_kind: str) -> None:
-        """Generate bulletins for the current session on demand."""
-        from bob_server.services.memory import MemoryService
-
-        settings = self._get_settings()
-        workspace = settings.harness.workspace_dir
-        svc = MemoryService(self.ctx)
-
-        try:
-            result = await svc.generate_session_bulletins(
-                workspace, session_key, run_dream=True,
-            )
-        except Exception as exc:
-            logger.exception("/bulletin failed for %s", session_key)
-            await self.send_message(chat_id, f"/bulletin error: {exc}")
-            return
-
-        status = result.get("status", "unknown")
-        if status == "empty":
-            reason = result.get("reason", "no data")
-            await self.send_message(chat_id, f"/bulletin: nothing to process ({reason})")
-            return
-
-        n = result.get("bulletins_generated", 0)
-        msgs = result.get("messages_processed", 0)
-        dream = result.get("dream", {})
-        claims = dream.get("claims_extracted", 0) if isinstance(dream, dict) else 0
-        entities = dream.get("entity_ops", 0) if isinstance(dream, dict) else 0
-
-        await self.send_message(
-            chat_id,
-            f"/bulletin: {n} bulletin(s) from {msgs} messages | "
-            f"dream: {claims} claims, {entities} entity ops",
-        )
 
     async def _cmd_verbose(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle verbose memory-extraction notices for this session.

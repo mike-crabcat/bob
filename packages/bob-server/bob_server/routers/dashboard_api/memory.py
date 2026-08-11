@@ -14,15 +14,7 @@ router = APIRouter()
 async def get_memory_stats(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    settings = request.app.state.settings
-    workspace = settings.harness.workspace_dir
     db = _db(request)
-
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
-
-    ctx = AppContext(settings=settings, db=db)
-    svc = MemoryService(ctx)
 
     # Build stats from database
     type_rows = await db.fetch_all(
@@ -49,14 +41,6 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
             "modified": r["updated_at"],
         })
 
-    # Pipeline status
-    bulletins = await svc.read_bulletins(workspace, skip_digested=True)
-    pending_bulletins = len(bulletins)
-
-    last_dream = await db.fetch_one(
-        "SELECT created_at FROM memory_dream_log ORDER BY created_at DESC LIMIT 1"
-    )
-
     return {
         "stats": {
             "total_entries": total_entries,
@@ -68,8 +52,6 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
             },
         },
         "recent": recent[:50],
-        "pending_bulletins": pending_bulletins,
-        "last_dream": _utc(last_dream["created_at"]) if last_dream else None,
     }
 
 
@@ -148,134 +130,6 @@ async def run_memory_search(request: Request) -> dict[str, Any]:
 
     result["latency_seconds"] = latency
     return result
-
-
-@router.get("/api/memory/bulletins")
-async def get_memory_bulletins(request: Request) -> dict[str, Any]:
-    if not _check_auth(request):
-        return {"error": "unauthorized"}
-    settings = request.app.state.settings
-    workspace = settings.harness.workspace_dir
-
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
-
-    ctx = AppContext(settings=settings, db=_db(request))
-    svc = MemoryService(ctx)
-    bulletins = await svc.read_bulletins(workspace, skip_digested=True)
-    result = []
-    for b in bulletins:
-        result.append({
-            "slug": b.id,
-            "source_session": b.source_id,
-            "source_type": b.source_type,
-            "channel_id": b.channel_id,
-            "content": b.content,
-            "created_at": b.created_at.timestamp() if hasattr(b.created_at, "timestamp") else 0,
-        })
-    return {"bulletins": result}
-
-
-@router.get("/api/memory/bulletins/{bulletin_id}")
-async def get_memory_bulletin_detail(request: Request) -> dict[str, Any]:
-    if not _check_auth(request):
-        return {"error": "unauthorized"}
-    db = _db(request)
-    bulletin_id = request.path_params["bulletin_id"]
-
-    row = await db.fetch_one(
-        "SELECT id, created_at, channel_id, source_type, source_id, visibility, content, "
-        "digested, session_range_start, session_range_end FROM memory_bulletins WHERE id = ?",
-        (bulletin_id,),
-    )
-    if not row:
-        return {"error": "not found"}
-
-    # Find claims that reference this bulletin
-    claim_rows = await db.fetch_all(
-        "SELECT id, claim_type_key, subject_id, object_id, value, status, visibility, created_at "
-        "FROM memory_claims WHERE source_bulletins LIKE ?",
-        (f'%"{bulletin_id}"%',),
-    )
-    claims = [
-        {
-            "id": r["id"],
-            "claim_type_key": r["claim_type_key"],
-            "subject_id": r["subject_id"],
-            "object_id": r["object_id"],
-            "value": r["value"],
-            "status": r["status"],
-            "visibility": r["visibility"],
-            "created_at": r["created_at"],
-        }
-        for r in claim_rows
-    ]
-
-    return {
-        "id": row["id"],
-        "created_at": row["created_at"],
-        "channel_id": row["channel_id"],
-        "source_type": row["source_type"],
-        "source_id": row["source_id"],
-        "visibility": row["visibility"],
-        "content": row["content"],
-        "digested": bool(row["digested"]),
-        "session_range_start": row["session_range_start"],
-        "session_range_end": row["session_range_end"],
-        "claims": claims,
-    }
-
-
-@router.get("/api/memory/dreams")
-async def get_memory_dreams(request: Request) -> dict[str, Any]:
-    if not _check_auth(request):
-        return {"error": "unauthorized"}
-    db = _db(request)
-    dreams: list[dict[str, Any]] = []
-    table_exists = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_dream_log'"
-    )
-    if table_exists:
-        rows = await db.fetch_all(
-            "SELECT id, bulletins_processed, entries_created, bulletin_slugs, "
-            "operations_json, raw_response, duration_seconds, status, created_at "
-            "FROM memory_dream_log ORDER BY created_at DESC LIMIT 20"
-        )
-        for row in rows:
-            operations = []
-            try:
-                parsed = json.loads(row["operations_json"]) if row["operations_json"] else []
-                if isinstance(parsed, dict):
-                    # Legacy format: just claims count
-                    operations = []
-                elif isinstance(parsed, list):
-                    operations = parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
-            slugs = []
-            try:
-                slugs = json.loads(row["bulletin_slugs"]) if row["bulletin_slugs"] else []
-            except (json.JSONDecodeError, TypeError):
-                pass
-            claims_extracted = 0
-            if isinstance(operations, list):
-                claims_extracted = sum(
-                    len(op["claims"]) if isinstance(op.get("claims"), list) else op.get("claims", 0)
-                    for op in operations
-                )
-            dreams.append({
-                "id": row["id"],
-                "bulletins_processed": row["bulletins_processed"],
-                "entries_created": row["entries_created"],
-                "claims_extracted": claims_extracted,
-                "bulletin_slugs": slugs,
-                "operations": operations,
-                "raw_response": row["raw_response"] or "",
-                "duration_seconds": row["duration_seconds"],
-                "status": row["status"],
-                "created_at": _utc(row["created_at"]),
-            })
-    return {"dreams": dreams}
 
 
 @router.get("/api/memory/category/{category}")
@@ -404,7 +258,6 @@ async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str
                 "object_id": c.object_id,
                 "value": c.value,
                 "status": c.status,
-                "source_bulletins": c.source_bulletins,
                 "visibility": c.visibility,
                 "created_at": c.created_at.isoformat() if c.created_at else None,
             }
@@ -509,7 +362,6 @@ async def get_memory_claims(request: Request) -> dict[str, Any]:
             "object_id": r["object_id"],
             "value": r["value"],
             "status": r["status"],
-            "source_bulletins": json.loads(r["source_bulletins"]) if r["source_bulletins"] else [],
             "visibility": r["visibility"],
             "created_at": _utc(r["created_at"]),
         }
@@ -518,51 +370,7 @@ async def get_memory_claims(request: Request) -> dict[str, Any]:
     return {"claims": claims}
 
 
-@router.post("/api/memory/digested")
-async def get_digested_bulletins(request: Request) -> dict[str, Any]:
-    if not _check_auth(request):
-        return {"error": "unauthorized"}
-    body = await request.json()
-    slugs: list[str] = body.get("slugs", [])
-    if not slugs:
-        return {"bulletins": []}
-
-    db = _db(request)
-    placeholders = ",".join("?" * len(slugs))
-    rows = await db.fetch_all(
-        f"SELECT id, content FROM memory_bulletins WHERE id IN ({placeholders}) AND digested = 1",
-        tuple(slugs),
-    )
-    return {"bulletins": [{"slug": r["id"], "content": r["content"]} for r in rows]}
-
-
-@router.post("/api/memory/redigest")
-async def redigest_bulletin(request: Request) -> dict[str, Any]:
-    if not _check_auth(request):
-        return {"error": "unauthorized"}
-    # In v6, bulletins are immutable — redigest re-processes a bulletin through the dream pipeline
-    body = await request.json()
-    slug: str = body.get("slug", "")
-    if not slug:
-        return {"error": "missing slug"}
-
-    settings = request.app.state.settings
-    workspace = settings.harness.workspace_dir
-
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
-
-    ctx = AppContext(settings=settings, db=_db(request))
-    svc = MemoryService(ctx)
-
-    bulletin = await svc.read_bulletin(workspace, slug)
-    if not bulletin:
-        return {"error": f"bulletin not found: {slug}"}
-
-    result = await svc.process_bulletin(workspace, bulletin)
-    return {"ok": True, "slug": slug, "result": result}
-
-
+@router.post("/api/memory/entities/merge")
 @router.post("/api/memory/entities/merge")
 async def merge_entities(request: Request) -> dict[str, Any]:
     if not _check_auth(request):

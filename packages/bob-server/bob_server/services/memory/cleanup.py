@@ -89,34 +89,8 @@ async def rewrite_claims(db: Any, rename: dict[str, str]) -> int:
 
 
 async def rewrite_bulletin_entities(db: Any, rename: dict[str, str]) -> int:
-    """Rewrite entity_id in entity↔bulletin join rows. Dedupe within each bulletin."""
-    changed = 0
-    for old, new in rename.items():
-        rows = await db.fetch_all(
-            "SELECT bulletin_id FROM memory_entity_bulletins WHERE entity_id = ?",
-            (old,),
-        )
-        if not rows:
-            continue
-
-        for r in rows:
-            bid = r["bulletin_id"]
-            existing = await db.fetch_one(
-                "SELECT 1 FROM memory_entity_bulletins WHERE entity_id = ? AND bulletin_id = ? LIMIT 1",
-                (new, bid),
-            )
-            if existing:
-                await db.execute(
-                    "DELETE FROM memory_entity_bulletins WHERE entity_id = ? AND bulletin_id = ?",
-                    (old, bid),
-                )
-            else:
-                await db.execute(
-                    "UPDATE memory_entity_bulletins SET entity_id = ? WHERE entity_id = ? AND bulletin_id = ?",
-                    (new, old, bid),
-                )
-            changed += 1
-    return changed
+    """Legacy no-op: bulletin tables were dropped. Kept for merge.py import compatibility."""
+    return 0
 
 
 async def rewrite_entity_relations(db: Any, rename: dict[str, str]) -> int:
@@ -171,7 +145,6 @@ async def run_cleanup(
 
     # Step 2: rewrite refs
     rewritten_claims = await rewrite_claims(db, rename)
-    rewritten_bulletins = await rewrite_bulletin_entities(db, rename)
     rewritten_related = await rewrite_entity_relations(db, rename)
 
     return {
@@ -179,6 +152,5 @@ async def run_cleanup(
         "merged": 0,
         "deleted": deleted,
         "rewritten_claims": rewritten_claims,
-        "rewritten_bulletins": rewritten_bulletins,
         "rewritten_related": rewritten_related,
     }

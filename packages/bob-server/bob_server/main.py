@@ -24,6 +24,7 @@ from bob_server.heartbeat import (
     HeartbeatRunner,
     LLMCallStalenessTask,
     LocationFetchTask,
+    MemoryReconciliationTask,
     SessionIdleSummaryTask,
 )
 from bob_server.services.routine_scheduler import RoutineSchedulerTask
@@ -64,6 +65,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await SubagentService(app_ctx).cleanup_stale()
         except Exception:
             logger.debug("Subagent cleanup skipped (table may not exist yet)")
+
+        # Clean up stale voice sessions (bridges are gone after restart)
+        try:
+            from bob_server.services.voice_session_service import VoiceSessionService
+            await VoiceSessionService(app_ctx).cleanup_stale()
+        except Exception:
+            logger.debug("Voice session cleanup skipped (table may not exist yet)")
 
         # Ensure the self-bob singleton exists so self-relevant claims have a target
         try:
@@ -106,9 +114,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 logger.exception("WhatsApp bridge service failed to start")
 
         stop_event = asyncio.Event()
-        logger.info(
-            "Memory extraction mode: %s", resolved_settings.memory_extraction.mode,
-        )
         runner = HeartbeatRunner(app_ctx, interval_seconds=resolved_settings.heartbeat_interval_seconds)
         runner.register(EmailPollingTask())
         runner.register(EmailSyncTask())
@@ -117,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(LLMCallStalenessTask())
         runner.register(LocationFetchTask())
         runner.register(RoutineSchedulerTask())
+        runner.register(MemoryReconciliationTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:
             yield
