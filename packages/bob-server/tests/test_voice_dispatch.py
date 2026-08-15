@@ -52,6 +52,14 @@ def test_build_outbound_instructions_callee_speaks_first():
     assert "let THEM speak first" in instructions
 
 
+def test_build_outbound_instructions_name_fidelity():
+    # Connect noise gets mis-heard as a name; the agent must not invent one
+    # (2026-08-15: opened a call to Ryan with "Hi Sophia" — hallucinated).
+    instructions = build_outbound_instructions(contact_name="Ryan", goal="test")
+    assert "ONLY the name given above" in instructions
+    assert "Never invent" in instructions
+
+
 def test_build_inbound_instructions_no_hangup_token():
     instructions = build_inbound_instructions("+61400111222", contact_name="Alice", agenda="wants a booking")
     assert "<hangup/>" not in instructions
