@@ -20,13 +20,13 @@ You too can have him.
 
 Bob connects to WhatsApp through a Go companion service (the WhatsApp Bridge) that links to WhatsApp Web via the `whatsmeow` library. It handles both direct messages and group chats, with support for text, images, and documents. Messages flow through a persistent SQLite queue with guaranteed delivery and automatic retries. Contacts are auto-seeded from shared contact cards. Proactive outreach tools let Bob initiate conversations with trusted contacts. A pairing system supports both QR code and phone number methods.
 
-### Voice Chat
+### Voice
 
-Real-time voice conversations run over WebSockets with a full STT/TTS pipeline. Bob uses Faster Whisper for speech-to-text (with CUDA acceleration) and Omnivoice for text-to-speech. The system supports barge-in detection, silence detection, multi-language conversations with language tagging, and session-based conversation tracking. Voice sessions are stored as unified session messages alongside text and email interactions.
+Realtime voice runs on the OpenAI Realtime API through one bridge (`realtime_bridge.py`) with pluggable audio sources: Twilio Media Streams for phone calls and raw browser PCM for voice-link sessions. The browser harness is free and instant, so prompts, voices, and tools can be iterated there before spending money on real calls. Calls get turn-ordered transcripts (persisted per turn), structured `report_success`/`report_failure` outcomes, time-aligned stereo recordings, barge-in handling, and callee-speaks-first phone etiquette. A legacy local STT/TTS pipeline (Faster Whisper + Omnivoice) still serves the push-to-talk language-practice frontend.
 
 ### Phone Calls
 
-Phone integration uses Twilio Media Streams for real-time bidirectional audio during voice calls. Bob can initiate outbound calls to contacts and handle inbound calls, with automatic contact resolution from caller ID. Calls are recorded and each exchange is logged with detailed timing metrics (STT latency, LLM latency, TTS latency, end-to-end latency). The `make_phone_call` tool lets the LLM dial contacts directly, and `get_call_status` tracks call progress.
+Phone integration uses Twilio Media Streams bridged to the OpenAI Realtime API for real-time bidirectional audio. Bob can place outbound calls to contacts (the LLM dispatches them via `create_subagent(agent_type="openai_voice", modality="phone")`) and handle inbound calls with automatic contact resolution from caller ID. When the agent's task is done it calls `end_call`, which terminates both the Realtime session and the Twilio leg. Browser voice-link calls (modality `voice_link`) run the same bridge without the telco leg and appear in the calls UI alongside phone calls. `get_call_status` tracks call progress.
 
 ### Email
 
@@ -59,34 +59,37 @@ Persisted notifications with acknowledgement, delivery state, and repeat throttl
 ## System Architecture
 
 ```text
-                         +-----------------+
-                         |   Web Dashboard |
-                         |   (React SPA)   |
-                         +--------+--------+
-                                  |
-                          HTTP/WS | :8420
-                                  |
-+--------+   +--------+   +------+-------+   +-----------+   +-----------+
-| WhatsApp|   |  Email |   |              |   |  Voice    |   |   Phone   |
-| Bridge  |   | (Agent |   |  Bob         |   |  Chat     |   |  (Twilio) |
-| (Go)    |   |  Mail) |   |  Server      |   |  (WS/STT/ |   |  (Media   |
-|         |   |        |   |  (FastAPI)   |   |   TTS)    |   |  Streams) |
-+----+----+   +----+---+   +------+-------+   +-----+-----+   +-----+-----+
-     |             |               |                 |               |
-     | WS :8430    |  Polling      |                 | WS            | WS
-     |             |               |                 |               |
-+----+----+        |        +------+--------+        |               |
-| WhatsApp|        |        |               |        |               |
-|  Web    |        +------->|    SQLite     |<-------+               |
-| (whats- |                 |   Database    |                        |
-|  meow)  |                 |               |                        |
-+---------+                 +---------------+                        |
-                                                                     |
-                               +-------------------+                 |
-                               |      Twilio       |<----------------+
-                               |   (PSTN/Mobile)   |
-                               +-------------------+
+                              +-----------------+
+                              |  Web Dashboard  |
+                              |  (React SPA)    |
+                              +--------+--------+
+                                       |
+                               HTTP/WS | :8420
+                                       |
++----------+   +--------+   +----------+------------------+   +----------------+
+| WhatsApp |   | Email  |   |           Bob Server        |   |    Browser     |
+|  Bridge  |   | (Agent |   |           (FastAPI)         |   | voice sessions |
+|   (Go)   |   |  Mail) |   |                             |   |  + realtime    |
+|          |   |        |   |   Realtime Voice Bridge     |   |  test harness  |
+|          |   |        |   |   (realtime_bridge.py)      |   |                |
++----+-----+   +----+---+   +------------+----------------+   +--------+-------+
+     |              |                    |       |                     |
+     | WS :8430     | Polling            | WSS   | WS (μ-law 8k)      | WS
+     |              |                    |       |                     | (PCM 24k)
+     |              |                    v       v                     |
+     |              |             +-----------+ +----------------+     |
+     |              |             |   OpenAI  | |    Twilio      |<----+
+     |              |             | Realtime  | | Media Streams  |
+     |              |             |    API    | |  (PSTN/Mobile) |
+     |              |             +-----------+ +----------------+
+     |              |
+     |              +------------------------>+---------------+
+     |                                       |    SQLite     |
+     +-------------------------------------->|   Database    |
+                                             +---------------+
 ```
+
+All realtime voice — Twilio phone calls and browser voice-link sessions — flows through the same bridge to the OpenAI Realtime API. Dispatch, instruction building, and call placement live in `voice_dispatch_service.py`; call records (both modalities) land in the `phone_calls` table and surface in the dashboard's calls UI with live transcripts.
 
 ## Setup
 
@@ -95,7 +98,7 @@ Persisted notifications with acknowledgement, delivery state, and repeat throttl
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Go 1.22+ (for WhatsApp bridge)
-- CUDA GPU (recommended for voice STT)
+- CUDA GPU (only for the legacy local voice STT pipeline; realtime voice needs none)
 - A Twilio account (for phone calls)
 - An AgentMail account (for email)
 
@@ -365,6 +368,15 @@ WhatsApp bridge (Go companion) variables:
 | `BOB_PHONE_CALL_RECORDING_ENABLED` | `true` | Record calls |
 | `BOB_PHONE_CALL_RECORDING_MAX_AGE_DAYS` | `30` | Recording retention |
 
+### OpenAI Realtime (voice calls)
+
+| Variable | Default | Description |
+|---|---|---|
+| `BOB_OPENAI_REALTIME_MODEL` | `gpt-realtime-2.1` | Realtime model |
+| `BOB_OPENAI_REALTIME_VOICE` | `cedar` | Voice for realtime calls |
+| `BOB_OPENAI_REALTIME_MAX_DURATION` | `300` | Max call duration (seconds) |
+| `BOB_OPENAI_REALTIME_TURN_DETECTION` | `server_vad` | Turn detection mode |
+
 ### Email
 
 | Variable | Default | Description |
@@ -429,6 +441,6 @@ uv run pytest
 
 - Database: `~/data/bob.db`
 - Config: `~/config/`
-- Phone recordings: `~/data/calls/`
+- Call recordings: `~/config/harness/calls/` (stereo 24kHz WAV)
 - WhatsApp bridge data: `~/data/whatsappbridge/`
 - Service: systemd user service (`bob.service`)
