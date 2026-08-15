@@ -33,6 +33,16 @@ This is a Python monorepo managed with `uv`. The main package is `bob-server`, a
   - `ui_app/` - React SPA source (Vite + TypeScript + Tailwind)
   - `services/` - Background services (email polling, whatsapp bridge, etc.)
 
+## Phone & voice
+
+All realtime voice (Twilio phone calls and browser voice-link sessions) runs the OpenAI Realtime bridge in `services/realtime_bridge.py` — audio-source-agnostic, so the free browser harness (`/voice/realtime`) predicts phone behaviour. Key modules:
+
+- `services/voice_dispatch_service.py` — single owner of call placement: instruction builders, modality alias table, Twilio placement, hangup, completion helpers. Nothing imports call placement from routers.
+- `routers/phone.py` — Twilio webhooks + the media-stream bridge lifecycle (partial transcripts per turn, structured outcomes, recordings).
+- `services/voice_session_service.py` — browser voice-link tokens/lifecycle; mirrors rows into `phone_calls` so links appear in the calls UI.
+- Dispatch entry point for the LLM: `create_subagent(agent_type="openai_voice", modality="phone"|"voice_link")`.
+- Schema and data flow: see `docs/datamodel.md` → Phone Calls & Voice Sessions. Note `services/voice_service.py` + `/voice/ws` are the LEGACY local STT→TTS pipeline (language-practice frontend only) — do not build on them.
+
 ## Runtime paths
 
 The database is at `/home/bob/data/bob.db`

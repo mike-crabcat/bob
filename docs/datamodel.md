@@ -123,39 +123,53 @@ erDiagram
 
 ---
 
-## Phone Calls
+## Phone Calls & Voice Sessions
 
-Real-time phone integration via Twilio Media Streams. Each call is recorded and split into exchanges (one user utterance + one agent reply) with detailed timing.
+All realtime voice — Twilio phone calls and browser voice-link calls — runs the same OpenAI Realtime bridge (`services/realtime_bridge.py`); a browser voice link is the same call without the Twilio leg. `phone_calls` is the unified call record that the dashboard calls UI reads; `voice_sessions` is the source of truth for browser sessions, with a mirror row in `phone_calls` (same id, `direction='voice_link'`) kept in sync at each lifecycle transition.
 
 ```mermaid
 erDiagram
-    contacts ||--o{ phone_calls : "places"
-    phone_calls ||--o{ phone_call_exchanges : "contains"
+    contacts ||--o{ subagents : "called via"
+    subagents ||--o{ phone_calls : "dispatches"
+    subagents ||--o{ voice_sessions : "dispatches"
+    voice_sessions ||--|| phone_calls : "mirrors into (same id)"
 
     phone_calls {
         uuid id PK
-        text call_sid UK
-        text direction
-        text status
-        real duration
-        text recording_path
-        uuid contact_id FK
-        text agenda
+        text call_sid UK "Twilio SID; empty for voice links"
+        text direction "inbound | outbound | voice_link"
+        text status "ringing | active | completed | failed | canceled | busy | no-answer"
+        text engine "openai_realtime"
+        text agenda "goal for the call"
+        text transcript "turn-ordered, persisted per turn boundary"
+        text realtime_meta "instructions, voice, max_duration, subagent_id"
+        text outcome "structured report_success / report_failure JSON"
+        text result_dispatched_at "atomic dispatch-once guard"
+        text subagent_id FK
+        text origin_session_key "where the result is dispatched"
+    }
+    voice_sessions {
+        uuid id PK "token in the join URL"
+        text origin_session_key "contact DM; owns call memory"
+        text report_back_session_key "second dispatch target"
+        text goal
+        text status "pending | active | completed | expired"
+        text outcome
+        text subagent_id FK
     }
     phone_call_exchanges {
         uuid id PK
-        uuid phone_call_id FK
-        text transcript
-        real stt_latency
-        real llm_latency
-        real tts_latency
-        real e2e_latency
+        uuid call_id FK "legacy pre-Realtime history"
     }
 ```
 
-**`phone_calls`** — One row per call. `call_sid` is the Twilio identifier; `direction` is `inbound` or `outbound`; `recording_path` points at the audio file under `~/data/calls/` (cleaned up on a retention schedule by the `CallCleanupTask` heartbeat).
+**`phone_calls`** — One row per call, any modality. `call_sid` is the Twilio identifier (empty for voice links). `engine` is `openai_realtime` for all current calls. `realtime_meta` carries the dispatch configuration (instructions, voice, max duration, `subagent_id`) durably, so the Twilio media-stream handler can recover the call from the DB after a server restart between dial and answer. `transcript` is turn-ordered (`Agent:` / `User:` lines) and written after every turn boundary, so it is readable mid-call and survives a bridge crash. `outcome` holds the structured `report_success` / `report_failure` tool result as JSON instead of prose-mashed tool output. `result_dispatched_at` guards the dispatch-to-originating-session path atomically (claim-by-UPDATE, safe across restarts and concurrent callers).
 
-**`phone_call_exchanges`** — Per-turn transcript and latency breakdown. The four latency columns (STT, LLM, TTS, end-to-end) back the dashboard's call-performance charts and let you spot which stage is slow.
+**`voice_sessions`** — Source of truth for browser voice-link calls. The id is the token in the join URL — a capability: anyone holding the link can join as Bob until it completes. `origin_session_key` is normally the contact's DM session (so the call transcript lands in the contact relationship's memory), with `report_back_session_key` dispatching the summary to a second session (e.g. the group that requested the reach-out). `subagent_id` links the session to the `openai_voice` subagent that dispatched it, so completion marks the subagent done and `kill_subagent` can expire the link. Untapped links expire after 24 hours (`VoiceSessionService.LINK_TTL_HOURS`), mirrored to the `phone_calls` row as `canceled`.
+
+**`phone_call_exchanges`** — Legacy: per-turn rows with STT/LLM/TTS latency breakdowns from the retired local STT→LLM→TTS pipeline. No longer written; read only for pre-Realtime call history (and pruned by the `CallCleanupTask` heartbeat).
+
+**How it gets written.** All call placement goes through `services/voice_dispatch_service.py` (`initiate_outbound_call` for Twilio, `VoiceDispatchService.dispatch_contact_call` for contact-oriented dispatch via `create_subagent(agent_type="openai_voice")`): it resolves the contact, builds the canonical instructions, and writes the `phone_calls` (and for voice links, `voice_sessions`) row. The Twilio webhook handler in `routers/phone.py` owns the media-stream lifecycle: it runs the bridge, persists partial transcripts per turn, extracts the structured outcome, finalizes the stereo 24kHz recording (under `~/config/harness/calls/`), and dispatches the summary to `origin_session_key`. Browser sessions complete through `VoiceSessionService.complete`, which summarises and dispatches via the standard thread-result path. Recordings are time-aligned stereo WAVs (left = caller after +12dB inbound gain, right = exactly the paced frames sent to Twilio).
 
 ---
 
