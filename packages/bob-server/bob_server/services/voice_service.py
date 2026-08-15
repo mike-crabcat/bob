@@ -1,5 +1,9 @@
 """Voice chat audio processing pipeline with dispatch system integration.
 
+LEGACY local pipeline (STT → LLM → TTS via voice_engines). Serves only the
+/voice/ws push-to-talk endpoint and its language-practice frontend; realtime
+voice calls go through services/realtime_bridge.py. Do not build on this
+module — see the note on the /ws endpoint in routers/voice.py.
 Each voice interaction is tracked as a dispatch for lifecycle management
 (concurrency limiting, stuck detection, auto-completion).
 """

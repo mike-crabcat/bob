@@ -1087,15 +1087,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
-        # Voice outreach: Bob can offer a browser voice call in DMs.
-        if chat_kind == "dm":
+        # Voice outreach: attach whenever the requester is a trusted contact, in any
+        # chat context (DM or group). Untrusted users don't get the tool — it costs
+        # real money (Twilio) and can ping arbitrary contacts, so it's gated on
+        # trust rather than chat kind. `initiate_voice_call` self-gates to DM-only
+        # via its chat-id check, so attaching it in groups is harmless.
+        if is_trusted:
             from bob_server.services.voice_outreach_tools import make_voice_outreach_tools
             tools.extend(make_voice_outreach_tools(self.ctx, self, session_key))
-            # reach_out_with_voice_call covers both modalities (voice link + phone).
-            # Drop the standalone phone-call tools so Bob isn't drawn to them by name
-            # when the user wants a browser voice link — they cause Bob to default to
-            # the phone path and hit Twilio instead of sending a link.
-            tools = [t for t in tools if t.name not in ("place_realtime_call", "make_phone_call")]
 
         # Outreach reply tool for active outreach targets
         route = await self.db.fetch_one(

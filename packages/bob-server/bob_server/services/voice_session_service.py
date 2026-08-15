@@ -51,22 +51,38 @@ class VoiceSessionService(BaseService):
         voice: str = "",
         goal: str = "",
         report_back_session_key: str | None = None,
+        subagent_id: str | None = None,
+        phone_number: str = "",
     ) -> dict[str, str]:
         """Mint a new voice session token + URL for the given origin session.
 
         ``goal`` makes it a task-oriented call (the voice agent works toward it
         and reports back via report_success/report_failure). ``report_back_session_key``
         is an optional second dispatch target — when set, the summary lands in both
-        the origin session and this one (used by reach_out_with_voice_call so the
-        user who requested the reach-out gets the answer).
+        the origin session and this one. ``subagent_id`` links the
+        session to an openai_voice subagent so its completion marks the subagent done.
+        ``phone_number`` is the contact's number, when known, for the calls UI.
+
+        A mirror row is written to ``phone_calls`` (same id) so browser voice-link
+        calls appear in the phone calls UI alongside Twilio calls — they run the
+        same Realtime bridge and lifecycle. voice_sessions stays the source of
+        truth; the phone_calls row is a UI-facing projection kept in sync at
+        each lifecycle transition below.
         """
         token = str(uuid4())
         now = utcnow().isoformat()
         await self.db.execute(
             """INSERT INTO voice_sessions
-               (id, origin_session_key, voice, goal, report_back_session_key, status, created_at)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
-            (token, origin_session_key, voice, goal, report_back_session_key, now),
+               (id, origin_session_key, voice, goal, report_back_session_key, subagent_id, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (token, origin_session_key, voice, goal, report_back_session_key, subagent_id, now),
+        )
+        await self.db.execute(
+            """INSERT INTO phone_calls
+               (id, call_sid, phone_number, direction, status, agenda, engine,
+                subagent_id, origin_session_key, started_at)
+               VALUES (?, '', ?, 'voice_link', 'ringing', ?, 'openai_realtime', ?, ?, datetime('now'))""",
+            (token, phone_number, goal, subagent_id, origin_session_key),
         )
         base = self._get_settings().resolved_public_url
         url = f"{base}/voice/session.html?id={token}"
@@ -86,16 +102,42 @@ class VoiceSessionService(BaseService):
         )
 
     async def cleanup_stale(self) -> int:
-        """Mark any 'active' sessions as completed — their bridge processes are gone
-        after a server restart, so reconnecting to them produces stale behavior."""
+        """Sweep stale sessions at startup.
+
+        - 'active' → completed: their bridge processes are gone after a server
+          restart, so reconnecting produces stale behavior.
+        - 'pending' older than LINK_TTL_HOURS → expired: the link was never
+          tapped (a phone call usually went out instead); without this they
+          show as 'ringing' in the calls UI forever.
+        """
         now = utcnow().isoformat()
         count = await self.db.execute(
             "UPDATE voice_sessions SET status='completed', completed_at=? WHERE status='active'",
             (now,),
         )
         if count:
-            logger.info("Cleaned up %d stale active voice sessions", count)
-        return count
+            await self.db.execute(
+                """UPDATE phone_calls
+                   SET status='completed', completed_at=datetime('now')
+                   WHERE direction='voice_link' AND status='active'""",
+            )
+        expired = await self.db.execute(
+            "UPDATE voice_sessions SET status='expired', completed_at=? "
+            "WHERE status='pending' AND created_at < datetime('now', ?)",
+            (now, f"-{self.LINK_TTL_HOURS} hours"),
+        )
+        if expired:
+            await self.db.execute(
+                "UPDATE phone_calls SET status='canceled', completed_at=datetime('now') "
+                "WHERE direction='voice_link' AND status='ringing' AND started_at < datetime('now', ?)",
+                (f"-{self.LINK_TTL_HOURS} hours",),
+            )
+        total = count + expired
+        if total:
+            logger.info("Cleaned up %d stale voice sessions (%d expired links)", total, expired)
+        return total
+
+    LINK_TTL_HOURS = 24
 
     async def resolve(self, token: str) -> dict[str, Any] | None:
         """Resolve a voice session token.
@@ -119,7 +161,29 @@ class VoiceSessionService(BaseService):
                 "UPDATE voice_sessions SET status='active', activated_at=? WHERE id=?",
                 (now, token),
             )
+            await self.db.execute(
+                "UPDATE phone_calls SET status='active' WHERE id = ? AND direction='voice_link'",
+                (token,),
+            )
         return row
+
+    async def persist_transcript(self, token: str, transcript: str) -> None:
+        """Persist a partial transcript after a turn boundary (best-effort).
+
+        Keeps the dashboard / DB readable mid-call and preserves progress if
+        the bridge hangs on cleanup.
+        """
+        try:
+            await self.db.execute(
+                "UPDATE voice_sessions SET transcript = ? WHERE id = ?",
+                (transcript, token),
+            )
+            await self.db.execute(
+                "UPDATE phone_calls SET transcript = ? WHERE id = ? AND direction='voice_link'",
+                (transcript, token),
+            )
+        except Exception:
+            logger.warning("Failed to persist partial voice transcript", exc_info=True)
 
     async def build_instructions(self, row: dict[str, Any]) -> str:
         """Build the Realtime session instructions: persona + voice preamble + recent chat context."""
@@ -164,17 +228,30 @@ class VoiceSessionService(BaseService):
         transcript: str,
         duration_seconds: float,
         *,
+        tool_calls: list[dict[str, Any]] | None = None,
         wa_service: "WhatsAppBridgeService | None" = None,
     ) -> None:
-        """Persist transcript, summarise, and dispatch the summary back to the origin session."""
+        """Persist transcript, summarise, and dispatch the summary back to the origin session.
+
+        ``tool_calls`` is the bridge's recorded tool-call list; a
+        report_success / report_failure result is extracted into the structured
+        ``outcome`` column (shared logic with the phone path).
+        """
+        import json as _json
+
         from bob_server.services.session_service import SessionService
-        from bob_server.services.llm_dispatch import LLMDispatchService
         from bob_server.services.thread_result_service import dispatch_thread_result
+        from bob_server.services.voice_dispatch_service import (
+            extract_outcome,
+            mark_voice_subagent_complete,
+        )
 
         row = await self.db.fetch_one("SELECT * FROM voice_sessions WHERE id = ?", (token,))
         if row is None:
             return
         origin = row["origin_session_key"]
+
+        outcome = extract_outcome(tool_calls)
 
         # Store the transcript as a session message (channel='voice_realtime') for memory.
         if transcript.strip():
@@ -184,17 +261,26 @@ class VoiceSessionService(BaseService):
                 metadata={"voice_session": token, "duration_seconds": duration_seconds},
             )
 
-        # Mark completed.
+        # Mark completed (voice_sessions is the source of truth; the phone_calls
+        # mirror row carries the same data for the calls UI).
         now = utcnow().isoformat()
         await self.db.execute(
             """UPDATE voice_sessions
-               SET status='completed', transcript=?, duration_seconds=?, completed_at=?
+               SET status='completed', transcript=?, duration_seconds=?, outcome=?, completed_at=?
                WHERE id=?""",
-            (transcript, duration_seconds, now, token),
+            (transcript, duration_seconds,
+             _json.dumps(outcome) if outcome else None, now, token),
+        )
+        await self.db.execute(
+            """UPDATE phone_calls
+               SET status='completed', transcript=?, duration_seconds=?, outcome=?, completed_at=datetime('now')
+               WHERE id=? AND direction='voice_link'""",
+            (transcript, duration_seconds,
+             _json.dumps(outcome) if outcome else None, token),
         )
 
         # Summarise, then hand to the standard thread-result dispatch so Bob relays it.
-        summary = await self._summarise(transcript, duration_seconds)
+        summary = await self._summarise(transcript, duration_seconds, outcome)
         result_content = (
             f"## Voice call with the user just ended\n"
             f"Duration: {duration_seconds:.0f}s\n\n"
@@ -222,13 +308,32 @@ class VoiceSessionService(BaseService):
                 wa_service=wa_service,
             )
 
+        # If this session was dispatched by an openai_voice subagent, mark it
+        # completed so the parent LLM sees a clean lifecycle. Shared with the
+        # phone path (voice_dispatch_service).
+        subagent_id = row.get("subagent_id") if row else None
+        if subagent_id:
+            await mark_voice_subagent_complete(self.db, subagent_id, transcript)
+
         logger.info("Voice session %s completed (%.0fs)", token[:8], duration_seconds)
 
-    async def _summarise(self, transcript: str, duration_seconds: float) -> str:
+    async def _summarise(
+        self,
+        transcript: str,
+        duration_seconds: float,
+        outcome: dict[str, Any] | None = None,
+    ) -> str:
         """Summarise the voice transcript in 2-4 sentences."""
-        if not transcript.strip():
+        if not transcript.strip() and not outcome:
             return "The call ended before any conversation took place."
         from bob_server.services.llm_dispatch import LLMDispatchService
+        from bob_server.services.voice_dispatch_service import format_outcome
+
+        outcome_block = format_outcome(outcome)
+        transcript_block = (
+            f"Reported outcome:\n{outcome_block}\n\nTranscript:\n{transcript}"
+            if outcome_block else transcript
+        )
         messages = [
             {
                 "role": "system",
@@ -240,7 +345,7 @@ class VoiceSessionService(BaseService):
             },
             {
                 "role": "user",
-                "content": f"Duration: {duration_seconds:.0f}s\n\nTranscript:\n{transcript}",
+                "content": f"Duration: {duration_seconds:.0f}s\n\n{transcript_block}",
             },
         ]
         try:

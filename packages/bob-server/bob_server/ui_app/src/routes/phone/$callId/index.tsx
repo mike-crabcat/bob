@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchAPI } from "@/lib/api";
+import { fetchAPI, postAPI } from "@/lib/api";
+import { parseTs } from "@/lib/time";
 
 interface CallDetail {
   id: string;
@@ -16,6 +17,15 @@ interface CallDetail {
   completed_at: string | null;
   contact_id: string | null;
   contact_name: string | null;
+  transcript: string | null;
+  outcome: CallOutcome | null;
+}
+
+interface CallOutcome {
+  tool: "report_success" | "report_failure" | string;
+  summary?: string;
+  reason?: string;
+  details?: string;
 }
 
 interface Exchange {
@@ -32,7 +42,8 @@ interface Exchange {
 
 function formatTime(ts: string | null): string {
   if (!ts) return "";
-  const d = new Date(ts.endsWith("Z") ? ts : ts + "Z");
+  const d = parseTs(ts);
+  if (isNaN(d.getTime())) return "";
   return d.toLocaleString();
 }
 
@@ -60,6 +71,78 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+interface TranscriptTurn {
+  speaker: "agent" | "user";
+  text: string;
+}
+
+function parseTranscript(transcript: string): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  for (const line of transcript.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("Agent:")) {
+      turns.push({ speaker: "agent", text: trimmed.slice(6).trim() });
+    } else if (trimmed.startsWith("User:")) {
+      turns.push({ speaker: "user", text: trimmed.slice(5).trim() });
+    } else if (turns.length > 0) {
+      // continuation of the previous turn
+      turns[turns.length - 1].text += `\n${trimmed}`;
+    } else {
+      turns.push({ speaker: "agent", text: trimmed });
+    }
+  }
+  return turns;
+}
+
+function LiveTranscript({ transcript, active }: { transcript: string; active: boolean }) {
+  const turns = parseTranscript(transcript);
+  return (
+    <section>
+      <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1 flex items-center gap-2">
+        transcript
+        {active && (
+          <span className="flex items-center gap-1 text-[9px] text-green-600 normal-case">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            live
+          </span>
+        )}
+      </h2>
+      <div className="flex flex-col gap-1">
+        {turns.map((turn, i) => (
+          <div key={i} className="border-l-2 border-border pl-2 py-1 whitespace-pre-wrap">
+            <span
+              className={`text-xs font-medium ${turn.speaker === "agent" ? "text-accent" : "text-muted"}`}
+            >
+              {turn.speaker === "agent" ? "bob" : "them"}:{" "}
+            </span>
+            <span className="text-xs text-text">{turn.text}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OutcomeBlock({ outcome }: { outcome: CallOutcome }) {
+  const success = outcome.tool === "report_success";
+  return (
+    <section>
+      <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">outcome</h2>
+      <div className="text-xs bg-surface border border-border p-2">
+        <span className={`font-medium ${success ? "text-green-600" : "text-red-600"}`}>
+          {success ? "✓ success" : "✗ failure"}
+        </span>
+        {outcome.summary && <div className="mt-1 text-text">{outcome.summary}</div>}
+        {outcome.reason && <div className="mt-1 text-text">{outcome.reason}</div>}
+        {outcome.details && (
+          <div className="mt-1 text-muted whitespace-pre-wrap">{outcome.details}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function CallDetailPage() {
   const { callId } = Route.useParams();
   const queryClient = useQueryClient();
@@ -81,7 +164,7 @@ function CallDetailPage() {
   });
 
   const hangupMutation = useMutation({
-    mutationFn: () => fetchAPI(`/phone/calls/${encodeURIComponent(callId)}/hangup`, { method: "POST" }),
+    mutationFn: () => postAPI(`/phone/calls/${encodeURIComponent(callId)}/hangup`, {}),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["phone-call", callId] }),
   });
 
@@ -107,7 +190,11 @@ function CallDetailPage() {
             {call.contact_name || call.phone_number}
           </h1>
           <span className="text-xs text-muted">
-            {call.direction === "outbound" ? "↗ outgoing" : "↙ incoming"}
+            {call.direction === "outbound"
+              ? "↗ outgoing"
+              : call.direction === "voice_link"
+                ? "◆ voice link"
+                : "↙ incoming"}
           </span>
           <StatusBadge status={call.status} />
         </div>
@@ -120,7 +207,7 @@ function CallDetailPage() {
         </div>
       </div>
 
-      {(call.status === "active" || call.status === "ringing") && (
+      {(call.status === "active" || call.status === "ringing") && call.direction !== "voice_link" && (
         <button
           onClick={() => hangupMutation.mutate()}
           disabled={hangupMutation.isPending}
@@ -150,6 +237,24 @@ function CallDetailPage() {
         </Link>
       </section>
 
+      {(call.transcript || call.status === "active") && (
+        call.transcript ? (
+          <LiveTranscript transcript={call.transcript} active={call.status === "active"} />
+        ) : (
+          <section>
+            <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1 flex items-center gap-2">
+              transcript
+              <span className="flex items-center gap-1 text-[9px] text-green-600 normal-case">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                listening…
+              </span>
+            </h2>
+          </section>
+        )
+      )}
+
+      {call.outcome && <OutcomeBlock outcome={call.outcome} />}
+
       {call.recording_path && (
         <section>
           <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">recording</h2>
@@ -162,7 +267,7 @@ function CallDetailPage() {
       {exchanges.length > 0 && (
         <section>
           <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">
-            transcript ({exchanges.length} exchanges)
+            legacy exchanges ({exchanges.length})
           </h2>
           <div className="flex flex-col gap-1">
             {exchanges.map((ex) => (

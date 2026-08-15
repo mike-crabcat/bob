@@ -102,18 +102,88 @@ def resample_8k_to_24k(pcm: Any) -> Any:
     return np.interp(old_indices, np.arange(len(pcm)), pcm).astype(pcm.dtype)
 
 
+def _design_lowpass(num_taps: int, cutoff_hz: float, sample_rate: float) -> Any:
+    """Windowed-sinc FIR lowpass (Hamming), unit DC gain."""
+    np = _ensure_numpy()
+    n = np.arange(num_taps) - (num_taps - 1) / 2
+    fc = 2.0 * cutoff_hz / sample_rate  # relative to sample rate (0..1)
+    h = np.sinc(fc * n) * np.hamming(num_taps)
+    return h / h.sum()
+
+
+# Speech-band ceiling for 8 kHz telephony — everything above this must be
+# filtered out BEFORE decimation, or it aliases down into the speech band as
+# inharmonic distortion (the "garbled agent voice" bug: pcm[::3] with no
+# lowpass folded all of OpenAI's full-band output back into 0-4 kHz).
+_SPEECH_CUTOFF_HZ = 3400.0
+
+
+class AntiAliasedDownsampler:
+    """Stateful anti-aliased downsampler for streaming chunked audio.
+
+    Keeps the FIR tail across ``process`` calls so chunk boundaries stay
+    continuous, and tracks the decimation phase so output length is exactly
+    ceil(input/factor) over the stream. Use one instance per audio stream.
+    """
+
+    def __init__(self, factor: int, sample_rate: float, num_taps: int = 63) -> None:
+        np = _ensure_numpy()
+        self.factor = factor
+        self._h = _design_lowpass(num_taps, _SPEECH_CUTOFF_HZ, sample_rate)
+        self._history = np.zeros(num_taps - 1, dtype=np.float64)
+        self._phase = 0  # input samples consumed mod factor
+
+    def process(self, pcm: Any) -> Any:
+        np = _ensure_numpy()
+        n = len(pcm)
+        if n == 0:
+            return np.array([], dtype=np.int16)
+        x = np.concatenate([self._history, pcm.astype(np.float64)])
+        y = np.convolve(x, self._h, mode="valid")  # one output per input sample
+        self._history = x[-(len(self._h) - 1):]
+        first = (-self._phase) % self.factor
+        out = y[first::self.factor]
+        self._phase = (self._phase + n) % self.factor
+        return np.clip(out, -32768, 32767).astype(np.int16)
+
+
 def resample_24k_to_8k(pcm: Any) -> Any:
-    """Downsample 24 kHz PCM16 to 8 kHz."""
+    """Downsample 24 kHz PCM16 to 8 kHz with anti-alias filtering.
+
+    Stateless (fresh filter per call) — fine for one-shot buffers. For
+    streaming audio use :class:`AntiAliasedDownsampler` to avoid chunk-edge
+    transients.
+    """
+    np = _ensure_numpy()
     if len(pcm) == 0:
         return pcm
-    return pcm[::3].copy()
+    h = _design_lowpass(63, _SPEECH_CUTOFF_HZ, 24000.0)
+    y = np.convolve(pcm.astype(np.float64), h, mode="same")
+    return np.clip(y[::3], -32768, 32767).astype(np.int16)
 
 
 def resample_16k_to_8k(pcm: Any) -> Any:
-    """Downsample 16 kHz PCM16 to 8 kHz."""
+    """Downsample 16 kHz PCM16 to 8 kHz with anti-alias filtering."""
+    np = _ensure_numpy()
     if len(pcm) == 0:
         return pcm
-    return pcm[::2].copy()
+    h = _design_lowpass(63, _SPEECH_CUTOFF_HZ, 16000.0)
+    y = np.convolve(pcm.astype(np.float64), h, mode="same")
+    return np.clip(y[::2], -32768, 32767).astype(np.int16)
+
+
+def apply_gain(pcm: Any, gain: float) -> Any:
+    """Apply linear gain with clip protection.
+
+    Telephony inbound audio is often recorded/transcribed at very low levels
+    (observed ~-38 dB RMS); a fixed boost before sending to the Realtime API
+    improves recognition and keeps recordings listenable.
+    """
+    np = _ensure_numpy()
+    if gain == 1.0 or len(pcm) == 0:
+        return pcm
+    boosted = pcm.astype(np.float64) * gain
+    return np.clip(boosted, -32768, 32767).astype(np.int16)
 
 
 def wav_bytes_to_pcm16(wav_bytes: bytes) -> tuple[Any, int]:

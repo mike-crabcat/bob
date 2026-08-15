@@ -68,6 +68,15 @@ def _get_session_key(user_id: str, session_mode: str) -> str:
 
 @router.websocket("/ws")
 async def voice_websocket(websocket: WebSocket) -> None:
+    """LEGACY local voice pipeline (STT → LLM → TTS via VoiceService).
+
+    Serves the push-to-talk language-practice frontend (session modes like
+    beginner_french with lesson progress). New realtime voice surfaces use
+    /voice/realtime below. Do not build on this path — if the language
+    frontend migrates to the Realtime bridge, this endpoint and the local
+    voice stack (voice_service, voice_engines, voice_transport,
+    voice_session_store) should be deleted.
+    """
     await websocket.accept()
     client = websocket.client.host if websocket.client else "unknown"
     logger.info("Voice WS connected from %s", client)
@@ -212,10 +221,8 @@ async def voice_realtime(websocket: WebSocket) -> None:
     #   - persona mode: {session_id}  (Bob-initiated; loads persona + chat context)
     session_id = config.get("session_id")
 
-    async def _no_complete(transcript: str, duration: float) -> None:
-        pass
-
-    on_complete = _no_complete
+    on_complete: Any = None  # set below in persona mode
+    session_svc = None  # VoiceSessionService in persona mode
     if session_id:
         from bob_server.services.voice_session_service import VoiceSessionService
         session_svc = VoiceSessionService(ctx)
@@ -240,8 +247,11 @@ async def voice_realtime(websocket: WebSocket) -> None:
         max_duration = rt_settings.max_call_duration_seconds
         wa_service = getattr(websocket.app.state, "whatsapp_bridge_service", None)
 
-        async def on_complete(transcript: str, duration: float) -> None:
-            await session_svc.complete(session_id, transcript, duration, wa_service=wa_service)
+        async def on_complete(transcript: str, duration: float, tool_calls: list | None = None) -> None:
+            await session_svc.complete(
+                session_id, transcript, duration,
+                tool_calls=tool_calls, wa_service=wa_service,
+            )
     else:
         if not config.get("instructions"):
             try:
@@ -262,6 +272,16 @@ async def voice_realtime(websocket: WebSocket) -> None:
     async def emit(event_name: str, payload: dict) -> None:
         await source.send_control({"type": event_name, **payload})
 
+    # Persist the partial transcript after every turn boundary so the dashboard
+    # and DB queries can see progress while the call is still live — and so we
+    # don't lose everything if the bridge hangs on cleanup (observed 2026-08-13).
+    voice_session_id_for_turn = session_id  # closure capture, may be None in test mode
+
+    async def on_turn(transcript: str) -> None:
+        if session_svc is None:
+            return
+        await session_svc.persist_transcript(voice_session_id_for_turn, transcript)
+
     bridge = RealtimeBridge(
         source,
         api_key=api_key,
@@ -272,6 +292,7 @@ async def voice_realtime(websocket: WebSocket) -> None:
         max_duration_seconds=max_duration,
         turn_detection=rt_settings.turn_detection,
         emit=emit,
+        on_turn=on_turn,
     )
 
     async def ws_read_loop() -> None:
@@ -312,7 +333,7 @@ async def voice_realtime(websocket: WebSocket) -> None:
             pass
         if on_complete is not None:
             try:
-                await on_complete(result.transcript, result.duration_seconds)
+                await on_complete(result.transcript, result.duration_seconds, result.tool_calls)
             except Exception:
                 logger.warning("voice session on_complete failed", exc_info=True)
 
