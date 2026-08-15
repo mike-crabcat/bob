@@ -240,3 +240,18 @@ async def test_voice_session_mirrors_to_phone_calls(ctx):
     assert final["status"] == "completed"
     assert final["duration_seconds"] == 12.0
     assert json.loads(final["outcome"])["summary"] == "all good"
+
+
+def test_invalid_realtime_voice_falls_back(monkeypatch):
+    """A TTS-only voice (fable) must never reach a realtime session — an
+    invalid voice makes session.update fail and the call silently runs on
+    default settings (2026-08-15 voice-link call)."""
+    from bob_server.config import Settings
+
+    monkeypatch.setenv("BOB_OPENAI_REALTIME_VOICE", "fable")
+    settings = Settings.from_env()
+    assert settings.openai_realtime.voice == "cedar"
+
+    monkeypatch.setenv("BOB_OPENAI_REALTIME_VOICE", "ash")
+    settings = Settings.from_env()
+    assert settings.openai_realtime.voice == "ash"

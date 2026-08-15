@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 import re
 import subprocess
 import sys
@@ -219,6 +221,15 @@ class OpenAIRealtimeSettings:
     turn_detection: str = "server_vad"
     input_audio_format: str = "pcm16"
     output_audio_format: str = "pcm16"
+
+    # Voices supported by gpt-realtime session.update (rejected otherwise —
+    # and a rejected session.update silently runs the call on DEFAULT session
+    # settings: no instructions, no tools, wrong voice). TTS-only voices such
+    # as fable/nova/onyx are NOT valid here.
+    VALID_VOICES = (
+        "alloy", "ash", "ballad", "coral", "echo", "sage",
+        "shimmer", "verse", "marin", "cedar",
+    )
 
     @property
     def enabled(self) -> bool:
@@ -465,9 +476,19 @@ class Settings:
             web_search_enabled=os.getenv("BOB_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
         )
 
+        realtime_voice = os.getenv("BOB_OPENAI_REALTIME_VOICE", "cedar")
+        if realtime_voice not in OpenAIRealtimeSettings.VALID_VOICES:
+            logger.warning(
+                "BOB_OPENAI_REALTIME_VOICE=%r is not a valid Realtime voice %s — "
+                "falling back to 'cedar' (an invalid voice makes session.update "
+                "fail and the call runs on default session settings)",
+                realtime_voice, OpenAIRealtimeSettings.VALID_VOICES,
+            )
+            realtime_voice = "cedar"
+
         openai_realtime = OpenAIRealtimeSettings(
             model=os.getenv("BOB_OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
-            voice=os.getenv("BOB_OPENAI_REALTIME_VOICE", "cedar"),
+            voice=realtime_voice,
             max_call_duration_seconds=float(os.getenv("BOB_OPENAI_REALTIME_MAX_DURATION", "300")),
             turn_detection=os.getenv("BOB_OPENAI_REALTIME_TURN_DETECTION", "server_vad"),
         )
