@@ -43,6 +43,11 @@ _SAMPLE_BYTES = 2
 # Twilio Media Stream sends 20ms frames (160 μ-law bytes at 8kHz).
 _TWILIO_FRAME_MS = 0.02
 
+# Stay this far ahead of real-time when feeding Twilio: absorbs network and
+# event-loop jitter so its jitter buffer doesn't underrun (underruns are the
+# periodic 'ticking' in the agent's voice).
+_SEND_LEAD_SECONDS = 0.1
+
 
 @runtime_checkable
 class AudioSource(Protocol):
@@ -159,8 +164,17 @@ class TwilioMediaSource:
         return self._closed
 
     async def _outbound_loop(self) -> None:
-        """Drain outbound PCM24, convert to μ-law 8kHz, pace 20ms frames to Twilio."""
+        """Drain outbound PCM24, convert to μ-law 8kHz, pace 20ms frames to Twilio.
+
+        Pacing runs on an ABSOLUTE clock (target = first_send + n × 20ms), not
+        sleep-per-frame: send overhead and event-loop jitter otherwise
+        accumulate into feeding Twilio slower than real-time, and its jitter
+        buffer underruns — heard as a periodic ticking in the agent's voice.
+        When late, frames burst to refill the buffer; after a long stall the
+        clock resyncs so we don't dump the whole backlog at once.
+        """
         import numpy as np
+        next_frame_at = 0.0  # set on first frame
         try:
             while True:
                 chunk = await self._outbound.get()
@@ -184,6 +198,17 @@ class TwilioMediaSource:
                         "streamSid": self._stream_sid,
                         "media": {"payload": payload},
                     })
+                    now = time.monotonic()
+                    if next_frame_at == 0.0 or next_frame_at - _SEND_LEAD_SECONDS < now - 0.1:
+                        # First frame, or we stalled >100ms behind (e.g. queue
+                        # ran dry waiting for the next delta) — (re)anchor the
+                        # schedule and rebuild the lead.
+                        next_frame_at = now + _SEND_LEAD_SECONDS
+                    else:
+                        delay = next_frame_at - _SEND_LEAD_SECONDS - now
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                    next_frame_at += _TWILIO_FRAME_MS
                     try:
                         await self._ws.send_text(msg)
                     except Exception as e:
@@ -194,7 +219,6 @@ class TwilioMediaSource:
                             (time.monotonic() - self._start_monotonic,
                              pcm24[i * 3 : i * 3 + len(frame) * 3].tobytes())
                         )
-                    await asyncio.sleep(_TWILIO_FRAME_MS)
                 if interrupted:
                     # Barge-in: drop the rest of this utterance (and anything
                     # still queued from it) but KEEP THE LOOP ALIVE — the next
