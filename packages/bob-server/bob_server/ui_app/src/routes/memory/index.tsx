@@ -48,6 +48,7 @@ interface EntityDetail {
   status: string;
   rendered: string;
   claims: ClaimDetail[];
+  related_entities: Record<string, string[]>;
 }
 
 interface ClaimDetail {

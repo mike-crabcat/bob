@@ -58,7 +58,7 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
     call = await db.fetch_one(
         """SELECT pc.id, pc.call_sid, pc.phone_number, pc.direction, pc.status,
                   pc.agenda, pc.exchange_count, pc.duration_seconds, pc.recording_path,
-                  pc.started_at, pc.completed_at,
+                  pc.started_at, pc.completed_at, pc.transcript, pc.outcome,
                   c.id as contact_id, c.name as contact_name
            FROM phone_calls pc
            LEFT JOIN contacts c ON c.phone_number = pc.phone_number AND c.deleted_at IS NULL
@@ -89,6 +89,8 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
             "recording_path": call["recording_path"],
             "started_at": _utc(call["started_at"]),
             "completed_at": _utc(call["completed_at"]),
+            "transcript": call["transcript"],
+            "outcome": json.loads(call["outcome"]) if call["outcome"] else None,
             "contact_id": call["contact_id"],
             "contact_name": call["contact_name"],
         },
@@ -109,14 +111,20 @@ async def dashboard_initiate_call(request: Request) -> dict[str, Any]:
     if not phone_settings.enabled:
         return {"error": "Phone subsystem is not enabled"}
 
-    from bob_server.routers.phone import initiate_outbound_call
+    from bob_server.services.voice_dispatch_service import (
+        build_outbound_instructions,
+        initiate_outbound_call,
+    )
+    instructions = build_outbound_instructions(goal=agenda)
     return await initiate_outbound_call(
         db=_db(request),
         settings=request.app.state.settings,
         phone_settings=phone_settings,
         to_number=to_number,
         agenda=agenda,
-        app_state=request.app.state,
+        event_bus=request.app.state.event_bus,
+        engine="openai_realtime",
+        realtime_meta={"instructions": instructions, "voice": ""},
     )
 
 

@@ -2,6 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { fetchAPI, postAPI } from "@/lib/api";
+import { parseTs } from "@/lib/time";
 
 interface PhoneCall {
   id: string;
@@ -27,9 +28,10 @@ interface Contact {
 
 function relativeTime(ts: string): string {
   if (!ts) return "";
-  const d = new Date(ts.endsWith("Z") ? ts : ts + "Z");
+  const d = parseTs(ts);
   const now = Date.now();
   const diff = now - d.getTime();
+  if (!isFinite(diff)) return "";
   if (diff < 60000) return "now";
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
@@ -38,7 +40,7 @@ function relativeTime(ts: string): string {
 
 function dateGroup(ts: string): string {
   if (!ts) return "older";
-  const d = new Date(ts.endsWith("Z") ? ts : ts + "Z");
+  const d = parseTs(ts);
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterday = new Date(today.getTime() - 86400000);
@@ -263,7 +265,7 @@ function PhoneListPage() {
                     className="flex items-center gap-2 border-b border-border py-2 hover:bg-surface transition-colors"
                   >
                     <span className="text-xs text-muted shrink-0">
-                      {call.direction === "outbound" ? "↗" : "↙"}
+                      {call.direction === "outbound" ? "↗" : call.direction === "voice_link" ? "◆" : "↙"}
                     </span>
                     <div className="flex flex-col min-w-0 flex-1">
                       <span className="text-xs text-text truncate">

@@ -1,8 +1,14 @@
 """Voice outreach tools — let Bob offer a browser voice call from a chat.
 
-Currently one tool: ``initiate_voice_call``. Built per-dispatch inside the
-WhatsApp handler (so the bridge service is in scope), like the other outreach
-tool factories. DM-only for v1 — groups raise "who's talking?".
+One tool: ``initiate_voice_call`` (offer a link in the current DM). Built
+per-dispatch inside the WhatsApp handler (so the bridge service is in scope),
+like the other outreach tool factories.
+
+Task-oriented voice dispatch (phone or voice_link, to any contact) lives in
+``create_subagent(agent_type="openai_voice")`` — see subagent_tools.
+``reach_out_with_voice_call`` was retired 2026-08-14: its phone branch
+duplicated the subagent path, and its voice_link default + docstring bias
+caused the LLM to send links when the user explicitly asked for phone calls.
 """
 
 from __future__ import annotations
@@ -18,26 +24,6 @@ if TYPE_CHECKING:
     from bob_server.services.whatsapp_bridge_service import WhatsAppBridgeService
 
 logger = logging.getLogger(__name__)
-
-# Modality aliases — accept the vocabulary people actually use. "voip" / "realtime"
-# / "browser" / "app" all mean the no-phone-call browser voice link; "phone" / "call"
-# / "dial" / "twilio" mean an actual outbound call.
-_VOICE_LINK_ALIASES = {
-    "voice_link", "voip", "realtime", "browser", "link", "app", "web", "data",
-    "whatsapp", "session",
-}
-_PHONE_ALIASES = {
-    "phone", "call", "twilio", "dial", "telephone", "cell", "landline", "sms",
-}
-
-
-def _normalise_modality(modality: str) -> str | None:
-    m = (modality or "voice_link").strip().lower()
-    if m in _VOICE_LINK_ALIASES:
-        return "voice_link"
-    if m in _PHONE_ALIASES:
-        return "phone"
-    return None
 
 
 def make_voice_outreach_tools(
@@ -62,6 +48,10 @@ def make_voice_outreach_tools(
         If the user has a specific task in mind (e.g. "quiz me about dinner",
         "talk me through the plan"), pass it as `goal` so the voice agent knows its
         purpose. Omit goal for an open conversation.
+
+        NOTE: this offers a BROWSER LINK only. If the user wants their actual
+        phone to ring, use create_subagent(agent_type="openai_voice",
+        modality="phone") instead.
         """
         from bob_server.services.voice_session_service import VoiceSessionService
         from bob_server.services.thread_result_service import _session_key_to_chat_id
@@ -80,6 +70,7 @@ def make_voice_outreach_tools(
             session_key,
             voice=ctx.settings.openai_realtime.voice,
             goal=goal,
+            phone_number="+" + chat_id.split("@")[0],
         )
         url = created["url"]
 
@@ -93,117 +84,4 @@ def make_voice_outreach_tools(
         logger.info("Voice call offered in session %s (goal=%s)", session_key, bool(goal))
         return json.dumps({"ok": True, "url": url})
 
-    @tool
-    async def reach_out_with_voice_call(
-        contact_id: str,
-        goal: str,
-        modality: str = "voice_link",
-        intro_message: str = "",
-    ) -> str:
-        """Reach out to a contact by voice to achieve a specific goal. Reports the
-        outcome back to this conversation when the call ends.
-
-        modality (default "voice_link" — omit it unless you specifically want a phone call):
-        - "voice_link" (also: voip, realtime, browser, app, web, whatsapp): DM the
-          contact a browser voice session link. No phone call, no app install, free.
-          This is the right default for WhatsApp contacts and for "VoIP"/"realtime" requests.
-        - "phone" (also: call, dial, twilio, telephone): place an actual outbound call
-          to their number. Costs money and rings their phone — confirm with the user
-          first unless they explicitly said "call"/"phone".
-
-        goal = what the voice agent should find out or achieve, phrased as a task
-        (e.g. "find out when Alice is free next week", "confirm the delivery arrived").
-        intro_message = opening line for the voice_link DM (default: a friendly invite).
-
-        Prefer this tool over place_realtime_call — it covers both modalities and
-        reports the outcome back to this conversation. Use place_realtime_call only
-        when you specifically need the phone path with custom raw instructions.
-        """
-        from bob_server.services.voice_session_service import VoiceSessionService
-
-        contact = await ctx.db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE id = ? AND deleted_at IS NULL",
-            (contact_id,),
-        )
-        if contact is None:
-            return json.dumps({"ok": False, "error": "Contact not found"})
-        phone = contact["phone_number"]
-        if not phone:
-            return json.dumps({"ok": False, "error": "Contact has no phone number"})
-
-        modality = _normalise_modality(modality)
-        if modality is None:
-            return json.dumps({
-                "ok": False,
-                "error": f"unknown modality. Use 'voice_link' (browser, default) or 'phone' (Twilio call).",
-            })
-
-        if modality == "voice_link":
-            if not (wa_service and wa_service.connected):
-                return json.dumps({"ok": False, "error": "WhatsApp bridge not connected"})
-
-            import re
-            phone_digits = re.sub(r"\D", "", phone)
-            target_session = f"agent:main:whatsapp:dm:{phone_digits}"
-            jid = f"{phone_digits}@s.whatsapp.net"
-
-            svc = VoiceSessionService(ctx)
-            created = await svc.create(
-                origin_session_key=target_session,
-                voice=ctx.settings.openai_realtime.voice,
-                goal=goal,
-                report_back_session_key=session_key,
-            )
-            url = created["url"]
-            intro = intro_message.strip() or f"Hi {contact['name']}, it's Bob — could we hop on a quick voice call?"
-            try:
-                await wa_service.send_message(jid, f"{intro}\n{url}")
-            except Exception as e:
-                logger.warning("reach_out voice_link send failed to %s: %s", jid, e)
-                return json.dumps({"ok": False, "error": f"failed to send DM: {e}"})
-
-            logger.info("reach_out voice_link -> %s (goal=%s)", contact["name"], goal[:60])
-            return json.dumps({
-                "ok": True,
-                "modality": "voice_link",
-                "contact": contact["name"],
-                "url": url,
-            })
-
-        # modality == "phone"
-        phone_settings = ctx.settings.phone
-        if not phone_settings.enabled:
-            return json.dumps({"ok": False, "error": "Phone subsystem is not enabled"})
-
-        instructions = (
-            f"You are calling {contact['name']}.\n\n"
-            f"Goal: {goal}\n\n"
-            f"Be polite and brief. When you have the answer (or it's clear you can't "
-            f"get it), call report_success with a one-line summary and the key facts "
-            f"in details, or report_failure with the reason. Then call end_call."
-        )
-        from bob_server.routers.phone import initiate_outbound_call
-        result = await initiate_outbound_call(
-            db=ctx.db,
-            settings=ctx.settings,
-            phone_settings=phone_settings,
-            to_number=phone,
-            agenda=goal,
-            app_state=None,
-            origin_session_key=session_key,
-            engine="openai_realtime",
-            realtime_meta={"instructions": instructions, "voice": ""},
-        )
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-
-        logger.info("reach_out phone -> %s (goal=%s)", contact["name"], goal[:60])
-        return json.dumps({
-            "ok": True,
-            "modality": "phone",
-            "contact": contact["name"],
-            "call_id": result.get("call_id"),
-            "call_sid": result.get("call_sid"),
-        })
-
-    return [initiate_voice_call, reach_out_with_voice_call]
+    return [initiate_voice_call]

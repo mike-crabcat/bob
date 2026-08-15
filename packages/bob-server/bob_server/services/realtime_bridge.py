@@ -27,9 +27,10 @@ from typing import Any, Protocol, runtime_checkable
 import websockets
 
 from bob_server.services.mulaw import (
+    AntiAliasedDownsampler,
+    apply_gain,
     mulaw_to_pcm16,
     pcm16_to_mulaw,
-    resample_24k_to_8k,
     resample_8k_to_24k,
 )
 from bob_server.services.tools import ImageInjection, Tool
@@ -93,7 +94,7 @@ class TwilioMediaSource:
     20ms frames to Twilio.
     """
 
-    def __init__(self, ws: Any, stream_sid: str) -> None:
+    def __init__(self, ws: Any, stream_sid: str, *, inbound_gain: float = 4.0) -> None:
         self._ws = ws
         self._stream_sid = stream_sid
         self._inbound: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -101,7 +102,17 @@ class TwilioMediaSource:
         self._send_task: asyncio.Task[None] | None = None
         self._interrupt = False
         self._closed = False
-        # Recording taps (PCM16 24kHz) — written by the bridge for stereo capture.
+        # Inbound boost (with clip protection): phone audio arrives very quiet
+        # (observed ~-38 dB RMS), which hurts both ASR and recordings.
+        self.inbound_gain = inbound_gain
+        # Stateful anti-aliased 24k→8k downsampler (kept across chunks).
+        self._downsampler = AntiAliasedDownsampler(factor=3, sample_rate=24000.0)
+        # Recording taps (PCM16 24kHz) for stereo capture, both as
+        # (wallclock_seconds, chunk). Correct because both sides are paced in
+        # real time: inbound by Twilio's 20ms frames, outbound by our pacing
+        # loop (each frame takes ≥20ms wall to send, so sends can never
+        # overlap). Overlaying OpenAI's raw deltas by ARRIVAL time was the
+        # original garble bug — they arrive in bursts faster than real time.
         self.rec_inbound_pcm24: list[tuple[float, bytes]] = []
         self.rec_outbound_pcm24: list[tuple[float, bytes]] = []
         self._start_monotonic: float = 0.0
@@ -126,14 +137,14 @@ class TwilioMediaSource:
             return None
         pcm8k = mulaw_to_pcm16(mulaw)
         pcm24k = resample_8k_to_24k(pcm8k)
+        if self.inbound_gain != 1.0:
+            pcm24k = apply_gain(pcm24k, self.inbound_gain)
         chunk = pcm24k.tobytes()
         if self._start_monotonic:
             self.rec_inbound_pcm24.append((time.monotonic() - self._start_monotonic, chunk))
         return chunk
 
     async def send_speaker_pcm16_24k(self, chunk: bytes) -> None:
-        if self._start_monotonic:
-            self.rec_outbound_pcm24.append((time.monotonic() - self._start_monotonic, chunk))
         await self._outbound.put(chunk)
 
     async def clear_playback(self) -> None:
@@ -157,13 +168,15 @@ class TwilioMediaSource:
                     return
                 self._interrupt = False
                 pcm24 = np.frombuffer(chunk, dtype=np.int16)
-                pcm8 = resample_24k_to_8k(pcm24)
+                pcm8 = self._downsampler.process(pcm24)
                 mulaw = pcm16_to_mulaw(pcm8)
-                # 160 μ-law bytes == 20ms at 8kHz.
+                # 160 μ-law bytes == 20ms at 8kHz; each corresponds to 480
+                # PCM24 samples (24k = 3 × 8k) — recorded for the call WAV.
+                interrupted = False
                 for i in range(0, len(mulaw), 160):
                     if self._interrupt:
-                        logger.info("TwilioMediaSource: barge-in, dropping remaining outbound")
-                        return
+                        interrupted = True
+                        break
                     frame = mulaw[i : i + 160]
                     payload = base64.b64encode(frame).decode("ascii")
                     msg = json.dumps({
@@ -176,7 +189,23 @@ class TwilioMediaSource:
                     except Exception as e:
                         logger.warning("TwilioMediaSource send failed: %s", e)
                         return
+                    if self._start_monotonic:
+                        self.rec_outbound_pcm24.append(
+                            (time.monotonic() - self._start_monotonic,
+                             pcm24[i * 3 : i * 3 + len(frame) * 3].tobytes())
+                        )
                     await asyncio.sleep(_TWILIO_FRAME_MS)
+                if interrupted:
+                    # Barge-in: drop the rest of this utterance (and anything
+                    # still queued from it) but KEEP THE LOOP ALIVE — the next
+                    # agent response still needs a consumer. Returning here
+                    # used to kill outbound audio for the rest of the call.
+                    logger.info("TwilioMediaSource: barge-in, dropping interrupted utterance")
+                    while not self._outbound.empty():
+                        try:
+                            self._outbound.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -191,7 +220,11 @@ class TwilioMediaSource:
                 pass
 
     def finalize_recording(self, calls_dir: Path, call_id: str) -> tuple[str, int] | None:
-        """Write a time-aligned stereo WAV (left=inbound, right=outbound) at 24kHz."""
+        """Write a stereo WAV (left=inbound, right=outbound) at 24kHz.
+
+        Both channels are overlaid at their wall-clock send/receive times, so
+        the two sides stay time-aligned across the whole call.
+        """
         import numpy as np
         import soundfile as sf
 
@@ -199,35 +232,33 @@ class TwilioMediaSource:
             return None
 
         target_sr = 24000
-        all_times = [t for t, _ in self.rec_inbound_pcm24] + [t for t, _ in self.rec_outbound_pcm24]
-        if not all_times:
-            return None
-        end = max(all_times)
+
+        def _end_sample(taps: list[tuple[float, bytes]]) -> int:
+            last_t, last_chunk = taps[-1]
+            return int((last_t + len(last_chunk) / (target_sr * _SAMPLE_BYTES)) * target_sr)
+
+        total_samples = 0
+        if self.rec_inbound_pcm24:
+            total_samples = max(total_samples, _end_sample(self.rec_inbound_pcm24))
         if self.rec_outbound_pcm24:
-            last_t, last_chunk = self.rec_outbound_pcm24[-1]
-            end = max(end, last_t + len(last_chunk) / (target_sr * _SAMPLE_BYTES))
-        total_samples = int(end * target_sr)
+            total_samples = max(total_samples, _end_sample(self.rec_outbound_pcm24))
         if total_samples <= 0:
             return None
 
-        left = np.zeros(total_samples, dtype=np.float32)
-        right = np.zeros(total_samples, dtype=np.float32)
+        def _overlay(taps: list[tuple[float, bytes]]) -> np.ndarray:
+            ch = np.zeros(total_samples, dtype=np.float32)
+            for ts, chunk in taps:
+                pcm = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                offset = int(ts * target_sr)
+                end_idx = min(offset + len(pcm), total_samples)
+                if offset < total_samples and end_idx > offset:
+                    ch[offset:end_idx] = pcm[: end_idx - offset]
+            return ch
 
-        for ts, chunk in self.rec_inbound_pcm24:
-            pcm = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-            offset = int(ts * target_sr)
-            end_idx = min(offset + len(pcm), total_samples)
-            if offset < total_samples and end_idx > offset:
-                left[offset:end_idx] = pcm[: end_idx - offset]
-
-        for ts, chunk in self.rec_outbound_pcm24:
-            pcm = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-            offset = int(ts * target_sr)
-            end_idx = min(offset + len(pcm), total_samples)
-            if offset < total_samples and end_idx > offset:
-                right[offset:end_idx] = pcm[: end_idx - offset]
-
-        stereo = np.column_stack([left, right])
+        stereo = np.column_stack([
+            _overlay(self.rec_inbound_pcm24),
+            _overlay(self.rec_outbound_pcm24),
+        ])
         calls_dir.mkdir(parents=True, exist_ok=True)
         path = calls_dir / f"{call_id}.wav"
         sf.write(str(path), stereo, target_sr, subtype="PCM_16", format="WAV")
@@ -300,6 +331,9 @@ class RealtimeBridge:
         turn_detection: str = "server_vad",
         base_url: str = "wss://api.openai.com/v1/realtime",
         emit: Any = None,
+        on_turn: Any = None,
+        speak_first: bool = True,
+        first_response_delay_seconds: float = 8.0,
     ) -> None:
         self.audio = audio_source
         self.api_key = api_key
@@ -311,10 +345,23 @@ class RealtimeBridge:
         self.turn_detection = turn_detection
         self.base_url = base_url
         self.emit = emit  # optional async callback(event_name, payload) for UI/captions
+        # Optional async callback(full_transcript: str) fired after each turn boundary
+        # (assistant response.done or user transcript completed). Lets the caller
+        # persist partial transcript so dashboard/monitoring can see progress even
+        # if the bridge hangs on cleanup.
+        self.on_turn = on_turn
+        # Phone-call convention: on an outbound call the CALLEE speaks first
+        # (typically "hello"). When speak_first is False the bridge does not
+        # prompt an opening response on connect; server VAD produces the agent's
+        # first turn in reply to the callee's greeting. If the line is silent
+        # (dead air), a fallback prompt fires after first_response_delay_seconds.
+        self.speak_first = speak_first
+        self.first_response_delay_seconds = first_response_delay_seconds
 
         self._tool_handlers: dict[str, Tool] = {t.name: t for t in self.tools}
         self._end_requested = asyncio.Event()
         self._session_ready = asyncio.Event()
+        self._first_speech = asyncio.Event()
         self._timed_out = False
         self._last_error = ""
         # Diagnostic counters (logged at session end).
@@ -342,6 +389,12 @@ class RealtimeBridge:
                 relay = asyncio.create_task(self._relay_mic_to_openai(oai))
                 events = asyncio.create_task(self._event_loop(oai))
                 timer = asyncio.create_task(self._duration_timer())
+                # Detached (not in the wait set — its completion must not end
+                # the session): nudges the agent to open if the callee never
+                # speaks within the delay window.
+                nudge = None
+                if not self.speak_first:
+                    nudge = asyncio.create_task(self._first_response_nudge(oai))
 
                 done, pending = await asyncio.wait(
                     {relay, events, timer, asyncio.create_task(self._end_requested.wait())},
@@ -360,6 +413,20 @@ class RealtimeBridge:
                         ended_by = "end_requested"
                 for t in pending:
                     t.cancel()
+                if nudge is not None and not nudge.done():
+                    nudge.cancel()
+                    pending.add(nudge)
+                # Await the cancelled pending tasks so they fully unwind before
+                # the `async with websockets.connect` exits. Without this the
+                # events loop can be mid-`async for raw in oai:` when the WS
+                # close runs, and the close hangs waiting for the receive loop
+                # to release the connection — which never happens. Observed
+                # hung bridge on max-duration timeout, 2026-08-13.
+                for t in pending:
+                    try:
+                        await asyncio.wait_for(t, timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        pass
                 for t in done:
                     exc = t.exception()
                     if exc and not isinstance(exc, (asyncio.CancelledError,)):
@@ -381,6 +448,14 @@ class RealtimeBridge:
                 )
         except asyncio.TimeoutError:
             result.end_reason = "timeout"
+        except asyncio.CancelledError:
+            # External cancellation (e.g. caller's WS read loop ended because
+            # the user hung up). Don't propagate — if we do, bridge_task()'s
+            # `result = await bridge.run()` raises and on_complete never runs,
+            # so the transcript is never persisted and the parent session
+            # never gets the call-result dispatch. Treat as a normal end.
+            result.end_reason = "cancelled"
+            logger.info("Bridge cancelled by caller (end_reason=cancelled)")
         except Exception as e:
             logger.warning("Realtime bridge error: %s", e, exc_info=True)
             result.end_reason = "error"
@@ -405,6 +480,23 @@ class RealtimeBridge:
         await asyncio.sleep(self.max_duration_seconds)
         self._timed_out = True
         logger.info("Realtime bridge: max duration %ss reached", self.max_duration_seconds)
+
+    async def _first_response_nudge(self, oai: websockets.WebSocketClientProtocol) -> None:
+        """Callee-first mode: if the line is silent past the delay (dead line,
+        misdial), prompt the agent to open so the call doesn't sit in dead air
+        until max_duration."""
+        await self._session_ready.wait()
+        try:
+            await asyncio.wait_for(self._first_speech.wait(), timeout=self.first_response_delay_seconds)
+            return  # callee spoke — server VAD handles the agent's reply
+        except asyncio.TimeoutError:
+            pass
+        if not self._end_requested.is_set():
+            logger.info(
+                "Bridge: no callee speech within %.0fs — prompting agent to open",
+                self.first_response_delay_seconds,
+            )
+            await self._send(oai, {"type": "response.create"})
 
     async def request_end(self) -> None:
         """Signal the bridge to wind down (e.g. ``end_call`` tool)."""
@@ -475,8 +567,11 @@ class RealtimeBridge:
     async def _dispatch_event(self, oai: websockets.WebSocketClientProtocol, etype: str, event: dict) -> None:
         if etype == "session.updated":
             self._session_ready.set()
-            # Agent speaks first to open the task.
-            await self._send(oai, {"type": "response.create"})
+            # Agent speaks first to open the task — unless the caller asked for
+            # callee-first (outbound phone convention); then server VAD opens
+            # the agent's first turn in reply to the callee's greeting.
+            if self.speak_first:
+                await self._send(oai, {"type": "response.create"})
             return
 
         if etype == "response.created":
@@ -504,6 +599,7 @@ class RealtimeBridge:
             if self._current_agent.strip():
                 self._turns.append(f"Agent: {self._current_agent.strip()}")
             self._current_agent = ""
+            await self._emit_turn()
             return
 
         if etype == "conversation.item.input_audio_transcription.completed":
@@ -512,6 +608,7 @@ class RealtimeBridge:
                 self._turns.append(f"User: {user_text}")
                 if self.emit:
                     await self.emit("user_transcript", {"text": user_text})
+                await self._emit_turn()
             return
 
         if etype == "conversation.item.input_audio_transcription.failed":
@@ -520,6 +617,7 @@ class RealtimeBridge:
 
         if etype == "input_audio_buffer.speech_started":
             self._speech_started_count += 1
+            self._first_speech.set()
             logger.info("Bridge: speech_started (#%d) — VAD detected input",
                         self._speech_started_count)
             await self.audio.clear_playback()
@@ -578,3 +676,15 @@ class RealtimeBridge:
 
     async def _send(self, oai: websockets.WebSocketClientProtocol, payload: dict) -> None:
         await oai.send(json.dumps(payload))
+
+    async def _emit_turn(self) -> None:
+        """Fire on_turn with the current full transcript after a turn boundary.
+
+        Best-effort: caller-level errors are logged but never break the bridge.
+        """
+        if not self.on_turn:
+            return
+        try:
+            await self.on_turn("\n".join(self._turns).strip())
+        except Exception:
+            logger.warning("on_turn callback failed", exc_info=True)

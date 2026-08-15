@@ -1,7 +1,8 @@
-"""Tests for phone.py — initiate_outbound_call, /call endpoint, /status webhook."""
+"""Tests for call placement — initiate_outbound_call (voice_dispatch_service)."""
 
 from __future__ import annotations
 
+import json
 import sys
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +11,7 @@ import pytest
 
 from bob_server.config import PhoneSettings, Settings
 from bob_server.context import AppContext
-from bob_server.routers.phone import _call_agendas, initiate_outbound_call
+from bob_server.services.voice_dispatch_service import call_agendas, initiate_outbound_call
 
 
 def _make_phone_settings(*, enabled: bool = True, base_url: str = "https://example.com") -> PhoneSettings:
@@ -60,6 +61,7 @@ async def test_initiate_outbound_call_returns_expected_shape(ctx: AppContext):
             phone_settings=phone_settings,
             to_number="+61400123456",
             agenda="Test agenda",
+            realtime_meta={"instructions": "say hi", "voice": "", "subagent_id": "sub-x"},
         )
 
     assert result["call_sid"] == "CA_test_sid"
@@ -74,12 +76,16 @@ async def test_initiate_outbound_call_returns_expected_shape(ctx: AppContext):
     assert row["agenda"] == "Test agenda"
     assert row["direction"] == "outbound"
 
-    # Verify _call_agendas was populated
-    assert "CA_test_sid" in _call_agendas
-    assert _call_agendas["CA_test_sid"]["agenda"] == "Test agenda"
+    # Dispatch metadata is persisted durably (survives a restart), not just cached
+    assert json.loads(row["realtime_meta"])["instructions"] == "say hi"
+    assert row["subagent_id"] == "sub-x"
+
+    # Verify the in-memory cache was populated too
+    assert "CA_test_sid" in call_agendas
+    assert call_agendas["CA_test_sid"]["agenda"] == "Test agenda"
 
     # Cleanup
-    _call_agendas.pop("CA_test_sid", None)
+    call_agendas.pop("CA_test_sid", None)
 
 
 async def test_initiate_outbound_call_disabled(ctx: AppContext):
@@ -126,4 +132,4 @@ async def test_initiate_outbound_call_passes_twilio_params(ctx: AppContext):
         )
 
     # Cleanup
-    _call_agendas.pop("CA_params", None)
+    call_agendas.pop("CA_params", None)

@@ -1,7 +1,10 @@
 """Phone call integration via Twilio Media Streams.
 
-Provides HTTP webhooks for Twilio call control and a WebSocket endpoint
-for bidirectional audio streaming through the voice pipeline.
+HTTP webhooks for Twilio call control and the WebSocket endpoint for
+bidirectional audio streaming through the OpenAI Realtime bridge. Call
+placement and dispatch metadata live in
+services/voice_dispatch_service.py; this router owns the Twilio-facing
+HTTP/WS surface only.
 """
 
 from __future__ import annotations
@@ -11,12 +14,20 @@ import base64
 import json
 import logging
 import re
-import time
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from bob_server.services.base import utcnow
+from bob_server.services.voice_dispatch_service import (
+    build_inbound_instructions,
+    call_agendas,
+    extract_outcome,
+    hangup_twilio_call,
+    initiate_outbound_call,
+    load_call_meta,
+    mark_voice_subagent_complete,
+    persist_call_transcript,
+)
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -24,114 +35,6 @@ from fastapi.responses import PlainTextResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["phone"])
-
-# Shared in-memory store for call agenda data, used by both the HTTP endpoint
-# and the LLM phone tool. Previously lived on app.state.
-_call_agendas: dict[str, dict] = {}
-
-# Track which call IDs have already had their result dispatched to the origin session.
-_result_dispatched: set[str] = set()
-
-
-def _build_phone_context() -> str:
-    return (
-        "This is a live phone call to a real person on their mobile phone. "
-        "If the person says a phone greeting like 'Hi', 'Hello', or 'X speaking', "
-        "introduce yourself by your name, explain that you are an AI assistant, "
-        "and say who you are calling on behalf of (the caller's name is in the agenda). "
-        "Respond in plain spoken language: no emojis, no markdown, no formatting. "
-        "To end the call at any time (e.g., the other person says goodbye, "
-        "or the conversation has reached its natural conclusion), include <hangup/> "
-        "at the end of your response. The call will be terminated after your response "
-        "is fully spoken. Do not mention the hangup token to the caller."
-    )
-
-
-class _CallRecorderProxy:
-    """Wraps a VoiceTransport and captures transcript/latency for call logging.
-
-    Saves the exchange to DB when the latency message arrives (the last
-    message VoiceService sends), ensuring all data is captured after the
-    full pipeline completes.
-    """
-
-    def __init__(self, transport: Any, call_id: str, exchange_index: int,
-                 db: Any, utterance_time: float = 0.0) -> None:
-        self._transport = transport
-        self._call_id = call_id
-        self._exchange_index = exchange_index
-        self._db = db
-        self._utterance_time = utterance_time
-        self._saved = False
-        self.user_transcript: str = ""
-        self.assistant_transcript: str = ""
-        self.latency: dict = {}
-        self.done: asyncio.Event = asyncio.Event()
-        self.hangup_requested: bool = False
-
-    async def send_audio(self, wav_bytes: bytes) -> None:
-        await self._transport.send_audio(wav_bytes)
-
-    async def send_status(self, state: str) -> None:
-        await self._transport.send_status(state)
-
-    async def send_error(self, message: str) -> None:
-        await self._transport.send_error(message)
-        self.done.set()
-
-    async def send_message(self, msg_type: str, data: dict) -> None:
-        if msg_type == "transcript":
-            self.user_transcript = data.get("text", "")
-        elif msg_type == "response_text":
-            self.assistant_transcript = data.get("text", "")
-        elif msg_type == "latency":
-            self.latency = data
-            await self._save_exchange()
-            self.done.set()
-        elif msg_type == "hangup":
-            self.hangup_requested = True
-            self.done.set()
-        await self._transport.send_message(msg_type, data)
-
-    async def _save_exchange(self) -> None:
-        if self._saved:
-            return
-        self._saved = True
-        if not self.user_transcript and not self.assistant_transcript:
-            return
-        from datetime import datetime, timezone
-        started_iso = (
-            datetime.fromtimestamp(self._utterance_time, tz=timezone.utc).isoformat()
-            if self._utterance_time else None
-        )
-        try:
-            await self._db.execute(
-                """INSERT INTO phone_call_exchanges
-                   (call_id, exchange_index, user_transcript, assistant_transcript,
-                    stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
-                    llm_prepare_ms, llm_stream_ms, tts_wait_lock_ms, tts_generate_ms,
-                    started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self._call_id, self._exchange_index,
-                 self.user_transcript, self.assistant_transcript,
-                 self.latency.get("stt_ms"),
-                 self.latency.get("llm_total_ms"),
-                 self.latency.get("tts_first_chunk_ms"),
-                 self.latency.get("e2e_ms"),
-                 self.latency.get("llm_prepare_ms"),
-                 self.latency.get("llm_stream_ms"),
-                 self.latency.get("tts_wait_lock_ms"),
-                 self.latency.get("tts_generate_ms"),
-                 started_iso),
-            )
-        except Exception:
-            logger.warning("Failed to log phone call exchange", exc_info=True)
-
-
-async def _emit_event(app_state: Any, event_type: str, payload: dict) -> None:
-    event_bus = getattr(app_state, "event_bus", None)
-    if event_bus:
-        await event_bus.publish(event_type, payload)
 
 
 def _normalize_phone(raw: str) -> str:
@@ -146,21 +49,9 @@ def _normalize_phone(raw: str) -> str:
     return "+" + digits
 
 
-def _build_inbound_phone_context(phone_number: str, contact_name: str | None = None) -> str:
-    name_hint = f" The caller's name is {contact_name}." if contact_name else ""
-    return (
-        "This is an inbound phone call from a real person. "
-        "They called your number, so greet them and find out how you can help. "
-        f"Their phone number is {phone_number}.{name_hint} "
-        "Respond in plain spoken language: no emojis, no markdown, no formatting. "
-        "To end the call at any time, include <hangup/> at the end of your response. "
-        "Do not mention the hangup token to the caller."
-    )
-
-
 async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number: str) -> None:
     """Set up session data for an inbound call: contact resolution, agenda, DB record."""
-    if call_sid in _call_agendas:
+    if call_sid in call_agendas:
         return
 
     call_id = str(uuid4())
@@ -200,7 +91,7 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
         session_key, "phone", contact_id=contact_id, is_trusted=is_trusted,
     )
 
-    inbound_context = _build_inbound_phone_context(phone_number, contact_name)
+    instructions = build_inbound_instructions(phone_number, contact_name, agenda)
 
     # Create session route
     from bob_server.services.session_route_service import SessionRouteService
@@ -224,97 +115,33 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
         (call_id, call_sid, phone_number, agenda),
     )
 
-    # Store for the media_stream handler
-    _call_agendas[call_sid] = {
-        "agenda": f"{inbound_context} {agenda}".strip() if agenda else inbound_context,
+    # Store for the media_stream handler — inbound calls are realtime too.
+    call_agendas[call_sid] = {
+        "agenda": agenda or "",
         "phone_number": phone_number,
         "call_id": call_id,
         "session_key": session_key,
         "contact_id": contact_id,
+        "direction": "inbound",
+        "engine": "openai_realtime",
+        "realtime_meta": {"instructions": instructions, "voice": ""},
     }
 
     logger.info("Set up inbound call %s from %s (contact=%s, trusted=%s)",
                 call_sid, phone_number, contact_id, is_trusted)
 
 
-async def initiate_outbound_call(
-    db: Any,
-    settings: Any,
-    phone_settings: Any,
-    to_number: str,
-    agenda: str,
-    app_state: Any | None = None,
-    origin_session_key: str | None = None,
-    *,
-    engine: str = "default",
-    realtime_meta: dict | None = None,
-) -> dict:
-    """Initiate an outbound phone call via Twilio.
-
-    Shared by the HTTP endpoint and the LLM phone tool.
-    Returns {"call_id", "call_sid", "status"} on success or {"error": ...} on failure.
-
-    ``engine`` selects the voice pipeline: ``"default"`` (STT→LLM→TTS) or
-    ``"openai_realtime"`` (OpenAI Realtime bridge). When realtime, ``realtime_meta``
-    carries the voice-agent config (instructions, voice, max_duration, tools).
-    """
-    if not phone_settings.enabled:
-        return {"error": "Phone subsystem is not enabled"}
-
-    call_id = str(uuid4())
-    session_key = f"agent:main:phone:call:{call_id}"
-
-    from twilio.rest import Client
-
-    client = Client(phone_settings.twilio_account_sid, phone_settings.twilio_auth_token)
-    base_url = phone_settings.base_url or settings.resolved_public_url
-
-    call = client.calls.create(
-        to=to_number,
-        from_=phone_settings.twilio_phone_number,
-        url=f"{base_url}/phone/twiml",
-        status_callback=f"{base_url}/phone/status",
-        status_callback_event=["initiated", "ringing", "answered", "completed"],
-    )
-
-    _call_agendas[call.sid] = {
-        "agenda": agenda,
-        "phone_number": to_number,
-        "call_id": call_id,
-        "session_key": session_key,
-        "origin_session_key": origin_session_key,
-        "engine": engine,
-        "realtime_meta": realtime_meta or {},
-    }
-
-    await db.execute(
-        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, engine, started_at, origin_session_key)
-           VALUES (?, ?, ?, 'outbound', 'ringing', ?, ?, datetime('now'), ?)""",
-        (call_id, call.sid, to_number, agenda, engine, origin_session_key),
-    )
-
-    logger.info("Initiated call %s to %s (engine=%s)", call.sid, to_number, engine)
-
-    if app_state:
-        await _emit_event(app_state, "phone.call.ringing", {
-            "call_id": call_id,
-            "phone_number": to_number,
-            "direction": "outbound",
-            "agenda": agenda,
-        })
-
-    return {"call_sid": call.sid, "call_id": call_id, "status": call.status}
-
-
 @router.post("/call")
 async def initiate_call(request: Request) -> dict:
-    """Initiate an outbound phone call via Twilio."""
+    """Initiate an outbound phone call via Twilio (Realtime engine)."""
     body = await request.json()
     to_number = body.get("to", "").strip()
     if not to_number:
         return {"error": "Missing 'to' phone number"}
 
     agenda = body.get("agenda", "").strip()
+    from bob_server.services.voice_dispatch_service import build_outbound_instructions
+    instructions = build_outbound_instructions(goal=agenda)
 
     return await initiate_outbound_call(
         db=request.app.state.db,
@@ -322,7 +149,9 @@ async def initiate_call(request: Request) -> dict:
         phone_settings=request.app.state.settings.phone,
         to_number=to_number,
         agenda=agenda,
-        app_state=request.app.state,
+        event_bus=request.app.state.event_bus,
+        engine="openai_realtime",
+        realtime_meta={"instructions": instructions, "voice": ""},
     )
 
 
@@ -364,10 +193,14 @@ async def _maybe_dispatch_call_result(
     app_state: Any,
     call_sid: str,
     call_status: str,
-    call_data: dict | None = None,
     call_id_override: str | None = None,
 ) -> None:
-    """Dispatch call result to originating session if applicable. Guards against double-dispatch."""
+    """Dispatch call result to originating session if applicable.
+
+    Double-dispatch is guarded atomically by claiming the row: the UPDATE only
+    fires when result_dispatched_at is NULL, so it is safe across restarts and
+    concurrent callers (previously an in-memory set).
+    """
     # Look up the call record to get origin_session_key and call_id
     if call_sid:
         call_row = await db.fetch_one(
@@ -386,9 +219,12 @@ async def _maybe_dispatch_call_result(
         return
 
     call_id = call_row["id"]
-    if call_id in _result_dispatched:
+    claimed = await db.execute(
+        "UPDATE phone_calls SET result_dispatched_at = datetime('now') WHERE id = ? AND result_dispatched_at IS NULL",
+        (call_id,),
+    )
+    if not claimed:
         return
-    _result_dispatched.add(call_id)
 
     origin_session_key = call_row["origin_session_key"]
     agenda = call_row["agenda"] or ""
@@ -441,21 +277,8 @@ async def call_status(request: Request) -> dict:
                    WHERE call_sid = ?""",
                 (call_status, call_sid),
             )
-        # Clean up stored call data
-        call_data = _call_agendas.pop(call_sid, None)
-        if call_data and isinstance(call_data, dict):
-            # Finalize recording if transport captured audio
-            transport = call_data.get("_transport")
-            if transport and hasattr(transport, "finalize_recording"):
-                settings = request.app.state.settings
-                calls_dir = Path(settings.config_dir) / "harness" / "calls"
-                result = transport.finalize_recording(calls_dir, call_data.get("call_id", call_sid))
-                if result:
-                    rel_path, _ = result
-                    await db.execute(
-                        "UPDATE phone_calls SET recording_path = ? WHERE call_sid = ?",
-                        (str(calls_dir / rel_path), call_sid),
-                    )
+        # Clean up cached call data
+        call_agendas.pop(call_sid, None)
 
         # Dispatch call result to originating session if applicable
         await _maybe_dispatch_call_result(
@@ -532,40 +355,21 @@ async def hangup_call(call_id: str, request: Request) -> dict:
     if call["status"] not in ("active", "ringing"):
         return {"error": f"Call is {call['status']}, cannot hang up"}
 
-    phone_settings = request.app.state.settings.phone
-    from twilio.rest import Client
-    client = Client(phone_settings.twilio_account_sid, phone_settings.twilio_auth_token)
-    client.calls(call["call_sid"]).update(status="completed")
-
-    return {"ok": True}
+    if hangup_twilio_call(request.app.state.settings, call["call_sid"]):
+        return {"ok": True}
+    return {"error": "Failed to hang up call via Twilio"}
 
 
 @router.websocket("/media")
 async def media_stream(websocket: WebSocket) -> None:
-    """Handle Twilio Media Stream WebSocket for bidirectional audio."""
+    """Handle Twilio Media Stream WebSocket — routes to the Realtime bridge.
+
+    All calls (inbound and outbound) run the OpenAI Realtime engine. Dispatch
+    metadata comes from the in-memory cache, falling back to the phone_calls
+    row so a server restart between dial and answer doesn't kill the call.
+    """
     await websocket.accept()
     logger.info("Twilio Media Stream connected")
-
-    engines = getattr(websocket.app.state, "voice_engines", None)
-
-    settings = websocket.app.state.settings.phone
-    db = websocket.app.state.db
-
-    from bob_server.context import AppContext
-    from bob_server.services.voice_transport import TwilioTransport
-
-    ctx = AppContext(db=db, settings=websocket.app.state.settings, voice_engines=engines) if engines else None
-
-    transport: TwilioTransport | None = None
-    agenda: str = ""
-    call_id: str = ""
-    exchange_index: int = 0
-    processing_lock = asyncio.Lock()
-    pipeline_task: asyncio.Task | None = None
-    hello_task: asyncio.Task | None = None
-    first_utterance_done = False
-    media_count = 0
-    pipeline_was_active = False
 
     try:
         while True:
@@ -590,166 +394,26 @@ async def media_stream(websocket: WebSocket) -> None:
                 start_data = data.get("start", {})
                 stream_sid = data.get("streamSid", start_data.get("streamSid", ""))
                 call_sid = start_data.get("callSid", "")
-                stored = _call_agendas.get(call_sid, {})
+                stored = call_agendas.get(call_sid) or await load_call_meta(websocket.app.state.db, call_sid)
                 if isinstance(stored, dict) and stored.get("engine") == "openai_realtime":
-                    # OpenAI Realtime path — own WS read loop, no local STT/TTS engines.
                     await _run_realtime_call(websocket, call_sid, stream_sid, stored)
                     return
-                if engines is None:
-                    logger.error("Voice engines not loaded — cannot handle default phone call")
+                logger.warning(
+                    "Twilio stream %s has no realtime call record (call_sid=%s); closing",
+                    stream_sid, call_sid,
+                )
+                try:
                     await websocket.close()
-                    return
-                transport = TwilioTransport(
-                    websocket=websocket,
-                    stream_sid=stream_sid,
-                    silence_threshold=settings.silence_threshold,
-                    silence_duration=settings.silence_duration,
-                    record=settings.call_recording_enabled,
-                )
-                stored = _call_agendas.get(call_sid, {})
-                if isinstance(stored, dict):
-                    raw_agenda = stored.get("agenda", "")
-                    call_id = stored.get("call_id", str(uuid4()))
-                else:
-                    raw_agenda = stored or ""
-                    call_id = str(uuid4())
-                phone_context = _build_phone_context()
-                agenda = f"{phone_context} {raw_agenda}".strip() if raw_agenda else phone_context
-                logger.info("Twilio stream started: %s (call: %s)", stream_sid, call_sid)
-
-                # Update call record to active
-                await db.execute(
-                    """UPDATE phone_calls
-                       SET stream_sid = ?, status = 'active'
-                       WHERE id = ?""",
-                    (stream_sid, call_id),
-                )
-                await _emit_event(websocket.app.state, "phone.call.active", {
-                    "call_id": call_id,
-                })
-
-                # If no speech after 5s, say "Hello?"
-                hello_task = asyncio.create_task(
-                    _say_hello_if_silent(
-                        websocket, transport, engines,
-                        lambda: first_utterance_done,
-                        lambda: transport._has_speech,
-                        call_id, exchange_index, db,
-                    )
-                )
-
-            elif event == "media":
-                if transport is None:
-                    continue
-
-                payload = data.get("media", {}).get("payload", "")
-                if not payload:
-                    continue
-
-                mulaw_bytes = base64.b64decode(payload)
-                media_count += 1
-
-                # Always feed audio for silence/speech detection
-                transport.feed_inbound_audio(mulaw_bytes)
-
-                if processing_lock.locked():
-                    # Pipeline running — check for barge-in
-                    pipeline_was_active = True
-                    if transport._has_speech and transport.is_speaking:
-                        logger.info("Barge-in detected at media chunk %d", media_count)
-                        transport.interrupt()
-                        if pipeline_task and not pipeline_task.done():
-                            pipeline_task.cancel()
-                        # Reset transport state for new utterance detection
-                        transport.clear_buffer()
-                        transport.reset_interrupt()
-                else:
-                    # Pipeline idle — normal utterance detection
-                    if pipeline_was_active:
-                        # Pipeline just finished — reset silence detector to
-                        # avoid false triggers from noise/echo accumulated
-                        # during TTS playback
-                        transport.clear_buffer()
-                        pipeline_was_active = False
-                    if transport.is_utterance_complete():
-                        logger.info("Utterance complete after %d media chunks", media_count)
-                        first_utterance_done = True
-                        if hello_task and not hello_task.done():
-                            hello_task.cancel()
-
-                        # Play acknowledgment tick so the caller knows input was captured
-                        from bob_server.services.voice_engines import generate_tone_wav
-                        tick_wav = generate_tone_wav(frequency=1200, duration=0.06, sample_rate=16000, amplitude=0.2)
-                        await transport.send_audio(tick_wav)
-
-                        pcm16 = transport.get_accumulated_pcm16()
-                        if len(pcm16) == 0:
-                            continue
-
-                        # Convert PCM16 to WAV bytes for the voice pipeline
-                        import io
-                        import soundfile as sf
-
-                        buf = io.BytesIO()
-                        sf.write(buf, pcm16, 16000, subtype="PCM_16", format="WAV")
-                        wav_bytes = buf.getvalue()
-
-                        utterance_time = time.time()
-
-                        pipeline_task = asyncio.create_task(
-                            _run_voice_pipeline(
-                                websocket, transport, wav_bytes,
-                                processing_lock, agenda, call_id, exchange_index, db, ctx,
-                                utterance_time,
-                            )
-                        )
-                        exchange_index += 1
-
-            elif event == "stop":
-                logger.info("Twilio stream stopped (received %d media chunks)", media_count)
-                break
+                except Exception:
+                    pass
+                return
 
     except WebSocketDisconnect:
         pass
     except Exception:
         logger.error("Error in media stream handler", exc_info=True)
-    finally:
-        if hello_task and not hello_task.done():
-            hello_task.cancel()
-        if pipeline_task and not pipeline_task.done():
-            pipeline_task.cancel()
-        # Finalize call record
-        if transport and call_id:
-            try:
-                calls_dir = websocket.app.state.settings.config_dir / "harness" / "calls"
-                result = transport.finalize_recording(calls_dir, call_id)
-                rec_path = str(calls_dir / result[0]) if result else None
-                await db.execute(
-                    """UPDATE phone_calls
-                       SET status = 'completed', completed_at = datetime('now'),
-                           exchange_count = ?, recording_path = ?, duration_seconds = ?
-                       WHERE id = ?""",
-                    (exchange_index, rec_path, None, call_id),
-                )
-                await _emit_event(websocket.app.state, "phone.call.completed", {
-                    "call_id": call_id,
-                    "exchange_count": exchange_index,
-                })
-            except Exception:
-                logger.warning("Failed to finalize call record", exc_info=True)
 
-        # Dispatch call result to originating session if applicable
-        if call_id:
-            await _maybe_dispatch_call_result(
-                db=db,
-                settings=websocket.app.state.settings,
-                app_state=websocket.app.state,
-                call_sid="",
-                call_status="completed",
-                call_id_override=call_id,
-            )
-
-        logger.info("Twilio Media Stream disconnected")
+    logger.info("Twilio Media Stream disconnected")
 
 
 async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: str, stored: dict) -> None:
@@ -767,6 +431,7 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
     settings_full = app_state.settings
     rt_settings = settings_full.openai_realtime
     db = app_state.db
+    event_bus = getattr(app_state, "event_bus", None)
 
     call_id = stored.get("call_id") or str(uuid4())
     phone_number = stored.get("phone_number", "")
@@ -781,6 +446,16 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
     ctx = AppContext(db=db, settings=settings_full, voice_engines=getattr(app_state, "voice_engines", None))
     tools = make_realtime_tools(ctx, phone_number=phone_number)
 
+    # Phone-call convention: on an outbound call the callee speaks first
+    # ("hello"); the agent replies to their greeting. Inbound callers have
+    # already spoken by connect time, so the agent opens there.
+    speak_first = (stored.get("direction") or "outbound") != "outbound"
+
+    # Persist partial transcript after every turn so phone_calls.transcript is
+    # readable mid-call and survives a bridge cleanup hang.
+    async def on_turn(transcript: str) -> None:
+        await persist_call_transcript(db, call_id, transcript)
+
     source = TwilioMediaSource(websocket, stream_sid)
     bridge = RealtimeBridge(
         source,
@@ -791,16 +466,34 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
         tools=tools,
         max_duration_seconds=max_duration,
         turn_detection=rt_settings.turn_detection,
+        on_turn=on_turn,
+        speak_first=speak_first,
     )
 
     await db.execute(
         "UPDATE phone_calls SET stream_sid = ?, status = 'active' WHERE id = ?",
         (stream_sid, call_id),
     )
-    await _emit_event(app_state, "phone.call.active", {"call_id": call_id})
+    if event_bus:
+        await event_bus.publish("phone.call.active", {"call_id": call_id})
 
     await source.start()
     bridge_task = asyncio.create_task(bridge.run())
+
+    async def _hangup_when_bridge_ends() -> None:
+        """end_call / timeout / error end the OpenAI session but NOT the phone
+        leg — and this handler's read loop only exits when Twilio closes the
+        stream, so without an explicit hang-up the call sits connected in dead
+        air, billing minutes, and the finalize path never runs (observed
+        2026-08-14: 3.5 min of silence after the agent ended a voicemail call).
+        Hanging up makes Twilio close the stream, which unblocks the read loop.
+        """
+        result = await bridge_task
+        if result.end_reason in ("end_tool", "timeout", "error") and not source.input_closed():
+            logger.info("Bridge ended (%s) — hanging up Twilio call %s", result.end_reason, call_sid)
+            hangup_twilio_call(settings_full, call_sid)
+
+    hangup_task = asyncio.create_task(_hangup_when_bridge_ends())
 
     try:
         while True:
@@ -825,6 +518,12 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
     except Exception:
         logger.error("Error in realtime media loop", exc_info=True)
     finally:
+        if not hangup_task.done():
+            hangup_task.cancel()
+            try:
+                await hangup_task
+            except (asyncio.CancelledError, Exception):
+                pass
         source.signal_closed()
         try:
             result = await asyncio.wait_for(bridge_task, timeout=10)
@@ -835,11 +534,12 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
         transcript = result.transcript if result else ""
         duration = result.duration_seconds if result else 0.0
 
-        # Append structured tool outcomes (confirm_booking / report_blocker / etc.)
-        # to the stored transcript so the summariser and Bob can see the result,
-        # not just the conversation prose.
-        if result and result.tool_calls:
-            lines = [f"\n\n--- Tool outcomes ---"]
+        # Structured outcome from report_success / report_failure tool calls.
+        outcome = extract_outcome(result.tool_calls) if result else None
+        if outcome is None and result and result.tool_calls:
+            # No outcome tool reported — keep any other tool results visible in
+            # the stored transcript as a fallback.
+            lines = ["\n\n--- Tool outcomes ---"]
             for tc in result.tool_calls:
                 args_str = json.dumps(tc.get("arguments", {}))
                 lines.append(f"{tc.get('name')}: {args_str} -> {tc.get('output')}")
@@ -858,26 +558,20 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
             await db.execute(
                 """UPDATE phone_calls
                    SET status = 'completed', completed_at = datetime('now'),
-                       transcript = ?, recording_path = ?, duration_seconds = ?
+                       transcript = ?, recording_path = ?, duration_seconds = ?, outcome = ?
                    WHERE id = ?""",
-                (transcript, rec_path, duration, call_id),
+                (transcript, rec_path, duration,
+                 json.dumps(outcome) if outcome else None, call_id),
             )
-            await _emit_event(app_state, "phone.call.completed", {"call_id": call_id})
+            if event_bus:
+                await event_bus.publish("phone.call.completed", {"call_id": call_id})
         except Exception:
             logger.warning("Failed to finalize realtime call record", exc_info=True)
 
         # Mark the linked subagent completed so the parent sees a clean lifecycle.
-        subagent_id = (stored.get("realtime_meta") or {}).get("subagent_id")
+        subagent_id = meta.get("subagent_id")
         if subagent_id:
-            try:
-                await db.execute(
-                    """UPDATE subagents
-                       SET status = 'completed', result = ?, updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (transcript[:4000], subagent_id),
-                )
-            except Exception:
-                logger.warning("Failed to mark realtime subagent completed", exc_info=True)
+            await mark_voice_subagent_complete(db, subagent_id, transcript)
 
         await _maybe_dispatch_call_result(
             db=db,
@@ -891,107 +585,3 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
             "Realtime call %s ended (reason=%s, %.1fs)",
             call_id, result.end_reason if result else "?", duration,
         )
-
-
-async def _say_hello_if_silent(
-    websocket: WebSocket,
-    transport: Any,
-    engines: Any,
-    started_check: Any,
-    has_speech_check: Any,
-    call_id: str,
-    exchange_index: int,
-    db: Any,
-) -> None:
-    """After 5s of silence, play 'Hello?' to prompt the callee."""
-    try:
-        await asyncio.sleep(5.0)
-        if started_check():
-            return
-        if has_speech_check():
-            return
-        logger.info("No speech after 5s, saying Hello?")
-        t0 = time.monotonic()
-        async with engines.tts.lock:
-            audio, sr = await asyncio.to_thread(engines.tts.generate, "Hello?", "en")
-        tts_ms = int((time.monotonic() - t0) * 1000)
-        from bob_server.services.voice_engines import samples_to_wav
-        wav_bytes = samples_to_wav(audio, sr)
-        await transport.send_audio(wav_bytes)
-        logger.info("Hello? played on phone call (TTS took %dms)", tts_ms)
-
-        # Log as an exchange
-        from datetime import datetime, timezone
-        try:
-            await db.execute(
-                """INSERT INTO phone_call_exchanges
-                   (call_id, exchange_index, user_transcript, assistant_transcript,
-                    stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (call_id, exchange_index,
-                 "(silence)", "Hello?",
-                 None, None, tts_ms, tts_ms,
-                 datetime.now(tz=timezone.utc).isoformat()),
-            )
-        except Exception:
-            logger.warning("Failed to log hello exchange", exc_info=True)
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        logger.warning("Failed to say hello", exc_info=True)
-
-
-async def _run_voice_pipeline(
-    websocket: WebSocket,
-    transport: Any,
-    wav_bytes: bytes,
-    lock: asyncio.Lock,
-    agenda: str,
-    call_id: str,
-    exchange_index: int,
-    db: Any,
-    ctx: Any,
-    utterance_time: float = 0.0,
-) -> None:
-    """Run the voice pipeline for a single utterance and log the exchange."""
-    proxy = _CallRecorderProxy(transport, call_id, exchange_index, db, utterance_time)
-    async with lock:
-        try:
-            from bob_server.services.voice_service import VoiceService
-
-            engines = websocket.app.state.voice_engines
-            service = VoiceService(ctx, engines)
-
-            await service.process_audio(
-                transport=proxy,
-                audio_chunks=[wav_bytes],
-                language=None,
-                user_id=f"phone:{call_id}",
-                session_mode="chat",
-                agenda=agenda,
-            )
-        except asyncio.CancelledError:
-            logger.info("Voice pipeline cancelled for exchange %d (barge-in)", exchange_index)
-            proxy.done.set()
-            raise
-        except Exception:
-            logger.error("Voice pipeline error during phone call", exc_info=True)
-            if not proxy._saved and (proxy.user_transcript or proxy.assistant_transcript):
-                await proxy._save_exchange()
-            proxy.done.set()
-
-        # Wait for the full pipeline (LLM + TTS) to complete before releasing the lock,
-        # preventing concurrent dispatches to the same session.
-        if not proxy.done.is_set():
-            try:
-                await asyncio.wait_for(proxy.done.wait(), timeout=120)
-            except asyncio.TimeoutError:
-                logger.warning("Pipeline timed out for exchange %d", exchange_index)
-
-    # Agent requested hangup via <hangup/> token — close the call
-    if proxy.hangup_requested:
-        logger.info("Agent requested hangup via <hangup/> token, closing call %s", call_id)
-        try:
-            await websocket.close()
-        except Exception:
-            pass

@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 _running_tasks: dict[str, asyncio.Task[None]] = {}
 _locks: dict[str, asyncio.Lock] = {}
 
+# Aliases the parent LLM tends to invent for the openai_voice agent_type. We
+# normalise to "openai_voice" rather than rejecting — historical data shows the
+# LLM producing values like "phone-call", "voice_chat", "voice" unpredictably.
+# Modality aliases live in voice_dispatch_service (shared with the outreach
+# tools) so there is exactly one vocabulary table.
+_VOICE_AGENT_TYPE_ALIASES = {
+    "openai_voice", "voice_call", "voice_chat", "voice", "phone_call",
+    "phone-call", "phone", "voice_link", "voip", "realtime",
+}
+
+
+def _normalise_voice_agent_type(value: str) -> str:
+    v = (value or "").strip().lower()
+    return "openai_voice" if v in _VOICE_AGENT_TYPE_ALIASES else value
+
 SUBAGENT_SYSTEM_PROMPT = """\
 You are a subagent of Bob, an AI assistant. You have been given a task to complete.
 Use your available tools (Read, Write, Glob, Grep) to accomplish the task.
@@ -44,8 +59,36 @@ class SubagentService(BaseService):
     """Manages async subagent lifecycle — create, run, message, check, list, kill."""
 
     async def create_subagent(
-        self, task: str, parent_session_key: str, *, agent_type: str = "claude", persona: bool = False, model: str = "",
+        self,
+        task: str,
+        parent_session_key: str,
+        *,
+        agent_type: str = "claude",
+        persona: bool = False,
+        model: str = "",
+        contact_id: str | None = None,
+        modality: str = "phone",
     ) -> dict[str, Any]:
+        # Normalise voice-agent aliases the parent LLM invents. Anything in the
+        # voice vocabulary routes to the openai_voice path; the stored values
+        # are the canonical ones so dashboards/logs are consistent. As a stronger
+        # signal: if contact_id is present we treat the subagent as a voice call
+        # regardless of agent_type — the LLM keeps inventing new type names
+        # ("phone-call", "voice_chat", "general-purpose", …) and contact_id is
+        # the unambiguous "this is a call to a person" marker.
+        from bob_server.services.voice_dispatch_service import normalise_voice_modality
+
+        requested_modality = modality
+        normalised_type = _normalise_voice_agent_type(agent_type)
+        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local")):
+            agent_type = "openai_voice"
+            # Unknown modality vocabulary defaults to phone — never guess toward
+            # a modality the caller didn't clearly pick... except that bare
+            # "voice" et al. are voice_link (see the shared alias table).
+            # Unknown modality vocabulary defaults to phone — see the shared
+            # alias table in voice_dispatch_service for the known vocabulary.
+            modality = normalise_voice_modality(modality) or "phone"
+
         subagent_id = str(uuid4())
         short_id = subagent_id[:8]
         session_key = f"subagent:{parent_session_key}:{short_id}"
@@ -53,10 +96,48 @@ class SubagentService(BaseService):
 
         await self.db.execute(
             """INSERT INTO subagents
-               (id, parent_session_key, session_key, task, status, agent_type, persona, model, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)""",
-            (subagent_id, parent_session_key, session_key, task, agent_type, int(persona), model, now, now),
+               (id, parent_session_key, session_key, task, status, agent_type, persona, model,
+                contact_id, modality, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?)""",
+            (subagent_id, parent_session_key, session_key, task, agent_type,
+             int(persona), model, contact_id, modality, now, now),
         )
+
+        # openai_voice dispatches synchronously so we can return voice_url / call_sid
+        # to the LLM in the tool result. No background task — the row stays in
+        # 'running' until VoiceSessionService.complete or _run_realtime_call marks
+        # it completed when the call ends.
+        if agent_type == "openai_voice":
+            try:
+                dispatch = await self._dispatch_openai_voice(
+                    subagent_id, task, contact_id, modality, parent_session_key,
+                )
+            except Exception as e:
+                logger.warning("openai_voice subagent %s dispatch failed: %s", short_id, e)
+                await self._update_status(subagent_id, "failed", error=str(e))
+                return {"ok": False, "error": str(e), "subagent_id": subagent_id, "session_key": session_key}
+
+            logger.info("openai_voice subagent %s dispatched: %s", short_id, dispatch)
+            result = {
+                "ok": True,
+                "subagent_id": subagent_id,
+                "session_key": session_key,
+                "status": "running",
+                "modality": modality,
+                **dispatch,
+            }
+            # Surface alias coercions so the LLM can notice and retry rather
+            # than conclude the tool is broken (observed 2026-08-14: it asked
+            # for a phone call via modality="voice", got a link, and told the
+            # user the dialler didn't work).
+            if requested_modality and requested_modality.strip().lower() != modality:
+                result["requested_modality"] = requested_modality
+                result["note"] = (
+                    f"you asked for modality '{requested_modality}' which was "
+                    f"interpreted as '{modality}' — pass modality='phone' or "
+                    f"'voice_link' explicitly to be sure"
+                )
+            return result
 
         t = asyncio.create_task(self._run_subagent(subagent_id, task))
         _running_tasks[subagent_id] = t
@@ -68,6 +149,25 @@ class SubagentService(BaseService):
             "session_key": session_key,
             "status": "created",
         }
+
+    async def _dispatch_openai_voice(
+        self,
+        subagent_id: str,
+        task: str,
+        contact_id: str | None,
+        modality: str,
+        parent_session_key: str,
+    ) -> dict[str, Any]:
+        """Dispatch a voice_link or phone call for this subagent.
+
+        Thin delegation to VoiceDispatchService, which owns contact resolution,
+        instruction building, and Twilio placement.
+        """
+        from bob_server.services.voice_dispatch_service import VoiceDispatchService
+
+        return await VoiceDispatchService(self.ctx).dispatch_contact_call(
+            subagent_id, task, contact_id, modality, parent_session_key,
+        )
 
     async def _run_subagent(self, subagent_id: str, task: str) -> None:
         short_id = subagent_id[:8]
@@ -146,6 +246,8 @@ class SubagentService(BaseService):
         )
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
+        if row["agent_type"] == "openai_voice":
+            return {"ok": False, "error": "Voice subagent in progress; cannot message. Use kill_subagent to cancel."}
         if row["status"] not in ("waiting_for_parent", "running"):
             return {"ok": False, "error": f"Subagent is in status '{row['status']}', cannot receive messages"}
 
@@ -251,7 +353,7 @@ class SubagentService(BaseService):
 
     async def kill_subagent(self, subagent_id: str) -> dict[str, Any]:
         row = await self.db.fetch_one(
-            "SELECT status FROM subagents WHERE id = ?", (subagent_id,),
+            "SELECT status, agent_type FROM subagents WHERE id = ?", (subagent_id,),
         )
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
@@ -260,16 +362,49 @@ class SubagentService(BaseService):
         if task and not task.done():
             task.cancel()
 
+        # For openai_voice subagents, tear down whatever they dispatched:
+        # expire the linked browser voice_session (so the contact's link stops
+        # working) and hang up any live phone call — the phone_calls row now
+        # carries subagent_id (migration 355), so the call_sid is reachable.
+        if row["agent_type"] == "openai_voice":
+            from bob_server.services.voice_dispatch_service import hangup_twilio_call
+
+            try:
+                now_iso = utcnow().isoformat()
+                await self.db.execute(
+                    "UPDATE voice_sessions SET status = 'expired', completed_at = ? WHERE subagent_id = ? AND status IN ('pending', 'active')",
+                    (now_iso, subagent_id),
+                )
+                # Keep the phone_calls mirror row in sync (calls UI).
+                await self.db.execute(
+                    "UPDATE phone_calls SET status = 'canceled', completed_at = ? WHERE subagent_id = ? AND direction = 'voice_link' AND status IN ('ringing', 'active')",
+                    (now_iso, subagent_id),
+                )
+            except Exception:
+                logger.warning("Failed to expire voice_session for killed subagent %s", subagent_id[:8], exc_info=True)
+
+            call = await self.db.fetch_one(
+                "SELECT call_sid, status FROM phone_calls WHERE subagent_id = ? ORDER BY started_at DESC LIMIT 1",
+                (subagent_id,),
+            )
+            if call and call["status"] in ("active", "ringing"):
+                if hangup_twilio_call(self._get_settings(), call["call_sid"]):
+                    logger.info("Hung up phone call %s for killed subagent %s", call["call_sid"], subagent_id[:8])
+
         await self._update_status(subagent_id, "killed")
         logger.info("Subagent %s killed", subagent_id[:8])
         return {"ok": True, "subagent_id": subagent_id, "status": "killed"}
 
     async def cleanup_stale(self) -> int:
-        """Set any running subagents to failed (e.g. after server restart)."""
+        """Set any running subagents to failed (e.g. after server restart).
+
+        Excludes ``openai_voice`` subagents — they legitimately stay in 'running'
+        for minutes-to-hours while the contact hasn't picked up yet.
+        """
         now = utcnow().isoformat()
         count = await self.db.execute(
             "UPDATE subagents SET status = 'failed', error_message = 'Server restarted', updated_at = ? "
-            "WHERE status IN ('created', 'running')",
+            "WHERE status IN ('created', 'running') AND agent_type != 'openai_voice'",
             (now,),
         )
         if count:

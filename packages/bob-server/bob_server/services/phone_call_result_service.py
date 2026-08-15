@@ -30,14 +30,32 @@ async def generate_call_summary(
     """
     db = ctx.db
 
-    call_row = await db.fetch_one("SELECT engine, transcript FROM phone_calls WHERE id = ?", (call_id,))
+    call_row = await db.fetch_one(
+        "SELECT engine, transcript, outcome FROM phone_calls WHERE id = ?", (call_id,)
+    )
     engine = (call_row["engine"] if call_row else None) or "default"
 
     if engine == "openai_realtime":
         transcript = (call_row["transcript"] if call_row else "") or ""
-        if not transcript.strip():
+        outcome = None
+        if call_row and call_row["outcome"]:
+            import json
+            try:
+                outcome = json.loads(call_row["outcome"])
+            except (json.JSONDecodeError, TypeError):
+                outcome = None
+
+        from bob_server.services.voice_dispatch_service import format_outcome
+        outcome_block = format_outcome(outcome)
+
+        if not transcript.strip() and not outcome_block:
             return f"Call {status} before any conversation took place."
-        return await _summarize_transcript(ctx, agenda, transcript)
+        blocks = []
+        if outcome_block:
+            blocks.append(f"Reported outcome:\n{outcome_block}")
+        if transcript.strip():
+            blocks.append(f"Transcript:\n{transcript}")
+        return await _summarize_transcript(ctx, agenda, "\n\n".join(blocks))
 
     exchanges = await db.fetch_all(
         """SELECT user_transcript, assistant_transcript
