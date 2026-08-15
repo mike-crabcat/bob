@@ -293,6 +293,11 @@ async def voice_realtime(websocket: WebSocket) -> None:
         turn_detection=rt_settings.turn_detection,
         emit=emit,
         on_turn=on_turn,
+        # Persona mode (voice-link sessions): same phone-call convention as
+        # outbound calls — the person who tapped the link gets the first turn,
+        # and the opening gate cancels noise-triggered turns. Test mode keeps
+        # agent-first (it exists to iterate on agent-opening tasks).
+        speak_first=session_id is None,
     )
 
     async def ws_read_loop() -> None:
