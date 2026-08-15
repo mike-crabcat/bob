@@ -333,7 +333,7 @@ class RealtimeBridge:
         emit: Any = None,
         on_turn: Any = None,
         speak_first: bool = True,
-        first_response_delay_seconds: float = 8.0,
+        opening_listen_seconds: float = 5.0,
     ) -> None:
         self.audio = audio_source
         self.api_key = api_key
@@ -352,16 +352,29 @@ class RealtimeBridge:
         self.on_turn = on_turn
         # Phone-call convention: on an outbound call the CALLEE speaks first
         # (typically "hello"). When speak_first is False the bridge does not
-        # prompt an opening response on connect; server VAD produces the agent's
-        # first turn in reply to the callee's greeting. If the line is silent
-        # (dead air), a fallback prompt fires after first_response_delay_seconds.
+        # prompt an opening response on connect; the agent's first turn comes
+        # from server VAD replying to the callee's greeting.
+        #
+        # Opening gate: VAD can fire on connection noise and create a response
+        # with NO transcribed human speech behind it (observed 2026-08-15: a
+        # noise burst at connect made the agent open with "Hi Sophia"). During
+        # the first opening_listen_seconds, any response created without a
+        # completed user transcription is cancelled and its audio suppressed;
+        # at the end of the window the agent is prompted to open only if
+        # nothing conversational happened.
         self.speak_first = speak_first
-        self.first_response_delay_seconds = first_response_delay_seconds
+        self.opening_listen_seconds = opening_listen_seconds
 
         self._tool_handlers: dict[str, Tool] = {t.name: t for t in self.tools}
         self._end_requested = asyncio.Event()
         self._session_ready = asyncio.Event()
         self._first_speech = asyncio.Event()
+        # Opening-gate state (callee-first mode).
+        self._grace_until = 0.0  # monotonic deadline; 0 = no gate (speak_first)
+        self._user_transcript_seen = False
+        self._response_in_flight = False
+        self._conversational_response_done = False
+        self._suppressed_response_ids: set[str] = set()
         self._timed_out = False
         self._last_error = ""
         # Diagnostic counters (logged at session end).
@@ -482,21 +495,20 @@ class RealtimeBridge:
         logger.info("Realtime bridge: max duration %ss reached", self.max_duration_seconds)
 
     async def _first_response_nudge(self, oai: websockets.WebSocketClientProtocol) -> None:
-        """Callee-first mode: if the line is silent past the delay (dead line,
-        misdial), prompt the agent to open so the call doesn't sit in dead air
-        until max_duration."""
+        """Opening gate: after the listen window, make sure the agent takes a
+        turn — prompt it to open if nothing conversational happened (dead line,
+        or the greeting's response was cancelled as noise-triggered)."""
         await self._session_ready.wait()
-        try:
-            await asyncio.wait_for(self._first_speech.wait(), timeout=self.first_response_delay_seconds)
-            return  # callee spoke — server VAD handles the agent's reply
-        except asyncio.TimeoutError:
-            pass
-        if not self._end_requested.is_set():
-            logger.info(
-                "Bridge: no callee speech within %.0fs — prompting agent to open",
-                self.first_response_delay_seconds,
-            )
-            await self._send(oai, {"type": "response.create"})
+        await asyncio.sleep(self.opening_listen_seconds)
+        if self._end_requested.is_set():
+            return
+        if self._response_in_flight or self._conversational_response_done:
+            return
+        logger.info(
+            "Bridge: opening window (%.0fs) elapsed without a conversational turn — prompting agent",
+            self.opening_listen_seconds,
+        )
+        await self._send(oai, {"type": "response.create"})
 
     async def request_end(self) -> None:
         """Signal the bridge to wind down (e.g. ``end_call`` tool)."""
@@ -567,25 +579,45 @@ class RealtimeBridge:
     async def _dispatch_event(self, oai: websockets.WebSocketClientProtocol, etype: str, event: dict) -> None:
         if etype == "session.updated":
             self._session_ready.set()
-            # Agent speaks first to open the task — unless the caller asked for
-            # callee-first (outbound phone convention); then server VAD opens
-            # the agent's first turn in reply to the callee's greeting.
             if self.speak_first:
+                # Agent opens the task.
                 await self._send(oai, {"type": "response.create"})
+            else:
+                # Callee-first: arm the opening gate.
+                self._grace_until = time.monotonic() + self.opening_listen_seconds
             return
 
         if etype == "response.created":
             self._response_count += 1
+            self._response_in_flight = True
+            response_id = (event.get("response") or {}).get("id") or ""
+            within_grace = self._grace_until and time.monotonic() < self._grace_until
+            if within_grace and not self._user_transcript_seen:
+                # A response with no transcribed human speech behind it during
+                # the opening window = VAD fired on connection noise. Kill it
+                # before any audio reaches the caller.
+                logger.info(
+                    "Bridge: cancelling noise-triggered response #%d during opening gate",
+                    self._response_count,
+                )
+                if response_id:
+                    self._suppressed_response_ids.add(response_id)
+                await self._send(oai, {"type": "response.cancel"})
+                return
             logger.info("Bridge: response.created (#%d)", self._response_count)
             return
 
         if etype == "response.output_audio.delta":
+            if event.get("response_id") in self._suppressed_response_ids:
+                return  # cancelled noise response — never reach the caller
             chunk = base64.b64decode(event.get("delta", ""))
             if chunk:
                 await self.audio.send_speaker_pcm16_24k(chunk)
             return
 
         if etype == "response.output_audio_transcript.delta":
+            if event.get("response_id") in self._suppressed_response_ids:
+                return
             delta = event.get("delta", "")
             if delta:
                 self._current_agent += delta
@@ -595,6 +627,13 @@ class RealtimeBridge:
 
         if etype == "response.done":
             logger.info("Bridge: response.done")
+            self._response_in_flight = False
+            response_id = (event.get("response") or {}).get("id") or ""
+            was_suppressed = response_id in self._suppressed_response_ids
+            self._suppressed_response_ids.discard(response_id)
+            if was_suppressed:
+                return  # noise-triggered turn: no audio, no transcript record
+            self._conversational_response_done = True
             # Flush the accumulated assistant transcript as one labelled turn.
             if self._current_agent.strip():
                 self._turns.append(f"Agent: {self._current_agent.strip()}")
@@ -605,6 +644,7 @@ class RealtimeBridge:
         if etype == "conversation.item.input_audio_transcription.completed":
             user_text = (event.get("transcript") or "").strip()
             if user_text:
+                self._user_transcript_seen = True
                 self._turns.append(f"User: {user_text}")
                 if self.emit:
                     await self.emit("user_transcript", {"text": user_text})
