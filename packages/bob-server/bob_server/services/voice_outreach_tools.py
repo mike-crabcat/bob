@@ -51,7 +51,9 @@ def make_voice_outreach_tools(
 
         NOTE: this offers a BROWSER LINK only. If the user wants their actual
         phone to ring, use create_subagent(agent_type="openai_voice",
-        modality="phone") instead.
+        modality="phone") instead. If the callee isn't a saved contact yet,
+        create them first with create_contact(name, phone_number) and pass the
+        returned contact_id.
         """
         from bob_server.services.voice_session_service import VoiceSessionService
         from bob_server.services.thread_result_service import _session_key_to_chat_id

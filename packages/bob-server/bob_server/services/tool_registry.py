@@ -71,14 +71,16 @@ def build_common_tools(
 
     # Trust-escalated tools
     if is_trusted:
-        _extend(make_contact_tools(ctx))
+        _extend(make_contact_tools(ctx, is_trusted=True))
         _extend(make_reflection_tools(ctx, session_key))
         if ctx.settings.harness.skill_dev_enabled:
             _extend(make_subagent_tools(ctx, session_key))
 
-    # Phone subsystem — adds contact + phone tools when enabled
+    # Phone subsystem — adds contact + phone tools when enabled.
+    # create_contact stays trust-gated here too: phone-enabled untrusted
+    # sessions get search only.
     if ctx.settings.phone.enabled:
-        _extend(make_contact_tools(ctx))
+        _extend(make_contact_tools(ctx, is_trusted=is_trusted))
         _extend(make_phone_tools(ctx, session_key=session_key))
 
     # Home Assistant — adds current_location() when configured

@@ -33,7 +33,9 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         - 'local': runs in-process via chat_with_tools (faster, no subprocess).
         - 'openai_voice': places a real voice call to a contact. `task` is the goal
           (short, plain-English: "find out if David is coming tonight"). `contact_id`
-          is REQUIRED — look up the contact first with a contact search tool.
+          is REQUIRED — look up the contact first with a contact search tool, or
+          create one on the spot with create_contact(name, phone_number) when the
+          number isn't saved yet (e.g. a shop you just looked up).
 
         modality — use EXACTLY 'phone' or 'voice_link', nothing else:
         - 'phone' (default): rings their actual phone via Twilio. Use this whenever
