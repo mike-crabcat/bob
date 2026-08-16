@@ -169,8 +169,6 @@ class DreamRunner(BaseService):
         if len(sessions) < self.settings.min_new_sessions and not sessions:
             return
 
-        auto_approve = await self._auto_approve_enabled()
-
         for session in sessions:
             session_key = session["session_key"]
             cursor_at = (session.get("cursor_at") or "") or None
@@ -192,7 +190,7 @@ class DreamRunner(BaseService):
             for cand in result["resolutions"]:
                 await self._write_resolution(run_id, cand, session_key, stats)
             for cand in result["plans"]:
-                await self._write_plan(run_id, cand, session_key, stats, auto_approve=auto_approve)
+                await self._write_plan(run_id, cand, session_key, stats)
 
             # Advance the cursor to the newest message actually reviewed.
             await self.store.set_cursor(session_key, messages[-1]["created_at"], run_id)
@@ -231,7 +229,7 @@ class DreamRunner(BaseService):
         await self.store.add_link("resolution", item_id, session_key=session_key)
         stats["resolutions_created"].append({"id": item_id, "title": cand.title})
 
-    async def _write_plan(self, run_id: str, cand: PlanCandidate, session_key: str, stats: dict, *, auto_approve: bool) -> None:
+    async def _write_plan(self, run_id: str, cand: PlanCandidate, session_key: str, stats: dict) -> None:
         for e in cand.evidence:
             e.run_id = run_id
         match, terminal, embedding = await self._dedup_lookup("plan", cand.title, cand.what_was_discussed)
@@ -258,7 +256,7 @@ class DreamRunner(BaseService):
             stats["capped_dropped"].append({"type": "plan", "title": cand.title, "deferred": True})
             return
         # Backlog guard: plans with only old evidence never auto-approve.
-        auto_ok = auto_approve and self._evidence_is_fresh(
+        auto_ok = await self._session_autoplan(session_key) and self._evidence_is_fresh(
             cand.evidence, {"ts": (utcnow() - timedelta(days=self.settings.backlog_evidence_days)).strftime("%Y-%m-%dT%H:%M:%SZ")}
         )
         if auto_ok:
@@ -279,7 +277,6 @@ class DreamRunner(BaseService):
         deferred = await self.store.load_deferred()
         if not deferred:
             return
-        auto_approve = await self._auto_approve_enabled()
         processed: list[int] = []
         for entry in deferred:
             cand = _candidate_from_dict(entry["item_type"], entry["candidate"])
@@ -289,7 +286,7 @@ class DreamRunner(BaseService):
             if entry["item_type"] == "resolution":
                 await self._write_resolution(run_id, cand, entry["session_key"], stats)
             else:
-                await self._write_plan(run_id, cand, entry["session_key"], stats, auto_approve=auto_approve)
+                await self._write_plan(run_id, cand, entry["session_key"], stats)
             processed.append(entry["deferred_id"])
         await self.store.delete_deferred(processed)
         logger.info("dream run %s replayed %d deferred candidate(s)", run_id, len(processed))
@@ -319,10 +316,13 @@ class DreamRunner(BaseService):
         newest = max((_parse_iso(e.at) for e in evidence), default=None)
         return newest is not None and newest > ref
 
-    async def _auto_approve_enabled(self) -> bool:
+    async def _session_autoplan(self, session_key: str) -> bool:
+        """Autoplan is session-scoped (session_routes metadata, /autoplan command)."""
         from bob_server.services.dream import config as dream_config
 
-        return await dream_config.get_auto_approve_plans(self.db, self.settings.auto_approve_plans)
+        return await dream_config.get_session_autoplan(
+            self.db, session_key, self.settings.auto_approve_plans
+        )
 
     # ----------------------------------------------------------- prospective
 

@@ -35,11 +35,11 @@ async def get_dream_stats(request: Request) -> dict[str, Any]:
     plan_rows = await db.fetch_all("SELECT status, COUNT(*) AS n FROM dream_plans GROUP BY status")
     res_rows = await db.fetch_all("SELECT status, COUNT(*) AS n FROM dream_resolutions GROUP BY status")
     runs = await store.list_runs(1)
-    auto = await dream_config.get_auto_approve_plans(db, settings.auto_approve_plans)
+    autoplan_sessions = await dream_config.list_autoplan_sessions(db, enabled=True)
     return {
         "enabled": settings.enabled,
         "draft_mode": settings.draft_mode,
-        "auto_approve_plans": auto,
+        "autoplan_sessions": [s["session_key"] for s in autoplan_sessions],
         "interval_minutes": settings.interval_minutes,
         "caps": {
             "sessions_per_run": settings.max_sessions_per_run,
@@ -184,14 +184,20 @@ async def drop_dream_resolution(request: Request, resolution_id: str) -> dict[st
 
 @router.post("/api/dreams/autoplan")
 async def set_autoplan(request: Request) -> dict[str, Any]:
+    """Session-scoped: {session_key, enabled}."""
     if not _check_auth(request):
         return {"error": "unauthorized"}
     body = await request.json()
+    session_key = str(body.get("session_key", "")).strip()
     enabled = bool(body.get("enabled"))
+    if not session_key:
+        return {"error": "session_key required (autoplan is session-scoped)"}
     from bob_server.services.dream import config as dream_config
 
-    await dream_config.set_auto_approve_plans(_db(request), enabled)
-    return {"ok": True, "auto_approve_plans": enabled}
+    ok = await dream_config.set_session_autoplan(_db(request), session_key, enabled)
+    if not ok:
+        return {"error": "no active session route for that key"}
+    return {"ok": True, "session_key": session_key, "enabled": enabled}
 
 
 @router.post("/api/dreams/run")

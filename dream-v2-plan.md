@@ -45,7 +45,7 @@ and why — for the operator to audit in the dashboard.
 | D8 | Dream journals are **not bulletins** | A journal talking about people would re-enter claim extraction and risk feedback loops. Revisit deliberately later if a "second-chance extraction net" is wanted. |
 | D9 | **All dream LLM calls run on the memory model** (`openai.get_memory_model()`) | Dreaming is background housekeeping, never user-facing — it inherits the low-cost slot for every pass (review, prospective, synthesis) with no per-pass escalation or overrides. |
 | D10 | **Approved plans are announced** in their linked session — one natural message offering help, batched per session | Approval that nobody hears about is inert; the announcement is the proactive payoff of a plan. Batching + `announced_at` guard prevent spam. |
-| D11 | **`/autoplan on` enables auto-approval from day one**, via the trusted-contact slash-command path, backed by a runtime DB toggle | Operator's explicit choice to skip manual plan approval early. Guardrails: auto-approval still never enables Tier 2 outreach, and per-run/per-session caps still apply. Slash command needs a restart-free store, hence DB-backed config rather than env. |
+| D11 | **`/autoplan on` enables auto-approval from day one, session-scoped** — the flag lives in `session_routes.metadata` (the `/patience`/`/verbose` idiom), so it applies only to plans whose evidence came from that chat | Operator's explicit choice, per conversation, to skip manual approval early. Guardrails: auto-approval still never enables Tier 2 outreach, per-run caps and the backlog guard still apply, and other chats are unaffected. |
 | D12 | **Participants change or cancel plans conversationally** via session-bound agent tools; session binding *is* the permission model | The most common response to an announcement is conversational ("we already sorted it", "make it Sunday"). Tools bound to the session key can only touch plans linked to that session — participants were party to the conversation that created the plan, so they may close or amend it; nobody else can. No slash syntax for regular people. |
 
 ## Data model
@@ -272,21 +272,23 @@ Unfalsifiable or evidence-free candidates are rejected regardless of LLM confide
 ## Plan approval & announcements
 
 **Approval paths.** A plan reaches `approved` two ways: operator flip in the dashboard
-(`approved_by='operator'`), or auto-approval (`approved_by='auto'`) when the runtime toggle
-is on — validated plans go straight from candidate to `approved` at creation time, skipping
-`draft`/`proposed`. Auto-approval is available from day one.
+(`approved_by='operator'`), or auto-approval (`approved_by='auto'`) when the evidence
+session's autoplan flag is on — validated plans from that session go straight from
+candidate to `approved` at creation time, skipping `draft`/`proposed`. Auto-approval is
+session-scoped and available from day one.
 
 **`/autoplan` slash command** (in `SlashCommandsMixin` alongside `/patience`, `/verbose` —
 trusted contacts only, per the existing gate at the bridge):
 
-- `/autoplan on` — sets `dream_config.auto_approve_plans=true`; reply confirms and states
-  the guardrails ("plans auto-approve and get announced here; outreach stays off").
-- `/autoplan off` — back to manual approval.
-- `/autoplan status` (or bare `/autoplan`) — state plus counters (pending, approved,
-  announced, dismissed).
+- `/autoplan on` — sets `dream_autoplan=true` in this chat's `session_routes.metadata`;
+  reply confirms scope ("plans from this conversation auto-approve and get announced here;
+  other chats unaffected; outreach stays off") with this chat's plan counters.
+- `/autoplan off` — back to manual approval for this chat.
+- `/autoplan status` (or bare `/autoplan`) — this chat's state.
 
-Follows the `/verbose` interaction pattern; persists to `dream_config` so it takes effect
-immediately with no restart. The dashboard exposes the same toggle.
+Follows the `/verbose` interaction pattern; takes effect immediately with no restart. The
+dashboard Controls tab lists sessions with autoplan on (with a turn-off button); the CLI is
+`bob dream autoplan on|off --session <key>` (bare `autoplan` lists enabled sessions).
 
 **Announcement pipeline.** When a plan becomes `approved`:
 

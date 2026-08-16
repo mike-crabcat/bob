@@ -49,7 +49,7 @@ interface DreamResolution {
 interface DreamStats {
   enabled: boolean;
   draft_mode: boolean;
-  auto_approve_plans: boolean;
+  autoplan_sessions: string[];
   interval_minutes: number;
   plans_by_status: Record<string, number>;
   resolutions_by_status: Record<string, number>;
@@ -287,8 +287,8 @@ function ControlsTab() {
     queryFn: () => fetchAPI<{ announcements: Announcement[] }>("/dreams/announcements"),
   });
 
-  const toggleAutoplan = async () => {
-    await postAPI("/dreams/autoplan", { enabled: !(stats?.auto_approve_plans ?? false) });
+  const toggleAutoplan = async (sessionKey: string, enabled: boolean) => {
+    await postAPI("/dreams/autoplan", { session_key: sessionKey, enabled });
     await queryClient.invalidateQueries({ queryKey: ["dream-stats"] });
   };
   const runNow = async () => {
@@ -299,16 +299,23 @@ function ControlsTab() {
   return (
     <div className="overflow-y-auto text-[11px]">
       <div className="px-3 py-2 border-b border-border space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="text-muted">autoplan</span>
-          <button
-            onClick={toggleAutoplan}
-            className={`px-2 py-0.5 border border-border ${(stats?.auto_approve_plans ?? false) ? "text-success" : "text-muted"} hover:bg-muted/10`}
-          >
-            {stats?.auto_approve_plans ? "ON" : "OFF"}
-          </button>
-          <span className="text-[10px] text-muted/60">auto-approve + announce; outreach stays off</span>
-        </div>
+        <div className="text-[10px] uppercase tracking-wider text-muted">autoplan (per chat — set with /autoplan in WhatsApp)</div>
+        {(stats?.autoplan_sessions ?? []).length === 0 ? (
+          <div className="text-[10px] text-muted">off everywhere — plans await manual approval</div>
+        ) : (
+          (stats?.autoplan_sessions ?? []).map((sk) => (
+            <div key={sk} className="flex items-center gap-2">
+              <span className="text-success">ON</span>
+              <span className="text-muted truncate">{sk}</span>
+              <button
+                onClick={() => toggleAutoplan(sk, false)}
+                className="ml-auto px-2 py-0.5 border border-border text-muted hover:bg-muted/10 shrink-0"
+              >
+                turn off
+              </button>
+            </div>
+          ))
+        )}
         <div className="flex items-center gap-2">
           <span className="text-muted">dream</span>
           <button onClick={runNow} className="px-2 py-0.5 border border-border text-accent hover:bg-accent/10">run now</button>

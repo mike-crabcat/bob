@@ -84,9 +84,9 @@ async def _status() -> None:
         from bob_server.services.dream import config as dream_config
 
         d = settings.dream
-        auto = await dream_config.get_auto_approve_plans(db, d.auto_approve_plans)
+        sessions = await dream_config.list_autoplan_sessions(db, enabled=True)
         typer.echo(f"enabled={d.enabled} interval_minutes={d.interval_minutes} draft_mode={d.draft_mode}")
-        typer.echo(f"auto_approve_plans={auto} (runtime dream_config)")
+        typer.echo(f"autoplan ON for {len(sessions)} session(s)" + (": " + ", ".join(s["session_key"] for s in sessions) if sessions else ""))
         typer.echo(f"caps: sessions/run={d.max_sessions_per_run} new_items/type={d.max_new_items_per_type}")
         store = DreamStore(ctx)
         for run in await store.list_runs(5):
@@ -97,15 +97,16 @@ async def _status() -> None:
 
 @app.command("autoplan")
 def dream_autoplan(
-    state: Annotated[Optional[str], typer.Argument(help="on | off | (blank for status)")] = None,
+    state: Annotated[Optional[str], typer.Argument(help="on | off | (blank to list)")] = None,
+    session_key: Annotated[Optional[str], typer.Option("--session", help="Session key to toggle (required for on/off)")] = None,
 ) -> None:
-    """Toggle or show runtime auto-approval of dream plans."""
+    """Session-scoped autoplan: toggle one session, or list sessions with it on."""
     import asyncio
 
-    asyncio.run(_autoplan(state))
+    asyncio.run(_autoplan(state, session_key))
 
 
-async def _autoplan(state: str | None) -> None:
+async def _autoplan(state: str | None, session_key: str | None) -> None:
     from bob_server.config import Settings
     from bob_server.database import Database
     from bob_server.services.dream import config as dream_config
@@ -115,16 +116,27 @@ async def _autoplan(state: str | None) -> None:
     schema_dir = Path(__file__).parent.parent / "schemas"
     db = Database(settings.db_path or Path("bob.db"), schema_dir)
     await db.connect()
+    await db.apply_migrations()
     try:
         if state is not None:
             val = state.strip().lower()
             if val not in ("on", "off"):
-                typer.echo("Usage: bob dream autoplan [on|off]")
+                typer.echo("Usage: bob dream autoplan [on|off] --session <session_key>")
                 raise typer.Exit(1)
-            await dream_config.set_auto_approve_plans(db, val == "on")
-        auto = await dream_config.get_auto_approve_plans(db, settings.dream.auto_approve_plans)
-        typer.echo(f"autoplan {'ON' if auto else 'OFF'}"
-             + (" — plans auto-approve and get announced; outreach stays off" if auto else " — plans await manual approval"))
+            if not session_key:
+                typer.echo("autoplan is session-scoped: pass --session <session_key> (list keys with bare 'autoplan')")
+                raise typer.Exit(1)
+            ok = await dream_config.set_session_autoplan(db, session_key, val == "on")
+            if not ok:
+                typer.echo(f"No active session route for {session_key}")
+                raise typer.Exit(1)
+        sessions = await dream_config.list_autoplan_sessions(db, enabled=True)
+        if sessions:
+            typer.echo("autoplan ON for:")
+            for s in sessions:
+                typer.echo(f"  {s['session_key']}")
+        else:
+            typer.echo("autoplan OFF everywhere (no sessions enabled)")
     finally:
         await db.close()
 
