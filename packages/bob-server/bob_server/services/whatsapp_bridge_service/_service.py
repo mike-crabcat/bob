@@ -774,12 +774,28 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Resolve contact — use chat_id for DMs (sender_jid may be device JID for own messages)
         phone_jid = chat_id if chat_kind == "dm" else sender_jid
         phone_number = _jid_to_phone(phone_jid)
+        if not phone_number:
+            logger.warning(
+                "unparseable phone from jid, dropping message: chat_id=%s sender_jid=%s",
+                chat_id, sender_jid,
+            )
+            return
         contact_id = None
         is_trusted = False
         contact = await self.db.fetch_one(
-            "SELECT id, name, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
+            """SELECT id, name, is_trusted, allow_inbound_dm
+               FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1""",
             (phone_number,),
         )
+        if contact and chat_kind == "dm" and not bool(contact.get("allow_inbound_dm", 1)):
+            # Contact exists but is outbound-only (agent-created for a call, or
+            # operator-restricted). Same treatment as unknown numbers, distinct
+            # log line so "why can't X reach me" is answerable from journalctl.
+            logger.warning(
+                "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
+                phone_number, contact["id"], sender_name, text[:80],
+            )
+            return
         if contact:
             contact_id = contact["id"]
             is_trusted = bool(contact.get("is_trusted", 0))
@@ -848,6 +864,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             mention_map: dict[str, str] = {}
             for jid in mentioned_jids:
                 phone = _jid_to_phone(jid)
+                if not phone:
+                    continue
                 # Try session participants first (group members with display names)
                 participant = await self.db.fetch_one(
                     "SELECT display_name FROM session_participants WHERE identifier = ? AND session_key = ? LIMIT 1",
