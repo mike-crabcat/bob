@@ -4,9 +4,26 @@ All notable changes to Bob are documented here. Entries are based on analysis of
 
 ## 2026-08-16
 
+### Added
+- Add the dream system: idle-time dream runs review sessions active since the last dream and produce evidence-cited resolutions (self-improvement items, kept only when a success signal is positively observed) and plans (unfinished business detected in conversation, announced once in the session where the evidence was cited), with an auditable per-run journal — all passes on the low-cost memory model, per-run caps with rollover for deferred candidates, and safe defaults (disabled, draft mode, nothing announced)
+- Add `/autoplan on|off|status` for trusted WhatsApp contacts, with dashboard and CLI equivalents: runtime auto-approval of dream plans that never triggers outbound outreach and is blocked for plans mined from stale conversation
+- Add a `/dreams` dashboard page (Journal / Resolutions / Plans / Controls) with the draft review queue, approvals, announcement log, and run-now control
+- Add session-bound plan tools so participants adjust plans conversationally — "we sorted it" completes a plan, a progress note marks it actioned, and links enforce that only the originating session's participants can touch a plan
+- Add a mechanical monologue guard to realtime calls: after an over-long assistant turn the bridge re-tightens session instructions (capped at two nudges)
+- Add a trusted-only `create_contact` agent tool so agents can dial numbers not yet in the directory; agent-created contacts are outbound-only by default
+
 ### Changed
 - Soften the outbound call opening: the voice agent no longer leads with "I'm an AI calling on Mike's behalf" — whose behalf it calls on, and its AI status, is revealed only when the goal calls for it or the person asks, and answered honestly when asked
 - Cap the voice agent's turns at a sentence or two with one question at a time, working the goal through as a dialogue instead of reciting it as a monologue
+- Reframe voice-call goals as private notes with a concrete customer-style opening, a hold-music silence rule, and no self-introduction on transactional calls — scripted goals were being recited verbatim, overriding the phone-manner rules, so the goal contract now demands factual briefs instead of staging
+- Split contact existence from inbound DM permission (`allow_inbound_dm`): being in the contact list no longer lets a number open a WhatsApp DM session; existing contacts keep inbound DMs while agent-created ones are outbound-only, with a chip, filter, and toggle in the contacts UI
+
+### Fixed
+- Fix the dashboard hang-up button silently failing: the call page posted to a dashboard route that didn't exist (only the Twilio-webhook mount had one) — add the authenticated endpoint and surface the error in the UI
+- Fix dream dedup matching nothing: the embeddings table silently used sqlite-vec's default L2 distance while the threshold was calibrated for cosine, so re-observation created duplicates instead of merging — recreated with `distance_metric=cosine` and re-embedded via `bob dream reindex`
+
+### Removed
+- Remove the `/approve` WhatsApp slash command; approving unknown numbers for DMs is now a dashboard decision
 
 ## 2026-08-15
 
