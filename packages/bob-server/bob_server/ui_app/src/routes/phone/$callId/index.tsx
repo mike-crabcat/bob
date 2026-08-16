@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { fetchAPI, postAPI } from "@/lib/api";
 import { parseTs } from "@/lib/time";
 
@@ -163,9 +164,14 @@ function CallDetailPage() {
     },
   });
 
+  const [hangupError, setHangupError] = useState<string | null>(null);
   const hangupMutation = useMutation({
     mutationFn: () => postAPI(`/phone/calls/${encodeURIComponent(callId)}/hangup`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["phone-call", callId] }),
+    onSuccess: () => {
+      setHangupError(null);
+      queryClient.invalidateQueries({ queryKey: ["phone-call", callId] });
+    },
+    onError: (e: Error) => setHangupError(e.message),
   });
 
   if (!data) {
@@ -215,6 +221,10 @@ function CallDetailPage() {
         >
           {hangupMutation.isPending ? "hanging up..." : "hang up"}
         </button>
+      )}
+
+      {hangupError && (
+        <div className="text-[10px] text-error">{hangupError}</div>
       )}
 
       {call.agenda && (
