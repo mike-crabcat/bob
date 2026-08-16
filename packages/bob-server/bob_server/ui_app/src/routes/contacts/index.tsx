@@ -10,6 +10,7 @@ interface ContactItem {
   email: string | null;
   is_trusted: boolean;
   is_default: boolean;
+  allow_inbound_dm: boolean;
   session_count: number;
   last_active: string | null;
   created_at: string;
@@ -44,12 +45,17 @@ function ContactsPage() {
   });
 
   const contacts = data?.contacts ?? [];
-  const filtered = filter === "all" ? contacts : contacts.filter((c) => c.is_trusted);
+  const filtered =
+    filter === "all"
+      ? contacts
+      : filter === "trusted"
+        ? contacts.filter((c) => c.is_trusted)
+        : contacts.filter((c) => !c.allow_inbound_dm);
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex gap-1 px-3 py-2 border-b border-border shrink-0">
-        {["all", "trusted"].map((f) => (
+        {["all", "trusted", "outbound"].map((f) => (
           <button
             key={f}
             onClick={() => setFilter(f)}
@@ -79,6 +85,11 @@ function ContactsPage() {
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs text-text truncate">{c.name}</span>
                   {c.is_default && <span className="text-[9px] text-accent">default</span>}
+                  {!c.allow_inbound_dm && (
+                    <span className="text-[9px] text-muted border border-border px-1 shrink-0">
+                      outbound only
+                    </span>
+                  )}
                 </div>
                 <span className="text-[10px] text-muted">{c.phone_number}</span>
               </div>
