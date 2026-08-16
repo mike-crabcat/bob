@@ -31,11 +31,18 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         agent_type:
         - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
         - 'local': runs in-process via chat_with_tools (faster, no subprocess).
-        - 'openai_voice': places a real voice call to a contact. `task` is the goal
-          (short, plain-English: "find out if David is coming tonight"). `contact_id`
-          is REQUIRED — look up the contact first with a contact search tool, or
-          create one on the spot with create_contact(name, phone_number) when the
-          number isn't saved yet (e.g. a shop you just looked up).
+        - 'openai_voice': places a real voice call to a contact. `task` is a FACTUAL
+          BRIEF, not a script: what to find out or achieve, plus constraints (budget,
+          dates, what to avoid) — under ~80 words, e.g. "Ask if they have a Sega
+          Mega Drive II (original style, not mini) in stock, price/condition, and
+          whether they can hold it today. Under $1000. Don't pay or commit."
+          Do NOT write greeting lines, "introduce yourself as…", staging, or
+          how-to-report instructions — the voice agent owns all of that and has its
+          own phone-manner rules; scripted goals get recited verbatim and sound
+          robotic. `contact_id` is REQUIRED — look up the contact first with a
+          contact search tool, or create one on the spot with
+          create_contact(name, phone_number) when the number isn't saved yet
+          (e.g. a shop you just looked up).
 
         modality — use EXACTLY 'phone' or 'voice_link', nothing else:
         - 'phone' (default): rings their actual phone via Twilio. Use this whenever

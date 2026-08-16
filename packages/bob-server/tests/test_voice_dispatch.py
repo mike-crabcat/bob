@@ -43,7 +43,7 @@ def test_build_outbound_instructions_contains_goal_and_protocol():
     assert "Alice" in instructions
     assert "confirm dinner at 7pm" in instructions
     assert "end_call" in instructions
-    assert "--- Your goal on this call ---" in instructions
+    assert "PRIVATE NOTES, not a script" in instructions
 
 
 def test_build_outbound_instructions_callee_speaks_first():
@@ -58,16 +58,40 @@ def test_build_outbound_instructions_no_proactive_disclosures():
     instructions = build_outbound_instructions(contact_name="Alice", goal="test")
     assert "identify yourself as Bob (an AI)" not in instructions
     assert "say you're calling on Mike's behalf" not in instructions
-    assert "Do NOT announce up front that you're an AI" in instructions
-    assert "do NOT open with whose behalf you're calling on" in instructions
+    assert "Do NOT introduce yourself by name" in instructions
+    assert "do NOT say whose behalf you're calling on" in instructions
+    assert "do NOT mention being an AI" in instructions
     assert "answer honestly and move on" in instructions
 
 
 def test_build_outbound_instructions_short_turns():
     # Anti-monologue: one or two sentences per turn, one question at a time.
     instructions = build_outbound_instructions(goal="test")
-    assert "never a monologue" in instructions
-    assert "Ask one question at a time" in instructions
+    assert "ONE short sentence" in instructions
+    assert "at most one" in instructions
+    assert "one exchange at a time" in instructions
+
+
+def test_build_outbound_instructions_hold_silence():
+    # 2026-08-16 JB Hi-Fi call: the agent talked over hold music ("I'm waiting
+    # for a person to answer..."). Hold music / IVR / announcements are not people.
+    instructions = build_outbound_instructions(goal="test")
+    assert "hold music" in instructions
+    assert "say NOTHING" in instructions
+
+
+def test_build_outbound_instructions_goal_is_notes_not_script():
+    # 2026-08-16 JB Hi-Fi call: the goal contained a quotable greeting script
+    # ("Introduce yourself naturally: 'Hi, I'm Bob, calling on behalf of Mike...'")
+    # which the model recited verbatim, overriding the preamble. The goal must be
+    # framed as private notes whose staging instructions are superseded.
+    instructions = build_outbound_instructions(
+        goal="Introduce yourself: 'Hi, I'm Bob, calling on behalf of Mike.' Ask about stock."
+    )
+    assert "Never recite, quote" in instructions
+    assert "IGNORE any greeting" in instructions
+    # The goal text itself still passes through (facts survive; framing handles manner).
+    assert "Ask about stock" in instructions
 
 
 def test_build_outbound_instructions_name_fidelity():
