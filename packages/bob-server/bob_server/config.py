@@ -21,6 +21,14 @@ DEFAULT_ENV_FILE_NAME = ".env"
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean env var; unset falls back to the default."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _env_path(name: str, default: Path) -> Path:
     value = os.getenv(name)
     return Path(value).expanduser() if value else default.expanduser()
@@ -295,6 +303,38 @@ class ReconciliationSettings:
 
 
 @dataclass(slots=True)
+class DreamSettings:
+    """Configuration for the dream system (see dream-v2-plan.md).
+
+    All LLM passes run on the low-cost memory model (openai.get_memory_model()).
+    Env values are boot defaults; runtime toggles like auto_approve_plans live in
+    the dream_config table and override.
+    """
+
+    enabled: bool = False
+    interval_minutes: float = 240.0
+    min_new_sessions: int = 1
+    min_new_messages_per_session: int = 4
+    max_sessions_per_run: int = 8
+    first_run_lookback_days: int = 14
+    backlog_evidence_days: int = 7         # older evidence never auto-approves
+    max_new_items_per_type: int = 3
+    dedup_distance_threshold: float = 0.25
+    draft_mode: bool = True
+    auto_approve_plans: bool = False       # boot default; runtime value in dream_config
+    announce_daily_cap_per_session: int = 3
+    announce_defer_active_minutes: int = 10
+    reannounce_after_days: int = 3
+    max_reannounces_per_plan: int = 1
+    plan_stalled_runs: int = 2
+    plan_stale_days: int = 14
+    recent_terminal_dedup_days: int = 14
+    resolution_kept_consecutive_runs: int = 3
+    resolution_stale_runs: int = 5
+    max_transcript_lines: int = 120
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -321,6 +361,7 @@ class Settings:
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     patience: PatienceSettings = field(default_factory=PatienceSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
+    dream: DreamSettings = field(default_factory=DreamSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
@@ -531,6 +572,30 @@ class Settings:
             daily_batch_max_entities=int(os.getenv("BOB_RECON_DAILY_BATCH_MAX_ENTITIES", "50")),
         )
 
+        dream = DreamSettings(
+            enabled=_env_bool("BOB_DREAM_ENABLED"),
+            interval_minutes=float(os.getenv("BOB_DREAM_INTERVAL_MINUTES", "240")),
+            min_new_sessions=int(os.getenv("BOB_DREAM_MIN_NEW_SESSIONS", "1")),
+            min_new_messages_per_session=int(os.getenv("BOB_DREAM_MIN_NEW_MESSAGES", "4")),
+            max_sessions_per_run=int(os.getenv("BOB_DREAM_MAX_SESSIONS_PER_RUN", "8")),
+            first_run_lookback_days=int(os.getenv("BOB_DREAM_FIRST_RUN_LOOKBACK_DAYS", "14")),
+            backlog_evidence_days=int(os.getenv("BOB_DREAM_BACKLOG_EVIDENCE_DAYS", "7")),
+            max_new_items_per_type=int(os.getenv("BOB_DREAM_MAX_NEW_ITEMS_PER_TYPE", "3")),
+            dedup_distance_threshold=float(os.getenv("BOB_DREAM_DEDUP_THRESHOLD", "0.25")),
+            draft_mode=_env_bool("BOB_DREAM_DRAFT_MODE", default=True),
+            auto_approve_plans=_env_bool("BOB_DREAM_AUTO_APPROVE_PLANS"),
+            announce_daily_cap_per_session=int(os.getenv("BOB_DREAM_ANNOUNCE_DAILY_CAP", "3")),
+            announce_defer_active_minutes=int(os.getenv("BOB_DREAM_ANNOUNCE_DEFER_ACTIVE_MINUTES", "10")),
+            reannounce_after_days=int(os.getenv("BOB_DREAM_REANNOUNCE_AFTER_DAYS", "3")),
+            max_reannounces_per_plan=int(os.getenv("BOB_DREAM_MAX_REANNOUNCES", "1")),
+            plan_stalled_runs=int(os.getenv("BOB_DREAM_PLAN_STALLED_RUNS", "2")),
+            plan_stale_days=int(os.getenv("BOB_DREAM_PLAN_STALE_DAYS", "14")),
+            recent_terminal_dedup_days=int(os.getenv("BOB_DREAM_RECENT_TERMINAL_DEDUP_DAYS", "14")),
+            resolution_kept_consecutive_runs=int(os.getenv("BOB_DREAM_RESOLUTION_KEPT_RUNS", "3")),
+            resolution_stale_runs=int(os.getenv("BOB_DREAM_RESOLUTION_STALE_RUNS", "5")),
+            max_transcript_lines=int(os.getenv("BOB_DREAM_MAX_TRANSCRIPT_LINES", "120")),
+        )
+
         return cls(
             host=host,
             port=port,
@@ -558,6 +623,7 @@ class Settings:
             whatsapp_bridge=whatsapp_bridge,
             patience=patience,
             reconciliation=reconciliation,
+            dream=dream,
         )
 
     def ensure_directories(self) -> None:

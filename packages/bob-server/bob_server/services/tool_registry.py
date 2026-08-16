@@ -69,6 +69,12 @@ def build_common_tools(
     if include_routines:
         _extend(make_routine_tools(ctx, session_key=session_key))
 
+    # Dream plan tools — participants adjust plans conversationally (session-bound)
+    if ctx.settings.dream.enabled:
+        from bob_server.services.dream.tools import make_dream_tools
+
+        _extend(make_dream_tools(ctx, session_key=session_key))
+
     # Trust-escalated tools
     if is_trusted:
         _extend(make_contact_tools(ctx))

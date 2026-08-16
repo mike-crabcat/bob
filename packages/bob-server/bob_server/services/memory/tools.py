@@ -65,6 +65,14 @@ async def recall(
             label = rc["display_name"] or rc["subject_id"]
             rendered += f"\n  - {label} [{rc['claim_type_key']}]"
 
+    # Dream augmentation: open plans/resolutions linked to this entity
+    try:
+        dream_block = await _dream_items_block(db, entity_id)
+    except Exception:
+        dream_block = ""  # dream tables missing (pre-migration) — degrade silently
+    if dream_block:
+        rendered += "\n\n" + dream_block
+
     # If embedding search returned multiple results, append the others
     extra_ids = entity.get("_extra_ids", [])
     if extra_ids:
@@ -202,3 +210,31 @@ async def _resolve_entity(db: Any, query: str) -> dict | None:
             return dict(row)
 
     return None
+
+
+async def _dream_items_block(db, entity_id: str) -> str:
+    """Compact open dream items linked to an entity, for recall augmentation."""
+    rows = await db.fetch_all(
+        "SELECT item_type, item_id FROM dream_item_links WHERE entity_id = ?", (entity_id,)
+    )
+    lines: list[str] = []
+    for r in rows or []:
+        if r["item_type"] == "plan":
+            p = await db.fetch_one(
+                "SELECT id, status, title, proposed_action FROM dream_plans "
+                "WHERE id = ? AND status IN ('proposed','approved','actioned')",
+                (r["item_id"],),
+            )
+            if p:
+                lines.append(f"  - [plan/{p['status']}] {p['title']} — next: {p['proposed_action']}")
+        else:
+            res = await db.fetch_one(
+                "SELECT id, status, title FROM dream_resolutions "
+                "WHERE id = ? AND status IN ('open','in_program')",
+                (r["item_id"],),
+            )
+            if res:
+                lines.append(f"  - [resolution/{res['status']}] {res['title']}")
+    if not lines:
+        return ""
+    return "Open dream items:\n" + "\n".join(lines)

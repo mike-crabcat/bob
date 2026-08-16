@@ -410,8 +410,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         participants_prompt = await self._build_participants_prompt(session_key)
 
+        from bob_server.services.dream.injection import build_session_plans_prompt
+
+        dream_plans_prompt = await build_session_plans_prompt(
+            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled,
+        )
+
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, agenda) if p
+            p for p in (workspace_prompt, participants_prompt, agenda, dream_plans_prompt) if p
         )
 
         # Build tools
@@ -1040,6 +1046,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             metadata=message_metadata,
         )
 
+        # Dream plans — Tier 1 injection for sessions with linked plans
+        from bob_server.services.dream.injection import build_session_plans_prompt
+
+        dream_plans_prompt = await build_session_plans_prompt(
+            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled,
+        )
+
         # Check for active outreach request and inject into system prompt
         outreach_prompt = ""
         route_for_outreach = await self.db.fetch_one(
@@ -1063,7 +1076,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 )
 
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, outreach_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, outreach_prompt) if p
         )
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)

@@ -42,6 +42,8 @@ class SlashCommandsMixin:
             await self._cmd_verbose(args, session_key, chat_id)
         elif command == "/silentmem":
             await self._cmd_silentmem(session_key, chat_id)
+        elif command == "/autoplan":
+            await self._cmd_autoplan(args, chat_id)
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -211,6 +213,50 @@ class SlashCommandsMixin:
         )
         logger.info("verbose %s for session %s (route %s)", arg, session_key, route["id"])
         await self.send_message(chat_id, f"verbose {'ON' if enabled else 'OFF'}")
+
+    async def _cmd_autoplan(self, args: str, chat_id: str) -> None:
+        """Toggle auto-approval of dream plans (runtime, no restart needed).
+
+        Usage: /autoplan on|off|status
+        When on, validated dream plans go straight to approved and are announced
+        in the session where the evidence was cited. Outreach (calls/emails to
+        new people) stays off regardless — that needs a separate per-plan flip.
+        """
+        from bob_server.services.dream import config as dream_config
+
+        arg = args.strip().lower()
+        if arg not in ("on", "off", "status", ""):
+            await self.send_message(chat_id, "Usage: /autoplan on|off|status")
+            return
+
+        if arg in ("on", "off"):
+            await dream_config.set_auto_approve_plans(self.db, arg == "on")
+            logger.info("autoplan %s (runtime dream_config)", arg)
+
+        current = await dream_config.get_auto_approve_plans(
+            self.db, self.ctx.settings.dream.auto_approve_plans
+        )
+        if arg == "on":
+            counters = await self.db.fetch_one(
+                """SELECT
+                     SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS drafts,
+                     SUM(CASE WHEN status = 'approved' AND announced_at IS NULL THEN 1 ELSE 0 END) AS pending,
+                     SUM(CASE WHEN announced_at IS NOT NULL THEN 1 ELSE 0 END) AS announced
+                   FROM dream_plans"""
+            )
+            c = counters or {}
+            await self.send_message(
+                chat_id,
+                f"autoplan ON — plans auto-approve and get announced in the chat they came from; "
+                f"outreach stays off. "
+                f"({c.get('drafts') or 0} draft, {c.get('pending') or 0} awaiting announce, "
+                f"{c.get('announced') or 0} announced)",
+            )
+        elif arg == "off":
+            await self.send_message(chat_id, "autoplan OFF — plans await manual approval")
+        else:
+            state = "ON" if current else "OFF"
+            await self.send_message(chat_id, f"autoplan {state}")
 
     async def _cmd_silentmem(self, session_key: str, chat_id: str) -> None:
         """Trigger a silent memory extraction turn on the current session now.
