@@ -284,6 +284,9 @@ class ContactFields(BobModel):
     phone_number: str | None = Field(default=None, max_length=50)
     email: str | None = Field(default=None, max_length=255)
     metadata: MetadataDict = Field(default_factory=dict)
+    # False = outbound-only contact (agent-created or operator-restricted):
+    # in the directory for calls/search/memory but cannot open a DM session.
+    allow_inbound_dm: bool = True
 
     @field_validator("name")
     @classmethod
@@ -313,6 +316,7 @@ class ContactUpdate(BobModel):
     phone_number: str | None = Field(default=None, min_length=1, max_length=50)
     email: str | None = Field(default=None, max_length=255)
     is_trusted: bool | None = None
+    allow_inbound_dm: bool | None = None
     metadata: MetadataDict | None = None
 
     @field_validator("name")

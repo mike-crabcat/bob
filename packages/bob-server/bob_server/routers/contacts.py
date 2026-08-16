@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -13,30 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from bob_server.database import Database
 from bob_server.dependencies import get_database
 from bob_server.models import ContactCreate, ContactResponse, ContactUpdate
+from bob_server.services.phone_utils import normalize_phone
 
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
-
-
-def _normalize_phone_number(phone: str) -> str:
-    """Normalize phone number to +61 format."""
-    # Remove all non-digit characters
-    digits = re.sub(r"\D", "", phone)
-    
-    # If starts with 0, replace with +61
-    if digits.startswith("0"):
-        return "+61" + digits[1:]
-    
-    # If starts with 61 but no +, add +
-    if digits.startswith("61") and not phone.strip().startswith("+"):
-        return "+" + digits
-    
-    # If already has +, return as is (with just digits after +)
-    if phone.strip().startswith("+"):
-        return "+" + digits
-    
-    # Default: add +61 prefix
-    return "+61" + digits
 
 
 def _row_to_contact(row: dict[str, Any]) -> ContactResponse:
@@ -53,6 +32,7 @@ def _row_to_contact(row: dict[str, Any]) -> ContactResponse:
         updated_at=datetime.fromisoformat(row["updated_at"]),
         deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
         is_trusted=bool(row.get("is_trusted", 0)),
+        allow_inbound_dm=bool(row.get("allow_inbound_dm", 1)),
     )
 
 
@@ -64,13 +44,19 @@ async def create_contact(
     """Create a new contact."""
     contact_id = uuid4()
     now = datetime.now(timezone.utc).isoformat()
-    normalized_phone = _normalize_phone_number(payload.phone_number) if payload.phone_number else None
+    normalized_phone = normalize_phone(payload.phone_number) if payload.phone_number else None
+    if payload.phone_number and normalized_phone is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not parse phone number: {payload.phone_number}",
+        )
 
     try:
         await database.execute(
             """
-            INSERT INTO contacts (id, name, phone_number, email, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO contacts (id, name, phone_number, email, metadata, allow_inbound_dm,
+                                  created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(contact_id),
@@ -78,6 +64,7 @@ async def create_contact(
                 normalized_phone,
                 payload.email,
                 json.dumps(payload.metadata),
+                1 if payload.allow_inbound_dm else 0,
                 now,
                 now,
             ),
@@ -166,11 +153,19 @@ async def update_contact(
     if payload.name is not None:
         updates["name"] = payload.name
     if payload.phone_number is not None:
-        updates["phone_number"] = _normalize_phone_number(payload.phone_number)
+        normalized = normalize_phone(payload.phone_number)
+        if normalized is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Could not parse phone number: {payload.phone_number}",
+            )
+        updates["phone_number"] = normalized
     if payload.email is not None:
         updates["email"] = payload.email
     if payload.is_trusted is not None:
         updates["is_trusted"] = 1 if payload.is_trusted else 0
+    if payload.allow_inbound_dm is not None:
+        updates["allow_inbound_dm"] = 1 if payload.allow_inbound_dm else 0
     if payload.metadata is not None:
         updates["metadata"] = json.dumps(payload.metadata)
 
@@ -248,7 +243,12 @@ async def get_contact_by_phone(
     database: Database = Depends(get_database),
 ) -> ContactResponse:
     """Lookup contact by phone number (normalized to +61 format)."""
-    normalized = _normalize_phone_number(phone_number)
+    normalized = normalize_phone(phone_number)
+    if normalized is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Could not parse phone number: {phone_number}",
+        )
     
     row = await database.fetch_one(
         "SELECT * FROM contacts WHERE phone_number = ? AND deleted_at IS NULL",

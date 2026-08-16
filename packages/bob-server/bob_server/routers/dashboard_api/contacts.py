@@ -22,7 +22,7 @@ async def get_contacts(request: Request) -> dict[str, Any]:
     if table_exists:
         rows = await db.fetch_all(
             """SELECT c.id, c.name, c.phone_number, c.email,
-                      c.is_trusted, c.is_default,
+                      c.is_trusted, c.is_default, c.allow_inbound_dm,
                       c.created_at, c.updated_at,
                       (SELECT COUNT(*) FROM session_participants sp WHERE sp.contact_id = c.id) as session_count,
                       (SELECT MAX(sp.last_active_at) FROM session_participants sp WHERE sp.contact_id = c.id) as last_active
@@ -38,6 +38,7 @@ async def get_contacts(request: Request) -> dict[str, Any]:
                 "email": row["email"],
                 "is_trusted": bool(row["is_trusted"]),
                 "is_default": bool(row["is_default"]),
+                "allow_inbound_dm": bool(row["allow_inbound_dm"]),
                 "session_count": row["session_count"],
                 "last_active": _utc(row["last_active"]),
                 "created_at": _utc(row["created_at"]),
@@ -53,7 +54,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
     db = _db(request)
     contact = await db.fetch_one(
         """SELECT id, name, phone_number, email, metadata,
-                  is_trusted, is_default, created_at, updated_at
+                  is_trusted, is_default, allow_inbound_dm, created_at, updated_at
            FROM contacts WHERE id = ? AND deleted_at IS NULL""",
         (contact_id,),
     )
@@ -109,6 +110,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         "email": contact["email"],
         "is_trusted": bool(contact["is_trusted"]),
         "is_default": bool(contact["is_default"]),
+        "allow_inbound_dm": bool(contact["allow_inbound_dm"]),
         "metadata": json.loads(contact["metadata"]) if contact["metadata"] else {},
         "sessions": sessions,
         "groups": groups,
@@ -133,6 +135,8 @@ async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
         updates["email"] = body["email"]
     if "is_trusted" in body and body["is_trusted"] is not None:
         updates["is_trusted"] = 1 if body["is_trusted"] else 0
+    if "allow_inbound_dm" in body and body["allow_inbound_dm"] is not None:
+        updates["allow_inbound_dm"] = 1 if body["allow_inbound_dm"] else 0
 
     if not updates:
         return {"ok": True, "updated": False}
