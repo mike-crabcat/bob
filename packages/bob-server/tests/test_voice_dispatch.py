@@ -52,6 +52,24 @@ def test_build_outbound_instructions_callee_speaks_first():
     assert "let THEM speak first" in instructions
 
 
+def test_build_outbound_instructions_no_proactive_disclosures():
+    # "I'm an AI" and "on Mike's behalf" up front cloud the opening; Bob only
+    # discloses either when the goal requires it or if asked.
+    instructions = build_outbound_instructions(contact_name="Alice", goal="test")
+    assert "identify yourself as Bob (an AI)" not in instructions
+    assert "say you're calling on Mike's behalf" not in instructions
+    assert "Do NOT announce up front that you're an AI" in instructions
+    assert "do NOT open with whose behalf you're calling on" in instructions
+    assert "answer honestly and move on" in instructions
+
+
+def test_build_outbound_instructions_short_turns():
+    # Anti-monologue: one or two sentences per turn, one question at a time.
+    instructions = build_outbound_instructions(goal="test")
+    assert "never a monologue" in instructions
+    assert "Ask one question at a time" in instructions
+
+
 def test_build_outbound_instructions_name_fidelity():
     # Connect noise gets mis-heard as a name; the agent must not invent one
     # (2026-08-15: opened a call to Ryan with "Hi Sophia" — hallucinated).
