@@ -17,6 +17,7 @@ interface ContactDetail {
   email: string | null;
   is_trusted: boolean;
   is_default: boolean;
+  allow_inbound_dm: boolean;
   groups: ContactGroup[];
   sessions: ContactSession[];
   created_at: string;
@@ -98,6 +99,7 @@ function ContactDetailPage() {
   const [editPhone, setEditPhone] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [editTrusted, setEditTrusted] = useState(false);
+  const [editAllowInbound, setEditAllowInbound] = useState(true);
   const [expandedClaim, setExpandedClaim] = useState<string | null>(null);
 
   const { data: detail } = useQuery<ContactDetail>({
@@ -146,6 +148,7 @@ function ContactDetailPage() {
     setEditPhone(detail.phone_number);
     setEditEmail(detail.email ?? "");
     setEditTrusted(detail.is_trusted);
+    setEditAllowInbound(detail.allow_inbound_dm);
     setEditing(true);
   };
 
@@ -155,6 +158,7 @@ function ContactDetailPage() {
     if (editPhone !== detail.phone_number) body.phone_number = editPhone;
     if (editEmail !== (detail.email ?? "")) body.email = editEmail || null;
     if (editTrusted !== detail.is_trusted) body.is_trusted = editTrusted;
+    if (editAllowInbound !== detail.allow_inbound_dm) body.allow_inbound_dm = editAllowInbound;
     if (Object.keys(body).length === 0) {
       setEditing(false);
       return;
@@ -216,6 +220,15 @@ function ContactDetailPage() {
               />
               <span className="text-xs text-text">trusted</span>
             </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={editAllowInbound}
+                onChange={(e) => setEditAllowInbound(e.target.checked)}
+                className="accent-accent"
+              />
+              <span className="text-xs text-text">allow inbound DM</span>
+            </label>
             <div className="flex gap-2 mt-1">
               <button
                 onClick={save}
@@ -248,6 +261,9 @@ function ContactDetailPage() {
             <div className="flex items-center gap-2 mt-1">
               <span className={`w-1.5 h-1.5 rounded-full ${detail.is_trusted ? "bg-success" : "bg-muted"}`} />
               <span className="text-[10px] text-muted">{detail.is_trusted ? "trusted" : "untrusted"}</span>
+              {!detail.allow_inbound_dm && (
+                <span className="text-[10px] text-muted border border-border px-1">outbound only</span>
+              )}
               {detail.is_default && <span className="text-[10px] text-accent">default</span>}
             </div>
           </>
