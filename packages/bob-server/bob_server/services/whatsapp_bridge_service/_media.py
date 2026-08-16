@@ -12,29 +12,23 @@ import asyncio
 import json
 import logging
 import os
-import re
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from bob_server.services.phone_utils import normalize_phone
+
 logger = logging.getLogger(__name__)
 
 
-def _jid_to_phone(jid: str) -> str:
-    """Extract phone number from WhatsApp JID and normalize to +CC format."""
-    phone_part = jid.split("@")[0] if "@" in jid else jid
-    phone_part = phone_part.split(":")[0] if ":" in phone_part else phone_part
-    digits = re.sub(r"\D", "", phone_part)
-    if phone_part.startswith("+"):
-        return "+" + digits
-    # Assume Australian number if no country code
-    if digits.startswith("0"):
-        return "+61" + digits[1:]
-    if digits.startswith("61"):
-        return "+" + digits
-    if len(digits) > 8:
-        return "+" + digits
+def _jid_to_phone(jid: str) -> str | None:
+    """Extract phone number from WhatsApp JID and normalize to +CC format.
+
+    Thin alias over the shared normalizer in ``services/phone_utils`` — kept
+    because half the bridge package imports this name.
+    """
+    return normalize_phone(jid)
 
 
 _PERTH = ZoneInfo("Australia/Perth")
