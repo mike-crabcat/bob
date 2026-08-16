@@ -128,6 +128,29 @@ async def dashboard_initiate_call(request: Request) -> dict[str, Any]:
     )
 
 
+@router.post("/api/phone/calls/{call_id}/hangup")
+async def hangup_phone_call(request: Request, call_id: str) -> dict[str, Any]:
+    """Hang up an active or ringing call. Mirrors the webhook-router endpoint,
+    dashboard-authenticated, via the shared voice_dispatch_service owner."""
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    call = await db.fetch_one(
+        "SELECT call_sid, status FROM phone_calls WHERE id = ? OR call_sid = ?",
+        (call_id, call_id),
+    )
+    if not call:
+        return {"error": "Call not found"}
+    if call["status"] not in ("active", "ringing"):
+        return {"error": f"Call is {call['status']}, cannot hang up"}
+
+    from bob_server.services.voice_dispatch_service import hangup_twilio_call
+
+    if hangup_twilio_call(request.app.state.settings, call["call_sid"]):
+        return {"ok": True}
+    return {"error": "Failed to hang up call via Twilio"}
+
+
 @router.get("/api/phone/recording/{call_id}")
 async def get_phone_recording(request: Request, call_id: str) -> Any:
     if not _check_auth(request):

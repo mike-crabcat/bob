@@ -130,3 +130,40 @@ async def test_opening_gate_nudge_prompts_after_silent_window():
     bridge.opening_listen_seconds = 0.01
     await bridge._first_response_nudge(oai)
     assert {"type": "response.create"} in oai.sent
+
+
+async def test_monologue_guard_tightens_instructions_after_long_turn():
+    """A too-long assistant turn re-sends session.update with a reminder appended,
+    capped at two nudges; a short turn never fires it."""
+    bridge, oai, source = _bridge()
+    await bridge._dispatch_event(oai, "session.updated", {})
+    oai.sent.clear()
+
+    # Short turn: no nudge.
+    bridge._current_agent = "Hi, do you have any in stock?"
+    await bridge._dispatch_event(oai, "response.done", {"response": {"id": "r1"}})
+    assert bridge._monologue_nudges == 0
+    assert not any(p.get("type") == "session.update" for p in oai.sent)
+
+    # Monologue: nudge 1 — session.update resent with the reminder.
+    long_turn = (
+        "Hi, I'm Bob, calling on behalf of Mike with a stock question. Could you tell me "
+        "if you have any Sega Mega Drive II consoles in stock, including anything not "
+        "listed online, like old stock, returns, display units, or items elsewhere in "
+        "your store network? And just to be clear, he's after the original-style console, "
+        "not a modern mini version, unless that is all you have."
+    )
+    bridge._current_agent = long_turn
+    await bridge._dispatch_event(oai, "response.done", {"response": {"id": "r2"}})
+    assert bridge._monologue_nudges == 1
+    updates = [p for p in oai.sent if p.get("type") == "session.update"]
+    assert updates and "too long for a phone call" in updates[-1]["session"]["instructions"]
+
+    # Cap: after two nudges, instructions stop growing.
+    bridge._current_agent = long_turn
+    await bridge._dispatch_event(oai, "response.done", {"response": {"id": "r3"}})
+    bridge._current_agent = long_turn
+    await bridge._dispatch_event(oai, "response.done", {"response": {"id": "r4"}})
+    assert bridge._monologue_nudges == 2
+    final = [p for p in oai.sent if p.get("type") == "session.update"][-1]["session"]["instructions"]
+    assert final.count("too long for a phone call") == 2

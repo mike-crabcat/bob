@@ -409,6 +409,8 @@ class RealtimeBridge:
         self._turns: list[str] = []
         self._current_agent: str = ""  # accumulating assistant transcript for the current turn
         self._tool_calls: list[dict[str, Any]] = []
+        # Monologue guard: after a too-long assistant turn, tighten instructions.
+        self._monologue_nudges = 0
 
     async def run(self) -> BridgeResult:
         """Connect, configure the session, relay audio, return the result."""
@@ -661,6 +663,7 @@ class RealtimeBridge:
             # Flush the accumulated assistant transcript as one labelled turn.
             if self._current_agent.strip():
                 self._turns.append(f"Agent: {self._current_agent.strip()}")
+                await self._maybe_nudge_shorter_turns(oai, self._current_agent.strip())
             self._current_agent = ""
             await self._emit_turn()
             return
@@ -699,6 +702,36 @@ class RealtimeBridge:
             if self.emit:
                 await self.emit("error", {"message": msg})
             return
+
+    # A "sentence or two" is ~15-30 spoken words; 45 catches real monologues
+    # without firing on a slightly long but acceptable turn.
+    _MONOLOGUE_WORD_LIMIT = 45
+    _MONOLOGUE_MAX_NUDGES = 2
+
+    async def _maybe_nudge_shorter_turns(self, oai: websockets.WebSocketClientProtocol, turn_text: str) -> None:
+        """Mechanical backstop for the short-turn rule: after an assistant turn
+        that ran long, append a system reminder to the session instructions and
+        re-send session.update (safe between responses). Capped so instructions
+        don't bloat on a call that keeps monologuing anyway.
+        """
+        if not self.instructions or self._monologue_nudges >= self._MONOLOGUE_MAX_NUDGES:
+            return
+        if len(turn_text.split()) <= self._MONOLOGUE_WORD_LIMIT:
+            return
+        self._monologue_nudges += 1
+        self.instructions += (
+            " [System reminder: that turn was too long for a phone call. Keep every "
+            "turn to ONE short sentence — two at most, a single question — then stop "
+            "and listen.]"
+        )
+        logger.info(
+            "Bridge: monologue guard fired (%d words, nudge %d) — session instructions tightened",
+            len(turn_text.split()), self._monologue_nudges,
+        )
+        try:
+            await self._send_session_update(oai)
+        except Exception:
+            logger.warning("Bridge: monologue nudge session.update failed", exc_info=True)
 
     async def _handle_function_call(self, oai: websockets.WebSocketClientProtocol, event: dict) -> None:
         call_id = event.get("call_id", "")

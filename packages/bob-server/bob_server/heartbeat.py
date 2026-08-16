@@ -313,6 +313,41 @@ class LLMCallStalenessTask:
             logger.warning("Marked %d stale LLM call(s) as failed", count)
 
 
+class DreamTask:
+    """Idle-time dream runs (see dream-v2-plan.md).
+
+    Never blocks the heartbeat loop: gates are checked cheaply, then the run
+    is spawned via asyncio.create_task with the runner's single-flight lock
+    guarding overlap (established pattern — routine_scheduler, email dispatch).
+    """
+
+    name = "dream"
+
+    def __init__(self) -> None:
+        self._last_check_at: float = 0.0
+
+    async def run(self, ctx: AppContext) -> None:
+        settings = ctx.settings.dream
+        if not settings.enabled:
+            return
+        # Self-gate on wall clock so the cadence is robust to interval changes.
+        now_mono = time.monotonic()
+        if now_mono - self._last_check_at < 300:
+            return
+        self._last_check_at = now_mono
+
+        from bob_server.services.dream import DreamRunner
+
+        runner = DreamRunner(ctx)
+
+        def _log_failure(task: "asyncio.Task[None]") -> None:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error("dream background run failed", exc_info=task.exception())
+
+        task = asyncio.create_task(runner.maybe_run(trigger="heartbeat"))
+        task.add_done_callback(_log_failure)
+
+
 class LocationFetchTask:
     """Fetch current location from Home Assistant on a fixed schedule and
     append to location_history table for trip-journal use.

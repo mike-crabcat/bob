@@ -19,6 +19,7 @@ from bob_server.database import Database
 from bob_server.exceptions import ServiceError
 from bob_server.heartbeat import (
     CallCleanupTask,
+    DreamTask,
     EmailPollingTask,
     EmailSyncTask,
     HeartbeatRunner,
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(LocationFetchTask())
         runner.register(RoutineSchedulerTask())
         runner.register(MemoryReconciliationTask())
+        runner.register(DreamTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
         try:
             yield

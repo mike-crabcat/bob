@@ -2,6 +2,189 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-08-16
+
+### Added
+- Add the dream system: idle-time dream runs review sessions active since the last dream and produce evidence-cited resolutions (self-improvement items, kept only when a success signal is positively observed) and plans (unfinished business detected in conversation, announced once in the session where the evidence was cited), with an auditable per-run journal — all passes on the low-cost memory model, per-run caps with rollover for deferred candidates, and safe defaults (disabled, draft mode, nothing announced)
+- Add `/autoplan on|off|status` for trusted WhatsApp contacts, with dashboard and CLI equivalents: runtime auto-approval of dream plans that never triggers outbound outreach and is blocked for plans mined from stale conversation
+- Add a `/dreams` dashboard page (Journal / Resolutions / Plans / Controls) with the draft review queue, approvals, announcement log, and run-now control
+- Add session-bound plan tools so participants adjust plans conversationally — "we sorted it" completes a plan, a progress note marks it actioned, and links enforce that only the originating session's participants can touch a plan
+- Add a mechanical monologue guard to realtime calls: after an over-long assistant turn the bridge re-tightens session instructions (capped at two nudges)
+- Add a trusted-only `create_contact` agent tool so agents can dial numbers not yet in the directory; agent-created contacts are outbound-only by default
+
+### Changed
+- Soften the outbound call opening: the voice agent no longer leads with "I'm an AI calling on Mike's behalf" — whose behalf it calls on, and its AI status, is revealed only when the goal calls for it or the person asks, and answered honestly when asked
+- Cap the voice agent's turns at a sentence or two with one question at a time, working the goal through as a dialogue instead of reciting it as a monologue
+- Reframe voice-call goals as private notes with a concrete customer-style opening, a hold-music silence rule, and no self-introduction on transactional calls — scripted goals were being recited verbatim, overriding the phone-manner rules, so the goal contract now demands factual briefs instead of staging
+- Split contact existence from inbound DM permission (`allow_inbound_dm`): being in the contact list no longer lets a number open a WhatsApp DM session; existing contacts keep inbound DMs while agent-created ones are outbound-only, with a chip, filter, and toggle in the contacts UI
+
+### Fixed
+- Fix the dashboard hang-up button silently failing: the call page posted to a dashboard route that didn't exist (only the Twilio-webhook mount had one) — add the authenticated endpoint and surface the error in the UI
+- Fix dream dedup matching nothing: the embeddings table silently used sqlite-vec's default L2 distance while the threshold was calibrated for cosine, so re-observation created duplicates instead of merging — recreated with `distance_metric=cosine` and re-embedded via `bob dream reindex`
+
+### Removed
+- Remove the `/approve` WhatsApp slash command; approving unknown numbers for DMs is now a dashboard decision
+
+## 2026-08-15
+
+### Added
+- Add a unified voice dispatch service as the single owner of realtime call placement — canonical outbound and inbound instruction builders, a shared modality alias table, contact-call dispatch, hang-up, and completion helpers — so routers and tools no longer import call placement directly
+- Add durable dispatch metadata for realtime calls (instructions, voice, subagent id, structured outcome, dispatch timestamp) so a server restart between dial and answer no longer loses the call, results cannot be double-dispatched, and killing a voice subagent hangs up its live phone call or expires its voice-link
+- Add `openai_voice` subagent dispatch: `create_subagent` with a contact and modality ("phone" or "voice_link") places the call synchronously, tolerates alias agent-type and modality vocabulary the LLM invents, and echoes back a coerced modality so the LLM can self-correct
+- Add structured call outcomes: report-success/report-failure results are stored as JSON on the call or session record and fed to the summariser, replacing tool output pasted into the transcript as prose
+- Add live turn-by-turn transcripts and structured outcomes to the dashboard call detail page, with the legacy exchange view retained for pre-realtime history
+- Mirror browser voice-link calls into the calls UI with full lifecycle sync so both call modalities appear alongside Twilio calls
+- Persist partial transcripts after every turn boundary so call progress is visible mid-call and survives a bridge crash
+
+### Changed
+- Route all phone calls, inbound and outbound, through the realtime bridge, with inbound-specific instructions for people calling Bob's number
+- Adopt callee-speaks-first on outbound calls and browser voice-link sessions, with server VAD driving the agent's first turn and a fallback nudge to open after 8 seconds of silence on a dead line
+- Normalise the bare modality "voice" to phone so explicit phone-call requests place real calls instead of browser links
+- Expire untapped voice-link invites after 24 hours instead of leaving them ringing indefinitely
+- Rewrite the README architecture diagram and phone/voice documentation for the realtime bridge, including the realtime environment variables, the realtime modules in agent-facing repo instructions, and read-only markers on the legacy per-exchange tables
+
+### Fixed
+- Fix inbound phone calls, which never reached the realtime bridge and were dead on arrival
+- Fix the agent's voice being garbled on every call by replacing naive decimation with an anti-aliased lowpass downsampler, stopping full-band Realtime output from aliasing into the speech band
+- Fix very quiet inbound phone audio by applying +12dB of clip-protected gain to audio that had been arriving at roughly -38dB RMS
+- Fix time alignment in call recordings by laying both channels down at their wall-clock send and receive times instead of packing bursty audio deltas sequentially
+- Fix barge-in silencing the rest of the call: the outbound audio loop now drops only the interrupted utterance instead of dying on the first interruption
+- Fix `end_call` leaving the Twilio leg open and billing dead air: ending the Realtime session now hangs up the phone call so finalisation runs within seconds
+- Fix the dashboard hang-up button, which issued a GET against a POST endpoint and never worked
+- Fix timestamp parsing in the calls UI to handle both SQLite and ISO formats
+- Fix hallucinated openings caused by connection noise, such as greeting the callee by a name invented from a noise burst: the outbound preamble forbids inventing names and treats silence, noise, and unintelligible audio as not-a-greeting, asking for a repeat rather than fabricating content
+- Add a 5-second opening gate in callee-first mode that cancels and fully suppresses agent responses created without a completed user transcription, so the agent no longer talks over the caller's hello while real greetings pass untouched
+- Fix periodic ticking in the agent's voice on Twilio calls by pacing outbound audio frames on an absolute clock with a 100ms send lead so Twilio's jitter buffer no longer underruns
+- Fix realtime calls silently running with no instructions, no tools, and the wrong voice when an unsupported voice was configured: the voice is now validated at config load against the Realtime voice set, falling back to cedar with a warning
+
+### Removed
+- Remove the `reach_out_with_voice_call` outreach tool, whose phone branch duplicated the subagent path and whose voice-link default biased the LLM away from requested phone calls; contact reach-out now goes through `openai_voice` subagent dispatch
+
+## 2026-08-11
+
+### Added
+- Add an OpenAI Realtime API voice bridge streaming bidirectional audio between caller and the Realtime API, with barge-in handling, turn transcripts, in-call tool dispatch, and time-aligned stereo call recordings — one audio-source-agnostic core serves both Twilio phone calls and browser sessions, configured via new `BOB_OPENAI_REALTIME_*` settings (model, voice, max call duration, turn detection)
+- Add the realtime engine for outbound Twilio calls as an alternative to the local STT→TTS pipeline, with voice-agent instructions, voice selection, duration caps, and a curated in-call tool set (end the call, look up the called contact, report success or failure of the task)
+- Add a browser test harness for realtime voice so prompts, voices, and tools can be iterated over the exact bridge code path used for phone calls without spending call minutes
+- Add browser voice-link sessions: Bob can offer a voice call from a WhatsApp DM by sending a tappable link that shares persona and recent chat context, and on hang-up the transcript is summarised and relayed back to the chat
+- Add task-oriented voice reach-out: a voice session carries a goal the voice agent works toward, reporting success or failure as a structured outcome dispatched back to both the contact's chat and the chat that requested the reach-out
+- Add a `place-realtime-call` tool so the LLM can dial a contact with custom voice-agent instructions, tracked as a subagent whose result flows back through the usual channels
+- Add a heartbeat-driven memory reconciliation task that replaces the trigger that died with the dream pipeline: throttled to once per hour, it selects entities touched in the last 24 hours, applies per-entity `min_interval_hours` backoff, caps at 50 entities per run, and is gated by `BOB_RECON_DAILY_BATCH_ENABLED`
+
+### Changed
+- Make silent extraction the only memory path: when a session goes idle (or the agent calls the `remember` tool), an agent-driven extraction turn runs over the session's new messages and writes claims directly to the entity store with per-message provenance (`source_messages`), replacing the transcript→bulletin→dream→claims pipeline end to end
+- Show message-count provenance instead of bulletin IDs in reconciliation renders, and dedupe identical claims by merging message provenance
+- Hide the raw phone-call tools in WhatsApp DM chats so Bob routes voice requests through the unified voice outreach tools instead of defaulting to placing Twilio calls
+- Extend call-result summarisation to realtime-engine calls by summarising the bridge transcript instead of per-exchange records
+
+### Removed
+- Remove the dream pipeline and bulletin system entirely: MemoryService bulletin/dream methods, the bulletin generator, and the session/email/manual history seeders
+- Remove the memory CLI `seed`, `seed-email`, `seed-manual`, `rebuild`, and `supplement` commands
+- Remove the `note` and `memory_write` agent tools, the `search_bulletins` session tool, and the WhatsApp `/bulletin` slash command; memory capture is now exclusively the `remember` tool plus automatic idle extraction
+- Remove the `BOB_MEMORY_EXTRACTION_MODE` setting and `MemoryExtractionSettings` (silent is the only mode)
+- Remove dashboard bulletin surfaces: `/api/memory/bulletins*`, `/dreams`, `/digested`, and `/redigest` endpoints, `pending_bulletins`/`last_dream`/`bulletin_count` fields, and the dashboard UI's dream log, bulletin cards, and bulletin detail page
+- Drop the `memory_bulletins`, `memory_bulletin_entities`, `memory_entity_bulletins`, `memory_claim_bulletins`, and `memory_dream_log` tables plus the `source_bulletins` column on `memory_claims` via migration 353
+- Delete the dream eval cases and bulletin-only tests
+
+## 2026-08-08
+
+### Added
+- Add a `reasoning_effort` passthrough on LLM dispatch and the OpenAI service, applied as `reasoning.effort` for reasoning-style models
+- Add `add_claim`, `replace_claim`, `rename_entity`, and `create_entity` actions to the `memory_correct` tool, letting the agent attach or replace individual claims, rename mislabeled entities (rewriting claim/relation references), and materialize missing typed entities
+- Refresh entity FTS and embedding indexes immediately after every memory correction so natural-language recall sees corrections right away instead of waiting for the next background cycle
+- Validate that the subject entity exists before `set_truth`/`add_claim`/`replace_claim` instead of silently creating orphan claims
+- Allow `truth` claims on daylog entities and add GPT-5.6 family pricing to the dashboard cost breakdown
+
+### Changed
+- Bump default models to the GPT-5.6 family: OpenAI, harness, and local-subagent defaults move to `gpt-5.6-sol`, the patience gate moves to `gpt-5.6-luna`, and GPT-5.6 models are treated as reasoning models that skip the temperature parameter
+- Run the patience urgency check at low reasoning effort with a 300-token budget so the gate can complete its reasoning
+- Drop "truth" rows from rendered entity templates (person, attraction, stay, connection) so user corrections no longer duplicate the facts they override
+
+### Fixed
+- Fix the WhatsApp bridge `/health` endpoint reporting `whatsapp_connected` based on whether a bob-server client was attached; it now reports the actual WhatsApp websocket status and a separate `client_connected` field
+
+## 2026-07-26
+
+### Added
+- Recover Hermes-style `<tool_call>` XML that GPT-5.x models sometimes emit as plain text instead of native function calls: the OpenAI service parses these blocks, dispatches the named tool handlers, strips the XML and trailing "Done." residue from the user-visible reply, and logs what was recovered, in both streaming and non-streaming paths
+- Normalize hallucinated `functions.`-prefixed tool names (e.g. `functions.send_whatsapp_message`) when recovering XML tool calls
+- Support streaming and downloading `.mkv` files from the dashboard workspace file viewer
+
+### Fixed
+- Strip `<tool_call>` XML from message content when serializing model output for session history so recovered calls cannot poison future turns via replay
+- Record only actually-delivered reply text into WhatsApp session history instead of the raw LLM output, preventing `<tool_call>` XML and other unprompted model output from leaking into replayed conversation context
+
+## 2026-06-30
+
+### Added
+- Add a daylog entity type as the retrospective counterpart to dayplan, with date/notes/media_ref/attraction claims, a render template, and trip→daylog references
+- Add a Home Assistant location integration: a pull-based `current_location()` tool backed by the HA REST API, a `location_history()` tool, and a scheduled background task that records GPS pings every 15 minutes into a location-history table
+- Add a memory feed of recent claims to the home dashboard, with per-claim-type badges and deep-links into the memory page
+
+### Changed
+- Strengthen dayplan extraction so forward-looking plans ("tomorrow we…", "we've booked…") always create a dayplan entity, and route past-day activity to daylog instead of event or trip notes
+- Guard claim writes against orphan subjects: claims referencing a non-existent entity are rejected, and the extraction tool surfaces the error inline so the LLM can create the entity and retry within the same turn
+- Restructure trip/stay/connection/daylog entity render templates with markdown section headers, adding Day Plans and Day Logs sections to trip renders
+- Expand the `find()` tool description and memory prompt guidance with the full entity-type list and explicit rules to consult memory before answering schedule or history questions
+
+### Removed
+- Remove the recent-bulletins widget from the home dashboard, superseded by the claims-based memory feed (bulletin totals remain in the stats box)
+
+## 2026-06-26
+
+### Added
+- Add optional relevance gating to patience: the patience LLM also decides whether Bob should respond at all, and batches judged not addressed to Bob are marked dispatched without invoking the main LLM; toggleable per session via a new `/relevance` slash command
+- Add download support (Content-Disposition attachment) to the workspace file endpoint and a download link in the dashboard workspace viewer
+
+### Changed
+- Route all WhatsApp messages through the patience buffer regardless of mode: with patience off, messages now batch behind a fixed settle delay (default 1.5s) instead of dispatching immediately
+- Track patience evaluation state so already-evaluated messages drop out of future patience contexts, and make the buffer safety cap flush without dispatching after a skip decision rather than force a main-LLM call
+- Include the stored session agenda in the patience LLM context so it can distinguish messages addressed to Bob from messages merely mentioning third parties
+- Inject a local-time header into routine prompts at dispatch so routine output anchors to the routine's timezone instead of the model's UTC sense of "today"
+- Withhold routine management tools from a routine's own dispatch so it executes the action instead of drifting into editing routines
+
+### Fixed
+- Fix routine due-ness comparisons across timezones by normalizing both sides with datetime(), stopping continuous re-firing of offset-mismatched routines (e.g. a Europe/Paris routine under an Australia/Perth server clock)
+- Restore undelivered session messages when the LLM call fails on OpenAI quota exhaustion so they retry once credit returns, and notify the chat once per hour instead of silently swallowing the batch
+
+## 2026-06-22
+
+### Added
+- Add per-routine IANA timezone and valid_from/valid_until validity windows to routines, honored by the cron scheduler, routine tools, and next-occurrence calculation, with validation of timezone names and bound formats
+- Add verbose memory notices: silent extraction turns post a system notice listing new entities and claims, published as an event and forwarded to the WhatsApp chat when enabled per session
+- Add `/verbose on|off|status` and `/silentmem` slash commands to toggle the notices and to trigger an immediate silent extraction turn on demand
+- Add WhatsApp document (file attachment) support: the bridge downloads document messages and copies them into workspace/whatsapp_media, surfacing the saved path to the agent for inspection
+
+### Changed
+- Harden claim writes with pre-write validation that rejects malformed file_ref claims and resolves object_id/value collisions, and make extraction/reconciliation tools tolerate non-array claims_json and skip invalid claims instead of failing the batch
+- Sharpen extraction and reconciliation prompts with per-type miscategorization rules (preference, truth, milestone) and narrow the milestone claim type to qualitative lifecycle events, explicitly excluding changelog entries, release notes, and bug-fix summaries
+
+## 2026-06-20
+
+### Added
+- Add a silent-turn memory extraction mode (`BOB_MEMORY_EXTRACTION_MODE=silent`): an idle-triggered agent tool-loop on the memory model records claims directly via claim-creation tools, attributing provenance to the turn's session message instead of a bulletin; the bulletin pipeline remains the default
+- Add a `remember` tool that, in silent mode, flags a conversation for immediate extraction right after the current reply completes, with an optional hint steering the extractor
+- Add message-level claim provenance (`source_messages`) and an extraction-turn tracking table, seeded for existing sessions so enabling silent mode doesn't trigger a one-time surge over historical conversations
+- Teach the memory extraction prompt to capture person-level claims (durable preferences, interests, jobs, pets, traits) with few-shot examples, so casual mentions are stored as person facts rather than only relationship-bob claims
+- Persist each dispatch's tool-call trace on the LLM call log and surface it in the dashboard call detail view, so tool calls shown are the dispatch's own instead of replayed items parsed from chat history
+- Sync contact renames to the linked person entity's display-name snapshot across the contacts API, dashboard, WhatsApp contact sync, and `/approve`, and retire the contact_id claim when a contact is soft-deleted so the link doesn't dangle
+- Add a copy-entity-id button to the memory entity detail header in the dashboard
+
+### Changed
+- Restrict the memory supplement stage to compositional entity types (trip, stay), skipping atomic types like person/group/connection where the cross-entity bulletin walk misattributed facts onto the wrong entity
+- Resolve person entities by contact_id claim before falling back to name slug, preventing duplicate person entities when a contact is renamed
+- Update the LLM pricing table and bill cached input at 10% of the input rate instead of 50% in dashboard cost estimates
+- Strip OpenAI web_search citation markers from outgoing WhatsApp messages, since [N] markers can't be rendered without a reference map
+- Hide the note/memory_write bulletin-authoring tools when silent extraction is on, replacing them with the `remember` tool
+- Rewrite the stale memory prompt section to advertise the real tool set (recall/find plus the mode-appropriate capture tool) instead of non-existent memory_search/memory_read/memory_browse/memory_graph tools
+
+### Fixed
+- Fix heartbeat idle detection and memory windowing queries by comparing created_at columns through datetime(), so mixed-format timestamps no longer break window boundaries
+- Fix `bob serve` to honor env-backed settings via dataclasses.replace instead of a hand-copied field allowlist that silently dropped memory_extraction, reconciliation, and patience configuration
+
+### Removed
+- Remove the redundant `memory_read` tool, folding its behavior into `recall` which already covers it
+
 ## 2026-06-18
 
 ### Added
