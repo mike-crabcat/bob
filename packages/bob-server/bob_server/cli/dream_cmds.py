@@ -17,6 +17,7 @@ async def _run(trigger: str, dry_run: bool) -> None:
     schema_dir = Path(__file__).parent.parent / "schemas"
     db = Database(settings.db_path or Path("bob.db"), schema_dir)
     await db.connect()
+    await db.apply_migrations()
     ctx = AppContext(settings=settings, db=db)
     try:
         if dry_run:
@@ -124,6 +125,35 @@ async def _autoplan(state: str | None) -> None:
         auto = await dream_config.get_auto_approve_plans(db, settings.dream.auto_approve_plans)
         typer.echo(f"autoplan {'ON' if auto else 'OFF'}"
              + (" — plans auto-approve and get announced; outreach stays off" if auto else " — plans await manual approval"))
+    finally:
+        await db.close()
+
+
+@app.command("reindex")
+def dream_reindex() -> None:
+    """Re-embed all active dream items (needed after embedding-metric changes)."""
+    import asyncio
+
+    asyncio.run(_reindex())
+
+
+async def _reindex() -> None:
+    from bob_server.config import Settings
+    from bob_server.context import AppContext
+    from bob_server.database import Database
+    from pathlib import Path
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent.parent / "schemas"
+    db = Database(settings.db_path or Path("bob.db"), schema_dir)
+    await db.connect()
+    await db.apply_migrations()
+    ctx = AppContext(settings=settings, db=db)
+    try:
+        from bob_server.services.dream import DreamStore
+
+        count = await DreamStore(ctx).rebuild_item_embeddings()
+        typer.echo(f"re-embedded {count} item(s)")
     finally:
         await db.close()
 

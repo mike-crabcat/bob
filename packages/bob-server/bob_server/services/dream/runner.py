@@ -24,6 +24,52 @@ logger = logging.getLogger(__name__)
 _run_lock = asyncio.Lock()
 
 
+def _candidate_to_dict(cand: ResolutionCandidate | PlanCandidate) -> dict:
+    """Serialise a candidate for the deferred queue."""
+    data = {
+        "title": cand.title,
+        "evidence": [e.to_dict() for e in cand.evidence],
+    }
+    if isinstance(cand, PlanCandidate):
+        data |= {
+            "what_was_discussed": cand.what_was_discussed,
+            "proposed_action": cand.proposed_action,
+            "assistance_method": cand.assistance_method,
+            "autonomy_tier": cand.autonomy_tier,
+            "due_hint": cand.due_hint,
+            "related_entities": cand.related_entities,
+        }
+    else:
+        data |= {
+            "behaviour": cand.behaviour,
+            "trigger_condition": cand.trigger_condition,
+            "success_signal": cand.success_signal,
+        }
+    return data
+
+
+def _candidate_from_dict(item_type: str, data: dict) -> ResolutionCandidate | PlanCandidate | None:
+    """Rebuild a candidate from the deferred queue."""
+    evidence = [Evidence.from_dict(e) for e in data.get("evidence", []) if isinstance(e, dict)]
+    if item_type == "plan":
+        if not all(data.get(k) for k in ("title", "what_was_discussed", "proposed_action", "assistance_method")):
+            return None
+        return PlanCandidate(
+            title=data["title"], what_was_discussed=data["what_was_discussed"],
+            proposed_action=data["proposed_action"], assistance_method=data["assistance_method"],
+            autonomy_tier=int(data.get("autonomy_tier", 1) or 1),
+            due_hint=data.get("due_hint", ""), evidence=evidence,
+            related_entities=[e for e in data.get("related_entities", []) if isinstance(e, str)],
+        )
+    if not all(data.get(k) for k in ("title", "behaviour", "trigger_condition", "success_signal")):
+        return None
+    return ResolutionCandidate(
+        title=data["title"], behaviour=data["behaviour"],
+        trigger_condition=data["trigger_condition"], success_signal=data["success_signal"],
+        evidence=evidence,
+    )
+
+
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -110,6 +156,11 @@ class DreamRunner(BaseService):
         from bob_server.services.dream.review import ReviewService
 
         review = ReviewService(self.ctx)
+
+        # Deferred candidates from a previous capped run get first claim on this
+        # run's cap slots — capping defers, never discards.
+        await self._process_deferred(run_id, stats)
+
         sessions = await self.store.sessions_due(
             min_new_messages=self.settings.min_new_messages_per_session,
             max_sessions=self.settings.max_sessions_per_run,
@@ -149,9 +200,6 @@ class DreamRunner(BaseService):
     async def _write_resolution(self, run_id: str, cand: ResolutionCandidate, session_key: str, stats: dict) -> None:
         for e in cand.evidence:
             e.run_id = run_id
-        if await self._cap_reached(stats, "resolutions_created"):
-            stats["capped_dropped"].append({"type": "resolution", "title": cand.title})
-            return
         match, terminal, embedding = await self._dedup_lookup("resolution", cand.title, cand.behaviour)
         if match:
             await self.store.merge_resolution(match["id"], cand.evidence, run_id=run_id)
@@ -169,6 +217,13 @@ class DreamRunner(BaseService):
             else:
                 stats["suppressed"].append({"type": "resolution", "id": terminal["id"], "title": cand.title})
             return
+        # Merges/suppressions don't consume cap slots — only new items do.
+        if self._cap_reached(stats, "resolutions_created"):
+            await self.store.defer_candidate(
+                "resolution", session_key, _candidate_to_dict(cand), run_id=run_id
+            )
+            stats["capped_dropped"].append({"type": "resolution", "title": cand.title, "deferred": True})
+            return
         status = "draft" if self.settings.draft_mode else "open"
         item_id = await self.store.insert_resolution(cand, run_id=run_id, status=status)
         if embedding is not None:
@@ -179,9 +234,6 @@ class DreamRunner(BaseService):
     async def _write_plan(self, run_id: str, cand: PlanCandidate, session_key: str, stats: dict, *, auto_approve: bool) -> None:
         for e in cand.evidence:
             e.run_id = run_id
-        if await self._cap_reached(stats, "plans_created"):
-            stats["capped_dropped"].append({"type": "plan", "title": cand.title})
-            return
         match, terminal, embedding = await self._dedup_lookup("plan", cand.title, cand.what_was_discussed)
         if match:
             await self.store.merge_plan(match["id"], cand.evidence, run_id=run_id)
@@ -197,6 +249,13 @@ class DreamRunner(BaseService):
                 stats["merged"].append({"type": "plan", "id": terminal["id"], "title": cand.title, "reopened": True})
             else:
                 stats["suppressed"].append({"type": "plan", "id": terminal["id"], "title": cand.title})
+            return
+        # Merges/suppressions don't consume cap slots — only new items do.
+        if self._cap_reached(stats, "plans_created"):
+            await self.store.defer_candidate(
+                "plan", session_key, _candidate_to_dict(cand), run_id=run_id
+            )
+            stats["capped_dropped"].append({"type": "plan", "title": cand.title, "deferred": True})
             return
         # Backlog guard: plans with only old evidence never auto-approve.
         auto_ok = auto_approve and self._evidence_is_fresh(
@@ -215,6 +274,26 @@ class DreamRunner(BaseService):
             await self.store.upsert_item_embedding(item_id, embedding)
         stats["plans_created"].append({"id": item_id, "title": cand.title, "status": "approved" if auto_ok else "draft/proposed"})
 
+    async def _process_deferred(self, run_id: str, stats: dict) -> None:
+        """Replay candidates deferred by a previous capped run, before new ones."""
+        deferred = await self.store.load_deferred()
+        if not deferred:
+            return
+        auto_approve = await self._auto_approve_enabled()
+        processed: list[int] = []
+        for entry in deferred:
+            cand = _candidate_from_dict(entry["item_type"], entry["candidate"])
+            if cand is None:
+                processed.append(entry["deferred_id"])
+                continue
+            if entry["item_type"] == "resolution":
+                await self._write_resolution(run_id, cand, entry["session_key"], stats)
+            else:
+                await self._write_plan(run_id, cand, entry["session_key"], stats, auto_approve=auto_approve)
+            processed.append(entry["deferred_id"])
+        await self.store.delete_deferred(processed)
+        logger.info("dream run %s replayed %d deferred candidate(s)", run_id, len(processed))
+
     async def _dedup_lookup(self, item_type: str, title: str, body: str) -> tuple[dict | None, dict | None, list[float] | None]:
         from bob_server.services.memory.embedding import embed_text
 
@@ -228,7 +307,7 @@ class DreamRunner(BaseService):
         )
         return match, terminal, embedding
 
-    async def _cap_reached(self, stats: dict, key: str) -> bool:
+    def _cap_reached(self, stats: dict, key: str) -> bool:
         return len(stats.get(key, [])) >= self.settings.max_new_items_per_type
 
     @staticmethod

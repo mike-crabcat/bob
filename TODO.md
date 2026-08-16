@@ -36,9 +36,9 @@ The tables it used are still in the database, orphaned. Last data write was
 - [ ] Optional: one-time JSON export of the non-empty tables to `~/data/` before dropping,
       in case the history is ever wanted (`tasks`, `task_history`, `task_files`, `projects`,
       `project_tasks`, `project_specs`, `project_sources`, `project_journal_entries`)
-- [ ] Drop migration `358_drop_legacy_task_project_tables.sql` covering the 14 tables above
+- [ ] Drop migration `360_drop_legacy_task_project_tables.sql` covering the 14 tables above
       (plain `DROP TABLE IF EXISTS`, matching the style of `353_drop_bulletin_dream_tables.sql`;
-      renumbered from 357 — the dream-v2 tables migration took 357)
+      renumbered from 357 — dream migrations took 357–359)
 - [ ] Remove the vestigial task/project lookup in `session_route_service.py` (~lines 405–440):
       the `task_id` metadata branch and the `project_tasks` join. Routing falls through to the
       remaining metadata paths (`channel`, `chat_id`, `project_id` in metadata can go too if

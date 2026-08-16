@@ -178,6 +178,48 @@ class DreamStore(BaseService):
 
     # ------------------------------------------------------------ resolutions
 
+    async def defer_candidate(
+        self, item_type: str, session_key: str, candidate: dict, *, run_id: str,
+        max_queue: int = 30,
+    ) -> None:
+        """Persist a capped candidate for the next run to process first."""
+        await self.db.execute(
+            "INSERT INTO dream_deferred_candidates (item_type, session_key, candidate_json, created_at, source_run_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (item_type, session_key, json_dumps(candidate) or "{}", iso_utc(), run_id),
+        )
+        # Bound the queue: drop the oldest beyond max_queue.
+        await self.db.execute(
+            "DELETE FROM dream_deferred_candidates WHERE id IN ("
+            "  SELECT id FROM dream_deferred_candidates ORDER BY id DESC LIMIT -1 OFFSET ?)",
+            (max_queue,),
+        )
+
+    async def load_deferred(self) -> list[dict]:
+        rows = await self.db.fetch_all(
+            "SELECT id, item_type, session_key, candidate_json FROM dream_deferred_candidates ORDER BY id ASC"
+        )
+        out = []
+        for r in rows or []:
+            candidate = json_loads(r["candidate_json"], {})
+            if not isinstance(candidate, dict):
+                continue
+            out.append({
+                "deferred_id": r["id"],
+                "item_type": r["item_type"],
+                "session_key": r["session_key"] or "",
+                "candidate": candidate,
+            })
+        return out
+
+    async def delete_deferred(self, deferred_ids: list[int]) -> None:
+        if not deferred_ids:
+            return
+        marks = ",".join("?" for _ in deferred_ids)
+        await self.db.execute(
+            f"DELETE FROM dream_deferred_candidates WHERE id IN ({marks})", tuple(deferred_ids)
+        )
+
     async def insert_resolution(
         self, cand: ResolutionCandidate, *, run_id: str, status: str
     ) -> str:
@@ -403,6 +445,29 @@ class DreamStore(BaseService):
             "INSERT INTO dream_item_embeddings(item_id, embedding) VALUES (?, ?)",
             (item_id, _pack_embedding(embedding)),
         )
+
+    async def rebuild_item_embeddings(self) -> int:
+        """Re-embed all non-terminal items (title + body). Used after metric changes."""
+        from bob_server.services.memory.embedding import embed_batch
+
+        resolutions = await self.list_resolutions(list(RESOLUTION_ACTIVE_STATUSES) + ["draft"])
+        plans = await self.list_plans(list(PLAN_ACTIVE_STATUSES))
+        texts, keys = [], []
+        for r in resolutions:
+            texts.append(f"{r['title']}\n{r['behaviour']}"[:2000])
+            keys.append(r["id"])
+        for p in plans:
+            texts.append(f"{p['title']}\n{p['what_was_discussed']}"[:2000])
+            keys.append(p["id"])
+        if not texts:
+            return 0
+        vectors = await embed_batch(texts)
+        count = 0
+        for item_id, vec in zip(keys, vectors):
+            if vec is not None:
+                await self.upsert_item_embedding(item_id, vec)
+                count += 1
+        return count
 
     async def find_similar_items(
         self, query_embedding: list[float], *, threshold: float, limit: int = 5

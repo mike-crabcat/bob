@@ -584,3 +584,47 @@ async def test_recall_augmentation_appends_dream_items(ctx, db):
     await db.execute("UPDATE dream_plans SET status = 'dismissed' WHERE id = 'plan-rec1'")
     rendered2 = await recall(db, "person-sarah-test")
     assert "Open dream items" not in rendered2
+
+
+async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkeypatch):
+    """Cap pressure defers (never discards); the next run replays deferred first,
+    and merges don't consume cap slots."""
+    import dataclasses
+
+    from bob_server.services.dream.runner import DreamRunner
+
+    # Cap of 1: first run creates one plan, defers the second
+    ctx.settings.dream.max_new_items_per_type = 1
+    payload = json.loads(json.dumps(REVIEW_PAYLOAD))
+    payload["plans"].append({
+        "title": "Second plan that should defer",
+        "what_was_discussed": "another thread",
+        "proposed_action": "do the thing",
+        "assistance_method": "ask the user",
+        "autonomy_tier": 1, "due_hint": "",
+        "evidence": [{"line": 4, "excerpt": "we should catch up soon"}],
+        "related_entities": [],
+    })
+    monkeypatch.setattr(
+        "bob_server.services.llm_dispatch.LLMDispatchService.chat",
+        _StubLLM(review=payload).chat,
+    )
+    await _seed_messages(ctx.db, SK, _messages())
+    result = await DreamRunner(ctx).maybe_run(trigger="cli")
+    assert len(result["stats"]["plans_created"]) == 1
+    assert len(result["stats"]["capped_dropped"]) == 1
+    assert result["stats"]["capped_dropped"][0].get("deferred") is True
+
+    deferred = await ctx.db.fetch_all("SELECT * FROM dream_deferred_candidates")
+    assert len(deferred) == 1
+    assert "Second plan" in deferred[0]["candidate_json"]
+
+    # Second run: no new messages, but the deferred plan replays and is created
+    result2 = await DreamRunner(ctx).maybe_run(trigger="cli")
+    titles = [p["title"] for p in result2["stats"]["plans_created"]]
+    assert "Second plan that should defer" in titles
+    remaining = await ctx.db.fetch_all("SELECT * FROM dream_deferred_candidates")
+    assert remaining == []
+
+    plans = await ctx.db.fetch_all("SELECT title FROM dream_plans")
+    assert len(plans) == 2

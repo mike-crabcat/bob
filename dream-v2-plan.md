@@ -50,7 +50,10 @@ and why — for the operator to audit in the dashboard.
 
 ## Data model
 
-Migration `schemas/357_dream_tables.sql` (the legacy-table drop moved to 358 — see `TODO.md`).
+Migrations: `357_dream_tables.sql`, `358_dream_deferred_candidates.sql` (cap rollover),
+`359_dream_embeddings_cosine.sql` (fix: vec0 tables default to L2 distance — the table is
+recreated with `distance_metric=cosine` to match the threshold semantics; `bob dream reindex`
+re-embeds after metric changes). The legacy-table drop moved to 360 — see `TODO.md`.
 
 ```sql
 CREATE TABLE dream_runs (
@@ -175,17 +178,22 @@ lock. A run:
      failing validation are rejected and counted in `stats_json` — no silent drops.
      Malformed JSON gets one strict-parse retry (precedent: claim extraction).
 4. **Dedup/merge (code, not LLM).** Embed each surviving candidate; cosine-compare against
-   non-terminal items of the same type. Within threshold → merge: `observation_count += 1`,
-   append evidence, update `last_seen_at`. **Recently-terminal suppression:** also compare
-   against items that ended (`dismissed`/`completed`/`expired`) within
-   `recent_terminal_dedup_days` (default 14) — a just-cancelled plan must not be re-created
-   because the topic recurred; the candidate is logged in the journal as suppressed.
-   Otherwise insert as new — resolutions as `draft` (while draft mode is on); plans as
-   `draft`, or straight to `approved` with `approved_by='auto'` when
-   `dream_config.auto_approve_plans` is on **and** the candidate's newest evidence citation
-   is within `backlog_evidence_days` (7) — plans mined from older conversation stay
-   `draft` even under autoplan, so run #1's backlog can never auto-announce something
-   stale.
+   non-terminal items of the same type (calibrated on live data: same-topic paraphrases
+   0.09–0.22, distinct topics 0.38+ — threshold 0.25 sits in the gap). Within threshold →
+   merge: `observation_count += 1`, append evidence, update `last_seen_at`. Merges and
+   suppressions do NOT consume cap slots — only new items do. **Recently-terminal
+   suppression:** also compare against items that ended (`dismissed`/`completed`/`expired`)
+   within `recent_terminal_dedup_days` (default 14) — a just-cancelled plan must not be
+   re-created because the topic recurred; the candidate is logged in the journal as
+   suppressed. **Cap rollover:** a candidate that hits `max_new_items_per_type` is persisted
+   to `dream_deferred_candidates` (full JSON) and replayed FIRST in the next run — capping
+   defers, never discards (a capped candidate's evidence is already behind the session
+   cursor, so it would otherwise never re-propose). Otherwise insert as new — resolutions
+   as `draft` (while draft mode is on); plans as `draft`, or straight to `approved` with
+   `approved_by='auto'` when `dream_config.auto_approve_plans` is on **and** the candidate's
+   newest evidence citation is within `backlog_evidence_days` (7) — plans mined from older
+   conversation stay `draft` even under autoplan, so run #1's backlog can never
+   auto-announce something stale.
 5. **Prospective pass** (`call_category='dream_prospective'`, one batched call): review
    non-terminal items created before this run —
    - *Plans:* any evidence the discussed thing happened or Bob acted — messages after the
@@ -466,7 +474,7 @@ Each phase lands independently green.
 - [x] Session collection query (window, overlap, caps, subagent exclusion)
 - [x] Transcript assembly + roster/group context (reuse claim-extraction patterns)
 - [x] Review call, candidate validation incl. evidence checking
-- [x] Embedding dedup/merge path
+- [x] Embedding dedup/merge path (cosine metric — vec0 defaults to L2, see migration 359; cap rollover via dream_deferred_candidates)
 - [x] Item + link writes; stats_json; journal synthesis call
 
 **Phase 3 — Prospective half & lifecycle:**
@@ -512,7 +520,7 @@ class DreamSettings:
     first_run_lookback_days: int = 14
     backlog_evidence_days: int = 7         # older evidence never auto-approves
     max_new_items_per_type: int = 3
-    dedup_distance_threshold: float = 0.25   # cosine; tune on draft-mode data
+    dedup_distance_threshold: float = 0.25   # cosine; calibrated: same-topic 0.09–0.22, distinct 0.38+
     draft_mode: bool = True
     auto_approve_plans: bool = False        # boot default; runtime value lives in dream_config
     announce_daily_cap_per_session: int = 3
