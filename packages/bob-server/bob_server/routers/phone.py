@@ -174,16 +174,11 @@ async def twiml_webhook(request: Request) -> PlainTextResponse:
         await _setup_inbound_call(db, settings, call_sid, from_number)
 
     base_url = settings.phone.base_url or settings.resolved_public_url
-    ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
 
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="{ws_url}/phone/media" />
-  </Connect>
-</Response>"""
+    from bob_server.services.voice_dispatch_service import build_stream_twiml
+    twiml = build_stream_twiml(base_url)
 
-    logger.info("TwiML webhook: returning stream URL %s/phone/media", ws_url)
+    logger.info("TwiML webhook: returning stream TwiML for %s/phone/media", base_url)
     return PlainTextResponse(twiml, media_type="application/xml")
 
 
@@ -280,6 +275,13 @@ async def call_status(request: Request) -> dict:
         # Clean up cached call data
         call_agendas.pop(call_sid, None)
 
+        # And any prewarmed session the media stream never claimed
+        # (no-answer/busy/failed — the stream never arrives).
+        row = await db.fetch_one("SELECT id FROM phone_calls WHERE call_sid = ?", (call_sid,))
+        if row is not None:
+            from bob_server.services import realtime_prewarm
+            await realtime_prewarm.discard(row["id"])
+
         # Dispatch call result to originating session if applicable
         await _maybe_dispatch_call_result(
             db=db,
@@ -369,7 +371,14 @@ async def media_stream(websocket: WebSocket) -> None:
     row so a server restart between dial and answer doesn't kill the call.
     """
     await websocket.accept()
-    logger.info("Twilio Media Stream connected")
+    # The funnel preserves the origin client (proxy protocol / X-Forwarded-For),
+    # so this shows WHERE Twilio's media server connects from — needed to
+    # reason about stream-establishment latency (2026-08-18: control-plane
+    # webhooks originated in Ashburn despite both legs being AU numbers).
+    logger.info(
+        "Twilio Media Stream connected (peer=%s xff=%s)",
+        websocket.client, websocket.headers.get("x-forwarded-for", "-"),
+    )
 
     try:
         while True:
@@ -457,18 +466,28 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
         await persist_call_transcript(db, call_id, transcript)
 
     source = TwilioMediaSource(websocket, stream_sid)
-    bridge = RealtimeBridge(
-        source,
-        api_key=settings_full.openai.api_key,
-        model=rt_settings.model,
-        instructions=instructions,
-        voice=voice,
-        tools=tools,
-        max_duration_seconds=max_duration,
-        turn_detection=rt_settings.turn_detection,
-        on_turn=on_turn,
-        speak_first=speak_first,
-    )
+
+    # Claim the session prewarmed at placement (see services/realtime_prewarm.py)
+    # so the greeting flows into a live, fully-configured session at 1×. Falls
+    # back to connecting here — the pre-prewarm behaviour — on any failure.
+    from bob_server.services import realtime_prewarm
+    prewarmed = await realtime_prewarm.claim(call_id)
+    if prewarmed is not None:
+        bridge = prewarmed
+        bridge.audio = source
+    else:
+        bridge = RealtimeBridge(
+            source,
+            api_key=settings_full.openai.api_key,
+            model=rt_settings.model,
+            instructions=instructions,
+            voice=voice,
+            tools=tools,
+            max_duration_seconds=max_duration,
+            turn_detection=rt_settings.turn_detection,
+            on_turn=on_turn,
+            speak_first=speak_first,
+        )
 
     await db.execute(
         "UPDATE phone_calls SET stream_sid = ?, status = 'active' WHERE id = ?",

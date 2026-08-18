@@ -189,6 +189,13 @@ class PhoneSettings:
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
     base_url: str = ""
+    # Twilio home region (e.g. "au1"). Empty = default us1. Our account is
+    # us1, so control+media process in Ashburn despite AU-only calls — every
+    # round trip crosses the Pacific (webhooks observed from AWS Virginia,
+    # 2026-08-18). Migrating to an au1 project moves media to Sydney
+    # (~60ms from this box); needs an au1-hosted number first — see
+    # Twilio Regional migration docs.
+    twilio_region: str = ""
     silence_threshold: float = 0.01
     silence_duration: float = 1.5
     call_recording_enabled: bool = True
@@ -501,6 +508,7 @@ class Settings:
             twilio_account_sid=os.getenv("BOB_PHONE_TWILIO_ACCOUNT_SID", ""),
             twilio_auth_token=os.getenv("BOB_PHONE_TWILIO_AUTH_TOKEN", ""),
             twilio_phone_number=os.getenv("BOB_PHONE_TWILIO_PHONE_NUMBER", ""),
+            twilio_region=os.getenv("BOB_PHONE_TWILIO_REGION", ""),
             base_url=os.getenv("BOB_PHONE_BASE_URL", ""),
             silence_threshold=float(os.getenv("BOB_PHONE_SILENCE_THRESHOLD", "0.01")),
             silence_duration=float(os.getenv("BOB_PHONE_SILENCE_DURATION", "1.5")),

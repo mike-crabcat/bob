@@ -37,7 +37,7 @@ This is a Python monorepo managed with `uv`. The main package is `bob-server`, a
 
 All realtime voice (Twilio phone calls and browser voice-link sessions) runs the OpenAI Realtime bridge in `services/realtime_bridge.py` — audio-source-agnostic, so the free browser harness (`/voice/realtime`) predicts phone behaviour. Key modules:
 
-- `services/voice_dispatch_service.py` — single owner of call placement: instruction builders, modality alias table, Twilio placement, hangup, completion helpers. Nothing imports call placement from routers.
+- `services/voice_dispatch_service.py` — single owner of call placement: instruction builders, modality alias table, Twilio placement, hangup, completion helpers. Nothing imports call placement from routers. Outbound calls prewarm the OpenAI session while the phone rings (`services/realtime_prewarm.py` registry), so the media stream attaches to a live, fully-configured session at answer — the callee's greeting must not ride a setup-backlog burst into a half-configured one.
 - `routers/phone.py` — Twilio webhooks + the media-stream bridge lifecycle (partial transcripts per turn, structured outcomes, recordings).
 - `services/voice_session_service.py` — browser voice-link tokens/lifecycle; mirrors rows into `phone_calls` so links appear in the calls UI.
 - Dispatch entry point for the LLM: `create_subagent(agent_type="openai_voice", modality="phone"|"voice_link")`.

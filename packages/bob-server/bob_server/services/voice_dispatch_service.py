@@ -92,6 +92,12 @@ def build_outbound_instructions(contact_name: str | None = None, goal: str = "")
         "not people. When you hear one, say NOTHING — stay completely silent "
         "until a human speaks. If a human picks up after a hold, a brief 'hi' "
         "is enough before continuing. "
+        "Voicemail: if the answer is a recorded greeting — the person saying "
+        "they can't come to the phone or asking you to leave a message — you "
+        "have reached voicemail. Leave ONE short message with the essential "
+        "point of your call, the way you would on an answering machine, then "
+        "immediately call the end_call tool. Do not wait for a reply — "
+        "voicemail never answers back. "
         "Speak in plain conversational language — no emojis, no markdown, no lists, no URLs. "
         "Every turn is ONE short sentence, two at most, containing at most one "
         "question — then STOP and listen. Work the goal one exchange at a time "
@@ -225,6 +231,27 @@ async def load_call_meta(db: Any, call_sid: str) -> dict | None:
     }
 
 
+def build_stream_twiml(base_url: str) -> str:
+    """Static TwiML connecting the call to our Media Stream WebSocket.
+
+    Identical for every call (the media handler resolves the call from the
+    stream's `start` event), so outbound placement passes this INLINE via
+    calls.create(twiml=...) — no webhook fetch in the answer critical path.
+    Each trans-Pacific fetch cost ~100-300ms of audio before the first
+    media frame (2026-08-18). The /phone/twiml webhook remains for inbound
+    calls, which need per-call setup first.
+    """
+    ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        "  <Connect>\n"
+        f'    <Stream url="{ws_url}/phone/media" />\n'
+        "  </Connect>\n"
+        "</Response>"
+    )
+
+
 async def initiate_outbound_call(
     db: Any,
     settings: Any,
@@ -255,18 +282,42 @@ async def initiate_outbound_call(
 
     from twilio.rest import Client
 
-    client = Client(phone_settings.twilio_account_sid, phone_settings.twilio_auth_token)
+    client = Client(
+        phone_settings.twilio_account_sid,
+        phone_settings.twilio_auth_token,
+        # Empty region = default us1 (Ashburn). Set BOB_PHONE_TWILIO_REGION=au1
+        # once an au1-hosted project+number exist to keep media in Sydney.
+        **({"region": phone_settings.twilio_region} if phone_settings.twilio_region else {}),
+    )
     base_url = phone_settings.base_url or settings.resolved_public_url
+
+    # Prewarm the OpenAI Realtime session while the phone rings, so the
+    # media stream attaches to a live, fully-configured session at answer
+    # (the callee's greeting must not ride a setup backlog — see
+    # services/realtime_prewarm.py). Best-effort: claim falls back to
+    # connect-at-answer on any failure.
+    if engine == "openai_realtime":
+        try:
+            from bob_server.services import realtime_prewarm
+            realtime_prewarm.start_prewarm(
+                call_id, db=db, settings=settings,
+                phone_number=to_number, agenda=agenda, meta=meta,
+            )
+        except Exception:
+            logger.warning("Prewarm start failed for call %s; continuing", call_id, exc_info=True)
 
     call = client.calls.create(
         to=to_number,
         from_=phone_settings.twilio_phone_number,
-        url=f"{base_url}/phone/twiml",
+        twiml=build_stream_twiml(base_url),
         status_callback=f"{base_url}/phone/status",
         status_callback_event=["initiated", "ringing", "answered", "completed"],
     )
     sid = call.sid or ""
     if not sid:
+        if engine == "openai_realtime":
+            from bob_server.services import realtime_prewarm
+            await realtime_prewarm.discard(call_id)
         return {"error": "Twilio returned no call SID"}
 
     call_agendas[sid] = {

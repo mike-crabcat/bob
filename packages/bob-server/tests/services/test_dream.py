@@ -59,6 +59,18 @@ def _messages(n: int = 6) -> list[dict]:
 
 
 
+
+async def _seed_route(db, session_key: str, autoplan: bool | None = None) -> None:
+    import json as _json
+    from uuid import uuid4
+
+    meta = {} if autoplan is None else {"dream_autoplan": autoplan}
+    await db.execute(
+        "INSERT INTO session_routes (id, session_key, kind, channel, chat_id, is_active, metadata, created_at, updated_at) "
+        "VALUES (?, ?, 'group', 'whatsapp', ?, 1, ?, datetime('now'), datetime('now'))",
+        (str(uuid4()), session_key, f"{session_key.split(':')[-1]}@g.us", _json.dumps(meta)),
+    )
+
 async def _seed_run_row(db) -> None:
     """dream_plans/resolutions have FK source_run_id → dream_runs; seed the row tests reference."""
     await db.execute(
@@ -188,10 +200,9 @@ async def test_runner_end_to_end_creates_items_and_advances_cursor(ctx, stub_env
 
 
 async def test_runner_autoapprove_with_backlog_guard(ctx, stub_env, monkeypatch):
-    from bob_server.services.dream import config as dream_config
     from bob_server.services.dream.runner import DreamRunner
 
-    await dream_config.set_auto_approve_plans(ctx.db, True)
+    await _seed_route(ctx.db, SK, autoplan=True)
 
     fresh = _messages()
     await _seed_messages(ctx.db, SK, fresh)
@@ -628,3 +639,27 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
 
     plans = await ctx.db.fetch_all("SELECT title FROM dream_plans")
     assert len(plans) == 2
+
+
+async def test_autoplan_is_session_scoped(ctx, stub_env):
+    """Autoplan lives on session_routes metadata: one chat on, others unaffected."""
+    from bob_server.services.dream import config as dream_config
+
+    other = "wa:contact:whatsapp:dm:61400000000"
+    await _seed_route(ctx.db, SK, autoplan=False)
+    await _seed_route(ctx.db, other, autoplan=True)
+
+    assert await dream_config.get_session_autoplan(ctx.db, SK, False) is False
+    assert await dream_config.get_session_autoplan(ctx.db, other, False) is True
+    # unset falls back to the boot default
+    third = "wa:contact:whatsapp:dm:61411111111"
+    await _seed_route(ctx.db, third, autoplan=None)
+    assert await dream_config.get_session_autoplan(ctx.db, third, True) is True
+    assert await dream_config.get_session_autoplan(ctx.db, third, False) is False
+
+    on = [s["session_key"] for s in await dream_config.list_autoplan_sessions(ctx.db, enabled=True)]
+    assert on == [other]
+
+    # toggle flips just this session
+    assert await dream_config.set_session_autoplan(ctx.db, SK, True) is True
+    assert await dream_config.get_session_autoplan(ctx.db, SK, False) is True

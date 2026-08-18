@@ -139,3 +139,59 @@ def test_recording_sequential_outbound_does_not_collapse_gaps(tmp_path):
     assert len(spans) == 2, f"pause collapsed: {spans}"
     gap = spans[1][0] - spans[0][1]
     assert gap > 2.0, f"expected ~2.8s gap, got {gap:.2f}s"
+
+
+def test_recording_keeps_head_buffered_while_relay_connects(tmp_path):
+    """Inbound frames that arrive before the relay starts consuming (the
+    ~1-2s OpenAI session setup window) must land at their ARRIVAL time.
+
+    The old code stamped taps at dequeue time, so the setup backlog was
+    stamped "now" in a drain burst and the overlay overwrote it — every
+    call recording lost its opening seconds while the transcript (fed from
+    the same frames) kept them.
+    """
+    import asyncio
+    import time
+
+    from bob_server.services.realtime_bridge import TwilioMediaSource
+    from bob_server.services.mulaw import pcm16_to_mulaw
+
+    src = TwilioMediaSource(ws=None, stream_sid="test")
+    # 20ms of audible 8kHz phone audio per frame.
+    frame = pcm16_to_mulaw(np.full(160, 8000, dtype=np.int16))
+
+    async def scenario() -> None:
+        src._start_monotonic = time.monotonic()
+        # 20 frames (400ms) fed at Twilio's real-time pace, with NO consumer
+        # running yet — the relay is still connecting to OpenAI.
+        for _ in range(20):
+            src.feed_inbound_mulaw(frame)
+            await asyncio.sleep(0.02)
+        # Relay connects and drains the whole backlog in one burst.
+        drained = []
+        while not src._inbound.empty():
+            drained.append(await src.recv_mic_pcm16_24k())
+        assert len(drained) == 20
+
+    asyncio.run(scenario())
+
+    assert src.finalize_recording(tmp_path, "rectest3") is not None
+    import soundfile as sf
+    data, sr = sf.read(tmp_path / "rectest3.wav")
+    assert sr == 24000
+    spans = _active_spans(data[:, 0])
+    assert spans, "inbound audio missing from recording entirely"
+    assert spans[0][0] < 0.15, f"head lost: audio only starts at {spans[0][0]:.2f}s"
+    assert spans[-1][1] > 0.35, f"backlog collapsed: audio ends at {spans[-1][1]:.2f}s"
+    # And it must NOT be stretched: 400ms of frames tile into ~one contiguous
+    # span ending near 0.4s. (A bytes-vs-samples slip in the back-to-back
+    # clamp once played callers at half speed with a 20ms stutter.)
+    merged = []
+    for sp in spans:
+        if merged and sp[0] - merged[-1][1] < 0.015:
+            merged[-1] = (merged[-1][0], sp[1])
+        else:
+            merged.append(sp)
+    assert len(merged) == 1, f"inbound audio fragmented: {merged}"
+    assert merged[0][1] < 0.5, f"inbound audio stretched: ends at {merged[0][1]:.2f}s, want ~0.4s"
+    assert len(data) / sr < 0.6, f"recording longer than the audio fed: {len(data)/sr:.2f}s"
