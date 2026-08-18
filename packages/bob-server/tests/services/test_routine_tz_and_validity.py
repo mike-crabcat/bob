@@ -366,3 +366,73 @@ async def test_write_routine_tool_accepts_tz_and_validity(svc, session_key):
     assert "Europe/Paris" in result
     assert "2026-06-23" in result
     assert "2026-07-15" in result
+
+
+# ---------------------------------------------------------------------------
+# write_routine tool — self-management guard
+# ---------------------------------------------------------------------------
+
+
+async def test_write_routine_tool_rejects_verbatim_request_prompt(svc, session_key):
+    # The production case (2026-08-17): the user's request was stored verbatim,
+    # including "disable/delete this routine if possible" — an instruction the
+    # routine's own runs can never obey because routine dispatch withholds
+    # routine-management tools.
+    from bob_server.services.routine_tools import make_routine_tools
+
+    ctx = svc.ctx
+    tools = make_routine_tools(ctx, session_key=session_key)
+    write_tool = next(t for t in tools if t.name == "write_routine")
+
+    result = await write_tool.handler(
+        routine_yaml=(
+            "name: shame-list\n"
+            "schedule: '0 17 * * *'\n"
+            "prompt: |\n"
+            "  Post a daily list of who has not confirmed. On or after Sunday,\n"
+            "  do not post and disable/delete this routine if possible.\n"
+        )
+    )
+    assert "error" in result
+    assert "valid_until" in result
+
+
+async def test_write_routine_tool_rejects_tool_name_references(svc, session_key):
+    from bob_server.services.routine_tools import make_routine_tools
+
+    ctx = svc.ctx
+    tools = make_routine_tools(ctx, session_key=session_key)
+    write_tool = next(t for t in tools if t.name == "write_routine")
+
+    result = await write_tool.handler(
+        routine_yaml=(
+            "name: self-editor\n"
+            "schedule: '0 9 * * *'\n"
+            "prompt: Check the outcome, then call write_routine to tighten this prompt.\n"
+        )
+    )
+    assert "error" in result
+
+
+async def test_write_routine_tool_accepts_operational_prompt_with_guard_clause(svc, session_key):
+    # Output-safety phrasing like the AI doom routines use ("do not create,
+    # edit, inspect, or describe routines") must not trip the guard.
+    from bob_server.services.routine_tools import make_routine_tools
+
+    ctx = svc.ctx
+    tools = make_routine_tools(ctx, session_key=session_key)
+    write_tool = next(t for t in tools if t.name == "write_routine")
+
+    result = await write_tool.handler(
+        routine_yaml=(
+            "name: shame-list\n"
+            "schedule: '0 17 * * *'\n"
+            "timezone: Australia/Perth\n"
+            "valid_until: '2026-08-22'\n"
+            "prompt: |\n"
+            "  Post the confirmation status. Do not create, edit, inspect,\n"
+            "  or describe routines. Read recent session messages to determine who\n"
+            "  has confirmed, then send exactly one message.\n"
+        )
+    )
+    assert "error" not in result
