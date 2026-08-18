@@ -2,8 +2,13 @@
 
 A noise burst at connect can make server VAD create a response with no
 transcribed human speech behind it (2026-08-15: agent opened with "Hi
-Sophia" on a call to Ryan). The gate cancels such responses during the
-opening window and suppresses their audio + transcript entirely.
+Sophia" on a call to Ryan). But the greeting's input transcription RACES
+response.created and can lose (2026-08-17: a real "hello?" was cancelled as
+noise and the caller sat through the whole opening window in dead air). So
+the gate HOLDS a transcript-less response created during the opening window:
+its output is buffered until a human transcript lands (release — play and
+record normally) or the decision window closes with none (cancel and
+suppress, as before).
 """
 
 from __future__ import annotations
@@ -61,13 +66,22 @@ async def test_noise_response_during_opening_is_cancelled_and_suppressed():
     assert bridge._grace_until > 0
 
     # VAD fires on connection noise: response created, no user transcript yet.
+    # It is held, not instantly cancelled — the transcript may still land.
     await bridge._dispatch_event(oai, "response.created", {"response": {"id": "resp_noise"}})
-    assert {"type": "response.cancel"} in oai.sent
+    assert not any(m.get("type") == "response.cancel" for m in oai.sent)
 
-    # Its audio and transcript deltas must never reach the caller or the record.
+    # While the verdict is pending, its audio reaches the caller nowhere.
     await bridge._dispatch_event(oai, "response.output_audio.delta", {
         "response_id": "resp_noise", "delta": "AAAA",
     })
+    assert source.played == []
+
+    # Decision window closes with no transcription behind it: noise.
+    bridge.gate_decision_seconds = 0
+    await bridge._gate_decide(oai)
+    assert {"type": "response.cancel"} in oai.sent
+
+    # Its transcript deltas must never reach the record either.
     await bridge._dispatch_event(oai, "response.output_audio_transcript.delta", {
         "response_id": "resp_noise", "delta": "Hi Sophia!",
     })
@@ -80,6 +94,74 @@ async def test_noise_response_during_opening_is_cancelled_and_suppressed():
     assert not bridge._response_in_flight
     # Gate state lets the nudge prompt a clean opening turn after the window.
     assert bridge._suppressed_response_ids == set()
+
+
+async def test_greeting_transcript_landing_after_response_releases_held_audio():
+    """2026-08-17 live-call ordering: response.created beat the greeting's
+    transcription — the gate must hold, then release, not cancel."""
+    bridge, oai, source = _bridge()
+
+    await bridge._dispatch_event(oai, "session.updated", {})
+    await bridge._dispatch_event(oai, "response.created", {"response": {"id": "resp_ok"}})
+
+    # Agent audio generates before the greeting transcript lands: held.
+    await bridge._dispatch_event(oai, "response.output_audio.delta", {
+        "response_id": "resp_ok", "delta": "AAAA",
+    })
+    assert source.played == []
+
+    # The greeting's transcription finally lands -> release.
+    await bridge._dispatch_event(oai, "conversation.item.input_audio_transcription.completed", {
+        "transcript": "hello?",
+    })
+    assert source.played == [b"\x00\x00\x00"]  # held audio flushed to the caller
+    assert not any(m.get("type") == "response.cancel" for m in oai.sent)
+
+    # Live deltas flow normally after the release.
+    await bridge._dispatch_event(oai, "response.output_audio.delta", {
+        "response_id": "resp_ok", "delta": "BBBB",
+    })
+    assert source.played == [b"\x00\x00\x00", b"\x04\x10A"]
+    assert bridge._user_transcript_seen
+
+
+async def test_held_response_done_then_transcript_completes_turn():
+    """response.done can arrive while still held — its bookkeeping must run
+    when the transcript confirms the turn was real."""
+    bridge, oai, source = _bridge()
+
+    await bridge._dispatch_event(oai, "session.updated", {})
+    await bridge._dispatch_event(oai, "response.created", {"response": {"id": "r1"}})
+    await bridge._dispatch_event(oai, "response.output_audio_transcript.delta", {
+        "response_id": "r1", "delta": "Hi there!",
+    })
+    assert bridge._current_agent == ""  # held, not recorded yet
+    await bridge._dispatch_event(oai, "response.done", {"response": {"id": "r1"}})
+    assert bridge._conversational_response_done is False  # deferred
+
+    await bridge._dispatch_event(oai, "conversation.item.input_audio_transcription.completed", {
+        "transcript": "hello",
+    })
+    assert bridge._turns == ["User: hello", "Agent: Hi there!"]
+    assert bridge._conversational_response_done is True
+    assert bridge._current_agent == ""
+
+
+async def test_empty_transcription_behind_held_response_is_noise():
+    """An empty transcription verdict decides the hold early: cancel."""
+    bridge, oai, source = _bridge()
+
+    await bridge._dispatch_event(oai, "session.updated", {})
+    await bridge._dispatch_event(oai, "response.created", {"response": {"id": "r1"}})
+    await bridge._dispatch_event(oai, "response.output_audio.delta", {
+        "response_id": "r1", "delta": "AAAA",
+    })
+    await bridge._dispatch_event(oai, "conversation.item.input_audio_transcription.completed", {
+        "transcript": "",
+    })
+    assert {"type": "response.cancel"} in oai.sent
+    assert source.played == []
+    assert not bridge._gate_held
 
 
 async def test_real_greeting_response_is_not_cancelled():

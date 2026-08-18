@@ -35,7 +35,10 @@ def _mock_twilio():
     """Inject a fake twilio.rest module so lazy imports resolve without the real package."""
     mock_twilio = MagicMock()
     mock_twilio_rest = MagicMock()
-    with patch.dict(sys.modules, {"twilio": mock_twilio, "twilio.rest": mock_twilio_rest}):
+    with patch.dict(sys.modules, {"twilio": mock_twilio, "twilio.rest": mock_twilio_rest}), \
+         patch("bob_server.services.realtime_prewarm.start_prewarm"):
+        # start_prewarm is patched out: it would open REAL OpenAI sessions
+        # from the test process using the configured API key.
         yield mock_twilio_rest.Client
 
 
@@ -126,7 +129,14 @@ async def test_initiate_outbound_call_passes_twilio_params(ctx: AppContext):
         mock_client.calls.create.assert_called_once_with(
             to="+61400999888",
             from_="+61400000000",
-            url="https://myserver.ngrok.io/phone/twiml",
+            twiml=(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<Response>\n"
+                "  <Connect>\n"
+                '    <Stream url="wss://myserver.ngrok.io/phone/media" />\n'
+                "  </Connect>\n"
+                "</Response>"
+            ),
             status_callback="https://myserver.ngrok.io/phone/status",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
         )
