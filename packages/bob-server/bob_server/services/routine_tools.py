@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from zoneinfo import available_timezones
@@ -17,6 +18,18 @@ if TYPE_CHECKING:
     from bob_server.context import AppContext
 
 logger = logging.getLogger(__name__)
+
+# Routine dispatch withholds routine-management tools (see tool_registry), so a
+# prompt that asks its own runs to create/modify/delete routines can never be
+# obeyed — the run just burns tokens hunting for the tools and may narrate the
+# failure to the channel (seen in production 2026-08-17). Expiry belongs in
+# valid_until, not in the prompt.
+_ROUTINE_SELF_MANAGEMENT_RE = re.compile(
+    r"\b(?:read|write|delete|remove|creat\w*|updat\w*|modif\w*|disabl\w*|enabl\w*)"
+    r"\s+(?:this|the|a|any)\s+routine"
+    r"|\b(?:read|write|delete)_routine\b",
+    re.IGNORECASE,
+)
 
 
 def _routine_to_yaml(routine: dict) -> str:
@@ -77,6 +90,13 @@ def make_routine_tools(
         The prompt must contain ONLY the action to perform — never include schedule/timing language
         (e.g. "At 9am each day", "Every Monday"). The schedule is handled by the separate schedule field.
 
+        The prompt is an operational instruction addressed to the future run, not the user's
+        request restated: rewrite it as concrete steps that run can perform on its own. Do not
+        include instructions to create, modify, or delete routines (routine runs cannot use
+        those tools — put expiry in valid_until instead), and do not bake in volatile facts the
+        run should re-check at execution time (e.g. who has currently replied, current status) —
+        describe how to check them (e.g. read the recent session messages) instead.
+
         Optional fields:
           timezone: IANA name (e.g. "Europe/Paris"). Defaults to the server's local timezone.
                     The cron wall-clock fields are interpreted in this zone.
@@ -113,6 +133,16 @@ def make_routine_tools(
             return json.dumps({"error": "Routine must include a 'schedule' field"})
         if not prompt:
             return json.dumps({"error": "Routine must include a 'prompt' field"})
+        if _ROUTINE_SELF_MANAGEMENT_RE.search(str(prompt)):
+            return json.dumps({
+                "error": (
+                    "Routine prompts must not create, modify, or delete routines: routine runs "
+                    "cannot use routine-management tools, so the instruction can never be obeyed. "
+                    "Put expiry in valid_until, keep the prompt operational, and re-checkable "
+                    "facts (like who has replied) should be looked up at run time rather than "
+                    "stated in the prompt."
+                ),
+            })
 
         if timezone is not None:
             if timezone not in available_timezones():
