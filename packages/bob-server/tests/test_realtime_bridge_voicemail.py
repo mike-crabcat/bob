@@ -88,6 +88,18 @@ async def test_voicemail_greeting_ends_call_after_reply_window():
     assert bridge._end_requested.is_set()
 
 
+async def test_voicemail_detection_without_right_now():
+    """Carrier phrasings without "right now" must arm the detector too —
+    2026-08-18: "The person you are calling is not available." (Simon's
+    greeting) didn't match, so no reply-window watch was armed."""
+    bridge, oai = _bridge()
+    await bridge._dispatch_event(oai, "session.updated", {})
+    await _greeting(bridge, oai, "The person you are calling is not available.")
+    assert bridge._voicemail_detected is True
+    await _greeting(bridge, oai, "Sorry, Simon isn't available at the moment.")
+    assert bridge._voicemail_detected is True
+
+
 async def test_live_greeting_never_arms_watch():
     bridge, oai = _bridge()
     await bridge._dispatch_event(oai, "session.updated", {})

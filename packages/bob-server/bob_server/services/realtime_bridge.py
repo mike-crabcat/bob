@@ -63,7 +63,8 @@ _VOICEMAIL_GREETING_RE = re.compile(
     r"|at the (?:beep|tone)"
     r"|can'?t come to the phone|cannot come to the phone"
     r"|unable to take (?:your|the) call"
-    r"|not (?:here|available) right now"
+    r"|isn'?t (?:here|available)"
+    r"|not (?:here|available)(?: right now)?"
     r"|voice ?mail"
     r"|message ?bank"  # AU carrier branding (Telstra MessageBank)
     r"|answering machine|answerphone"
@@ -78,6 +79,15 @@ _VOICEMAIL_GREETING_RE = re.compile(
 # (someone offering to take a message) answers well inside this window and
 # disarms the watch.
 _VOICEMAIL_REPLY_GRACE_SECONDS = 10.0  # module default; tests override the class attr
+
+# Grace drain after the agent requests the end of the call: hold the session
+# open just long enough to (a) let queued goodbye audio finish playing —
+# teardown cancels the pacing loop mid-word otherwise — and (b) catch the
+# caller's in-flight input transcription. The input transcription (whisper)
+# races the end_call function event and lost on 2026-08-20: David's final
+# "bye" was in the recording but dropped from the transcript.
+_END_DRAIN_MIN_SECONDS = 1.2  # whisper catch-up window; tests override the class attr
+_END_DRAIN_MAX_SECONDS = 3.0
 
 
 @runtime_checkable
@@ -470,6 +480,10 @@ class RealtimeBridge:
         self._prewarmed_ws: websockets.WebSocketClientProtocol | None = None
         self._prewarmed_session_updated: dict | None = None
         self._run_end_reason = ""
+        # Outbound playback tail (for the end-of-call grace drain): when the
+        # last speaker chunk was queued and how long it runs.
+        self._last_audio_queued_at = 0.0  # monotonic
+        self._last_audio_queued_dur = 0.0  # seconds
         self._timed_out = False
         self._last_error = ""
         # Diagnostic counters (logged at session end).
@@ -644,6 +658,11 @@ class RealtimeBridge:
             {relay, events, timer, asyncio.create_task(self._end_requested.wait())},
             return_when=asyncio.FIRST_COMPLETED,
         )
+        # Agent requested the end — hold the session open briefly (grace
+        # drain) so queued goodbye audio finishes playing and the caller's
+        # in-flight transcription lands before teardown.
+        if self._end_requested.is_set() and not events.done():
+            await self._end_grace_drain(events)
         # Which task triggered the end? (diagnostic)
         ended_by = "unknown"
         for t in done:
@@ -695,6 +714,27 @@ class RealtimeBridge:
         await asyncio.sleep(self.max_duration_seconds)
         self._timed_out = True
         logger.info("Realtime bridge: max duration %ss reached", self.max_duration_seconds)
+
+    async def _end_grace_drain(self, events: asyncio.Task) -> None:
+        """Hold the ended session open for a short, bounded window.
+
+        Two things are still in flight when the agent calls end_call: the
+        caller's goodbye transcription (whisper races the tool event — lost
+        on 2026-08-20) and the tail of the agent's own queued audio (teardown
+        cancels the pacing loop mid-word). Wait the longer of the two, capped.
+        """
+        now = time.monotonic()
+        audio_tail = self._last_audio_queued_at + self._last_audio_queued_dur + 0.4
+        deadline = min(
+            now + self._END_DRAIN_MAX_SECONDS,
+            max(now + self._END_DRAIN_MIN_SECONDS, audio_tail),
+        )
+        budget = max(0.0, deadline - now)
+        logger.info("Bridge: end requested — grace drain %.2fs", budget)
+        try:
+            await asyncio.wait_for(asyncio.shield(events), timeout=budget)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
 
     async def _first_response_nudge(self, oai: websockets.WebSocketClientProtocol) -> None:
         """Opening gate: after the listen window, make sure the agent takes a
@@ -751,6 +791,7 @@ class RealtimeBridge:
         for buf in held.values():
             for chunk in buf["audio"]:
                 await self.audio.send_speaker_pcm16_24k(chunk)
+                self._note_playback(chunk)
             for text in buf["text"]:
                 self._current_agent += text
                 if self.emit:
@@ -824,6 +865,9 @@ class RealtimeBridge:
             })
 
     async def _event_loop(self, oai: websockets.WebSocketClientProtocol) -> None:
+        # NOTE: does not stop on _end_requested — run() owns the shutdown
+        # sequencing and keeps this loop running through the end-of-call
+        # grace drain (in-flight transcriptions + goodbye audio playback).
         async for raw in oai:
             try:
                 event = json.loads(raw)
@@ -834,8 +878,12 @@ class RealtimeBridge:
                 await self._dispatch_event(oai, etype, event)
             except Exception:
                 logger.warning("Realtime event dispatch failed for %s", etype, exc_info=True)
-            if self._end_requested.is_set():
-                return
+
+    def _note_playback(self, chunk: bytes) -> None:
+        """Record the outbound tail so the end-of-call grace drain knows how
+        long queued audio still needs to finish playing."""
+        self._last_audio_queued_at = time.monotonic()
+        self._last_audio_queued_dur = len(chunk) / (24000 * _SAMPLE_BYTES)
 
     async def _dispatch_event(self, oai: websockets.WebSocketClientProtocol, etype: str, event: dict) -> None:
         if etype == "session.updated":
@@ -880,6 +928,7 @@ class RealtimeBridge:
                 held["audio"].append(chunk)
                 return
             await self.audio.send_speaker_pcm16_24k(chunk)
+            self._note_playback(chunk)
             return
 
         if etype == "response.output_audio_transcript.delta":
@@ -1052,6 +1101,8 @@ class RealtimeBridge:
     # Reply-window length for the voicemail watch (module constant is the
     # default; kept as a class attr so tests can compress it per-instance).
     _VOICEMAIL_REPLY_GRACE_SECONDS = _VOICEMAIL_REPLY_GRACE_SECONDS
+    _END_DRAIN_MIN_SECONDS = _END_DRAIN_MIN_SECONDS
+    _END_DRAIN_MAX_SECONDS = _END_DRAIN_MAX_SECONDS
 
     async def _handle_function_call(self, oai: websockets.WebSocketClientProtocol, event: dict) -> None:
         call_id = event.get("call_id", "")
