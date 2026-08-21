@@ -79,7 +79,14 @@ tastes they actually hold (e.g. "I'm vegetarian", "I drive a Prado", "I follow t
 **Do NOT record:**
 - Jokes, hypotheticals, "wouldn't it be funny if…", or group banter/riffs as facts or \
   preferences. If a statement is playful, ironic, a thought experiment, or the group \
-  riffing on a silly idea, it is NOT a preference — skip it entirely.
+  riffing on a silly idea, it is NOT a preference — skip it entirely. **Exception:** when \
+  a group settles on a standing identity for a member (a nickname, epithet, or running bit \
+  like everyone's assigned transformer), record it as `assigned_identity` on that person \
+  (or on `self-bob` when the identity is Bob's own). A group settles on an identity when \
+  members accept or reuse it — corrections ("I am more like Blaster"), reactions, or later \
+  reuse ("make an image of us as our transformer selves"). An identity the group has \
+  adopted is group canon even when the original assignment appeared in your own message. \
+  Shared references the group expects everyone to get are memory-worthy; one-off riffs are not.
 - Something attached to the wrong person. Only record a fact against the person who \
   actually stated it or clearly owns it. Never transfer one person's possession, trait, \
   or taste onto another participant.
@@ -89,7 +96,9 @@ tastes they actually hold (e.g. "I'm vegetarian", "I drive a Prado", "I follow t
 **Attribution rule (read carefully):** when a group discusses an object or topic — a car, \
 a trip, a gadget, a running joke — record it ONLY for the person who owns it or who stated \
 it as their own. Do not spread it across participants. If you cannot tell who it belongs \
-to, do not record it at all.
+to, do not record it at all. A group-assigned identity is the exception: attribute it to \
+the person it is assigned TO, not to whoever proposed it — include the assigning group \
+in the value.
 
 Use the most specific preference type available (drink_preference, food_preference, \
 sport_preference, interest, etc.) rather than a generic "preference" when one fits.

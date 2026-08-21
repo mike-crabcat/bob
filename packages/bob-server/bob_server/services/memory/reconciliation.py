@@ -413,6 +413,11 @@ The per-type failure modes below are NOT exhaustive — apply the definition's s
      for", "requested", or "wants someone to" should be treated as suspect and re-read \
      against this list.
 
+   **`assigned_identity`** is valid group lore even though it reads as trivia or banter — \
+   do NOT retract it for being playful or non-durable (it also applies to `self-bob` when \
+   a group assigns Bob an identity). Retract only if the group never settled on it (someone \
+   floated it once and it never stuck) or the person has explicitly rejected it.
+
    **`truth`** is ONLY for explicit user corrections of existing memory — a value that \
    contradicts a previously-recorded claim ("actually, the message went by WhatsApp, \
    not email"). Retract when the value is:
