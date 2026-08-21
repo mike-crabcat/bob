@@ -47,7 +47,7 @@ CLAIM_TYPE_REGISTRY: dict[str, ClaimType] = {}
 _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     # Person
     ("alias", ["person", "group", "location"], "Alternative name or nickname (e.g. 'Cleaver', 'Dave'). Not for event status, actions, or phrases", 'person-mike-cleaver → "Cleaver"'),
-    ("appearance", ["person"], "Physical description", 'person-mike-cleaver → "tall, short brown hair, glasses"'),
+    ("appearance", ["person"], "Durable physical description of the person — build, complexion, hair and facial hair, eyes, habitual accessories (glasses), distinguishing features. NOT a photo caption: clothing/props/background of one image only as 'in this photo…'; NOT scheduling or attendance; NOT instructions. One canonical description per person — an update replaces the previous wording.", 'person-mike-cleaver → "medium-solid build, short brown hair greying at the sides, full beard, rectangular glasses"'),
     ("spouse", ["person"], "Spouse or partner", "person-mike-cleaver → person-blair-nicol"),
     ("parent", ["person"], "Parent of this person", "person-mike-cleaver → person-mum"),
     ("child", ["person"], "Child of this person", "person-mike-cleaver → person-bob-jnr"),

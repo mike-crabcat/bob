@@ -154,6 +154,21 @@ A genuine `truth` correction reads like: "no, the message to Gareth went by What
 not email", or "actually it's 2 stops in Paris, not 1". If the value does not contradict \
 a previously-recorded claim, it is not a `truth`.
 
+**`appearance` is for durable PHYSICAL features of a person ONLY** — build, complexion, \
+hair and facial hair, eyes, habitual accessories (glasses), distinguishing features. Do \
+NOT record as `appearance`:
+
+- Photo captions — clothing, props, or the background of one image ("black shirt", \
+"sunglasses pushed up on his head", "bright modern indoor background"). That describes \
+the photo, not the person. Photo-specific clothing may be noted only as "in this photo…".
+- Scheduling or attendance ("coming to the gathering", "will be there Friday") — not \
+physical.
+- Instructions or image-generation directives ("omit the chain from future images") — \
+a directive is not a description.
+
+One canonical description per person: an updated description replaces the previous \
+wording; do not accumulate photo-specific fragments alongside it.
+
 **`milestone` (on `self-bob`) is for qualitative lifecycle events ONLY** — firsts, \
 breakthroughs, regime changes in Bob's capability or role. Examples: "first solo \
 multi-step task completed", "first time Mike delegated a booking decision without \
