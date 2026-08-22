@@ -220,6 +220,43 @@ class CallCleanupTask:
         logger.info("Cleaned up %d old phone call(s)", len(old_calls))
 
 
+_last_llm_log_redaction: datetime | None = None
+
+
+class LlmLogRetentionTask:
+    """Redact heavy payloads from llm_call_log rows older than 30 days.
+
+    Rows and metrics (tokens, latency, status, model) are kept forever;
+    prompts, messages, responses, and tool blocks are stripped. This keeps
+    telemetry from dominating database size (it once reached 2.4GB of a
+    2.5GB file) without losing usage history. Bob3 plan Phase 0, decision 7.
+    """
+
+    name = "llm_log_retention"
+    payload_max_age_days = 30
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_llm_log_redaction
+        now = datetime.now(timezone.utc)
+        if _last_llm_log_redaction and (now - _last_llm_log_redaction) < timedelta(hours=24):
+            return
+        _last_llm_log_redaction = now
+
+        cutoff = (now - timedelta(days=self.payload_max_age_days)).isoformat()
+        redacted = await ctx.db.execute(
+            """UPDATE llm_call_log
+               SET system_prompt = '', user_message = '', messages_json = NULL,
+                   response_text = '', tools_json = NULL, tool_blocks_json = NULL
+               WHERE created_at < ?
+                 AND (length(system_prompt) > 0 OR length(user_message) > 0
+                      OR messages_json IS NOT NULL OR length(response_text) > 0
+                      OR tools_json IS NOT NULL OR tool_blocks_json IS NOT NULL)""",
+            (cutoff,),
+        )
+        if redacted:
+            logger.info("Redacted payloads from %d llm_call_log row(s)", redacted)
+
+
 _last_memory_reconcile: datetime | None = None
 
 
