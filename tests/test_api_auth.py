@@ -156,3 +156,18 @@ def test_dashboard_auth_endpoint_when_gate_disabled(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert response.json()["ok"] is True
         assert "set-cookie" not in response.headers
+
+
+def test_dashboard_auth_accepts_raw_pasted_plus_in_query(tmp_path: Path) -> None:
+    """Phone flow: a raw-pasted (unencoded) URL carries a base64 token's '+'
+    literally; query parsing decodes it to a space. The endpoint must accept
+    the space-restored form too."""
+    settings = make_settings(tmp_path, dashboard_secret="abc+def/ghi=")
+    with TestClient(create_app(settings)) as client:
+        # httpx encodes params properly; simulate a raw paste by sending the
+        # decoded-what-the-server-would-see form directly.
+        assert client.get("/dashboard/api/auth", params={"secret": "abc def/ghi="}).status_code == 200
+        client.cookies.clear()
+        assert client.get("/dashboard/api/auth", params={"secret": "abc+def/ghi="}).status_code == 200
+        client.cookies.clear()
+        assert client.get("/dashboard/api/auth", params={"secret": "abcXdef/ghi="}).status_code == 401

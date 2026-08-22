@@ -35,7 +35,16 @@ async def dashboard_auth(request: Request):
     token = extract_api_token(request)
     import secrets as _secrets
 
-    if not token or not _secrets.compare_digest(token, settings.resolved_api_secret):
+    # A raw-pasted URL (the phone flow) is not percent-encoded: a base64
+    # secret's '+' arrives decoded as a space. Base64/urlsafe tokens never
+    # contain literal spaces, so restoring '+' is unambiguous.
+    def _valid(candidate: str) -> bool:
+        return bool(candidate) and (
+            _secrets.compare_digest(candidate, settings.resolved_api_secret)
+            or _secrets.compare_digest(candidate.replace(" ", "+"), settings.resolved_api_secret)
+        )
+
+    if not _valid(token):
         return JSONResponse(status_code=401, content={"ok": False, "detail": "invalid token"})
 
     response = JSONResponse({"ok": True})
