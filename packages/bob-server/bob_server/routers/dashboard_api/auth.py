@@ -16,8 +16,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from bob_server.api_auth import extract_api_token
-
 from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
@@ -32,7 +30,14 @@ async def dashboard_auth(request: Request):
     if not settings.api_auth_enabled:
         return {"ok": True, "auth_disabled": True}
 
-    token = extract_api_token(request)
+    # The token comes from the URL, deliberately NOT via extract_api_token:
+    # that helper checks the cookie BEFORE the query param, so a browser
+    # still holding a stale/broken cookie would have it shadow the fresh
+    # token in the URL — and this endpoint is the RECOVERY path for exactly
+    # that situation (observed live 2026-08-22: correct token in the URL,
+    # 401 because the old mangled cookie won the priority race). A valid
+    # cookie never needs this endpoint anyway.
+    token = request.query_params.get("secret", "")
     import secrets as _secrets
 
     # A raw-pasted URL (the phone flow) is not percent-encoded: a base64

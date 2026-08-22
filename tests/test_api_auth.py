@@ -194,3 +194,22 @@ def test_dashboard_auth_sets_canonical_secret_not_mangled_form(tmp_path: Path) -
         client.cookies.clear()
         client.cookies.set("bob_dashboard_secret", m.group(1))
         assert client.post("/phone/call", json={}).status_code == 200
+
+
+def test_dashboard_auth_ignores_stale_cookie_when_url_token_valid(tmp_path: Path) -> None:
+    """Recovery path: a browser holding a stale/broken cookie must still be
+    able to authenticate via the URL — extract_api_token checks cookies before
+    query params, so the old cookie shadowed the fresh token and the endpoint
+    401'd a CORRECT token (observed live 2026-08-22)."""
+    import re
+    settings = make_settings(tmp_path, dashboard_secret="good-token")
+    with TestClient(create_app(settings)) as client:
+        client.cookies.set("bob_dashboard_secret", '"old mangled value"')
+        response = client.get("/dashboard/api/auth", params={"secret": "good-token"})
+        assert response.status_code == 200
+        m = re.search(r"bob_dashboard_secret=([^;]+)", response.headers["set-cookie"], re.I)
+        assert m and m.group(1) == "good-token"  # stale cookie overwritten
+        # And no token in the URL is still rejected — the URL must carry it.
+        client.cookies.clear()
+        client.cookies.set("bob_dashboard_secret", '"old mangled value"')
+        assert client.get("/dashboard/api/auth").status_code == 401
