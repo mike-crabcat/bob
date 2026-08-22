@@ -25,7 +25,10 @@ def make_client(tmp_path: Path) -> TestClient:
         config_dir=tmp_path / "config",
         db_path=tmp_path / "data" / "cyborg.db",
     )
-    return TestClient(create_app(settings))
+    return TestClient(
+        create_app(settings),
+        headers={"X-Dashboard-Secret": settings.resolved_api_secret},
+    )
 
 
 def approve_latest_project_spec(client: TestClient, project_id: str, approver: str = "Bob") -> dict:

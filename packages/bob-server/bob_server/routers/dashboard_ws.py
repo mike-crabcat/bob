@@ -18,10 +18,16 @@ router = APIRouter()
 
 
 def _check_auth(settings: Any, websocket: WebSocket) -> bool:
-    if not settings.dashboard_secret_configured:
+    """Same token and comparison path as the HTTP gate (see api_auth), with a
+    WS-specific extraction: ?secret= query or the dashboard cookie."""
+    import secrets as _secrets
+
+    if not settings.api_auth_enabled:
         return True
-    secret = websocket.query_params.get("secret", "")
-    return secret == settings.dashboard_secret
+    token = websocket.query_params.get("secret", "") or websocket.cookies.get(
+        "bob_dashboard_secret", ""
+    )
+    return bool(token) and _secrets.compare_digest(token, settings.resolved_api_secret)
 
 
 @router.websocket("/ws")

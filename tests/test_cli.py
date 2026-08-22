@@ -4,12 +4,24 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 import bob_server.cli as cli
 
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CLI settings off the developer's real ~/.config and ~/data.
+
+    _api_call() builds Settings.from_env(); without this, resolving the API
+    secret would write a real ~/data/api_secret on dev machines.
+    """
+    monkeypatch.setenv("BOB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("BOB_CONFIG_DIR", str(tmp_path / "config"))
 
 
 class FakeResponse:

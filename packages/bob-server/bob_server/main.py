@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from bob_server import __version__
+from bob_server.api_auth import ApiAuthMiddleware
 from bob_server.config import Settings
 from bob_server.context import AppContext
 from bob_server.database import Database
@@ -150,6 +151,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+
+    # API token gate for state-changing requests. Registered before the
+    # correlation middleware so CorrelationId stays outermost and 401s still
+    # get correlation IDs. add_middleware prepends, so this one runs inside it.
+    app.add_middleware(ApiAuthMiddleware, settings=resolved_settings)
 
     # Add correlation ID middleware
     app.add_middleware(CorrelationIdMiddleware)

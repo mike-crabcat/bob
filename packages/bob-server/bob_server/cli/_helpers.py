@@ -227,6 +227,8 @@ def _api_call(method: str, path: str, data: Optional[dict[str, Any]] = None) -> 
     settings = Settings.from_env()
     url = f"http://{settings.host}:{settings.port}{path}"
     headers = {"Content-Type": "application/json"}
+    if settings.api_auth_enabled:
+        headers["X-Dashboard-Secret"] = settings.resolved_api_secret
     body = json.dumps(data).encode() if data is not None else None
     req = Request(url, data=body, headers=headers, method=method)
 

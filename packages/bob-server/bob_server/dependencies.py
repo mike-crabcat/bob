@@ -19,19 +19,14 @@ def get_settings(request: Request) -> Settings:
 
 
 def require_dashboard_origin(request: Request) -> None:
-    """Verify the request originates from the dashboard.
+    """Verify the request carries the API token.
 
-    If BOB_DASHBOARD_SECRET is not configured, the check is skipped (dev mode).
-    Otherwise, the request must include the secret as a cookie or header.
+    Currently unused by any router (kept for reuse); delegates to the shared
+    comparison path in api_auth so it cannot drift from the middleware.
     """
-    settings: Settings = request.app.state.settings
-    if not settings.dashboard_secret_configured:
-        return
+    from bob_server.api_auth import api_token_valid
 
-    secret = request.cookies.get("bob_dashboard_secret") or request.headers.get(
-        "X-Dashboard-Secret", ""
-    )
-    if secret != settings.dashboard_secret:
+    if not api_token_valid(request.app.state.settings, request):
         raise ForbiddenError("This operation requires dashboard authorization")
 
 
