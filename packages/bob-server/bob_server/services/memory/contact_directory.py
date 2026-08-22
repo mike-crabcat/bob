@@ -31,10 +31,8 @@ class ContactDirectory:
 
     @classmethod
     async def load(cls, db: Any) -> "ContactDirectory":
-        rows = await db.fetch_all(
-            "SELECT id, name, phone_number, email FROM contacts "
-            "WHERE name IS NOT NULL AND name != '' AND deleted_at IS NULL"
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        rows = [r for r in await ContactRepository(db).list_active() if (r["name"] or "").strip()]
         records = []
         for r in rows:
             uuid = str(r["id"])

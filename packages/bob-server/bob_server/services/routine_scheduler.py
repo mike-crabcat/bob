@@ -103,12 +103,10 @@ class RoutineSchedulerTask:
             is_trusted = False
             contact_id = route["contact_id"] if route else None
             if route and contact_id:
-                contact = await ctx.db.fetch_one(
-                    "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
-                    (contact_id,),
-                )
-                if contact:
-                    is_trusted = bool(contact.get("is_trusted", 0))
+                from bob_server.repositories.contacts import ContactRepository
+                trusted = await ContactRepository(ctx.db).is_trusted(contact_id)
+                if trusted is not None:
+                    is_trusted = trusted
 
             # Routines carry their own self-contained prompt — skip session history
             # (which includes the original "set up this routine" conversation)

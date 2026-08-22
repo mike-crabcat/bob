@@ -378,10 +378,8 @@ class VoiceDispatchService(BaseService):
         if modality not in ("phone", "voice_link"):
             raise ValueError(f"unknown modality: {modality!r} — use 'phone' or 'voice_link'")
 
-        contact = await self.db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE id = ? AND deleted_at IS NULL",
-            (contact_id,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(self.db).get(contact_id)
         if contact is None:
             raise ValueError(f"contact not found: {contact_id}")
 

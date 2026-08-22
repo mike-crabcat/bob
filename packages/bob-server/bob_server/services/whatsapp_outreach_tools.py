@@ -56,10 +56,8 @@ def make_whatsapp_outreach_tools(
         db = ctx.db
 
         # Look up contact
-        contact = await db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE id = ? AND deleted_at IS NULL",
-            (contact_id,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(db).get(contact_id)
         if contact is None:
             return json.dumps({"ok": False, "error": "Contact not found"})
 
@@ -99,10 +97,8 @@ def make_whatsapp_outreach_tools(
             (current_session_key,),
         )
         if current_route and current_route.get("contact_id"):
-            requestor = await db.fetch_one(
-                "SELECT name FROM contacts WHERE id = ?",
-                (current_route["contact_id"],),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            requestor = await ContactRepository(db).get(current_route["contact_id"])
             if requestor:
                 requestor_name = requestor["name"]
 
@@ -212,10 +208,8 @@ def make_whatsapp_outreach_tools(
         db = ctx.db
 
         # Look up contact by name
-        contact = await db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE name LIKE ? AND deleted_at IS NULL LIMIT 1",
-            (f"%{contact_name}%",),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(db).search_by_name(f"%{contact_name}%")
         if contact is None:
             return json.dumps({"ok": False, "error": f"No contact found matching '{contact_name}'"})
 

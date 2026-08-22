@@ -28,18 +28,8 @@ def make_contact_tools(ctx: AppContext, *, is_trusted: bool = False) -> list:
         """Search contacts by name, phone number, or email.
         Returns matching contacts with their ID, name, phone, and trusted status."""
         db = ctx.db
-        pattern = f"%{query}%"
-        rows = await db.fetch_all(
-            """
-            SELECT id, name, phone_number, email, is_trusted
-            FROM contacts
-            WHERE deleted_at IS NULL
-              AND (name LIKE ? OR phone_number LIKE ? OR email LIKE ?)
-            ORDER BY name
-            LIMIT ?
-            """,
-            (pattern, pattern, pattern, limit),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        rows = await ContactRepository(db).search(f"%{query}%", limit)
         results = [
             {
                 "id": row["id"],
@@ -83,11 +73,8 @@ def make_contact_tools(ctx: AppContext, *, is_trusted: bool = False) -> list:
                 ),
             })
 
-        existing = await db.fetch_one(
-            """SELECT id, name, phone_number, is_trusted, allow_inbound_dm
-               FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1""",
-            (normalized,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        existing = await ContactRepository(db).get_by_phone(normalized)
         if existing:
             # Never mutate an existing contact from here: a real person must not
             # lose inbound access (or their name) because a task "added" them.
@@ -104,14 +91,9 @@ def make_contact_tools(ctx: AppContext, *, is_trusted: bool = False) -> list:
                 "allow_inbound_dm": bool(existing.get("allow_inbound_dm", 1)),
             })
 
-        contact_id = str(uuid4())
-        now_iso = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            """INSERT INTO contacts (id, name, phone_number, is_trusted, allow_inbound_dm,
-                                     created_at, updated_at)
-               VALUES (?, ?, ?, 0, 0, ?, ?)""",
-            (contact_id, clean_name, normalized, now_iso, now_iso),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact_id = await ContactRepository(db).create(
+            name=clean_name, phone_number=normalized, is_trusted=0, allow_inbound_dm=0)
 
         from bob_server.services.memory import MemoryService
         try:

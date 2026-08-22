@@ -375,9 +375,8 @@ class SessionRouteService(BaseService):
             return related_route
 
         # Fallback to default contact from database
-        default_contact = await self.db.fetch_one(
-            "SELECT id FROM contacts WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1"
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        default_contact = await ContactRepository(self.db).get_default()
         if default_contact:
             self.logger.info(
                 f"No route found in metadata, using default contact fallback: {default_contact['id']}"
@@ -558,14 +557,8 @@ class SessionRouteService(BaseService):
         metadata: dict[str, Any] | None = None,
         route_source: str,
     ) -> ResolvedSessionRoute:
-        row = await self.db.fetch_one(
-            """
-            SELECT id, name, phone_number
-            FROM contacts
-            WHERE id = ? AND deleted_at IS NULL
-            """,
-            (contact_id,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        row = await ContactRepository(self.db).get(contact_id)
         if row is None:
             raise NotFoundError(f"Contact '{contact_id}' was not found")
         phone_number = (row.get("phone_number") or "").strip()

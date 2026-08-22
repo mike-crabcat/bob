@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 class GroupEventsMixin:
+
+    def _contacts(self):
+        from bob_server.repositories.contacts import ContactRepository
+        return ContactRepository(self.db)
     """Group membership and metadata sync handlers."""
 
     async def _handle_group_sync(self, payload: dict[str, Any]) -> None:
@@ -99,10 +103,7 @@ class GroupEventsMixin:
             p_jid = p.get("jid", "")
             phone_number = _jid_to_phone(p_jid)
             display_name = p.get("display_name", "")
-            contact = await self.db.fetch_one(
-                "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                (phone_number,),
-            )
+            contact = await self._contacts().get_by_phone(phone_number)
             if not contact:
                 continue
             await self.db.execute(
@@ -169,10 +170,7 @@ class GroupEventsMixin:
             phone_number = _jid_to_phone(jid)
             # Try to get a display name from existing session_participants or contacts
             display_name = ""
-            existing = await self.db.fetch_one(
-                "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                (phone_number,),
-            )
+            existing = await self._contacts().get_by_phone(phone_number)
             if existing:
                 display_name = existing["name"]
 
@@ -192,10 +190,7 @@ class GroupEventsMixin:
             )
 
             # Upsert session participant
-            contact = await self.db.fetch_one(
-                "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                (phone_number,),
-            )
+            contact = await self._contacts().get_by_phone(phone_number)
             if contact:
                 await self.db.execute(
                     """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
@@ -211,10 +206,7 @@ class GroupEventsMixin:
         leave_names: list[str] = []
         for jid in left_jids:
             phone_number = _jid_to_phone(jid)
-            existing_contact = await self.db.fetch_one(
-                "SELECT id, name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                (phone_number,),
-            )
+            existing_contact = await self._contacts().get_by_phone(phone_number)
             if existing_contact:
                 leave_names.append(existing_contact["name"] or phone_number)
                 await self.db.execute(
@@ -247,10 +239,7 @@ class GroupEventsMixin:
         sender_name = ""
         if sender_jid:
             sender_phone = _jid_to_phone(sender_jid)
-            sender_contact = await self.db.fetch_one(
-                "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                (sender_phone,),
-            )
+            sender_contact = await self._contacts().get_by_phone(sender_phone)
             if sender_contact:
                 sender_name = sender_contact["name"]
 
@@ -279,12 +268,8 @@ class GroupEventsMixin:
         )
         is_trusted = False
         if route and route["contact_id"]:
-            contact = await self.db.fetch_one(
-                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
-                (route["contact_id"],),
-            )
-            if contact:
-                is_trusted = bool(contact.get("is_trusted", 0))
+            trusted = await self._contacts().is_trusted(route["contact_id"])
+            is_trusted = bool(trusted)
 
         from bob_server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)

@@ -46,10 +46,8 @@ def make_email_thread_result_tools(
         subject = thread_row["subject"] if thread_row else "unknown"
         contact_name = "unknown"
         if thread_row and thread_row.get("contact_id"):
-            contact = await db.fetch_one(
-                "SELECT name FROM contacts WHERE id = ? AND deleted_at IS NULL",
-                (thread_row["contact_id"],),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            contact = await ContactRepository(db).get(thread_row["contact_id"])
             if contact:
                 contact_name = contact["name"]
 

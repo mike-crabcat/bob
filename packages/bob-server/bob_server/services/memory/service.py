@@ -729,10 +729,8 @@ class MemoryService(BaseService):
             )
             if rows and rows[0]["value"]:
                 hex8 = rows[0]["value"][:8]
-                row = await self.db.fetch_one(
-                    "SELECT name FROM contacts WHERE id LIKE ? LIMIT 1",
-                    (f"{hex8}%",),
-                )
+                from bob_server.repositories.contacts import ContactRepository
+                row = await ContactRepository(self.db).get_by_id_prefix(hex8)
                 if row and row["name"]:
                     return row["name"]
             slug = entity_id.removeprefix(et_def.prefix)

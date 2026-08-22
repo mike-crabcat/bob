@@ -41,10 +41,8 @@ async def resolve_contact(
     # Try database lookup by name
     if db is not None:
         try:
-            row = await db.fetch_one(
-                "SELECT id FROM contacts WHERE display_name = ? OR name = ? LIMIT 1",
-                (name_or_ref, name_or_ref),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            row = await ContactRepository(db).get_by_name_exact(name_or_ref)
             if row:
                 return canonical_contact_id(str(row["id"]))
         except Exception:

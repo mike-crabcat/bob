@@ -76,14 +76,16 @@ class ContactRepository:
         phone_number: str | None = None,
         email: str | None = None,
         is_trusted: int = 0,
+        allow_inbound_dm: int = 1,
     ) -> str:
         contact_id = str(uuid4())
         now_iso = _utcnow_iso()
         await self.db.execute(
             """INSERT INTO contacts (id, name, phone_number, email, is_trusted,
-                                     created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (contact_id, name, phone_number, email, is_trusted, now_iso, now_iso),
+                                     allow_inbound_dm, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (contact_id, name, phone_number, email, is_trusted, allow_inbound_dm,
+             now_iso, now_iso),
         )
         return contact_id
 
@@ -91,3 +93,36 @@ class ContactRepository:
         await self.db.execute(
             "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
             (name, _utcnow_iso(), contact_id))
+
+    async def get_default(self) -> dict | None:
+        return await self.db.fetch_one(
+            "SELECT * FROM contacts WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1")
+
+    async def list_active(self) -> list[dict]:
+        return await self.db.fetch_all(
+            "SELECT * FROM contacts WHERE deleted_at IS NULL ORDER BY name")
+
+    async def search_by_name(self, name_like: str) -> dict | None:
+        """First live contact whose name matches the LIKE pattern."""
+        return await self.db.fetch_one(
+            "SELECT * FROM contacts WHERE name LIKE ? AND deleted_at IS NULL LIMIT 1",
+            (name_like,))
+
+    async def search(self, pattern: str, limit: int = 20) -> list[dict]:
+        """Live contacts whose name, phone, or email matches the LIKE pattern."""
+        return await self.db.fetch_all(
+            """SELECT * FROM contacts
+               WHERE deleted_at IS NULL
+                 AND (name LIKE ? OR phone_number LIKE ? OR email LIKE ?)
+               ORDER BY name LIMIT ?""",
+            (pattern, pattern, pattern, limit))
+
+    async def get_by_name_exact(self, name: str) -> dict | None:
+        return await self.db.fetch_one(
+            "SELECT * FROM contacts WHERE name = ? AND deleted_at IS NULL LIMIT 1",
+            (name,))
+
+    async def get_by_id_prefix(self, prefix: str) -> dict | None:
+        return await self.db.fetch_one(
+            "SELECT * FROM contacts WHERE id LIKE ? AND deleted_at IS NULL LIMIT 1",
+            (f"{prefix}%",))

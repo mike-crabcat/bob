@@ -156,10 +156,8 @@ class EmailDeliveryService(BaseService):
         contact_id = None
         recipient_email = to if isinstance(to, str) else (to[0] if to else "")
         if recipient_email:
-            contact = await self.db.fetch_one(
-                "SELECT id FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
-                (recipient_email,),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            contact = await ContactRepository(self.db).get_by_email(recipient_email)
             if contact:
                 contact_id = contact["id"]
 
