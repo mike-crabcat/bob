@@ -391,12 +391,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         contact_id = route["contact_id"]
         is_trusted = False
         if contact_id:
-            contact = await self.db.fetch_one(
-                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
-                (contact_id,),
-            )
-            if contact:
-                is_trusted = bool(contact.get("is_trusted", 0))
+            from bob_server.repositories.contacts import ContactRepository
+            is_trusted = bool(await ContactRepository(self.db).is_trusted(contact_id))
 
         # Build system prompt
         from bob_server.services.session_agenda_service import SessionAgendaService
@@ -565,27 +561,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
     async def _lookup_contact(self, phone_number: str) -> tuple[str, bool] | None:
         """Return (contact_id, is_trusted) for an existing contact, or None.
 
-        Exact match first, then prefix-match fallback to catch WhatsApp JIDs with
-        extra trailing digits (e.g. +614154068544 should match existing +61415406854).
+        Fuzzy: exact match first, then prefix-match fallback for WhatsApp JIDs
+        with extra trailing digits (see ContactRepository.get_by_phone_fuzzy).
         """
-        contact = await self.db.fetch_one(
-            "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-            (phone_number,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(self.db).get_by_phone_fuzzy(phone_number)
         if contact:
             return contact["id"], bool(contact.get("is_trusted", 0))
-
-        if len(phone_number) > 6:
-            prefix_matches = await self.db.fetch_all(
-                "SELECT id, is_trusted, phone_number FROM contacts WHERE deleted_at IS NULL "
-                "AND (phone_number = ? OR ? LIKE phone_number || '%' OR phone_number LIKE ? || '%') "
-                "ORDER BY LENGTH(phone_number) DESC LIMIT 1",
-                (phone_number[:-1], phone_number, phone_number),
-            )
-            if prefix_matches:
-                best = prefix_matches[0]
-                logger.info("resolved contact %s via prefix match: %s → %s", best["id"], phone_number, best["phone_number"])
-                return best["id"], bool(best.get("is_trusted", 0))
         return None
 
     async def _resolve_or_seed_contact(self, phone_number: str, display_name: str = "") -> tuple[str, bool]:
@@ -593,24 +575,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         existing = await self._lookup_contact(phone_number)
         if existing:
             return existing
-        new_id = str(uuid4())
-        now_iso = utcnow().isoformat()
-        await self.db.execute(
-            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-               VALUES (?, ?, ?, 0, ?, ?)""",
-            (new_id, display_name or phone_number, phone_number, now_iso, now_iso),
-        )
-        logger.info("auto-seeded untrusted contact %s for phone %s", new_id, phone_number)
-
-        # Auto-create person memory entry
-        from bob_server.services.memory import MemoryService
-        mem_svc = MemoryService(self.ctx)
-        await mem_svc.ensure_person_entry(
-            self.ctx.settings.harness.workspace_dir,
-            contact_id=new_id, name=display_name or phone_number,
-            phone_number=phone_number, channel="WhatsApp",
-        )
-
+        from bob_server.services.channel_policies import ContactResolver
+        new_id = await ContactResolver(self.ctx).seed_untrusted_by_phone(
+            phone_number, display_name)
         return new_id, False
 
 
@@ -782,66 +749,25 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             return
         contact_id = None
         is_trusted = False
-        contact = await self.db.fetch_one(
-            """SELECT id, name, is_trusted, allow_inbound_dm
-               FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1""",
-            (phone_number,),
-        )
-        if contact and chat_kind == "dm" and not bool(contact.get("allow_inbound_dm", 1)):
-            # Contact exists but is outbound-only (agent-created for a call, or
-            # operator-restricted). Same treatment as unknown numbers, distinct
-            # log line so "why can't X reach me" is answerable from journalctl.
-            logger.warning(
-                "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
-                phone_number, contact["id"], sender_name, text[:80],
-            )
-            return
-        if contact:
-            contact_id = contact["id"]
-            is_trusted = bool(contact.get("is_trusted", 0))
-            logger.info("resolved contact %s (trusted=%s) for phone %s", contact_id, is_trusted, phone_number)
-            # Backfill name from WhatsApp if contact has no real name
-            if sender_name and contact["name"] in ("", phone_number):
-                await self.db.execute(
-                    "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
-                    (sender_name, utcnow().isoformat(), contact_id),
+        from bob_server.services.channel_policies import WhatsAppInboundPolicy
+        resolution = await WhatsAppInboundPolicy(self.ctx).resolve_sender(
+            chat_kind=chat_kind, phone_number=phone_number, sender_name=sender_name)
+        if not resolution.accepted:
+            if resolution.drop_reason == "inbound_disabled":
+                # Distinct log line so "why can't X reach me" is answerable
+                # from journalctl.
+                logger.warning(
+                    "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
+                    phone_number, resolution.contact_id, sender_name, text[:80],
                 )
-                from bob_server.services.memory import MemoryService
-                await MemoryService(self.ctx).sync_person_display_name_for_contact(
-                    contact_id, sender_name,
+            else:
+                logger.warning(
+                    "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
+                    phone_number, sender_jid, sender_name, text[:80],
                 )
-        elif chat_kind == "dm":
-            # Security gate: drop DMs from numbers with no contact row.
-            # Group sync auto-seeds contacts for everyone Bob has seen in a group,
-            # so any legitimate acquaintance already has a row. Pure unknowns get
-            # logged and never become a session.
-            logger.warning(
-                "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
-                phone_number, sender_jid, sender_name, text[:80],
-            )
             return
-        else:
-            logger.info("no contact found for phone %s", phone_number)
-            # Auto-seed an untrusted contact for unknown WhatsApp senders
-            new_id = str(uuid4())
-            now_iso = utcnow().isoformat()
-            await self.db.execute(
-                """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-                   VALUES (?, ?, ?, 0, ?, ?)""",
-                (new_id, sender_name or phone_number, phone_number, now_iso, now_iso),
-            )
-            contact_id = new_id
-            is_trusted = False
-            logger.info("auto-seeded untrusted contact %s for phone %s", contact_id, phone_number)
-
-            # Auto-create person memory entry for new contacts
-            from bob_server.services.memory import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            await mem_svc.ensure_person_entry(
-                settings.harness.workspace_dir,
-                contact_id=contact_id, name=sender_name or phone_number,
-                phone_number=phone_number, channel="WhatsApp",
-            )
+        contact_id = resolution.contact_id
+        is_trusted = resolution.is_trusted
 
         # Derive session key
         agent_id = "main"
@@ -875,10 +801,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     mention_map[phone] = participant["display_name"]
                     continue
                 # Then try contacts table
-                contact_match = await self.db.fetch_one(
-                    "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                    (phone,),
-                )
+                from bob_server.repositories.contacts import ContactRepository
+                contact_match = await ContactRepository(self.db).get_by_phone(phone)
                 if contact_match and contact_match["name"]:
                     mention_map[phone] = contact_match["name"]
                 # Upsert mentioned user as participant so dispatch-time resolution can find them
@@ -991,17 +915,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 # Auto-seed contact from shared vCard
                 if phone:
                     normalized_phone = _jid_to_phone(phone)
-                    existing = await self.db.fetch_one(
-                        "SELECT id FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                        (normalized_phone,),
-                    )
+                    from bob_server.repositories.contacts import ContactRepository
+                    repo = ContactRepository(self.db)
+                    existing = await repo.get_by_phone(normalized_phone)
                     if not existing:
-                        new_cid = str(uuid4())
-                        await self.db.execute(
-                            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-                               VALUES (?, ?, ?, 0, ?, ?)""",
-                            (new_cid, name, normalized_phone, now_iso, now_iso),
-                        )
+                        await repo.create(name=name, phone_number=normalized_phone)
                         logger.info("auto-seeded shared contact %s (%s)", name, normalized_phone)
                     contacts_lines.append(f"- **{name}** — {normalized_phone}")
                 else:

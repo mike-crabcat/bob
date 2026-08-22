@@ -36,6 +36,7 @@ async def _seed_contact(db, phone: str, *, trusted: int, allow_inbound: int) -> 
 def _make_service(db) -> tuple[WhatsAppBridgeService, AsyncMock]:
     svc = object.__new__(WhatsAppBridgeService)
     svc.db = db
+    svc.ctx = SimpleNamespace(db=db)  # channel policy resolves sender via ctx
     svc._ws = None  # _send_ack becomes a no-op
     svc._get_settings = lambda: SimpleNamespace(  # type: ignore[method-assign]
         openai=SimpleNamespace(enabled=True),

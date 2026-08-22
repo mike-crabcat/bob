@@ -483,30 +483,10 @@ class EmailPollingService(BaseService):
     ) -> tuple[dict[str, Any], bool]:
         """Find or create an email_threads record for this message."""
         sender_email, sender_name = _parse_from(message.get("from"))
-        contact_id = None
-        is_trusted = False
-        if sender_email:
-            contact = await self.db.fetch_one(
-                "SELECT id, is_trusted FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
-                (sender_email,),
-            )
-            if contact:
-                contact_id = contact["id"]
-                is_trusted = bool(contact.get("is_trusted", 0))
-            else:
-                # Auto-seed an untrusted contact for unknown email senders
-                from uuid import uuid4
-                from bob_server.services.base import utcnow
-                new_id = str(uuid4())
-                now_iso = utcnow().isoformat()
-                await self.db.execute(
-                    """INSERT INTO contacts (id, name, email, is_trusted, created_at, updated_at)
-                       VALUES (?, ?, ?, 0, ?, ?)""",
-                    (new_id, sender_name or sender_email, sender_email, now_iso, now_iso),
-                )
-                contact_id = new_id
-                is_trusted = False
-                logger.debug("auto-seeded untrusted contact %s for email %s", contact_id, sender_email)
+        from bob_server.services.channel_policies import EmailInboundPolicy
+        sender = await EmailInboundPolicy(self.ctx).resolve_sender(sender_email, sender_name)
+        contact_id = sender.contact_id
+        is_trusted = sender.is_trusted
 
         if contact_id is not None and is_trusted:
             default_agenda = DEFAULT_AGENDA
@@ -628,11 +608,8 @@ class EmailPollingService(BaseService):
         contact_id = thread.get("contact_id")
         is_trusted = False
         if contact_id:
-            contact = await self.db.fetch_one(
-                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL LIMIT 1",
-                (contact_id,),
-            )
-            is_trusted = bool(contact.get("is_trusted", 0)) if contact else False
+            from bob_server.repositories.contacts import ContactRepository
+            is_trusted = bool(await ContactRepository(self.db).is_trusted(contact_id))
         agenda_svc = SessionAgendaService(self.ctx)
         agenda_text = await agenda_svc.get_effective_agenda(
             thread["session_key"], "email",
@@ -865,10 +842,8 @@ class EmailPollingService(BaseService):
             # Resolve to contact
             contact_id = None
             is_trusted = 0
-            contact = await self.db.fetch_one(
-                "SELECT id, is_trusted FROM contacts WHERE email = ? AND deleted_at IS NULL LIMIT 1",
-                (email_lower,),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            contact = await ContactRepository(self.db).get_by_email(email_lower)
             if contact:
                 contact_id = contact["id"]
                 is_trusted = 1 if contact.get("is_trusted") else 0
