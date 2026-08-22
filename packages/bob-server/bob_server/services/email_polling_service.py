@@ -708,7 +708,9 @@ class EmailPollingService(BaseService):
         from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-        participants_prompt = await self._build_participants_prompt(session_key)
+        from bob_server.services.context_assembler import ContextAssembler
+        participants_prompt = await ContextAssembler(self.ctx).participants_prompt(
+            session_key, include_identifier=True)
 
         # Load memory index for trusted sessions
         memory_prompt = ""
@@ -857,24 +859,6 @@ class EmailPollingService(BaseService):
                        last_active_at = excluded.last_active_at""",
                 (session_key, email_lower, display_name, contact_id, is_trusted, now_iso),
             )
-
-    async def _build_participants_prompt(self, session_key: str) -> str:
-        rows = await self.db.fetch_all(
-            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
-            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
-            (session_key,),
-        )
-        if not rows:
-            return ""
-        lines = ["## Participants"]
-        for r in rows:
-            name = r["display_name"] or r["identifier"]
-            if r["contact_id"]:
-                trust = "trusted" if r["is_trusted"] else "untrusted"
-                lines.append(f"- {name} <{r['identifier']}> (contact, {trust})")
-            else:
-                lines.append(f"- {name} <{r['identifier']}> (not in contacts)")
-        return "\n".join(lines)
 
     def _should_poll(self, inbox: dict[str, Any], poll_interval: float) -> bool:
         """Check if enough time has elapsed since the last poll for this inbox."""

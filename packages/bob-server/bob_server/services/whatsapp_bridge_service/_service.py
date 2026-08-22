@@ -404,13 +404,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             contact_id=contact_id, is_trusted=is_trusted,
         )
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-        participants_prompt = await self._build_participants_prompt(session_key)
+        from bob_server.services.context_assembler import ContextAssembler
+        assembler = ContextAssembler(self.ctx)
+        participants_prompt = await assembler.participants_prompt(session_key)
 
-        from bob_server.services.dream.injection import build_session_plans_prompt
-
-        dream_plans_prompt = await build_session_plans_prompt(
-            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled,
-        )
+        dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
 
         system_content = "\n\n".join(
             p for p in (workspace_prompt, participants_prompt, agenda, dream_plans_prompt) if p
@@ -503,60 +501,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 return result
 
         asyncio.create_task(_run_dispatch())
-
-    async def _build_participants_prompt(self, session_key: str) -> str:
-        # For group sessions, use the group members table for richer info
-        if ":group:" in session_key:
-            route = await self.db.fetch_one(
-                "SELECT chat_id FROM session_routes WHERE session_key = ?",
-                (session_key,),
-            )
-            if route and route["chat_id"]:
-                group = await self.db.fetch_one(
-                    "SELECT id, name, member_count FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-                    (route["chat_id"],),
-                )
-                if group:
-                    members = await self.db.fetch_all(
-                        """SELECT gm.display_name, gm.is_admin, gm.is_super_admin,
-                                  c.name as contact_name, c.is_trusted
-                           FROM whatsappgroup_members gm
-                           JOIN contacts c ON c.id = gm.contact_id AND c.deleted_at IS NULL
-                           WHERE gm.group_id = ? AND gm.left_at IS NULL
-                           ORDER BY gm.is_super_admin DESC, gm.is_admin DESC, gm.display_name ASC""",
-                        (group["id"],),
-                    )
-                    if members:
-                        lines = [f"## Participants ({len(members)} members in {group['name'] or 'group'})"]
-                        for m in members:
-                            name = m["display_name"] or m["contact_name"] or "Unknown"
-                            badges = []
-                            if m["is_super_admin"]:
-                                badges.append("super admin")
-                            elif m["is_admin"]:
-                                badges.append("admin")
-                            trust = "trusted" if m["is_trusted"] else "untrusted"
-                            badges.append(trust)
-                            lines.append(f"- {name} ({', '.join(badges)})")
-                        return "\n".join(lines)
-
-        # Fallback: session_participants for DMs or when group data unavailable
-        rows = await self.db.fetch_all(
-            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
-            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
-            (session_key,),
-        )
-        if not rows:
-            return ""
-        lines = ["## Participants"]
-        for r in rows:
-            name = r["display_name"] or r["identifier"]
-            if r["contact_id"]:
-                trust = "trusted" if r["is_trusted"] else "untrusted"
-                lines.append(f"- {name} (contact, {trust})")
-            else:
-                lines.append(f"- {name} ({r['identifier']}, not in contacts)")
-        return "\n".join(lines)
 
     async def _lookup_contact(self, phone_number: str) -> tuple[str, bool] | None:
         """Return (contact_id, is_trusted) for an existing contact, or None.
@@ -871,37 +815,21 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         # Build system prompt: workspace context + agenda + participants
         from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+        from bob_server.services.context_assembler import ContextAssembler
+        assembler = ContextAssembler(self.ctx)
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
 
-        participants_prompt = await self._build_participants_prompt(session_key)
+        participants_prompt = await assembler.participants_prompt(session_key)
 
         # Inject person profile for DM sessions
         person_context = ""
-        if contact_id and chat_kind != "group":
-            from bob_server.services.memory import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            entry = await mem_svc.find_person_entry(
-                settings.harness.workspace_dir, contact_id=contact_id,
-            )
-            if entry:
-                person_context = f"## Person Profile\n\n{entry}"
+        if chat_kind != "group":
+            person_context = await assembler.person_profile(contact_id)
 
         # Inject group entity hint for group sessions
         group_memory_hint = ""
         if chat_kind == "group":
-            group_row = await self.db.fetch_one(
-                "SELECT wg.memory_entity_id FROM whatsappgroups wg "
-                "JOIN session_routes sr ON sr.chat_id = wg.whatsapp_jid "
-                "WHERE sr.session_key = ? AND wg.deleted_at IS NULL",
-                (session_key,),
-            )
-            if group_row and group_row["memory_entity_id"]:
-                eid = group_row["memory_entity_id"]
-                group_memory_hint = (
-                    "## Group Memory\n\n"
-                    f"This is a WhatsApp group with accumulated memory entity `{eid}`.\n"
-                    f"Use `recall('{eid}')` to look up group knowledge."
-                )
+            group_memory_hint = await assembler.group_memory_hint(session_key)
 
         # Handle shared contacts — auto-seed into contacts table
         shared_contacts = payload.get("contacts", [])
@@ -1007,33 +935,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             ), txn=txn)
 
         # Dream plans — Tier 1 injection for sessions with linked plans
-        from bob_server.services.dream.injection import build_session_plans_prompt
-
-        dream_plans_prompt = await build_session_plans_prompt(
-            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled,
-        )
+        dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
 
         # Check for active outreach request and inject into system prompt
-        outreach_prompt = ""
-        route_for_outreach = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if route_for_outreach and route_for_outreach["metadata"]:
-            try:
-                route_meta = json.loads(route_for_outreach["metadata"])
-            except (json.JSONDecodeError, TypeError):
-                route_meta = {}
-            if "outreach_initiated_from" in route_meta:
-                outreach_prompt = (
-                    "## Active Outreach Request\n"
-                    "You proactively sent a message to this contact.\n"
-                    f"- Requested by: {route_meta.get('outreach_requestor', 'unknown')}\n"
-                    f"- Objective: {route_meta.get('outreach_objective', 'unknown')}\n"
-                    f"- Your initial message: \"{route_meta.get('outreach_message', '')}\"\n\n"
-                    "Your goal is to achieve the objective through this conversation. "
-                    "When you have the information needed, call the finish_outreach tool to relay the result back."
-                )
+        outreach_prompt = await assembler.outreach_prompt(session_key)
 
         system_content = "\n\n".join(
             p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, outreach_prompt) if p

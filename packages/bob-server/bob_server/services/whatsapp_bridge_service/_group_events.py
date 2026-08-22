@@ -303,7 +303,8 @@ class GroupEventsMixin:
             contact_id=route["contact_id"] if route else None, is_trusted=is_trusted,
         )
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-        participants_prompt = await self._build_participants_prompt(session_key)
+        from bob_server.services.context_assembler import ContextAssembler
+        participants_prompt = await ContextAssembler(self.ctx).participants_prompt(session_key)
 
         system_content = "\n\n".join(
             p for p in (workspace_prompt, participants_prompt) if p
