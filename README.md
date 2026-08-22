@@ -128,7 +128,10 @@ mkdir -p ~/config
 cat > ~/config/.env <<'EOF'
 # Core
 BOB_PORT=8420
-BOB_DASHBOARD_SECRET=your-dashboard-secret
+# API token: leave unset — a secret is auto-generated to ~/data/api_secret.
+# (Setting it here would leak it to the agent's bash tool via the environment;
+# see "API authentication" below.)
+# BOB_DASHBOARD_SECRET=
 
 # LLM
 BOB_OPENAI_API_KEY=sk-...
@@ -227,6 +230,19 @@ So the backend must be running separately (`uv run bob serve`) for the dev dashb
 
 For production, `npm run build` outputs static files to `ui_dist/`, which the FastAPI server serves at `/dashboard`.
 
+## API Authentication
+
+All state-changing HTTP requests (POST/PUT/PATCH/DELETE) require the API token. GET/HEAD/OPTIONS are open, as are the endpoints called by external parties: `POST /phone/twiml`, `POST /phone/status` (Twilio callbacks), and `POST /voice/log` (public voice pages). WebSocket endpoints keep their own auth.
+
+The token is `BOB_DASHBOARD_SECRET` if set, otherwise a secret auto-generated to `~/data/api_secret` (0600, stable across restarts). Present it via any of:
+
+- `Authorization: Bearer <token>` header
+- `X-Dashboard-Secret: <token>` header (what the CLI sends)
+- `bob_dashboard_secret=<token>` cookie (set this in your browser for the dashboard: DevTools → `document.cookie = "bob_dashboard_secret=<token>; path=/; max-age=31536000"`)
+- `?secret=<token>` query parameter (legacy dashboard SPA transport)
+
+The CLI reads the token automatically. To disable the gate entirely (break-glass), set `BOB_API_AUTH_DISABLED=true` and restart.
+
 ## CLI
 
 ```bash
@@ -312,7 +328,8 @@ curl -X POST http://127.0.0.1:8420/api/v1/webhooks/process-pending
 | `BOB_LOG_PATH` | *(none)* | Log file path |
 | `BOB_DB_POOL_SIZE` | `4` | Connection pool size |
 | `BOB_PUBLIC_URL` | *(none)* | Public URL for webhook callbacks |
-| `BOB_DASHBOARD_SECRET` | *(none)* | Shared secret for dashboard operations |
+| `BOB_DASHBOARD_SECRET` | *(auto-generated)* | Explicit API token. If unset, a token is generated to `{data_dir}/api_secret` (0600). **Do not set this in `.env`** while the agent bash tool inherits the server environment — the agent could read it via `printenv`; use the generated file instead |
+| `BOB_API_AUTH_DISABLED` | `false` | Kill switch: when `true`, the API token gate is bypassed entirely |
 | `BOB_HEARTBEAT_INTERVAL_SECONDS` | `60` | Heartbeat and notification dispatch interval |
 
 ### LLM

@@ -31,7 +31,11 @@ def make_client(tmp_path: Path, settings: Settings | None = None) -> TestClient:
         config_dir=tmp_path / "config",
         db_path=tmp_path / "data" / "cyborg.db",
     )
-    return TestClient(create_app(resolved_settings))
+    # The API token gate rejects unauthenticated state-changing requests.
+    return TestClient(
+        create_app(resolved_settings),
+        headers={"X-Dashboard-Secret": resolved_settings.resolved_api_secret},
+    )
 
 
 def create_task(client: TestClient, **payload: object) -> dict[str, object]:

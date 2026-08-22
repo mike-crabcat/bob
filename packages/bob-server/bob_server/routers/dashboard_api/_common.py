@@ -53,15 +53,9 @@ def _parse_channel(session_key: str) -> str:
 
 
 def _check_auth(request: Request) -> bool:
-    settings = request.app.state.settings
-    if not settings.dashboard_secret_configured:
-        return True
-    secret = request.query_params.get("secret", "")
-    if not secret:
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            secret = auth[7:]
-    return secret == settings.dashboard_secret
+    from bob_server.api_auth import api_token_valid
+
+    return api_token_valid(request.app.state.settings, request)
 
 
 def _db(request: Request) -> Database:

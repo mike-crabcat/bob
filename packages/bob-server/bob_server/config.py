@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import logging
 import os
 from pathlib import Path
+import secrets
 
 logger = logging.getLogger(__name__)
 import re
@@ -372,11 +373,53 @@ class Settings:
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
+    api_auth_disabled: bool = False  # Kill switch: bypass the API token gate
+    _api_secret_cache: str | None = field(default=None, init=False, repr=False, compare=False)
     session_summary_idle_minutes: float = 5.0
 
     @property
     def dashboard_secret_configured(self) -> bool:
         return bool(self.dashboard_secret.strip())
+
+    @property
+    def api_auth_enabled(self) -> bool:
+        return not self.api_auth_disabled
+
+    @property
+    def api_secret_path(self) -> Path:
+        return self.data_dir / "api_secret"
+
+    @property
+    def resolved_api_secret(self) -> str:
+        """The API token: explicit BOB_DASHBOARD_SECRET if set, else a generated
+        secret persisted under data_dir so it is stable across restarts.
+
+        Kept out of os.environ on purpose — the agent bash tool inherits the
+        server environment, so a secret set in `.env` would be readable via
+        printenv. The file lives outside the workspace.
+        """
+        if self.dashboard_secret_configured:
+            return self.dashboard_secret.strip()
+        if self._api_secret_cache:
+            return self._api_secret_cache
+        secret = ""
+        try:
+            secret = self.api_secret_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        if not secret:
+            secret = secrets.token_urlsafe(32)
+            try:
+                self.data_dir.mkdir(parents=True, exist_ok=True)
+                self.api_secret_path.write_text(secret + "\n", encoding="utf-8")
+                os.chmod(self.api_secret_path, 0o600)
+            except OSError:
+                logger.warning(
+                    "Cannot persist API secret to %s; it will change on restart",
+                    self.api_secret_path,
+                )
+        self._api_secret_cache = secret
+        return secret
 
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.expanduser()
@@ -452,6 +495,7 @@ class Settings:
 
         public_url = os.getenv("BOB_PUBLIC_URL", "")
         dashboard_secret = os.getenv("BOB_DASHBOARD_SECRET", "")
+        api_auth_disabled = _env_bool("BOB_API_AUTH_DISABLED", False)
 
         agentmail = AgentMailSettings(
             base_url=os.getenv("BOB_AGENTMAIL_BASE_URL", "https://api.agentmail.to").rstrip("/"),
@@ -623,6 +667,7 @@ class Settings:
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             public_url=public_url,
             dashboard_secret=dashboard_secret,
+            api_auth_disabled=api_auth_disabled,
             session_summary_idle_minutes=session_summary_idle_minutes,
             phone=phone,
             openai=openai_llm,
