@@ -245,6 +245,39 @@ async def _maybe_dispatch_call_result(
     )
 
 
+async def _append_call_status_event(db: Any, call_sid: str, call_status: str, call_duration: str) -> None:
+    """Append a call.status event (Bob3 Phase I ingress, audit-only).
+
+    Twilio retries webhooks, so external_id = sid:status gives accept-once.
+    Best-effort: an append failure must never break the webhook.
+    """
+    if not call_sid or not call_status:
+        return
+    try:
+        from bob_server.repositories import Event, EventLogRepository
+
+        row = await db.fetch_one(
+            "SELECT phone_number, direction FROM phone_calls WHERE call_sid = ?",
+            (call_sid,))
+        phone = (row or {}).get("phone_number") or "unknown"
+        binding = f"agent:main:phone:dm:{phone.lstrip('+')}"
+        await EventLogRepository(db).append(Event(
+            event_type="call.status",
+            binding_key=binding,
+            conversation_id=binding,
+            source="phone",
+            external_id=f"{call_sid}:{call_status}",
+            payload={
+                "call_sid": call_sid,
+                "status": call_status,
+                "duration": call_duration or None,
+                "direction": (row or {}).get("direction"),
+            },
+        ))
+    except Exception:
+        logger.warning("call.status event append failed for %s", call_sid, exc_info=True)
+
+
 @router.post("/status")
 async def call_status(request: Request) -> dict:
     """Handle call status callbacks from Twilio."""
@@ -255,6 +288,7 @@ async def call_status(request: Request) -> dict:
     logger.info("Call %s status: %s (duration=%s)", call_sid, call_status, call_duration)
 
     db = request.app.state.db
+    await _append_call_status_event(db, call_sid, call_status, call_duration)
 
     # Persist status to DB
     if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):

@@ -348,40 +348,61 @@ class EmailPollingService(BaseService):
 
         sender_email, sender_name = _parse_from(message.get("from"))
 
-        # Store the message
+        # Store the message and append the ingress event in ONE transaction
+        # (Bob3 invariants 1+2). external_id = agentmail_message_id gives
+        # accept-once; audit-only in Phase I (dispatch unchanged).
+        from bob_server.repositories import Event, EventLogRepository
+
+        session_key_for_event = _build_session_key(thread_id)
         message_id = str(uuid4())
-        await self.db.execute(
-            """
-            INSERT INTO email_messages (
-                id, inbox_id, agentmail_message_id, thread_id,
-                subject, sender_email, sender_name,
-                to_addresses, cc_addresses,
-                text_body, html_body, preview, labels,
-                has_attachments, in_reply_to,
-                message_timestamp, processed_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                message_id,
-                inbox["id"],
-                agentmail_message_id,
-                thread_id,
-                message.get("subject"),
-                sender_email,
-                sender_name or None,
-                json_dumps(message.get("to", [])),
-                json_dumps(message.get("cc", [])),
-                message.get("extracted_text") or message.get("text", ""),
-                message.get("extracted_html") or message.get("html"),
-                message.get("preview"),
-                json_dumps(message.get("labels", [])),
-                1 if message.get("attachments") else 0,
-                message.get("in_reply_to"),
-                message.get("timestamp") or message.get("created_at", now.isoformat()),
-                now.isoformat(),
-                now.isoformat(),
-            ),
-        )
+        async with self.db.transaction() as txn:
+            await txn.execute(
+                """
+                INSERT INTO email_messages (
+                    id, inbox_id, agentmail_message_id, thread_id,
+                    subject, sender_email, sender_name,
+                    to_addresses, cc_addresses,
+                    text_body, html_body, preview, labels,
+                    has_attachments, in_reply_to,
+                    message_timestamp, processed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    inbox["id"],
+                    agentmail_message_id,
+                    thread_id,
+                    message.get("subject"),
+                    sender_email,
+                    sender_name or None,
+                    json_dumps(message.get("to", [])),
+                    json_dumps(message.get("cc", [])),
+                    message.get("extracted_text") or message.get("text", ""),
+                    message.get("extracted_html") or message.get("html"),
+                    message.get("preview"),
+                    json_dumps(message.get("labels", [])),
+                    1 if message.get("attachments") else 0,
+                    message.get("in_reply_to"),
+                    message.get("timestamp") or message.get("created_at", now.isoformat()),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await EventLogRepository(self.db).append(Event(
+                event_type="message.received",
+                binding_key=session_key_for_event,
+                conversation_id=session_key_for_event,
+                source="email",
+                external_id=agentmail_message_id,
+                occurred_at=str(message.get("timestamp") or now.isoformat()),
+                payload={
+                    "email_message_id": message_id,
+                    "thread_id": thread_id,
+                    "sender_email": sender_email,
+                    "subject": message.get("subject"),
+                    "backfill": backfill,
+                },
+            ), txn=txn)
 
         # Resolve or create the thread record
         thread, is_new_thread = await self._resolve_or_create_thread(inbox, message, thread_id, now)

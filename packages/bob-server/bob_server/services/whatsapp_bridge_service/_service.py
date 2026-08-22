@@ -1058,11 +1058,35 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             fallback_text = f"[Document: {document_filename}]"
         else:
             fallback_text = ""
-        await SessionService(self.ctx).add_message(
-            session_key, "user", text or fallback_text,
-            channel="whatsapp", sender_id=contact_id, dispatched=0,
-            metadata=message_metadata,
-        )
+        # Store the user message and append the ingress event in ONE
+        # transaction (Bob3 invariants 1+2): the event log is the durable
+        # record of accepted stimuli, keyed (source=whatsapp, external_id=
+        # wa_message_id) so bridge redeliveries can't double-accept. Audit
+        # -only in Phase I — dispatch still runs off session_messages.
+        from bob_server.repositories import Event, EventLogRepository
+
+        event_repo = EventLogRepository(self.db)
+        session_svc = SessionService(self.ctx)
+        async with self.db.transaction() as txn:
+            stored_msg_id = await session_svc.add_message(
+                session_key, "user", text or fallback_text,
+                channel="whatsapp", sender_id=contact_id, dispatched=0,
+                metadata=message_metadata, txn=txn,
+            )
+            await event_repo.append(Event(
+                event_type="message.received",
+                binding_key=session_key,
+                conversation_id=session_key,
+                source="whatsapp",
+                external_id=wa_message_id or None,
+                payload={
+                    "session_message_id": stored_msg_id,
+                    "chat_kind": chat_kind,
+                    "sender_name": sender_name,
+                    "contact_id": contact_id,
+                    "has_media": bool(message_metadata),
+                },
+            ), txn=txn)
 
         # Dream plans — Tier 1 injection for sessions with linked plans
         from bob_server.services.dream.injection import build_session_plans_prompt

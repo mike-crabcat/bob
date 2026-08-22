@@ -257,6 +257,60 @@ class LlmLogRetentionTask:
             logger.info("Redacted payloads from %d llm_call_log row(s)", redacted)
 
 
+_last_event_log_reconcile: datetime | None = None
+
+
+class EventLogReconciliationTask:
+    """Daily audit: compare legacy channel stores against event_log (Bob3 Phase I).
+
+    Audit-only — logs unmatched counts, never writes. Compares the last 24h of
+    whatsapp session_messages and email_messages against event_log appends,
+    scoped to rows created after the first event of each source (i.e. after
+    the ingress-append deploy). Count divergence is expected signal: e.g.
+    WhatsApp has no in-service dedup while event_log dedups on wa_message_id.
+    """
+
+    name = "event_log_reconciliation"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_event_log_reconcile
+        now = datetime.now(timezone.utc)
+        if _last_event_log_reconcile and (now - _last_event_log_reconcile) < timedelta(hours=24):
+            return
+        _last_event_log_reconcile = now
+
+        since = (now - timedelta(hours=24)).isoformat()
+        for source, legacy_sql in (
+            ("whatsapp",
+             """SELECT COUNT(*) AS n FROM session_messages
+                WHERE role = 'user' AND channel = 'whatsapp' AND created_at >= ?"""),
+            ("email",
+             """SELECT COUNT(*) AS n FROM email_messages m
+                JOIN email_inboxes i ON i.id = m.inbox_id
+                WHERE m.created_at >= ? AND m.sender_email != i.email_address"""),
+        ):
+            first = await ctx.db.fetch_one(
+                "SELECT MIN(recorded_at) AS t FROM event_log WHERE source = ?", (source,))
+            baseline = (first or {}).get("t")
+            if not baseline:
+                continue  # no events yet for this source; nothing to reconcile
+            window_start = max(since, baseline)
+            legacy = await ctx.db.fetch_one(legacy_sql, (window_start,))
+            events = await ctx.db.fetch_one(
+                "SELECT COUNT(*) AS n FROM event_log WHERE source = ? AND recorded_at >= ?",
+                (source, window_start))
+            legacy_n = (legacy or {}).get("n", 0) or 0
+            events_n = (events or {}).get("n", 0) or 0
+            if legacy_n != events_n:
+                logger.warning(
+                    "event_log reconciliation [%s]: legacy=%d events=%d since %s",
+                    source, legacy_n, events_n, window_start)
+            else:
+                logger.info(
+                    "event_log reconciliation [%s]: OK (%d rows) since %s",
+                    source, legacy_n, window_start)
+
+
 _last_memory_reconcile: datetime | None = None
 
 

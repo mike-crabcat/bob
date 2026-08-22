@@ -98,6 +98,33 @@ class Database:
                 self._write_lock.release()
             await self._queue.put(connection)
 
+    @asynccontextmanager
+    async def transaction(self, *, immediate: bool = True) -> "Transaction":
+        """Run multiple statements as one atomic unit.
+
+        ``immediate=True`` issues ``BEGIN IMMEDIATE`` so the write lock is
+        taken up front — required on claim paths, where a read-then-write
+        must not interleave with another writer. All statements inside the
+        block commit together; any exception rolls the whole unit back.
+
+        Usage::
+
+            async with db.transaction() as txn:
+                await txn.execute("INSERT ...", (...,))
+                row = await txn.fetch_one("SELECT ...", (...,))
+                await txn.execute("UPDATE ...", (...,))
+        """
+
+        async with self.connection(write=True) as connection:
+            await connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            txn = Transaction(connection)
+            try:
+                yield txn
+            except Exception:
+                await connection.rollback()
+                raise
+            # commit happens in connection(write=True) on clean exit
+
     async def apply_migrations(self) -> None:
         """Apply SQL migrations from the schema directory once each."""
 
@@ -184,3 +211,33 @@ def _migration_sort_key(path: Path) -> tuple[int, str]:
     if match is None:
         return (10**9, path.name)
     return (int(match.group(1)), path.name)
+
+
+class Transaction:
+    """Statement executor bound to one connection inside ``Database.transaction``.
+
+    Not for use outside the ``transaction`` context manager. Keeps the same
+    call shapes as ``Database`` so repository code is oblivious to whether
+    it runs standalone or transactionally.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def execute(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        cursor = await self._connection.execute(query, params)
+        rowcount = cursor.rowcount
+        await cursor.close()
+        return rowcount
+
+    async def fetch_one(self, query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+        cursor = await self._connection.execute(query, params)
+        row = await cursor.fetchone()
+        await cursor.close()
+        return dict(row) if row else None
+
+    async def fetch_all(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        cursor = await self._connection.execute(query, params)
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]

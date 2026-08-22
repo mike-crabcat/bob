@@ -46,7 +46,33 @@ class RoutineSchedulerTask:
                 routine["schedule"], timezone=routine.get("timezone")
             ).astimezone(UTC).isoformat()
             if await svc.claim(routine["id"], next_at):
+                await self._append_fired_event(ctx, routine)
                 asyncio.create_task(self._fire_routine(ctx, routine))
+
+    async def _append_fired_event(self, ctx, routine: dict) -> None:
+        """Append routine.fired (Bob3 Phase I ingress, audit-only).
+
+        Idempotency: routine id + the run slot it was claimed for, so a
+        crashed-and-replayed claim can't double-accept. Best-effort — an
+        append failure must never block the routine.
+        """
+        try:
+            from bob_server.repositories import Event, EventLogRepository
+
+            slot = routine.get("next_run_at") or ""
+            session_key = routine["session_key"]
+            await EventLogRepository(ctx.db).append(Event(
+                event_type="routine.fired",
+                binding_key=session_key,
+                conversation_id=session_key,
+                source="routine",
+                external_id=f"{routine['id']}:{slot}",
+                payload={"routine_id": routine["id"], "name": routine.get("name"),
+                         "slot": slot},
+            ))
+        except Exception:
+            logger.warning("routine.fired event append failed for %s",
+                           routine.get("id"), exc_info=True)
 
     async def _fire_routine(self, ctx, routine: dict) -> None:
         from bob_server.services.session_service import SessionService

@@ -41,6 +41,7 @@ class SessionService(BaseService):
         dispatch_id: str | None = None,
         synthetic: bool | None = None,
         message_id: str | None = None,
+        txn: Any | None = None,
     ) -> str:
         """Store a message. Returns the message ID.
 
@@ -56,6 +57,10 @@ class SessionService(BaseService):
         ``message_id`` lets a caller pre-set the id (e.g. a silent extraction
         turn that threads its own message id as claim provenance before the
         message row exists). Defaults to a freshly generated uuid.
+
+        ``txn`` (a ``Database.transaction`` executor) makes the insert part
+        of a caller-owned atomic unit — used at ingress to compose message
+        persistence with the event-log append (Bob3 invariant 2).
         """
         tool_summary: str | None = None
         tool_blocks_json: str | None = None
@@ -71,7 +76,7 @@ class SessionService(BaseService):
                 synthetic = False
         msg_id = message_id or str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
-        await self.db.execute(
+        await (txn or self.db).execute(
             """INSERT INTO session_messages
                (id, session_key, role, content, sender_id, channel, metadata,
                 dispatched, synthetic, tool_summary, tool_blocks_json)
