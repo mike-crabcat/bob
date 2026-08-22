@@ -308,15 +308,24 @@ class GroupEventsMixin:
         chat_id = group_jid
         message_was_sent = [False]
         sent_texts: list[str] = []
-        sent_texts: list[str] = []
+        send_seq = [0]
 
         async def _send_whatsapp_message(text: str) -> str:
+            from bob_server.services.effects import emit_and_deliver
+
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
+            seq = send_seq[0]
+            send_seq[0] += 1
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send",
+                idempotency_key=f"whatsapp_send:{dispatch_id}:{seq}",
+                payload={"chat_id": chat_id, "text": text})
+            if not result.get("ok"):
+                return f"Error sending message: {result.get('error', 'delivery failed')}"
             sent_texts.append(text)
-            request_id = await wa_service.send_message(chat_id, text)
-            return f"Message sent (request_id={request_id})"
+            return f"Message sent (request_id={result.get('external_result_id')})"
 
         tools.append(Tool(
             name="send_whatsapp_message",

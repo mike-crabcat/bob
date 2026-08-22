@@ -71,6 +71,7 @@ def _make_service(ctx, tmp_path: Path) -> WhatsAppBridgeService:
     svc.send_message = AsyncMock(return_value="req-1")  # type: ignore[method-assign]
     svc.send_media = AsyncMock(return_value="req-2")  # type: ignore[method-assign]
     svc.subscribe_presence = AsyncMock()  # type: ignore[method-assign]
+    svc._register_send_executors()  # normally done in __init__ (Phase IV effects)
     return svc
 
 
@@ -397,18 +398,19 @@ async def test_burst_messages_claimed_by_single_dispatch(
 
 # ------------------------------------------------- failure injection: send
 
-async def test_send_failure_after_claim_loses_the_turn(
+async def test_send_failure_after_claim_records_recoverable_effect(
         ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
     """FAILURE INJECTION at the send boundary: transport dies during
-    send_whatsapp_message. CHARACTERIZATION: the user message stays
-    claimed (dispatched=1) and no assistant history is written — the turn
-    is silently lost (invariant 6/7 gap; fixed by turns + effects outbox
-    in Phases III/IV)."""
+    send_whatsapp_message. Bob3 Phase IV: the send is recorded as an effect
+    before delivery — the failure no longer propagates, the effect stays
+    pending for the pump to retry, and no assistant history is written
+    (delivered-only). Closes the pre-Bob3 lost-turn gap."""
     _stub_workspace(monkeypatch)
 
     async def behaviour(messages, tools):
         tool = await _get_tool(tools, "send_whatsapp_message")
-        await tool.handler(text="about to fail")
+        result = await tool.handler(text="about to fail")
+        assert result.startswith("Error sending message")
         return "unreachable"
     _stub_llm(monkeypatch, behaviour)
 
@@ -416,12 +418,15 @@ async def test_send_failure_after_claim_loses_the_turn(
     svc = _make_service(ctx, tmp_path)
     svc.send_message = AsyncMock(side_effect=ConnectionError("bridge died mid-send"))
 
-    with pytest.raises(ConnectionError):
-        await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "hello"))
+    await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "hello"))
 
     rows = await _user_messages(ctx.db, "agent:main:whatsapp:dm:%")
-    assert rows[0]["dispatched"] == 1, "claim is not restored on send failure"
+    assert rows[0]["dispatched"] == 1
     assert await _assistant_messages(ctx.db, "agent:main:whatsapp:dm:%") == []
+    effect = await ctx.db.fetch_one(
+        "SELECT * FROM effects WHERE kind = 'whatsapp_send'")
+    assert effect is not None
+    assert effect["status"] == "pending", "failed send awaits pump retry"
 
 
 async def test_crash_between_store_and_dispatch_leaves_message_recoverable(

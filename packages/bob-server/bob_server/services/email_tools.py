@@ -13,6 +13,35 @@ from bob_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
+
+def _register_email_executors() -> None:
+    """Bob3 Phase IV: email sends are effects. Executors call the delivery
+    service, so test patches on EmailDeliveryService methods keep working."""
+    from bob_server.services import effects as effects_svc
+
+    async def _exec_reply(ctx, payload):
+        from bob_server.services.email_delivery_service import EmailDeliveryService
+        result = await EmailDeliveryService(ctx).send_reply(
+            inbox_id=payload["inbox_id"], thread_id=payload["thread_id"],
+            text=payload["text"], attachments=payload.get("attachments"))
+        return (result or {}).get("message_id") or (result or {}).get("thread_id")
+
+    async def _exec_send(ctx, payload):
+        from bob_server.services.email_delivery_service import EmailDeliveryService
+        result = await EmailDeliveryService(ctx).send_new_email(
+            inbox_id=payload["inbox_id"], to=payload["to"],
+            subject=payload["subject"], text=payload["text"],
+            agenda=payload.get("agenda"),
+            origin_session_key=payload.get("origin_session_key"),
+            attachments=payload.get("attachments"))
+        return (result or {}).get("thread_id")
+
+    effects_svc.register_executor("email_reply", _exec_reply)
+    effects_svc.register_executor("email_send", _exec_send)
+
+
+_register_email_executors()
+
 MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25 MB
 
 # Attachments we never persist to disk — executables and code files. Bob can
@@ -119,25 +148,26 @@ def make_email_tools(
             if errors:
                 return f"Error with attachments: {'; '.join(errors)}"
 
-        svc = EmailDeliveryService(ctx)
-        try:
-            await svc.send_reply(
-                inbox_id=inbox_id,
-                thread_id=thread_id,
-                text=body,
-                attachments=attachment_dicts,
-            )
-            if reply_tracker is not None:
-                reply_tracker[0] = True
-            if reply_body_tracker is not None:
-                reply_body_tracker.append(body)
-            result = {"ok": True, "thread_id": thread_id}
-            if attachment_dicts:
-                result["attachments_sent"] = [a["filename"] for a in attachment_dicts]
-            return json.dumps(result)
-        except Exception as e:
-            logger.warning("email_reply failed: %s", e)
-            return f"Error sending reply: {e}"
+        from uuid import uuid4 as _uuid4
+
+        from bob_server.services.effects import emit_and_deliver
+
+        outcome = await emit_and_deliver(
+            ctx, kind="email_reply",
+            idempotency_key=f"email_reply:{thread_id}:{_uuid4().hex}",
+            payload={"inbox_id": inbox_id, "thread_id": thread_id,
+                     "text": body, "attachments": attachment_dicts})
+        if not outcome.get("ok"):
+            logger.warning("email_reply failed: %s", outcome.get("error"))
+            return f"Error sending reply: {outcome.get('error', 'delivery failed')}"
+        if reply_tracker is not None:
+            reply_tracker[0] = True
+        if reply_body_tracker is not None:
+            reply_body_tracker.append(body)
+        result = {"ok": True, "thread_id": thread_id}
+        if attachment_dicts:
+            result["attachments_sent"] = [a["filename"] for a in attachment_dicts]
+        return json.dumps(result)
 
     @tool
     async def email_skip() -> str:
@@ -357,24 +387,24 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
         if inbox is None:
             return "Error: no active email inbox configured"
 
-        try:
-            svc = EmailDeliveryService(ctx)
-            result = await svc.send_new_email(
-                inbox_id=inbox["id"],
-                to=to,
-                subject=subject,
-                text=body,
-                agenda=agenda,
-                origin_session_key=session_key,
-                attachments=attachment_dicts,
-            )
-            response = {"ok": True, "thread_id": result.get("thread_id", "")}
-            if attachment_dicts:
-                response["attachments_sent"] = [a["filename"] for a in attachment_dicts]
-            return json.dumps(response)
-        except Exception as e:
-            logger.warning("email_send failed: %s", e)
-            return f"Error sending email: {e}"
+        from uuid import uuid4 as _uuid4
+
+        from bob_server.services.effects import emit_and_deliver
+
+        outcome = await emit_and_deliver(
+            ctx, kind="email_send",
+            idempotency_key=f"email_send:{_uuid4().hex}",
+            payload={"inbox_id": inbox["id"], "to": to, "subject": subject,
+                     "text": body, "agenda": agenda,
+                     "origin_session_key": session_key,
+                     "attachments": attachment_dicts})
+        if not outcome.get("ok"):
+            logger.warning("email_send failed: %s", outcome.get("error"))
+            return f"Error sending email: {outcome.get('error', 'delivery failed')}"
+        response = {"ok": True, "thread_id": outcome.get("external_result_id", "")}
+        if attachment_dicts:
+            response["attachments_sent"] = [a["filename"] for a in attachment_dicts]
+        return json.dumps(response)
 
     return [email_send]
 

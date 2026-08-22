@@ -97,6 +97,26 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         self._verbose_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._verbose_listener_task: asyncio.Task | None = None
         self._presence_subscribed: set[str] = set()
+        self._register_send_executors()
+
+    def _register_send_executors(self) -> None:
+        """Bind this instance as the executor for WhatsApp send effects
+        (Bob3 Phase IV outbox). Last-constructed instance wins — there is
+        one live bridge per process."""
+        from bob_server.services import effects as effects_svc
+
+        async def _exec_send(ctx: Any, payload: dict[str, Any]) -> str:
+            return await self.send_message(
+                payload["chat_id"], payload["text"],
+                reply_to=payload.get("reply_to"))
+
+        async def _exec_media(ctx: Any, payload: dict[str, Any]) -> str:
+            return await self.send_media(
+                payload["chat_id"], payload["file_path"],
+                caption=payload.get("caption", ""))
+
+        effects_svc.register_executor("whatsapp_send", _exec_send)
+        effects_svc.register_executor("whatsapp_send_media", _exec_media)
 
     @property
     def connected(self) -> bool:
@@ -440,14 +460,25 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         message_was_sent = [False]
         sent_texts: list[str] = []
 
+        send_seq = [0]
+
         async def _send_whatsapp_message(text: str) -> str:
+            from bob_server.services.effects import emit_and_deliver
+
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
             text = strip_citation_markers(text)
+            seq = send_seq[0]
+            send_seq[0] += 1
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send",
+                idempotency_key=f"whatsapp_send:{dispatch_id}:{seq}",
+                payload={"chat_id": chat_id, "text": text})
+            if not result.get("ok"):
+                return f"Error sending message: {result.get('error', 'delivery failed')}"
             sent_texts.append(text)
-            request_id = await wa_service.send_message(chat_id, text)
-            return f"Message sent (request_id={request_id})"
+            return f"Message sent (request_id={result.get('external_result_id')})"
 
         tools.append(Tool(
             name="send_whatsapp_message",
@@ -1001,12 +1032,20 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         message_was_sent = [False]
         sent_texts: list[str] = []
+        send_seq = [0]
 
         async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+            # Bob3 Phase IV: sends go through the effects outbox — recorded
+            # durably, delivered inline, retried by the pump after a crash.
+            # History (sent_texts) is written from delivery confirmation.
+            from bob_server.services.effects import emit_and_deliver
+
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
             text = strip_citation_markers(text)
+            seq = send_seq[0]
+            send_seq[0] += 1
             if media_path:
                 workspace = settings.harness.workspace_dir.expanduser().resolve()
                 resolved = (workspace / media_path).resolve()
@@ -1017,12 +1056,22 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 prepared = await _prepare_media(str(resolved))
                 if prepared is None:
                     return "Error: failed to prepare media for sending"
+                result = await emit_and_deliver(
+                    self.ctx, kind="whatsapp_send_media",
+                    idempotency_key=f"whatsapp_send_media:{dispatch_id}:{seq}",
+                    payload={"chat_id": chat_id, "file_path": prepared, "caption": text})
+                if not result.get("ok"):
+                    return f"Error sending media: {result.get('error', 'delivery failed')}"
                 sent_texts.append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
-                request_id = await wa_service.send_media(chat_id, prepared, caption=text)
-                return f"Media sent (request_id={request_id})"
+                return f"Media sent (request_id={result.get('external_result_id')})"
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send",
+                idempotency_key=f"whatsapp_send:{dispatch_id}:{seq}",
+                payload={"chat_id": chat_id, "text": text})
+            if not result.get("ok"):
+                return f"Error sending message: {result.get('error', 'delivery failed')}"
             sent_texts.append(text)
-            request_id = await wa_service.send_message(chat_id, text)
-            return f"Message sent (request_id={request_id})"
+            return f"Message sent (request_id={result.get('external_result_id')})"
 
         tools.append(Tool(
             name="send_whatsapp_message",

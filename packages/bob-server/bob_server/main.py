@@ -28,6 +28,7 @@ from bob_server.heartbeat import (
     LlmLogRetentionTask,
     EventLogReconciliationTask,
     AttentionShadowAgreementTask,
+    EffectPumpTask,
     LocationFetchTask,
     MemoryReconciliationTask,
     SessionIdleSummaryTask,
@@ -110,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(LlmLogRetentionTask())
         runner.register(EventLogReconciliationTask())
         runner.register(AttentionShadowAgreementTask())
+        runner.register(EffectPumpTask())
         runner.register(SessionIdleSummaryTask())
         runner.register(LLMCallStalenessTask())
         runner.register(LocationFetchTask())

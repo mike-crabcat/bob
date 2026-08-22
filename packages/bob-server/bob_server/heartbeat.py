@@ -553,3 +553,21 @@ class LocationFetchTask:
             "LocationFetchTask recorded ping: lat %.4f lon %.4f zone=%s",
             lat, lon, payload.get("state"),
         )
+
+
+class EffectPumpTask:
+    """Deliver due pending effects (Bob3 Phase IV outbox).
+
+    The write path delivers inline; this pump exists for crash leftovers and
+    backoff retries. Runs every heartbeat tick — claim_due is a cheap indexed
+    query when the outbox is empty.
+    """
+
+    name = "effect_pump"
+
+    async def run(self, ctx: AppContext) -> None:
+        from bob_server.services.effects import pump_due_effects
+
+        processed = await pump_due_effects(ctx)
+        if processed:
+            logger.info("effect pump delivered/retried %d effect(s)", processed)
