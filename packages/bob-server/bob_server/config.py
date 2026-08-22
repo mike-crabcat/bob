@@ -171,6 +171,10 @@ class VoiceSettings:
     """Configuration for the voice chat subsystem."""
 
     enabled: bool = True
+    # Load STT/TTS models at startup instead of on first /voice/ws connection.
+    # Lazy is the default: realtime calls do STT/TTS at OpenAI, so the local
+    # models would otherwise sit on the GPU unused.
+    preload: bool = False
     stt_model: str = "large-v3-turbo"
     stt_device: str = "cuda"
     stt_compute_type: str = "int8"
@@ -533,6 +537,7 @@ class Settings:
 
         voice = VoiceSettings(
             enabled=os.getenv("BOB_VOICE_ENABLED", "true").lower() not in ("false", "0", "no", "off"),
+            preload=os.getenv("BOB_VOICE_PRELOAD", "false").lower() in ("true", "1", "yes", "on"),
             stt_model=os.getenv("BOB_VOICE_STT_MODEL", "large-v3-turbo"),
             stt_device=os.getenv("BOB_VOICE_STT_DEVICE", "cuda"),
             stt_compute_type=os.getenv("BOB_VOICE_STT_COMPUTE_TYPE", "int8"),
