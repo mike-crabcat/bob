@@ -311,6 +311,60 @@ class EventLogReconciliationTask:
                     source, legacy_n, window_start)
 
 
+_last_attention_agreement: datetime | None = None
+
+
+class AttentionShadowAgreementTask:
+    """Daily Phase III soak metric: shadow decisions vs live dispatcher.
+
+    A shadow ACT agrees when the live dispatcher produced an assistant
+    message in that session within 10 minutes of the stimulus; a WAIT agrees
+    when it did not. Logged as telemetry only — the ≥90% ACT-agreement
+    cutover gate (plan Phase III exit) reads these lines over the soak week.
+    """
+
+    name = "attention_shadow_agreement"
+    _reply_window_minutes = 10
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_attention_agreement
+        now = datetime.now(timezone.utc)
+        if _last_attention_agreement and (now - _last_attention_agreement) < timedelta(hours=24):
+            return
+        _last_attention_agreement = now
+
+        since = (now - timedelta(hours=24)).isoformat()
+        rows = await ctx.db.fetch_all(
+            "SELECT id, session_key, decision, created_at FROM attention_shadow "
+            "WHERE created_at >= ? ORDER BY id", (since,))
+        if not rows:
+            return
+        stats = {"ACT": {"agree": 0, "total": 0}, "WAIT": {"agree": 0, "total": 0}}
+        for r in rows:
+            decision = r["decision"]
+            if decision not in stats:
+                continue
+            replied = await ctx.db.fetch_one(
+                """SELECT 1 AS x FROM session_messages
+                   WHERE session_key = ? AND role = 'assistant'
+                     AND datetime(created_at) > datetime(?)
+                     AND datetime(created_at) <= datetime(?, ?)
+                   LIMIT 1""",
+                (r["session_key"], r["created_at"], r["created_at"],
+                 f"+{self._reply_window_minutes} minutes"))
+            live_acted = replied is not None
+            agree = (decision == "ACT") == live_acted
+            stats[decision]["total"] += 1
+            if agree:
+                stats[decision]["agree"] += 1
+        for decision, s in stats.items():
+            if s["total"]:
+                pct = 100.0 * s["agree"] / s["total"]
+                logger.info(
+                    "attention shadow agreement [%s]: %.1f%% (%d/%d) over last 24h",
+                    decision, pct, s["agree"], s["total"])
+
+
 _last_memory_reconcile: datetime | None = None
 
 

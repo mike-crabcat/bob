@@ -403,7 +403,15 @@ class EmailPollingService(BaseService):
                 },
             ), txn=txn)
 
-        # Resolve or create the thread record
+        # Attention shadow (Bob3 Phase III): email is always addressed.
+        from bob_server.services.attention import record_shadow_decision
+        await record_shadow_decision(
+            self.db,
+            session_key=session_key_for_event,
+            source="email",
+            text=message.get("extracted_text") or "",
+            chat_kind="thread",
+        )
         thread, is_new_thread = await self._resolve_or_create_thread(inbox, message, thread_id, now)
 
         # Build raw attachment metadata for all messages (needed by list_attachments tool)

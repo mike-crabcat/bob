@@ -900,6 +900,18 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 },
             ), txn=txn)
 
+        # Attention shadow (Bob3 Phase III): record what the new coordinator
+        # would do. Audit-only — live dispatch below is unchanged.
+        from bob_server.services.attention import record_shadow_decision
+        await record_shadow_decision(
+            self.db,
+            session_key=session_key,
+            source="whatsapp",
+            text=text or fallback_text,
+            chat_kind=chat_kind,
+            bot_name=settings.patience.bot_name,
+        )
+
         # Dream plans — Tier 1 injection for sessions with linked plans
         dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
 
