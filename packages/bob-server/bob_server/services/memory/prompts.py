@@ -79,7 +79,14 @@ tastes they actually hold (e.g. "I'm vegetarian", "I drive a Prado", "I follow t
 **Do NOT record:**
 - Jokes, hypotheticals, "wouldn't it be funny if…", or group banter/riffs as facts or \
   preferences. If a statement is playful, ironic, a thought experiment, or the group \
-  riffing on a silly idea, it is NOT a preference — skip it entirely.
+  riffing on a silly idea, it is NOT a preference — skip it entirely. **Exception:** when \
+  a group settles on a standing identity for a member (a nickname, epithet, or running bit \
+  like everyone's assigned transformer), record it as `assigned_identity` on that person \
+  (or on `self-bob` when the identity is Bob's own). A group settles on an identity when \
+  members accept or reuse it — corrections ("I am more like Blaster"), reactions, or later \
+  reuse ("make an image of us as our transformer selves"). An identity the group has \
+  adopted is group canon even when the original assignment appeared in your own message. \
+  Shared references the group expects everyone to get are memory-worthy; one-off riffs are not.
 - Something attached to the wrong person. Only record a fact against the person who \
   actually stated it or clearly owns it. Never transfer one person's possession, trait, \
   or taste onto another participant.
@@ -89,7 +96,9 @@ tastes they actually hold (e.g. "I'm vegetarian", "I drive a Prado", "I follow t
 **Attribution rule (read carefully):** when a group discusses an object or topic — a car, \
 a trip, a gadget, a running joke — record it ONLY for the person who owns it or who stated \
 it as their own. Do not spread it across participants. If you cannot tell who it belongs \
-to, do not record it at all.
+to, do not record it at all. A group-assigned identity is the exception: attribute it to \
+the person it is assigned TO, not to whoever proposed it — include the assigning group \
+in the value.
 
 Use the most specific preference type available (drink_preference, food_preference, \
 sport_preference, interest, etc.) rather than a generic "preference" when one fits.
@@ -144,6 +153,21 @@ Re-read it and either route it to `task` or skip it.
 A genuine `truth` correction reads like: "no, the message to Gareth went by WhatsApp, \
 not email", or "actually it's 2 stops in Paris, not 1". If the value does not contradict \
 a previously-recorded claim, it is not a `truth`.
+
+**`appearance` is for durable PHYSICAL features of a person ONLY** — build, complexion, \
+hair and facial hair, eyes, habitual accessories (glasses), distinguishing features. Do \
+NOT record as `appearance`:
+
+- Photo captions — clothing, props, or the background of one image ("black shirt", \
+"sunglasses pushed up on his head", "bright modern indoor background"). That describes \
+the photo, not the person. Photo-specific clothing may be noted only as "in this photo…".
+- Scheduling or attendance ("coming to the gathering", "will be there Friday") — not \
+physical.
+- Instructions or image-generation directives ("omit the chain from future images") — \
+a directive is not a description.
+
+One canonical description per person: an updated description replaces the previous \
+wording; do not accumulate photo-specific fragments alongside it.
 
 **`milestone` (on `self-bob`) is for qualitative lifecycle events ONLY** — firsts, \
 breakthroughs, regime changes in Bob's capability or role. Examples: "first solo \

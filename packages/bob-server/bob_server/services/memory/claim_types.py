@@ -47,7 +47,7 @@ CLAIM_TYPE_REGISTRY: dict[str, ClaimType] = {}
 _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     # Person
     ("alias", ["person", "group", "location"], "Alternative name or nickname (e.g. 'Cleaver', 'Dave'). Not for event status, actions, or phrases", 'person-mike-cleaver → "Cleaver"'),
-    ("appearance", ["person"], "Physical description", 'person-mike-cleaver → "tall, short brown hair, glasses"'),
+    ("appearance", ["person"], "Durable physical description of the person — build, complexion, hair and facial hair, eyes, habitual accessories (glasses), distinguishing features. NOT a photo caption: clothing/props/background of one image only as 'in this photo…'; NOT scheduling or attendance; NOT instructions. One canonical description per person — an update replaces the previous wording.", 'person-mike-cleaver → "medium-solid build, short brown hair greying at the sides, full beard, rectangular glasses"'),
     ("spouse", ["person"], "Spouse or partner", "person-mike-cleaver → person-blair-nicol"),
     ("parent", ["person"], "Parent of this person", "person-mike-cleaver → person-mum"),
     ("child", ["person"], "Child of this person", "person-mike-cleaver → person-bob-jnr"),
@@ -66,6 +66,7 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("pet", ["person"], "Pets they have — type, name, breed", 'person-mike-cleaver → "golden retriever named Bella"'),
     ("interest", ["person"], "Hobbies, passions, activities", 'person-mike-cleaver → "surfing, photography"'),
     ("personality", ["person"], "Temperament and character traits", 'person-mike-cleaver → "easygoing, punctual"'),
+    ("assigned_identity", ["person", "self"], "Playful identity or epithet a GROUP has settled on for this person (or for Bob, on self-bob) — standing nicknames, running-bit personas (e.g. 'the Optimus Prime of the group', 'the GPT-2 of AI Doom', 'team mum'). Durable group lore, not a self-stated fact: attribute to the person it is assigned TO and name the assigning group in the value. Only record once the group has settled on it — not a first-pass suggestion.", 'person-mike-cleaver → "Optimus Prime of the Leeming Boys (group-leeming-boys) — 50% more buff than canon"'),
     ("language", ["person"], "Languages spoken", 'person-mike-cleaver → "English, conversational Indonesian"'),
     ("birthday", ["person"], "Date of birth", 'person-mike-cleaver → "1990-03-15"'),
     ("contact_method", ["person"], "Phone number, email address, or messaging handle only (e.g. '+61 400 123 456', 'email: mike@example.com', '@handle'). Not for conversation summaries, instructions, or actions", 'person-mike-cleaver → "email: mike@example.com"'),
@@ -703,6 +704,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("pet", "Pets"),
         ("interest", "Interests"),
         ("personality", "Personality"),
+        ("assigned_identity", "Group identity"),
         ("communication_style", "Communication"),
         ("preference", "Preferences"),
         ("contact_id", "Contact ID"),
@@ -834,6 +836,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     ],
     "self": [
         ("self_image", "Self-image"),
+        ("assigned_identity", "Group identity"),
         ("capability", "Capabilities"),
         ("limit", "Limits"),
         ("value", "Values"),
