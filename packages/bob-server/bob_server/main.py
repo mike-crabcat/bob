@@ -87,22 +87,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app_ctx.event_bus = event_bus
         app.state.event_bus = event_bus
 
-        # Voice engines are constructed cheaply; GPU models load lazily on the
-        # first legacy /voice/ws connection (realtime calls do STT/TTS at
-        # OpenAI). BOB_VOICE_PRELOAD=true restores eager startup loading.
-        if resolved_settings.voice.enabled:
-            try:
-                from bob_server.services.voice_engines import VoiceEngineManager
-
-                voice_engines = VoiceEngineManager(resolved_settings.voice)
-                if resolved_settings.voice.preload:
-                    await voice_engines.ensure_ready()
-                app.state.voice_engines = voice_engines
-                app_ctx.voice_engines = voice_engines
-            except Exception:
-                logger.exception("Voice engine init failed — disabling voice")
-                resolved_settings.voice.enabled = False
-
         # Conditional WhatsApp bridge service
         wa_bridge_service = None
         if resolved_settings.whatsapp_bridge.enabled:

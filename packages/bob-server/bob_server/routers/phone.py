@@ -452,7 +452,7 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
         rt_settings.max_call_duration_seconds,
     )
 
-    ctx = AppContext(db=db, settings=settings_full, voice_engines=getattr(app_state, "voice_engines", None))
+    ctx = AppContext(db=db, settings=settings_full)
     tools = make_realtime_tools(ctx, phone_number=phone_number)
 
     # Phone-call convention: on an outbound call the callee speaks first

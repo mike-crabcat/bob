@@ -7,6 +7,7 @@ pipeline runs deterministically against the in-memory DB.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -292,9 +293,11 @@ async def test_prospective_engagement_guard_blocks_expiry(ctx, stub_env, monkeyp
            VALUES (?, 't', 'd', 'a', 'm', 'approved', 'auto', ?, ?, ?, 'dream-x', 'last week', ?, ?)""",
         (plan_id, now, now, json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
     )
-    # engagement: user replied after the announcement
+    # engagement: user replied after the announcement (strictly after announced_at,
+    # so the timestamp must be relative to now — a hardcoded date rots)
+    reply_at = (datetime.now(timezone.utc) + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     await _seed_messages(ctx.db, SK, [
-        {"created_at": "2026-08-16T12:00:00Z", "role": "user", "sender_id": "c1", "content": "yes saturday works"},
+        {"created_at": reply_at, "role": "user", "sender_id": "c1", "content": "yes saturday works"},
     ])
 
     prospective_payload = {"decisions": [{"item_type": "plan", "item_id": plan_id, "action": "expire", "reason": "due passed"}]}
