@@ -1,0 +1,17 @@
+{
+  "name": "burst_dm",
+  "description": "5-message DM burst inside one attention window replays as exactly one turn with one send effect (Phase III exit SLO).",
+  "llm_reply": "Here's everything you asked for.",
+  "messages": [
+    {"kind": "dm", "phone": "+614000000010", "text": "hey", "msg_id": "rp-b1"},
+    {"kind": "dm", "phone": "+614000000010", "text": "quick question", "msg_id": "rp-b2"},
+    {"kind": "dm", "phone": "+614000000010", "text": "what's the plan", "msg_id": "rp-b3"},
+    {"kind": "dm", "phone": "+614000000010", "text": "for tomorrow", "msg_id": "rp-b4"},
+    {"kind": "dm", "phone": "+614000000010", "text": "?", "msg_id": "rp-b5"}
+  ],
+  "expect": {
+    "turns": 1,
+    "send_effects": 1,
+    "all_messages_claimed": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "addressed_dm_reply",
+  "description": "Single trusted DM: one turn, one send effect, delivered-only assistant history.",
+  "llm_reply": "On my way!",
+  "messages": [
+    {"kind": "dm", "phone": "+614000000010", "text": "are you coming?", "msg_id": "rp-a1"}
+  ],
+  "expect": {
+    "turns": 1,
+    "send_effects": 1,
+    "assistant_history": ["On my way!"]
+  }
+}

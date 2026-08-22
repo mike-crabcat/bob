@@ -1,0 +1,13 @@
+{
+  "name": "group_chatter_act",
+  "description": "Unaddressed group chatter the probe deems actionable: one turn, one send effect.",
+  "probe_decision": "ACT",
+  "llm_reply": "I can help with that.",
+  "messages": [
+    {"kind": "group", "phone": "+614000000010", "text": "does anyone know how to fix the wifi", "msg_id": "rp-ga1"}
+  ],
+  "expect": {
+    "turns": 1,
+    "send_effects": 1
+  }
+}

@@ -584,3 +584,64 @@ class WakeupPumpTask:
         fired = await pump_due_wakeups(ctx)
         if fired:
             logger.info("wakeup pump fired %d wakeup(s)", fired)
+
+
+_last_deletion_propagation: datetime | None = None
+
+
+class DeletionPropagationTask:
+    """Daily deletion propagation (Bob3 Phase VII, decision 7): events are
+    kept forever, but explicit deletions propagate as payload redaction.
+    Event rows referencing a deleted contact keep their identity/ordering
+    columns; the payload is replaced with a tombstone."""
+
+    name = "deletion_propagation"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_deletion_propagation
+        now = datetime.now(timezone.utc)
+        if _last_deletion_propagation and (now - _last_deletion_propagation) < timedelta(hours=24):
+            return
+        _last_deletion_propagation = now
+
+        deleted = await ctx.db.fetch_all(
+            "SELECT id FROM contacts WHERE deleted_at IS NOT NULL")
+        redacted = 0
+        for row in deleted:
+            redacted += await ctx.db.execute(
+                """UPDATE event_log
+                   SET payload_json = json_object('redacted', 'contact_deleted')
+                   WHERE json_extract(payload_json, '$.contact_id') = ?
+                     AND json_extract(payload_json, '$.redacted') IS NULL""",
+                (row["id"],),
+            )
+        if redacted:
+            logger.info("deletion propagation redacted %d event payload(s)", redacted)
+
+
+_last_growth_check: datetime | None = None
+
+
+class GrowthMonitoringTask:
+    """Daily DB growth telemetry (Bob3 Phase VII item 4): logs database size
+    and hot-table row counts so growth is visible against the Phase 0
+    baseline (journalctl-greppable: 'db growth')."""
+
+    name = "growth_monitoring"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_growth_check
+        now = datetime.now(timezone.utc)
+        if _last_growth_check and (now - _last_growth_check) < timedelta(hours=24):
+            return
+        _last_growth_check = now
+
+        page_count = await ctx.db.fetch_one("PRAGMA page_count")
+        page_size = await ctx.db.fetch_one("PRAGMA page_size")
+        size_mb = (list(page_count.values())[0] * list(page_size.values())[0]) / (1024 * 1024)
+        counts = {}
+        for table in ("event_log", "session_messages", "llm_call_log",
+                      "effects", "turns", "goals"):
+            row = await ctx.db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
+            counts[table] = row["n"]
+        logger.info("db growth: size=%.1fMB rows=%s", size_mb, counts)

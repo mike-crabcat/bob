@@ -47,6 +47,36 @@ def executors_reset_for_tests() -> None:
     _EXECUTORS.clear()
 
 
+class FakeEffectSink:
+    """Replay-safe effect sink (Bob3 invariant 8): while installed, EVERY
+    effect kind is captured here instead of reaching a real executor, so a
+    recorded episode can replay through real Act code with zero external
+    actions. Enforced by type — delivery checks the sink before the registry.
+    """
+
+    def __init__(self) -> None:
+        self.delivered: list[dict[str, Any]] = []
+
+    async def __call__(self, ctx: Any, kind: str, payload: dict[str, Any]) -> str:
+        self.delivered.append({"kind": kind, "payload": payload})
+        return f"fake-{len(self.delivered)}"
+
+
+_FAKE_SINK: FakeEffectSink | None = None
+
+
+def install_fake_sink(sink: FakeEffectSink) -> None:
+    if not isinstance(sink, FakeEffectSink):
+        raise TypeError("replay sink must be a FakeEffectSink")
+    global _FAKE_SINK
+    _FAKE_SINK = sink
+
+
+def uninstall_fake_sink() -> None:
+    global _FAKE_SINK
+    _FAKE_SINK = None
+
+
 async def emit_and_deliver(
     ctx: Any,
     *,
@@ -87,6 +117,14 @@ async def deliver(ctx: Any, effect: dict[str, Any]) -> dict[str, Any]:
 
     repo = EffectRepository(ctx.db)
     kind = effect["kind"]
+    if _FAKE_SINK is not None:
+        payload = effect["payload_json"]
+        if isinstance(payload, str):
+            payload = _json.loads(payload or "{}")
+        external_id = await _FAKE_SINK(ctx, kind, payload)
+        await repo.mark_delivered(effect["id"], external_result_id=external_id)
+        return {"ok": True, "effect_id": effect["id"],
+                "external_result_id": external_id, "fake": True}
     entry = _EXECUTORS.get(kind)
     if entry is None:
         await repo.mark_failed(effect["id"], f"no executor registered for kind {kind!r}")
