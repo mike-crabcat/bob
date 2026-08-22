@@ -76,11 +76,11 @@ def _make_service(ctx, tmp_path: Path) -> WhatsAppBridgeService:
 
 @pytest.fixture
 def immediate_patience(monkeypatch):
-    """Bypass the patience buffer: run the dispatch closure immediately."""
-    async def _submit(ctx, session_key, item, dispatch_fn, **kwargs):
+    """Bypass the attention coordinator: run the dispatch closure immediately."""
+    async def _submit(self, session_key, dispatch_fn, **kwargs):
         await dispatch_fn()
     monkeypatch.setattr(
-        "bob_server.services.patience_gate.submit_to_patience", _submit)
+        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _submit)
     return _submit
 
 
@@ -369,10 +369,10 @@ async def test_burst_messages_claimed_by_single_dispatch(
 
     dispatch_fns = []
 
-    async def _capture(ctx_, session_key, item, dispatch_fn, **kwargs):
+    async def _capture(self, session_key, dispatch_fn, **kwargs):
         dispatch_fns.append(dispatch_fn)
     monkeypatch.setattr(
-        "bob_server.services.patience_gate.submit_to_patience", _capture)
+        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _capture)
 
     llm_calls = []
 
@@ -432,10 +432,10 @@ async def test_crash_between_store_and_dispatch_leaves_message_recoverable(
     session picks it up (the property burst-claiming relies on)."""
     _stub_workspace(monkeypatch)
 
-    async def _drop(ctx_, session_key, item, dispatch_fn, **kwargs):
+    async def _drop(self, session_key, dispatch_fn, **kwargs):
         return  # simulated crash: dispatch never runs
     monkeypatch.setattr(
-        "bob_server.services.patience_gate.submit_to_patience", _drop)
+        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _drop)
 
     llm_calls = []
 
@@ -452,10 +452,10 @@ async def test_crash_between_store_and_dispatch_leaves_message_recoverable(
     assert rows[0]["dispatched"] == 0, "message survives the crash unclaimed"
 
     # a later arrival's dispatch claims both messages
-    async def _run(ctx_, sk, item, fn, **kw):
+    async def _run(self, sk, fn, **kw):
         await fn()
     monkeypatch.setattr(
-        "bob_server.services.patience_gate.submit_to_patience", _run)
+        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _run)
     await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "follow-up", msg_id="w-next"))
 
     rows = await _user_messages(ctx.db, "agent:main:whatsapp:dm:%")

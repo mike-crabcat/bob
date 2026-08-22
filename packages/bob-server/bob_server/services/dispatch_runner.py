@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 
 _NO_REPLY_VARIANTS = ("NO_REPLY", "NO REPLY", "NOTHING TO SAY")
 
+_LEASE_OWNER: str | None = None
+
+
+def _lease_owner() -> str:
+    global _LEASE_OWNER
+    if _LEASE_OWNER is None:
+        import os
+        import uuid
+        _LEASE_OWNER = f"dispatch-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    return _LEASE_OWNER
+
 
 @dataclass
 class DispatchSpec:
@@ -76,6 +87,18 @@ class DispatchRunner:
                 return ""
             await session_svc.mark_dispatched(session_key)
 
+            # Durable turn (Bob3 invariants 4-6): claim this conversation's
+            # pending event_log events under lease. Advisory alongside the
+            # session_messages claim — a dispatch with no matching events
+            # (e.g. group-event notifications) simply runs without a turn row.
+            turn = None
+            try:
+                from bob_server.repositories.turns import TurnRepository
+                turn = await TurnRepository(self.db).claim(
+                    session_key, lease_owner=_lease_owner())
+            except Exception:
+                logger.warning("turn claim failed for %s", session_key, exc_info=True)
+
             messages = await build_chat_messages(
                 None, session_key,
                 db=self.db,
@@ -94,6 +117,12 @@ class DispatchRunner:
                     contact_id=spec.contact_id,
                 )
             except Exception as exc:
+                if turn is not None:
+                    try:
+                        from bob_server.repositories.turns import TurnRepository
+                        await TurnRepository(self.db).fail(turn["turn_id"], str(exc))
+                    except Exception:
+                        logger.warning("turn fail-mark failed", exc_info=True)
                 if spec.quota_restore and _is_quota_error(exc):
                     await history_repo.restore_pending(claimed_ids)
                     logger.warning(
@@ -120,6 +149,13 @@ class DispatchRunner:
                     )
 
             await self._record_history(spec, session_svc, result)
+
+            if turn is not None:
+                try:
+                    from bob_server.repositories.turns import TurnRepository
+                    await TurnRepository(self.db).complete(turn["turn_id"])
+                except Exception:
+                    logger.warning("turn complete-mark failed", exc_info=True)
 
             if spec.event and self.ctx.event_bus:
                 topic, payload = spec.event

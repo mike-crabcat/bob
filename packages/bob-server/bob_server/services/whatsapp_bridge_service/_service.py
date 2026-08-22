@@ -108,6 +108,19 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             return
         self._task = asyncio.create_task(self._run_loop(), name="whatsapp_bridge")
 
+        # Bob3 Phase III recovery: re-arm dispatch for sessions whose stored
+        # messages never dispatched (crash during an armed attention window).
+        async def _recovery_sweep() -> None:
+            try:
+                await asyncio.sleep(10)  # let the bridge connect first
+                resumed = await self.resume_pending_sessions()
+                if resumed:
+                    logger.info("recovery sweep re-armed %d session(s)", resumed)
+            except Exception:
+                logger.warning("recovery sweep failed", exc_info=True)
+
+        self._recovery_task = asyncio.create_task(_recovery_sweep(), name="wa_recovery_sweep")
+
         # Subscribe to subagent result events and trigger dispatches
         if self.ctx.event_bus:
             self._subagent_queue = self.ctx.event_bus.subscribe()
@@ -521,40 +534,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             key_part = sender_jid.split("@")[0]
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
-        # Check if patience is enabled for this session
-        route_row = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route_row or not route_row["metadata"]:
-            return
-        try:
-            route_meta = json.loads(route_row["metadata"])
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not route_meta.get("patience_enabled"):
-            return
-
-        import time as _time
-        from bob_server.services.patience_buffer import PendingItem, PatienceBufferRegistry
-
-        item = PendingItem(
-            item_type="typing",
-            timestamp=_time.monotonic(),
-            sender_jid=sender_jid,
-            sender_name=sender_name or "",
-            payload={},
-        )
-        buffer = PatienceBufferRegistry.get(session_key)
-
-        # Keep only the latest typing event per sender to avoid buffer bloat
-        buffer.items = [i for i in buffer.items if i.item_type != "typing" or i.sender_jid != sender_jid]
-        buffer.add(item)
-
-        logger.info("patience: typing indicator from %s in %s, buffer=%d messages + %d typing",
-                     sender_name, session_key,
-                     len([i for i in buffer.items if i.item_type == "message"]),
-                     len([i for i in buffer.items if i.item_type == "typing"]))
+        # Typing extends an armed attention window (Tier 1 presence awareness).
+        from bob_server.services.attention import AttentionCoordinator
+        AttentionCoordinator(self.ctx).notify_typing(session_key, sender_name or "")
 
 
     async def _on_message(self, msg: dict[str, Any]) -> None:
@@ -779,24 +761,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             contact_id=contact_id, is_trusted=is_trusted,
         )
 
-        # Build system prompt: workspace context + agenda + participants
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
-        from bob_server.services.context_assembler import ContextAssembler
-        assembler = ContextAssembler(self.ctx)
-        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-
-        participants_prompt = await assembler.participants_prompt(session_key)
-
-        # Inject person profile for DM sessions
-        person_context = ""
-        if chat_kind != "group":
-            person_context = await assembler.person_profile(contact_id)
-
-        # Inject group entity hint for group sessions
-        group_memory_hint = ""
-        if chat_kind == "group":
-            group_memory_hint = await assembler.group_memory_hint(session_key)
-
         # Handle shared contacts — auto-seed into contacts table
         shared_contacts = payload.get("contacts", [])
         contacts_block = ""
@@ -885,7 +849,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 channel="whatsapp", sender_id=contact_id, dispatched=0,
                 metadata=message_metadata, txn=txn,
             )
-            await event_repo.append(Event(
+            ingress_event_id = await event_repo.append(Event(
                 event_type="message.received",
                 binding_key=session_key,
                 conversation_id=session_key,
@@ -900,17 +864,88 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 },
             ), txn=txn)
 
-        # Attention shadow (Bob3 Phase III): record what the new coordinator
-        # would do. Audit-only — live dispatch below is unchanged.
-        from bob_server.services.attention import record_shadow_decision
-        await record_shadow_decision(
-            self.db,
+        logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
+
+        dispatch_spec = await self._build_inbound_dispatch_spec(
             session_key=session_key,
-            source="whatsapp",
+            chat_id=chat_id,
+            chat_kind=chat_kind,
+            contact_id=contact_id,
+            is_trusted=is_trusted,
+            sender_name=sender_name,
+            text_preview=text[:100],
+        )
+
+        async def _run_dispatch() -> str:
+            from bob_server.services.dispatch_runner import DispatchRunner
+            return await DispatchRunner(self.ctx).run(dispatch_spec)
+
+        # Attention coordinator (Bob3 Phase III cutover): Tier 0 addressed
+        # detection + Tier 1 windows decide WHEN this dispatch runs; Tier 2
+        # (probe_enabled) decides WHETHER an unaddressed group batch runs.
+        # Route metadata keeps the legacy flag names for operator continuity.
+        probe_enabled = False
+        route_row = await self.db.fetch_one(
+            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+            (session_key,),
+        )
+        if route_row and route_row["metadata"]:
+            try:
+                route_meta = json.loads(route_row["metadata"])
+                probe_enabled = bool(route_meta.get("patience_enabled")) and bool(
+                    route_meta.get("patience_relevance_gating"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        from bob_server.services.attention import AttentionCoordinator
+
+        await AttentionCoordinator(self.ctx).submit(
+            session_key, _run_dispatch,
             text=text or fallback_text,
             chat_kind=chat_kind,
             bot_name=settings.patience.bot_name,
+            mentioned_jids=tuple(mentioned_jids or ()),
+            sender_name=sender_name or "",
+            probe_enabled=probe_enabled,
+            probe_model=settings.patience.model,
+            event_id=ingress_event_id,
         )
+
+        # Auto-subscribe to presence for this chat so typing indicators can
+        # extend the attention window.
+        if chat_id not in self._presence_subscribed:
+            await self.subscribe_presence(chat_id)
+            self._presence_subscribed.add(chat_id)
+
+    async def _build_inbound_dispatch_spec(
+        self,
+        *,
+        session_key: str,
+        chat_id: str,
+        chat_kind: str,
+        contact_id: str | None,
+        is_trusted: bool,
+        sender_name: str = "",
+        text_preview: str = "",
+    ) -> "DispatchSpec":
+        """Assemble the full inbound-WhatsApp DispatchSpec (system prompt,
+        tools, send tool, quota handling). Shared by the live inbound path
+        and the crash-recovery sweep (`resume_pending_sessions`)."""
+        from bob_server.services.context_assembler import ContextAssembler
+        from bob_server.services.prompt_assembler import load_workspace_prompt
+
+        settings = self._get_settings()
+        assembler = ContextAssembler(self.ctx)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
+        participants_prompt = await assembler.participants_prompt(session_key)
+
+        person_context = ""
+        if chat_kind != "group":
+            person_context = await assembler.person_profile(contact_id)
+
+        group_memory_hint = ""
+        if chat_kind == "group":
+            group_memory_hint = await assembler.group_memory_hint(session_key)
 
         # Dream plans — Tier 1 injection for sessions with linked plans
         dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
@@ -921,8 +956,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         system_content = "\n\n".join(
             p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, outreach_prompt) if p
         )
-
-        logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
 
         from bob_server.services.llm_dispatch import LLMDispatchService
         from bob_server.services.tools import Tool
@@ -1032,58 +1065,60 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 "session_key": session_key,
                 "sender_name": sender_name,
                 "chat_kind": chat_kind,
-                "text_preview": text[:100],
+                "text_preview": text_preview,
             }),
         )
 
-        async def _run_dispatch() -> str:
-            return await DispatchRunner(self.ctx).run(dispatch_spec)
+        return dispatch_spec
 
-        # Check if patience is enabled for this session (per-session via route metadata)
-        patience_enabled = False
-        relevance_gating_enabled = False
-        route_row = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
+    async def resume_pending_sessions(self) -> int:
+        """Crash-recovery sweep (Bob3 Phase III item 5): re-arm dispatch for
+        WhatsApp sessions holding stored-but-undispatched user messages, so a
+        kill -9 during an armed attention window loses zero messages.
+
+        Returns the number of sessions re-armed."""
+        rows = await self.db.fetch_all(
+            """SELECT DISTINCT sm.session_key FROM session_messages sm
+               WHERE sm.role = 'user' AND sm.dispatched = 0
+                 AND sm.channel = 'whatsapp'""",
         )
-        if route_row and route_row["metadata"]:
+        resumed = 0
+        for row in rows:
+            session_key = row["session_key"]
             try:
-                route_meta = json.loads(route_row["metadata"])
-                patience_enabled = route_meta.get("patience_enabled", False)
-                relevance_gating_enabled = route_meta.get("patience_relevance_gating", False)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        logger.info(
-            "patience check: session=%s route_found=%s enabled=%s relevance=%s",
-            session_key, route_row is not None, patience_enabled, relevance_gating_enabled,
-        )
+                route = await self.db.fetch_one(
+                    """SELECT chat_id, contact_id FROM session_routes
+                       WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1""",
+                    (session_key,),
+                )
+                if not route or not route["chat_id"]:
+                    logger.warning("recovery: no route for pending session %s, skipping", session_key)
+                    continue
+                chat_kind = "group" if ":group:" in session_key else "dm"
+                contact_id = route["contact_id"]
+                is_trusted = False
+                if contact_id:
+                    from bob_server.repositories.contacts import ContactRepository
+                    trusted = await ContactRepository(self.db).is_trusted(contact_id)
+                    is_trusted = bool(trusted)
 
-        # Always route through the buffer. Patience-on runs the LLM gate on top;
-        # patience-off uses a fixed settle delay to absorb bursts.
-        import time as _time
-        from bob_server.services.patience_buffer import PendingItem
-        from bob_server.services.patience_gate import submit_to_patience
+                spec = await self._build_inbound_dispatch_spec(
+                    session_key=session_key,
+                    chat_id=route["chat_id"],
+                    chat_kind=chat_kind,
+                    contact_id=contact_id,
+                    is_trusted=is_trusted,
+                )
 
-        item = PendingItem(
-            item_type="message",
-            timestamp=_time.monotonic(),
-            sender_jid=sender_jid,
-            sender_name=sender_name or "",
-            payload={"text": text},
-        )
-        await submit_to_patience(
-            self.ctx, session_key, item, _run_dispatch,
-            bot_name=settings.patience.bot_name,
-            model=settings.patience.model,
-            max_pending_items=settings.patience.max_pending_items,
-            max_context_messages=settings.patience.max_context_messages,
-            relevance_gating_enabled=relevance_gating_enabled,
-            patience_enabled=patience_enabled,
-            settle_seconds=settings.patience.patience_off_settle_seconds,
-        )
+                from bob_server.services.attention import AttentionCoordinator
+                from bob_server.services.dispatch_runner import DispatchRunner
 
-        # Auto-subscribe to presence for this chat (only meaningful when patience is on,
-        # since typing-indicator extension is a patience-on feature).
-        if patience_enabled and chat_id not in self._presence_subscribed:
-            await self.subscribe_presence(chat_id)
-            self._presence_subscribed.add(chat_id)
+                async def _run_dispatch(s=spec) -> str:
+                    return await DispatchRunner(self.ctx).run(s)
+
+                await AttentionCoordinator(self.ctx).resume_pending(session_key, _run_dispatch)
+                resumed += 1
+                logger.info("recovery: re-armed dispatch for %s", session_key)
+            except Exception:
+                logger.warning("recovery: failed to resume %s", session_key, exc_info=True)
+        return resumed

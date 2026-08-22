@@ -28,6 +28,7 @@ class HistoryRepository:
         limit: int,
         since_hours: float | None = None,
         dispatched_only: bool = False,
+        pending_only: bool = False,
     ) -> list[dict]:
         """Last N user/assistant rows, oldest-first (full columns).
 
@@ -41,6 +42,8 @@ class HistoryRepository:
             params.append(f"-{since_hours} hours")
         if dispatched_only:
             since_clause += " AND dispatched = 1 "
+        if pending_only:
+            since_clause += " AND dispatched = 0 AND role = 'user' "
         params.append(limit)
         return await self.db.fetch_all(
             f"SELECT * FROM session_messages "
