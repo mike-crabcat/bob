@@ -103,21 +103,9 @@ class SessionService(BaseService):
         roles: list[str] | None = None,
     ) -> list[SessionMessage]:
         """Retrieve messages for a session, oldest first."""
-        if roles:
-            placeholders = ",".join("?" for _ in roles)
-            rows = await self.db.fetch_all(
-                f"SELECT * FROM session_messages "
-                f"WHERE session_key = ? AND role IN ({placeholders}) "
-                f"ORDER BY created_at ASC LIMIT ?",
-                (session_key, *roles, limit),
-            )
-        else:
-            rows = await self.db.fetch_all(
-                "SELECT * FROM session_messages "
-                "WHERE session_key = ? ORDER BY created_at ASC LIMIT ?",
-                (session_key, limit),
-            )
-
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).messages(
+            session_key, limit=limit, roles=roles)
         return [self._row_to_message(r) for r in rows]
 
     async def delete_session(self, session_key: str) -> None:

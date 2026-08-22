@@ -140,20 +140,11 @@ def make_session_tools(
         if not 1 <= limit <= 200:
             limit = 50
 
-        # Newest N, then flip to oldest-first for readability. rowid breaks
-        # created_at ties (second granularity) by insertion order. (SessionService
+        # Newest N, then flip to oldest-first for readability. (SessionService
         # .get_messages applies LIMIT to the oldest end, which is wrong here.)
-        rows = await db.fetch_all(
-            """
-            SELECT sm.role, sm.content, sm.channel, sm.created_at, c.name AS sender_name
-            FROM session_messages sm
-            LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
-            WHERE sm.session_key = ?
-            ORDER BY sm.created_at DESC, sm.rowid DESC LIMIT ?
-            """,
-            (target, limit),
-        )
-        messages = list(reversed(rows or []))
+        from bob_server.repositories.history import HistoryRepository
+        messages = await HistoryRepository(db).recent_with_sender_names(
+            target, limit=limit)
 
         return json.dumps({
             "session_key": target,

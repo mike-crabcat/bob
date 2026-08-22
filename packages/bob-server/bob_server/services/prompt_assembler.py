@@ -295,16 +295,9 @@ async def build_chat_messages(
                     if digits:
                         mention_names[digits] = p["display_name"]
 
-        rows = await db.fetch_all(
-            "SELECT role, content, sender_id, metadata, tool_summary, tool_blocks_json "
-            "FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "AND rowid IN (SELECT rowid FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "ORDER BY created_at DESC LIMIT ?) "
-            "ORDER BY created_at ASC",
-            (session_key, session_key, max_history),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(db).recent_dialogue(
+            session_key, limit=max_history)
 
         # Indices of the last N assistant rows — these get full tool-block
         # replay. Older rows fall back to the short summary prefix.

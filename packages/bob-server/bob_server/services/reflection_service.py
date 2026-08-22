@@ -86,13 +86,9 @@ class ReflectionService(BaseService):
                     parts.append(f"    Tool calls:\n{tool_log}")
 
         # Session messages
-        msg_rows = await self.db.fetch_all(
-            """SELECT role, content FROM session_messages
-               WHERE session_key = ?
-               ORDER BY created_at ASC
-               LIMIT ?""",
-            (session_key, _MAX_MESSAGES),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        msg_rows = await HistoryRepository(self.db).messages(
+            session_key, limit=_MAX_MESSAGES)
         if msg_rows:
             parts.append(f"\n## Session Messages ({len(msg_rows)} total)")
             for row in msg_rows:

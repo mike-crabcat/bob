@@ -206,21 +206,10 @@ class MemoryService(BaseService):
 
     async def _has_undigested_messages(self, session_key: str) -> bool:
         """True if there are session messages newer than the last silent turn."""
+        from bob_server.repositories.history import HistoryRepository
+        history = HistoryRepository(self.db)
         active_from = await self._last_silent_turn_at(session_key)
-        if active_from:
-            row = await self.db.fetch_one(
-                "SELECT COUNT(*) AS n FROM session_messages "
-                "WHERE session_key = ? AND datetime(created_at) > datetime(?) "
-                "AND role IN ('user', 'assistant')",
-                (session_key, active_from),
-            )
-            return bool(row and row["n"])
-        row = await self.db.fetch_one(
-            "SELECT COUNT(*) AS n FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant')",
-            (session_key,),
-        )
-        return bool(row and row["n"])
+        return bool(await history.count_dialogue(session_key, active_from))
 
     async def _render_silent_turn_history(
         self, session_key: str, *, max_history: int = 30, since_hours: float | None = None
@@ -248,20 +237,9 @@ class MemoryService(BaseService):
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]
 
-        since_clause = ""
-        since_param: list[Any] = []
-        if since_hours is not None:
-            since_clause = " AND datetime(created_at) > datetime('now', ?) "
-            since_param = [f"-{since_hours} hours"]
-
-        rows = await self.db.fetch_all(
-            "SELECT role, content, sender_id, synthetic FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "AND rowid IN (SELECT rowid FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            f"{since_clause} ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
-            (session_key, session_key, *since_param, max_history),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).recent_dialogue(
+            session_key, limit=max_history, since_hours=since_hours)
 
         messages: list[dict[str, Any]] = []
         for row in rows:

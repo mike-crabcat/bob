@@ -326,11 +326,10 @@ class EmailPollingService(BaseService):
                     (thread_id,),
                 )
                 if session_key_row:
-                    dispatched = await self.db.fetch_one(
-                        "SELECT id FROM session_messages WHERE session_key = ? LIMIT 1",
-                        (session_key_row["session_key"],),
-                    )
-                    if not dispatched:
+                    from bob_server.repositories.history import HistoryRepository
+                    has_history = await HistoryRepository(self.db).has_any(
+                        session_key_row["session_key"])
+                    if not has_history:
                         logger.info("Re-dispatching undelivered message %s for thread %s", agentmail_message_id[:30], thread_id[:8])
                         thread_row = await self.db.fetch_one(
                             "SELECT * FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",

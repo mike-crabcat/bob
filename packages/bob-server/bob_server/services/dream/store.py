@@ -160,20 +160,12 @@ class DreamStore(BaseService):
         self, session_key: str, cursor_at: str | None, *, lookback_days: int, limit: int
     ) -> list[dict]:
         """Messages to review: after the cursor (or within lookback on first sight)."""
-        if cursor_at:
-            rows = await self.db.fetch_all(
-                "SELECT created_at, role, sender_id, content FROM session_messages "
-                "WHERE session_key = ? AND datetime(created_at) > datetime(?) "
-                "ORDER BY created_at ASC LIMIT ?",
-                (session_key, cursor_at, limit),
-            )
-        else:
-            rows = await self.db.fetch_all(
-                "SELECT created_at, role, sender_id, content FROM session_messages "
-                "WHERE session_key = ? AND datetime(created_at) > datetime('now', ?) "
-                "ORDER BY created_at ASC LIMIT ?",
-                (session_key, f"-{lookback_days} days", limit),
-            )
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).messages_since(
+            session_key,
+            since_iso=cursor_at or None,
+            lookback_days=None if cursor_at else lookback_days,
+            limit=limit)
         return [dict(r) for r in rows] if rows else []
 
     # ------------------------------------------------------------ resolutions
@@ -546,12 +538,8 @@ class DreamStore(BaseService):
         return None
 
     async def session_last_inbound_at(self, session_key: str) -> str | None:
-        row = await self.db.fetch_one(
-            "SELECT MAX(created_at) AS last_at FROM session_messages "
-            "WHERE session_key = ? AND role = 'user'",
-            (session_key,),
-        )
-        return row["last_at"] if row else None
+        from bob_server.repositories.history import HistoryRepository
+        return await HistoryRepository(self.db).last_message_at(session_key, role="user")
 
     async def announcements_today(self, session_key: str) -> int:
         """Announcement messages recorded in this session today (daily cap)."""
@@ -565,12 +553,9 @@ class DreamStore(BaseService):
 
     async def user_messages_since(self, session_key: str, since_iso: str) -> list[dict]:
         """Engagement check: user messages in a session after a timestamp."""
-        rows = await self.db.fetch_all(
-            "SELECT created_at, role, sender_id, content FROM session_messages "
-            "WHERE session_key = ? AND role = 'user' AND datetime(created_at) > datetime(?) "
-            "ORDER BY created_at ASC LIMIT 50",
-            (session_key, since_iso),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).messages_since(
+            session_key, since_iso=since_iso, role="user", limit=50)
         return [dict(r) for r in rows] if rows else []
 
     async def announce_history(self, limit: int = 30) -> list[dict]:

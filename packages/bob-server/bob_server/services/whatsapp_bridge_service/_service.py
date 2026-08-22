@@ -1135,12 +1135,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 # restore them if the LLM call fails due to quota exhaustion.
                 # Without this, mark_dispatched silently swallows messages that
                 # never got a reply.
-                pre_rows = await self.db.fetch_all(
-                    "SELECT id FROM session_messages "
-                    "WHERE session_key = ? AND role = 'user' AND dispatched = 0",
-                    (session_key,),
-                )
-                claimed_ids = [r["id"] for r in pre_rows]
+                from bob_server.repositories.history import HistoryRepository
+                history_repo = HistoryRepository(self.db)
+                claimed_ids = await history_repo.pending_user_ids(session_key)
                 if not claimed_ids:
                     return ""
                 await session_svc.mark_dispatched(session_key)
@@ -1162,12 +1159,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     )
                 except Exception as exc:
                     if _is_quota_error(exc):
-                        placeholders = ",".join("?" for _ in claimed_ids)
-                        await self.db.execute(
-                            f"UPDATE session_messages SET dispatched = 0 "
-                            f"WHERE id IN ({placeholders})",
-                            tuple(claimed_ids),
-                        )
+                        await history_repo.restore_pending(claimed_ids)
                         logger.warning(
                             "quota exhausted for %s; restored %d message(s) for retry",
                             session_key, len(claimed_ids),

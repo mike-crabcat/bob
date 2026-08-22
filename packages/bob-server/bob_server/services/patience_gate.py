@@ -339,15 +339,12 @@ async def _build_patience_context(
         parts.append(agenda.strip())
 
     # Recent dispatched messages
-    rows = await db.fetch_all(
-        "SELECT role, content, sender_id FROM session_messages "
-        "WHERE session_key = ? AND role IN ('user', 'assistant') AND dispatched = 1 "
-        "ORDER BY created_at DESC LIMIT ?",
-        (session_key, max_context),
-    )
+    from bob_server.repositories.history import HistoryRepository
+    rows = await HistoryRepository(db).recent_dialogue(
+        session_key, limit=max_context, dispatched_only=True)
     if rows:
         parts.append("## Recent conversation")
-        for row in reversed(rows):
+        for row in rows:
             role = "User" if row["role"] == "user" else "Bot"
             content = (row["content"] or "")[:200]
             parts.append(f"{role}: {content}")
