@@ -52,9 +52,14 @@ async def dashboard_auth(request: Request):
     # ?secret= query and WS URLs. SameSite=Lax keeps it out of cross-site
     # requests; the tailnet/LAN dashboard is served over plain http, so
     # Secure would prevent the cookie from being stored at all.
+    #
+    # The cookie value is the CANONICAL secret, never the token as received:
+    # a raw-pasted URL leaves the received form with a space where '+' was,
+    # and a space makes the cookie layer quote the value ('"abc def="') —
+    # which then fails every later comparison (observed live 2026-08-22).
     response.set_cookie(
         "bob_dashboard_secret",
-        token,
+        settings.resolved_api_secret,
         max_age=_COOKIE_MAX_AGE,
         path="/",
         samesite="lax",

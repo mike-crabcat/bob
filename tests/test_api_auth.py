@@ -171,3 +171,26 @@ def test_dashboard_auth_accepts_raw_pasted_plus_in_query(tmp_path: Path) -> None
         assert client.get("/dashboard/api/auth", params={"secret": "abc+def/ghi="}).status_code == 200
         client.cookies.clear()
         assert client.get("/dashboard/api/auth", params={"secret": "abcXdef/ghi="}).status_code == 401
+
+
+def test_dashboard_auth_sets_canonical_secret_not_mangled_form(tmp_path: Path) -> None:
+    """The cookie must hold the canonical secret even when the URL was pasted
+    raw ('+' decoded to space). Setting the received form stored a space-y
+    value, which the cookie layer quotes ('"abc def="') — and that failed
+    every later auth (observed live 2026-08-22).
+
+    Uses a urlsafe secret — what resolved_api_secret actually generates —
+    because the cookie layer quotes any value containing '=' or spaces, so
+    non-urlsafe secrets can never round-trip through a cookie at all."""
+    import re
+    settings = make_settings(tmp_path, dashboard_secret="abc-def_ghi")
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/dashboard/api/auth", params={"secret": "abc-def_ghi"})
+        assert response.status_code == 200
+        m = re.search(r"bob_dashboard_secret=([^;]+)", response.headers["set-cookie"], re.I)
+        assert m and m.group(1) == "abc-def_ghi"  # canonical, unquoted
+
+        # And the set cookie authenticates a gated POST without any jar magic.
+        client.cookies.clear()
+        client.cookies.set("bob_dashboard_secret", m.group(1))
+        assert client.post("/phone/call", json={}).status_code == 200
