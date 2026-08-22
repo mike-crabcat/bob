@@ -62,6 +62,17 @@ def _get_engines(websocket: WebSocket) -> Any | None:
     return engines
 
 
+async def _send_voice_unavailable(websocket: WebSocket) -> None:
+    """Tell the client voice is unavailable, then reset it to idle."""
+    try:
+        await websocket.send_text(
+            ErrorMessage(message="Voice is unavailable — dependencies not installed. Install with: pip install bob-server[voice]").model_dump_json()
+        )
+        await websocket.send_text(StatusMessage(state="idle").model_dump_json())
+    except Exception:
+        pass
+
+
 def _get_session_key(user_id: str, session_mode: str) -> str:
     return f"agent:main:voice:session:{user_id}:{session_mode}"
 
@@ -83,14 +94,35 @@ async def voice_websocket(websocket: WebSocket) -> None:
 
     engines = _get_engines(websocket)
     if engines is None:
+        await _send_voice_unavailable(websocket)
+        return
+
+    # Models load lazily here (first legacy-voice connection of the process).
+    try:
+        try:
+            await websocket.send_text(StatusMessage(state="loading").model_dump_json())
+        except Exception:
+            pass
+        await engines.ensure_ready()
+    except ImportError as exc:
+        logger.warning("Voice dependencies not installed: %s", exc)
+        await _send_voice_unavailable(websocket)
+        return
+    except Exception:
+        logger.exception("Voice engine load failed")
         try:
             await websocket.send_text(
-                ErrorMessage(message="Voice is unavailable — dependencies not installed. Install with: pip install bob-server[voice]").model_dump_json()
+                ErrorMessage(message="Voice engines failed to load — see server logs").model_dump_json()
             )
             await websocket.send_text(StatusMessage(state="idle").model_dump_json())
         except Exception:
             pass
         return
+    else:
+        try:
+            await websocket.send_text(StatusMessage(state="idle").model_dump_json())
+        except Exception:
+            pass
 
     transport = BrowserTransport(websocket)
     audio_chunks: list[bytes] = []

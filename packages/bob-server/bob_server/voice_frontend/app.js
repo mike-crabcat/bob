@@ -638,6 +638,11 @@ const app = {
                 this.updateStatus('idle', 'Ready');
                 this.el['ptt-btn'].disabled = false;
                 break;
+            case 'loading':
+                // Server is loading voice models (first connection after startup)
+                this.updateStatus('thinking', 'Loading voice models…');
+                this.el['ptt-btn'].disabled = true;
+                break;
         }
     },
 

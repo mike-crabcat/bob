@@ -1,8 +1,9 @@
 """STT and TTS engine singletons for the voice chat subsystem.
 
-GPU models are loaded once at startup and shared across all WebSocket connections.
-All heavy imports are deferred to avoid pulling in torch/whisper/omnivoice when
-voice is disabled.
+GPU models are loaded lazily on first use (VoiceEngineManager.ensure_ready)
+and shared across all WebSocket connections — an idle server holds no GPU
+memory. All heavy imports are deferred to avoid pulling in
+torch/whisper/omnivoice when voice is disabled.
 """
 
 from __future__ import annotations
@@ -222,7 +223,7 @@ _FILLER_PHRASES = ["Ok.", "Hurmm.", "I'm thinking.", "Okaay."]
 
 
 class VoiceEngineManager:
-    """Owns the STT and TTS engine singletons. Loaded once at startup."""
+    """Owns the STT and TTS engine singletons. Models load on first use."""
 
     def __init__(self, settings: VoiceSettings) -> None:
         self.settings = settings
@@ -233,14 +234,26 @@ class VoiceEngineManager:
         )
         self.tts = TTSEngine(num_steps=settings.tts_num_steps)
         self.filler_sounds: list[bytes] = []
+        self._ready = False
+        self._ready_lock = asyncio.Lock()
 
-    async def preload(self) -> None:
-        """Load models and generate filler sounds. Call during lifespan startup."""
-        logger.info("Preloading voice engines...")
-        await asyncio.to_thread(self.stt.preload)
-        await asyncio.to_thread(self.tts.preload, self.settings.voices_dir)
-        self.filler_sounds = await asyncio.to_thread(self._generate_filler_sounds)
-        logger.info("Voice engines ready (%d filler sounds)", len(self.filler_sounds))
+    async def ensure_ready(self) -> None:
+        """Load models and generate filler sounds on first call; no-op after.
+
+        Raises on failure (e.g. ImportError when voice extras are missing) so
+        callers can report it — the next call will retry.
+        """
+        if self._ready:
+            return
+        async with self._ready_lock:
+            if self._ready:
+                return
+            logger.info("Loading voice engines (first use)...")
+            await asyncio.to_thread(self.stt.preload)
+            await asyncio.to_thread(self.tts.preload, self.settings.voices_dir)
+            self.filler_sounds = await asyncio.to_thread(self._generate_filler_sounds)
+            logger.info("Voice engines ready (%d filler sounds)", len(self.filler_sounds))
+            self._ready = True
 
     def _generate_filler_sounds(self) -> list[bytes]:
         fillers: list[bytes] = []

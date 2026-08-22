@@ -86,7 +86,8 @@ def parse_client_message(raw: str) -> ClientMessage | None:
 
 class StatusMessage(BaseModel):
     type: Literal["status"] = "status"
-    state: Literal["recording", "transcribing", "thinking", "speaking", "idle"]
+    # "loading" is sent while voice models load lazily on first connection.
+    state: Literal["recording", "transcribing", "thinking", "speaking", "idle", "loading"]
 
 
 class TranscriptMessage(BaseModel):
