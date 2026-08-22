@@ -745,6 +745,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 },
             ), txn=txn)
 
+        # Bob3 Phase VI: keep the binding map current for new sessions.
+        try:
+            from bob_server.repositories.conversations import ConversationRepository
+            await ConversationRepository(self.db).ensure(session_key)
+        except Exception:
+            logger.warning("failed to ensure conversation for %s", session_key, exc_info=True)
+
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
 
         dispatch_spec = await self._build_inbound_dispatch_spec(

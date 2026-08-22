@@ -479,6 +479,13 @@ class EmailPollingService(BaseService):
                 is_new_thread=is_new_thread,
                 saved_attachments=saved_attachments,
             ))
+
+        # Bob3 Phase VI: keep the binding map current for new sessions.
+        try:
+            from bob_server.repositories.conversations import ConversationRepository
+            await ConversationRepository(self.db).ensure(session_key_for_event)
+        except Exception:
+            logger.warning("failed to ensure conversation for %s", session_key_for_event, exc_info=True)
         return True
 
     async def _resolve_or_create_thread(
