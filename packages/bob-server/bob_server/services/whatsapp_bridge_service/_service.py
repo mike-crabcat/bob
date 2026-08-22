@@ -36,14 +36,7 @@ _quota_notify_last: dict[str, float] = {}
 _QUOTA_NOTIFY_MIN_INTERVAL = 3600.0  # 1 hour
 
 
-def _is_quota_error(exc: Exception) -> bool:
-    """True if the exception looks like an OpenAI insufficient-quota failure.
-
-    openai_service wraps the SDK's RateLimitError in a RuntimeError, so we
-    detect by message rather than by type.
-    """
-    msg = str(exc).lower()
-    return "insufficient_quota" in msg or ("429" in msg and "quota" in msg)
+from bob_server.services.dispatch_runner import _is_quota_error
 
 
 async def _notify_quota_exhausted(wa_service: Any, chat_id: str, session_key: str) -> None:
@@ -456,51 +449,24 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         dispatch_id = str(uuid4())
 
-        async def _run_dispatch() -> str:
-            from bob_server.services.session_service import SessionService
-            from bob_server.services.session_dispatch_gate import SessionDispatchGate
+        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
-            session_svc = SessionService(self.ctx)
-            async with SessionDispatchGate.get_lock(session_key):
-                claimed = await session_svc.mark_dispatched(session_key)
-                if claimed == 0:
-                    return ""
+        dispatch_spec = DispatchSpec(
+            session_key=session_key,
+            system_content=system_content,
+            tools=tools,
+            call_category="subagent_result",
+            send_tool_name="send_whatsapp_message",
+            dispatch_id=dispatch_id,
+            contact_id=contact_id,
+            channel="whatsapp",
+            max_history=100,
+            history_policy="delivered_only",
+            message_was_sent=message_was_sent,
+            sent_texts=sent_texts,
+        )
 
-                messages = await build_chat_messages(
-                    None, session_key,
-                    db=self.db,
-                    system_content=system_content,
-                    max_history=100,
-                )
-
-                result = await LLMDispatchService(self.ctx).chat_with_tools(
-                    messages, tools,
-                    call_category="subagent_result",
-                    session_key=session_key,
-                    dispatch_id=dispatch_id,
-                    contact_id=contact_id,
-                )
-                if not message_was_sent[0] and result.strip():
-                    from bob_server.services.tap import tap_dispatch, tap_enabled
-                    if tap_enabled():
-                        result = await tap_dispatch(
-                            self.ctx, messages=messages, tools=tools,
-                            session_key=session_key,
-                            send_tool_name="send_whatsapp_message",
-                            first_result=result,
-                            call_category="subagent_result",
-                            dispatch_id=dispatch_id,
-                            contact_id=contact_id,
-                        )
-
-                # Only delivered replies belong in replayed history; raw output can leak <tool_call> XML.
-                if message_was_sent[0] and sent_texts:
-                    assistant_text = "\n\n".join(p for p in sent_texts if p.strip())
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
-
-                return result
-
-        asyncio.create_task(_run_dispatch())
+        asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))
 
     async def _lookup_contact(self, phone_number: str) -> tuple[str, bool] | None:
         """Return (contact_id, is_trusted) for an existing contact, or None.
@@ -1030,77 +996,36 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         dispatch_id = str(uuid4())
 
+        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
+
+        async def _on_quota_exhausted() -> None:
+            await _notify_quota_exhausted(wa_service, chat_id, session_key)
+
+        dispatch_spec = DispatchSpec(
+            session_key=session_key,
+            system_content=system_content,
+            tools=tools,
+            call_category="whatsapp_incoming",
+            send_tool_name="send_whatsapp_message",
+            dispatch_id=dispatch_id,
+            contact_id=contact_id,
+            channel="whatsapp",
+            max_history=100,
+            history_policy="delivered_only",
+            message_was_sent=message_was_sent,
+            sent_texts=sent_texts,
+            quota_restore=True,
+            on_quota_exhausted=_on_quota_exhausted,
+            event=("whatsapp.message.received", {
+                "session_key": session_key,
+                "sender_name": sender_name,
+                "chat_kind": chat_kind,
+                "text_preview": text[:100],
+            }),
+        )
+
         async def _run_dispatch() -> str:
-            from bob_server.services.session_service import SessionService
-            from bob_server.services.session_dispatch_gate import SessionDispatchGate
-
-            session_svc = SessionService(self.ctx)
-            async with SessionDispatchGate.get_lock(session_key):
-                # Capture IDs of the messages we're about to claim, so we can
-                # restore them if the LLM call fails due to quota exhaustion.
-                # Without this, mark_dispatched silently swallows messages that
-                # never got a reply.
-                from bob_server.repositories.history import HistoryRepository
-                history_repo = HistoryRepository(self.db)
-                claimed_ids = await history_repo.pending_user_ids(session_key)
-                if not claimed_ids:
-                    return ""
-                await session_svc.mark_dispatched(session_key)
-
-                messages = await build_chat_messages(
-                    None, session_key,
-                    db=self.db,
-                    system_content=system_content,
-                    max_history=100,
-                )
-
-                try:
-                    result = await LLMDispatchService(self.ctx).chat_with_tools(
-                        messages, tools,
-                        call_category="whatsapp_incoming",
-                        session_key=session_key,
-                        dispatch_id=dispatch_id,
-                        contact_id=contact_id,
-                    )
-                except Exception as exc:
-                    if _is_quota_error(exc):
-                        await history_repo.restore_pending(claimed_ids)
-                        logger.warning(
-                            "quota exhausted for %s; restored %d message(s) for retry",
-                            session_key, len(claimed_ids),
-                        )
-                        await _notify_quota_exhausted(wa_service, chat_id, session_key)
-                        return ""
-                    raise
-                # Tap: if LLM produced text but didn't use send_whatsapp_message,
-                # give it a second chance with a reminder.
-                if not message_was_sent[0] and result.strip():
-                    from bob_server.services.tap import tap_dispatch, tap_enabled
-                    if tap_enabled():
-                        result = await tap_dispatch(
-                            self.ctx, messages=messages, tools=tools,
-                            session_key=session_key,
-                            send_tool_name="send_whatsapp_message",
-                            first_result=result,
-                            call_category="whatsapp_incoming",
-                            dispatch_id=dispatch_id,
-                            contact_id=contact_id,
-                        )
-                # Record to unified session history — combine LLM text output + all sent messages
-                # If nothing was sent and the result is just a NO_REPLY variant, skip recording
-                # to avoid poisoning future decisions with a pattern of non-responses.
-                # Only delivered replies belong in replayed history; raw output can leak <tool_call> XML.
-                if message_was_sent[0] and sent_texts:
-                    assistant_text = "\n\n".join(p for p in sent_texts if p.strip())
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
-                if self.ctx.event_bus:
-                    await self.ctx.event_bus.publish("whatsapp.message.received", {
-                        "session_key": session_key,
-                        "sender_name": sender_name,
-                        "chat_kind": chat_kind,
-                        "text_preview": text[:100],
-                    })
-                return result
+            return await DispatchRunner(self.ctx).run(dispatch_spec)
 
         # Check if patience is enabled for this session (per-session via route metadata)
         patience_enabled = False

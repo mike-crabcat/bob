@@ -769,55 +769,29 @@ class EmailPollingService(BaseService):
 
         dispatch_id = str(uuid4())
 
-        async def _run_dispatch() -> str:
-            from bob_server.services.session_dispatch_gate import SessionDispatchGate
+        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
-            session_svc = SessionService(self.ctx)
-            async with SessionDispatchGate.get_lock(session_key):
-                claimed = await session_svc.mark_dispatched(session_key)
-                if claimed == 0:
-                    return ""
+        dispatch_spec = DispatchSpec(
+            session_key=session_key,
+            system_content=system_content,
+            tools=tools,
+            call_category="email_incoming",
+            send_tool_name="email_reply",
+            dispatch_id=dispatch_id,
+            contact_id=contact_id,
+            channel="email",
+            max_history=20,
+            history_policy="merged_always",
+            message_was_sent=reply_sent,
+            sent_texts=reply_bodies,
+            event=("email.message.received", {
+                "session_key": session_key,
+                "subject": thread.get("subject", ""),
+                "from_address": message.get("from", ""),
+            }),
+        )
 
-                messages = await build_chat_messages(
-                    None, session_key,
-                    db=self.db,
-                    system_content=system_content,
-                    max_history=20,
-                )
-
-                result = await LLMDispatchService(self.ctx).chat_with_tools(
-                    messages, tools,
-                    call_category="email_incoming",
-                    session_key=session_key,
-                    dispatch_id=dispatch_id,
-                    contact_id=contact_id,
-                )
-                # Tap: if LLM didn't use email_reply, give it a second chance.
-                if not reply_sent[0] and result.strip():
-                    from bob_server.services.tap import tap_dispatch, tap_enabled
-                    if tap_enabled():
-                        result = await tap_dispatch(
-                            self.ctx, messages=messages, tools=tools,
-                            session_key=session_key,
-                            send_tool_name="email_reply",
-                            first_result=result,
-                            call_category="email_incoming",
-                            dispatch_id=dispatch_id,
-                            contact_id=contact_id,
-                        )
-                # Merge LLM text output with actual email reply body (like WhatsApp sent_texts)
-                parts = [p for p in ([result] if result.strip() else []) + reply_bodies if p.strip()]
-                assistant_text = "\n\n".join(parts) if parts else result
-                await session_svc.add_message(session_key, "assistant", assistant_text, channel="email", dispatch_id=dispatch_id)
-                if self.ctx.event_bus:
-                    await self.ctx.event_bus.publish("email.message.received", {
-                        "session_key": session_key,
-                        "subject": thread.get("subject", ""),
-                        "from_address": message.get("from", ""),
-                    })
-                return result
-
-        asyncio.create_task(_run_dispatch())
+        asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))
 
     async def _upsert_email_participants(self, session_key: str, message: dict[str, Any]) -> None:
         """Upsert sender and to/cc addresses as session participants."""

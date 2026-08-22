@@ -360,54 +360,29 @@ class GroupEventsMixin:
         if agenda:
             user_content = agenda + "\n\n" + user_content
 
-        async def _run_dispatch() -> str:
-            from bob_server.services.session_dispatch_gate import SessionDispatchGate
+        def _override_last_user_message(messages: list) -> list:
+            # Override the last user message with our notification
+            if messages and messages[-1].get("role") == "user":
+                messages[-1]["content"] = user_content
+            return messages
 
-            async with SessionDispatchGate.get_lock(session_key):
-                claimed = await session_svc.mark_dispatched(session_key)
-                if claimed == 0:
-                    return ""
+        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
-                messages = await build_chat_messages(
-                    None, session_key,
-                    db=self.db,
-                    system_content=system_content,
-                    max_history=100,
-                )
-                # Override the last user message with our notification
-                if messages and messages[-1].get("role") == "user":
-                    messages[-1]["content"] = user_content
+        dispatch_spec = DispatchSpec(
+            session_key=session_key,
+            system_content=system_content,
+            tools=tools,
+            call_category="whatsapp_group_member_change",
+            send_tool_name="send_whatsapp_message",
+            dispatch_id=dispatch_id,
+            contact_id=route["contact_id"] if route else None,
+            channel="whatsapp",
+            max_history=100,
+            history_policy="merged_skip_no_reply",
+            message_was_sent=message_was_sent,
+            sent_texts=sent_texts,
+            transform_messages=_override_last_user_message,
+        )
 
-                result = await LLMDispatchService(self.ctx).chat_with_tools(
-                    messages, tools,
-                    call_category="whatsapp_group_member_change",
-                    session_key=session_key,
-                    dispatch_id=dispatch_id,
-                    contact_id=route["contact_id"] if route else None,
-                )
-                if not message_was_sent[0] and result.strip():
-                    from bob_server.services.tap import tap_dispatch, tap_enabled
-                    if tap_enabled():
-                        result = await tap_dispatch(
-                            self.ctx, messages=messages, tools=tools,
-                            session_key=session_key,
-                            send_tool_name="send_whatsapp_message",
-                            first_result=result,
-                            call_category="whatsapp_group_member_change",
-                            dispatch_id=dispatch_id,
-                            contact_id=route["contact_id"] if route else None,
-                        )
-
-                parts = [p for p in ([result] if result.strip() else []) + sent_texts if p.strip()]
-                assistant_text = "\n\n".join(parts) if parts else result
-                if not message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in (
-                    "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
-                ):
-                    pass
-                else:
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
-
-                return result
-
-        asyncio.create_task(_run_dispatch())
+        asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))
 
