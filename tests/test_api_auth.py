@@ -124,3 +124,35 @@ def test_explicit_dashboard_secret_wins_and_writes_no_file(tmp_path: Path) -> No
             "/phone/call", json={}, headers={"X-Dashboard-Secret": "explicit-secret"}
         )
         assert response.status_code == 200
+
+
+def test_dashboard_auth_endpoint_sets_cookie_for_valid_token(tmp_path: Path) -> None:
+    """The one-URL phone flow: GET /dashboard/api/auth?secret=<token> must set
+    the bob_dashboard_secret cookie the SPA reads, and reject wrong tokens."""
+    settings = make_settings(tmp_path)
+    token = settings.resolved_api_secret
+    with TestClient(create_app(settings)) as client:
+        response = client.get(f"/dashboard/api/auth?secret={token}")
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        set_cookie = response.headers["set-cookie"]
+        assert "bob_dashboard_secret=" in set_cookie
+        assert "httponly" not in set_cookie.lower()  # SPA reads document.cookie
+
+        # The freshly set cookie authenticates a gated POST (TestClient jar).
+        assert client.post("/phone/call", json={}).status_code == 200
+
+        # Wrong token: 401, no cookie (fresh client — no valid cookie jar).
+        with TestClient(create_app(settings)) as bare:
+            bad = bare.get("/dashboard/api/auth?secret=not-the-token")
+            assert bad.status_code == 401
+            assert "set-cookie" not in bad.headers
+
+
+def test_dashboard_auth_endpoint_when_gate_disabled(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, api_auth_disabled=True)
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/dashboard/api/auth")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert "set-cookie" not in response.headers
