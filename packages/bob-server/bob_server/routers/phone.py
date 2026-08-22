@@ -228,7 +228,8 @@ async def _maybe_dispatch_call_result(
     from bob_server.services.phone_call_result_service import dispatch_call_result
 
     ctx = AppContext(db=db, settings=settings)
-    wa_service = getattr(app_state, "whatsapp_bridge_service", None)
+    ctx.whatsapp_bridge = getattr(app_state, "whatsapp_bridge_service", None)
+    wa_service = ctx.whatsapp_bridge
 
     asyncio.create_task(dispatch_call_result(
         ctx,

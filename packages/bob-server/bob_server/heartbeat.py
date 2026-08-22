@@ -571,3 +571,16 @@ class EffectPumpTask:
         processed = await pump_due_effects(ctx)
         if processed:
             logger.info("effect pump delivered/retried %d effect(s)", processed)
+
+
+class WakeupPumpTask:
+    """Fire due wakeups (Bob3 Phase V): goal deadlines and scheduled wakes."""
+
+    name = "wakeup_pump"
+
+    async def run(self, ctx: AppContext) -> None:
+        from bob_server.services.goal_service import pump_due_wakeups
+
+        fired = await pump_due_wakeups(ctx)
+        if fired:
+            logger.info("wakeup pump fired %d wakeup(s)", fired)

@@ -244,7 +244,7 @@ class VoiceSessionService(BaseService):
         import json as _json
 
         from bob_server.services.session_service import SessionService
-        from bob_server.services.thread_result_service import dispatch_thread_result
+        from bob_server.services.wake_service import wake_conversation
         from bob_server.services.voice_dispatch_service import (
             extract_outcome,
             mark_voice_subagent_complete,
@@ -292,24 +292,18 @@ class VoiceSessionService(BaseService):
             f"Relay a short, friendly summary of this voice call to the user via "
             f"send_whatsapp_message. If anything was agreed or needs follow-up, mention it."
         )
-        await dispatch_thread_result(
-            self.ctx,
-            origin_session_key=origin,
-            result_content=result_content,
+        await wake_conversation(
+            self.ctx, origin, result_content,
             call_category="voice_session",
-            wa_service=wa_service,
         )
 
         # Goal-mode reach-out: also dispatch to the requesting user's session so
         # they get the answer. The origin session (contact's DM) keeps memory.
         report_back = row.get("report_back_session_key") if row else None
         if report_back and report_back != origin:
-            await dispatch_thread_result(
-                self.ctx,
-                origin_session_key=report_back,
-                result_content=result_content,
+            await wake_conversation(
+                self.ctx, report_back, result_content,
                 call_category="voice_session_report",
-                wa_service=wa_service,
             )
 
         # If this session was dispatched by an openai_voice subagent, mark it

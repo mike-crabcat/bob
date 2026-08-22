@@ -534,3 +534,62 @@ def make_email_thread_tools(
         return json.dumps({"query": query, "result_count": len(results), "results": results})
 
     return [email_thread_read, email_thread_search]
+
+
+def make_email_thread_result_tools(
+    ctx: AppContext,
+    *,
+    thread_id: str,
+    origin_session_key: str,
+    agenda: str,
+    wa_service: object | None = None,
+) -> list:
+    """finish_email_thread for a thread with an origin session: completing
+    relays the result by waking the origin conversation (Bob3 Phase V wake
+    path — channel-agnostic). ``wa_service`` is accepted for backward
+    compatibility and unused."""
+
+    @tool
+    async def finish_email_thread(result: str) -> str:
+        """Complete the email thread task and relay the result back to the requesting session.
+        Call when you have achieved the objective from the email conversation.
+        The result will be dispatched to the originating session, which will decide
+        how to relay it."""
+        from bob_server.services.wake_service import wake_conversation
+
+        db = ctx.db
+        thread_row = await db.fetch_one(
+            "SELECT subject, contact_id FROM email_threads WHERE id = ? OR agentmail_thread_id = ?",
+            (thread_id, thread_id),
+        )
+        subject = thread_row["subject"] if thread_row else "unknown"
+        contact_name = "unknown"
+        if thread_row and thread_row.get("contact_id"):
+            from bob_server.repositories.contacts import ContactRepository
+            contact = await ContactRepository(db).get(thread_row["contact_id"])
+            if contact:
+                contact_name = contact["name"]
+
+        await db.execute(
+            "UPDATE email_threads SET origin_session_key = NULL WHERE id = ? OR agentmail_thread_id = ?",
+            (thread_id, thread_id),
+        )
+
+        result_content = (
+            f"## Email Thread Result\n"
+            f"Subject: {subject}\n"
+            f"Contact: {contact_name}\n"
+            f"Agenda: {agenda}\n\n"
+            f"{result}"
+        )
+        await wake_conversation(
+            ctx, origin_session_key, result_content,
+            call_category="email_thread_result",
+        )
+        logger.info(
+            "Email thread result dispatched from thread %s to origin session %s",
+            thread_id, origin_session_key,
+        )
+        return json.dumps({"ok": True, "dispatched_to": origin_session_key})
+
+    return [finish_email_thread]

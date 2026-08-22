@@ -1,15 +1,11 @@
-"""Phone call result service — generates call summaries and dispatches results to originating sessions."""
+"""Phone call result service — call summaries relayed via the wake path (Bob3 Phase V)."""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import Any
 
 from bob_server.context import AppContext
-from bob_server.services.thread_result_service import dispatch_thread_result
-
-if TYPE_CHECKING:
-    from bob_server.services.whatsapp_bridge_service import WhatsAppBridgeService
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +116,16 @@ async def dispatch_call_result(
     origin_session_key: str,
     agenda: str,
     status: str,
-    wa_service: WhatsAppBridgeService | None = None,
+    wa_service: Any | None = None,
 ) -> None:
-    """Generate a call summary and dispatch the result to the originating session."""
+    """Generate a call summary and relay it by waking the origin conversation.
+
+    If the call was placed by a subagent with a linked goal, the goal is
+    settled without a second wake (the wake below carries the result).
+    ``wa_service`` is accepted for backward compatibility and unused.
+    """
+    from bob_server.services.wake_service import wake_conversation
+
     summary = await generate_call_summary(ctx, call_id, agenda, status)
 
     result_content = (
@@ -132,10 +135,29 @@ async def dispatch_call_result(
         f"{summary}"
     )
 
-    await dispatch_thread_result(
-        ctx,
-        origin_session_key=origin_session_key,
-        result_content=result_content,
+    await _settle_call_goal(ctx, call_id, status, result_content)
+    await wake_conversation(
+        ctx, origin_session_key, result_content,
         call_category="call_result",
-        wa_service=wa_service,
     )
+
+
+async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: str) -> None:
+    """Settle the goal linked to this call's subagent, if any (wake handled
+    by the caller)."""
+    try:
+        row = await ctx.db.fetch_one(
+            "SELECT subagent_id FROM phone_calls WHERE id = ?", (call_id,))
+        subagent_id = row["subagent_id"] if row else None
+        if not subagent_id:
+            return
+        from bob_server.repositories.goals import GoalRepository
+        from bob_server.services.goal_service import settle_goal
+
+        goal = await GoalRepository(ctx.db).get_by_external_ref(subagent_id)
+        if goal and goal["status"] == "active":
+            outcome = "completed" if status == "completed" else "failed"
+            await settle_goal(ctx, goal["id"], status=outcome, result=result,
+                              wake_origin=False)
+    except Exception:
+        logger.warning("failed to settle goal for call %s", call_id, exc_info=True)

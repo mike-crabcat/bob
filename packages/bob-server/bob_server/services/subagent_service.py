@@ -103,6 +103,21 @@ class SubagentService(BaseService):
              int(persona), model, contact_id, modality, now, now),
         )
 
+        # Bob3 Phase V: a subagent is a goal held on behalf of the parent
+        # conversation. Completion settles the goal and wakes the parent.
+        try:
+            from bob_server.services.goal_service import create_goal
+            await create_goal(
+                self.ctx,
+                conversation_id=session_key,
+                objective=task[:2000],
+                origin_conversation_id=parent_session_key,
+                kind="call" if agent_type == "openai_voice" else "subagent",
+                external_ref=subagent_id,
+            )
+        except Exception:
+            logger.warning("failed to create goal for subagent %s", short_id, exc_info=True)
+
         # openai_voice dispatches synchronously so we can return voice_url / call_sid
         # to the LLM in the tool result. No background task — the row stays in
         # 'running' until VoiceSessionService.complete or _run_realtime_call marks
@@ -206,7 +221,7 @@ class SubagentService(BaseService):
         except Exception as e:
             logger.error("Subagent %s failed: %s", short_id, e)
             await self._update_status(subagent_id, "failed", error=str(e))
-            await self._notify_parent(subagent_id, f"ERROR: {e}")
+            await self._notify_parent(subagent_id, f"ERROR: {e}", failed=True)
             _running_tasks.pop(subagent_id, None)
             return
 
@@ -392,6 +407,16 @@ class SubagentService(BaseService):
                     logger.info("Hung up phone call %s for killed subagent %s", call["call_sid"], subagent_id[:8])
 
         await self._update_status(subagent_id, "killed")
+        try:
+            from bob_server.repositories.goals import GoalRepository
+            goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
+            if goal and goal["status"] == "active":
+                from bob_server.services.goal_service import settle_goal
+                await settle_goal(self.ctx, goal["id"], status="cancelled",
+                                  result="subagent killed", wake_origin=False)
+        except Exception:
+            logger.warning("failed to cancel goal for killed subagent %s",
+                           subagent_id[:8], exc_info=True)
         logger.info("Subagent %s killed", subagent_id[:8])
         return {"ok": True, "subagent_id": subagent_id, "status": "killed"}
 
@@ -413,36 +438,60 @@ class SubagentService(BaseService):
 
     # -- Internal helpers --
 
-    async def _notify_parent(self, subagent_id: str, result_text: str) -> None:
-        """Inject a subagent result message into the parent session and publish event."""
+    async def _notify_parent(
+        self, subagent_id: str, result_text: str, *, failed: bool = False,
+    ) -> None:
+        """Relay a subagent result to the parent conversation (Bob3 Phase V).
+
+        First result settles the linked goal, whose completion wakes the
+        origin conversation with the result — on any channel. Follow-up
+        results (goal already settled) wake the parent directly.
+        """
         row = await self.db.fetch_one(
             "SELECT parent_session_key FROM subagents WHERE id = ?",
             (subagent_id,),
         )
         if not row:
             return
+        parent_session_key = row["parent_session_key"]
 
         short_id = subagent_id[:8]
         content = (
             f"[Subagent {short_id}] {result_text}\n\n"
-            f"Relay this result to the user by calling send_whatsapp_message with a summary. "
+            f"Relay this result to the user with a summary. "
             f"You can also use message_subagent to reply or kill_subagent to terminate."
         )
 
-        from bob_server.services.session_service import SessionService
-        session_svc = SessionService(self.ctx)
-        await session_svc.add_message(
-            row["parent_session_key"],
-            "user",
-            content,
-            channel="subagent",
-            dispatched=0,
-        )
+        from bob_server.repositories.goals import GoalRepository
+        from bob_server.services.goal_service import settle_goal
+        from bob_server.services.wake_service import wake_conversation
+
+        settled = False
+        try:
+            goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
+            if goal and goal["status"] == "active":
+                settled = await settle_goal(
+                    self.ctx, goal["id"],
+                    status="failed" if failed else "completed",
+                    result=content,
+                )
+        except Exception:
+            logger.warning("failed to settle goal for subagent %s", short_id, exc_info=True)
+
+        if not settled:
+            try:
+                await wake_conversation(
+                    self.ctx, parent_session_key, content,
+                    call_category="subagent_result",
+                )
+            except Exception:
+                logger.exception("failed to wake parent %s for subagent %s",
+                                 parent_session_key, short_id)
 
         if self.ctx.event_bus:
             await self.ctx.event_bus.publish("subagent.result_ready", {
                 "subagent_id": subagent_id,
-                "parent_session_key": row["parent_session_key"],
+                "parent_session_key": parent_session_key,
                 "result": result_text,
             })
 

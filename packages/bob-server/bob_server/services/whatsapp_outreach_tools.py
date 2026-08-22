@@ -102,6 +102,27 @@ def make_whatsapp_outreach_tools(
             if requestor:
                 requestor_name = requestor["name"]
 
+        # Bob3 Phase V: outreach is a goal held by the target conversation on
+        # behalf of the requesting one. A 24h deadline wakeup resurfaces
+        # unanswered outreach in the origin conversation.
+        goal_id = None
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            from bob_server.services.goal_service import create_goal
+            phone_digits_g = re.sub(r"\D", "", phone)
+            goal = await create_goal(
+                ctx,
+                conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
+                objective=objective,
+                origin_conversation_id=current_session_key,
+                kind="outreach",
+                deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            )
+            goal_id = goal["id"]
+        except Exception:
+            logger.warning("failed to create outreach goal", exc_info=True)
+
         # Create or update session route with outreach metadata
         outreach_meta = {
             "outreach_initiated_from": current_session_key,
@@ -109,6 +130,8 @@ def make_whatsapp_outreach_tools(
             "outreach_requestor": requestor_name,
             "outreach_message": message,
         }
+        if goal_id:
+            outreach_meta["outreach_goal_id"] = goal_id
         route_service = SessionRouteService(ctx)
         try:
             await route_service.create_route(SessionRouteCreate(
@@ -274,12 +297,8 @@ def make_outreach_reply_tools(
         Call when you have achieved the objective or obtained the requested information.
         The result will be dispatched to the originating session, which will decide
         how to handle it (potentially messaging the requesting contact)."""
-        from bob_server.services.session_service import SessionService
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
-        from bob_server.services.workspace_tools import make_workspace_tools
-        from bob_server.services.tools import Tool
-        from bob_server.services.session_agenda_service import SessionAgendaService
+        from bob_server.services.goal_service import settle_goal
+        from bob_server.services.wake_service import wake_conversation
 
         db = ctx.db
 
@@ -298,6 +317,7 @@ def make_outreach_reply_tools(
 
         objective = meta.get("outreach_objective", "unknown")
         requestor = meta.get("outreach_requestor", "unknown")
+        goal_id = meta.get("outreach_goal_id")
 
         # Look up target contact name for context
         target_contact = await db.fetch_one(
@@ -309,18 +329,13 @@ def make_outreach_reply_tools(
         target_contact_name = target_contact["name"] if target_contact else "unknown"
 
         # Clear outreach metadata from route
-        meta.pop("outreach_initiated_from", None)
-        meta.pop("outreach_objective", None)
-        meta.pop("outreach_requestor", None)
-        meta.pop("outreach_message", None)
+        for key in ("outreach_initiated_from", "outreach_objective",
+                    "outreach_requestor", "outreach_message", "outreach_goal_id"):
+            meta.pop(key, None)
         await db.execute(
             "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
             (json.dumps(meta) if meta else None, current_session_key),
         )
-
-        # Build result content for source session
-        origin_chat_id = _session_key_to_chat_id(origin_session_key)
-        settings = ctx.settings
 
         result_content = (
             f"## Outreach Result\n"
@@ -330,96 +345,26 @@ def make_outreach_reply_tools(
             f"{result}"
         )
 
-        # Store result in source session's message history
-        session_svc = SessionService(ctx)
-        await session_svc.add_message(
-            origin_session_key, "user", result_content,
-            channel="whatsapp",
-            metadata={"outreach_result": True, "source_session": current_session_key},
-        )
-
-        # Dispatch an LLM call in the source session to receive the result
-        agenda_svc = SessionAgendaService(ctx)
-        origin_agenda = await agenda_svc.get_effective_agenda(
-            origin_session_key, "whatsapp",
-        )
-
-        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=db)
-        system_content = "\n\n".join(
-            p for p in (workspace_prompt, origin_agenda) if p
-        )
-
-        messages = await build_chat_messages(
-            result_content,
-            origin_session_key,
-            db=db,
-            system_content=system_content,
-            max_history=20,
-        )
-
-        # Build tools for source session
-        origin_tools = make_workspace_tools(ctx, session_key=origin_session_key)
-
-        message_was_sent = [False]
-
-        async def _send_reply(text: str) -> str:
-            message_was_sent[0] = True
-            if text.strip().upper() == "NO_REPLY":
-                return "No reply sent."
-            text = strip_citation_markers(text)
-            if not origin_chat_id:
-                return "Error: cannot resolve chat for source session"
-            if not wa_service.connected:
-                return "Error: WhatsApp bridge not connected"
-            await wa_service.send_message(origin_chat_id, text)
-            return "Message sent"
-
-        origin_tools.append(Tool(
-            name="send_whatsapp_message",
-            description=(
-                "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent."
-            ),
-            parameters={"text": {"type": "string", "description": "The message text to send."}},
-            required=["text"],
-            handler=_send_reply,
-        ))
-
-        dispatch_id = str(uuid4())
-
-        async def _run_dispatch() -> str:
-            llm_result = await LLMDispatchService(ctx).chat_with_tools(
-                messages, origin_tools,
+        # Bob3 Phase V: settling the goal wakes the origin conversation with
+        # the result (any channel). Legacy outreach without a goal wakes
+        # the origin directly.
+        settled = False
+        if goal_id:
+            try:
+                settled = await settle_goal(
+                    ctx, goal_id, status="completed", result=result_content,
+                )
+            except Exception:
+                logger.warning("failed to settle outreach goal %s", goal_id, exc_info=True)
+        if not settled:
+            await wake_conversation(
+                ctx, origin_session_key, result_content,
                 call_category="outreach_result",
-                session_key=origin_session_key,
-                dispatch_id=dispatch_id,
+                metadata={"outreach_result": True, "source_session": current_session_key},
             )
-
-            # Tap: if LLM didn't use send_whatsapp_message, give it a second chance.
-            if not message_was_sent[0] and llm_result.strip():
-                from bob_server.services.tap import tap_dispatch, tap_enabled
-                if tap_enabled():
-                    llm_result = await tap_dispatch(
-                        ctx, messages=messages, tools=origin_tools,
-                        session_key=origin_session_key,
-                        send_tool_name="send_whatsapp_message",
-                        first_result=llm_result,
-                        call_category="outreach_result",
-                        dispatch_id=dispatch_id,
-                    )
-
-            # Record in source session history
-            await session_svc.add_message(
-                origin_session_key, "assistant", llm_result,
-                channel="whatsapp",
-            )
-
-            return llm_result
-
-        asyncio.create_task(_run_dispatch())
 
         logger.info(
-            "Outreach finished from %s to %s, dispatching result to source session",
+            "Outreach finished from %s to %s, result relayed via wake path",
             current_session_key, origin_session_key,
         )
 

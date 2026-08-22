@@ -56,7 +56,7 @@ def make_voice_outreach_tools(
         returned contact_id.
         """
         from bob_server.services.voice_session_service import VoiceSessionService
-        from bob_server.services.thread_result_service import _session_key_to_chat_id
+        from bob_server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
 
         chat_id = _session_key_to_chat_id(session_key)
         if chat_id is None or "@s.whatsapp.net" not in chat_id:

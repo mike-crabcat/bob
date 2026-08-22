@@ -177,6 +177,17 @@ async def mark_voice_subagent_complete(db: Any, subagent_id: str, result_text: s
         )
     except Exception:
         logger.warning("Failed to mark voice subagent %s completed", subagent_id[:8], exc_info=True)
+    # Bob3 Phase V: settle the linked goal. No wake here — the voice/call
+    # result dispatch wakes the origin with the full summary.
+    try:
+        from bob_server.repositories.goals import GoalRepository
+        goal = await GoalRepository(db).get_by_external_ref(subagent_id)
+        if goal and goal["status"] == "active":
+            await GoalRepository(db).transition(
+                goal["id"], to_status="completed", result=result_text[:4000],
+                note="voice subagent completed")
+    except Exception:
+        logger.warning("Failed to settle goal for voice subagent %s", subagent_id[:8], exc_info=True)
 
 
 def hangup_twilio_call(settings: Any, call_sid: str) -> bool:
