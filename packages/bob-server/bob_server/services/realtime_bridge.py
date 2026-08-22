@@ -639,11 +639,31 @@ class RealtimeBridge:
         nudge = None
         if not self.speak_first:
             nudge = asyncio.create_task(self._first_response_nudge(oai))
+        end_wait = asyncio.create_task(self._end_requested.wait())
+        session_tasks = [relay, events, timer, end_wait] + ([nudge] if nudge else [])
 
-        done, pending = await asyncio.wait(
-            {relay, events, timer, asyncio.create_task(self._end_requested.wait())},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        try:
+            done, pending = await asyncio.wait(
+                {relay, events, timer, end_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            # The bridge task itself was cancelled (callee hung up: the media
+            # handler tears the bridge down externally — see phone.py). The
+            # wait raises instead of returning, so the pending-cancel loop
+            # below never runs. Without cancelling here, the duration timer
+            # sleeps out its full window ("max duration reached" logs fire
+            # minutes AFTER the call ended) and the end_requested waiter never
+            # completes at all (both observed 2026-08-22). Unwind them before
+            # re-raising so the caller's cleanup runs against finished tasks.
+            for t in session_tasks:
+                t.cancel()
+            for t in session_tasks:
+                try:
+                    await asyncio.wait_for(t, timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            raise
         # Which task triggered the end? (diagnostic)
         ended_by = "unknown"
         for t in done:
@@ -918,6 +938,12 @@ class RealtimeBridge:
         if etype == "conversation.item.input_audio_transcription.completed":
             user_text = (event.get("transcript") or "").strip()
             if user_text:
+                # Confirmed human speech: if agent audio is still playing or
+                # queued, this is a REAL barge-in — cut it now. (Deferred from
+                # speech_started, which cannot tell echo from speech. In the
+                # opening-gate release flow below nothing is queued yet, so
+                # this is a no-op there.)
+                await self.audio.clear_playback()
                 first_user_turn = not self._user_transcript_seen
                 self._user_transcript_seen = True
                 self._user_transcript_count += 1
@@ -952,7 +978,15 @@ class RealtimeBridge:
             self._first_speech.set()
             logger.info("Bridge: speech_started (#%d) — VAD detected input",
                         self._speech_started_count)
-            await self.audio.clear_playback()
+            # Barge-in is NOT triggered here. VAD fires on the far line's ECHO
+            # of our own outbound audio just as readily as on human speech
+            # (observed 2026-08-22: an analog pub landline echoed the agent's
+            # opening line back, VAD committed the echo, and clear_playback cut
+            # the agent's own sentence mid-word — the callee heard a chopped-up
+            # robot and both calls to the venue collapsed). Echo yields VAD
+            # energy but never a transcription; real speech yields both. So the
+            # interrupt is deferred to the next non-empty user transcript (see
+            # input_audio_transcription.completed below).
             return
 
         if etype == "response.function_call_arguments.done":

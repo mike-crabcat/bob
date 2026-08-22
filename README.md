@@ -238,7 +238,7 @@ The token is `BOB_DASHBOARD_SECRET` if set, otherwise a secret auto-generated to
 
 - `Authorization: Bearer <token>` header
 - `X-Dashboard-Secret: <token>` header (what the CLI sends)
-- `bob_dashboard_secret=<token>` cookie (set this in your browser for the dashboard: DevTools → `document.cookie = "bob_dashboard_secret=<token>; path=/; max-age=31536000"`)
+- `bob_dashboard_secret=<token>` cookie — easiest to set by visiting `http://<host>:8420/dashboard/api/auth?secret=<token>` once in the browser you use for the dashboard (sets the cookie for a year; works on phones). The DevTools equivalent: `document.cookie = "bob_dashboard_secret=<token>; path=/; max-age=31536000"`
 - `?secret=<token>` query parameter (legacy dashboard SPA transport)
 
 The CLI reads the token automatically. To disable the gate entirely (break-glass), set `BOB_API_AUTH_DISABLED=true` and restart.

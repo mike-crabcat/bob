@@ -124,3 +124,92 @@ def test_explicit_dashboard_secret_wins_and_writes_no_file(tmp_path: Path) -> No
             "/phone/call", json={}, headers={"X-Dashboard-Secret": "explicit-secret"}
         )
         assert response.status_code == 200
+
+
+def test_dashboard_auth_endpoint_sets_cookie_for_valid_token(tmp_path: Path) -> None:
+    """The one-URL phone flow: GET /dashboard/api/auth?secret=<token> must set
+    the bob_dashboard_secret cookie the SPA reads, and reject wrong tokens."""
+    settings = make_settings(tmp_path)
+    token = settings.resolved_api_secret
+    with TestClient(create_app(settings)) as client:
+        response = client.get(f"/dashboard/api/auth?secret={token}")
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        set_cookie = response.headers["set-cookie"]
+        assert "bob_dashboard_secret=" in set_cookie
+        assert "httponly" not in set_cookie.lower()  # SPA reads document.cookie
+
+        # The freshly set cookie authenticates a gated POST (TestClient jar).
+        assert client.post("/phone/call", json={}).status_code == 200
+
+        # Wrong token: 401, no cookie (fresh client — no valid cookie jar).
+        with TestClient(create_app(settings)) as bare:
+            bad = bare.get("/dashboard/api/auth?secret=not-the-token")
+            assert bad.status_code == 401
+            assert "set-cookie" not in bad.headers
+
+
+def test_dashboard_auth_endpoint_when_gate_disabled(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, api_auth_disabled=True)
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/dashboard/api/auth")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert "set-cookie" not in response.headers
+
+
+def test_dashboard_auth_accepts_raw_pasted_plus_in_query(tmp_path: Path) -> None:
+    """Phone flow: a raw-pasted (unencoded) URL carries a base64 token's '+'
+    literally; query parsing decodes it to a space. The endpoint must accept
+    the space-restored form too."""
+    settings = make_settings(tmp_path, dashboard_secret="abc+def/ghi=")
+    with TestClient(create_app(settings)) as client:
+        # httpx encodes params properly; simulate a raw paste by sending the
+        # decoded-what-the-server-would-see form directly.
+        assert client.get("/dashboard/api/auth", params={"secret": "abc def/ghi="}).status_code == 200
+        client.cookies.clear()
+        assert client.get("/dashboard/api/auth", params={"secret": "abc+def/ghi="}).status_code == 200
+        client.cookies.clear()
+        assert client.get("/dashboard/api/auth", params={"secret": "abcXdef/ghi="}).status_code == 401
+
+
+def test_dashboard_auth_sets_canonical_secret_not_mangled_form(tmp_path: Path) -> None:
+    """The cookie must hold the canonical secret even when the URL was pasted
+    raw ('+' decoded to space). Setting the received form stored a space-y
+    value, which the cookie layer quotes ('"abc def="') — and that failed
+    every later auth (observed live 2026-08-22).
+
+    Uses a urlsafe secret — what resolved_api_secret actually generates —
+    because the cookie layer quotes any value containing '=' or spaces, so
+    non-urlsafe secrets can never round-trip through a cookie at all."""
+    import re
+    settings = make_settings(tmp_path, dashboard_secret="abc-def_ghi")
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/dashboard/api/auth", params={"secret": "abc-def_ghi"})
+        assert response.status_code == 200
+        m = re.search(r"bob_dashboard_secret=([^;]+)", response.headers["set-cookie"], re.I)
+        assert m and m.group(1) == "abc-def_ghi"  # canonical, unquoted
+
+        # And the set cookie authenticates a gated POST without any jar magic.
+        client.cookies.clear()
+        client.cookies.set("bob_dashboard_secret", m.group(1))
+        assert client.post("/phone/call", json={}).status_code == 200
+
+
+def test_dashboard_auth_ignores_stale_cookie_when_url_token_valid(tmp_path: Path) -> None:
+    """Recovery path: a browser holding a stale/broken cookie must still be
+    able to authenticate via the URL — extract_api_token checks cookies before
+    query params, so the old cookie shadowed the fresh token and the endpoint
+    401'd a CORRECT token (observed live 2026-08-22)."""
+    import re
+    settings = make_settings(tmp_path, dashboard_secret="good-token")
+    with TestClient(create_app(settings)) as client:
+        client.cookies.set("bob_dashboard_secret", '"old mangled value"')
+        response = client.get("/dashboard/api/auth", params={"secret": "good-token"})
+        assert response.status_code == 200
+        m = re.search(r"bob_dashboard_secret=([^;]+)", response.headers["set-cookie"], re.I)
+        assert m and m.group(1) == "good-token"  # stale cookie overwritten
+        # And no token in the URL is still rejected — the URL must carry it.
+        client.cookies.clear()
+        client.cookies.set("bob_dashboard_secret", '"old mangled value"')
+        assert client.get("/dashboard/api/auth").status_code == 401
