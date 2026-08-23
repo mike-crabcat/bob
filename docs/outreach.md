@@ -37,7 +37,7 @@ Since the original implementation, outreach has been re-based on the Bob3 **goal
               |                 |      outreach_objective, ...
               |                 |  - store opening msg in B
               v                 v
-      goals table           session_routes.metadata
+      goals table           goals.strategy_json
    (origin_conversation_id=A)  (active-outreach marker)
               |                                    |
               |                          2. Target replies
@@ -246,10 +246,10 @@ Since Bob3 Phase VI, the channel-derived key is a *binding*: on every inbound me
 
 ## Data Model
 
-There is no dedicated outreach table. Active-outreach state lives in `session_routes.metadata` (JSON); the durable lifecycle lives in the Bob3 tables.
+There is no dedicated outreach table. Active-outreach state lives on the goal itself (`goals.strategy_json` carries requestor/message); the durable lifecycle lives in the Bob3 tables.
 
 ```
-session_routes                       goals (kind='outreach')
+goals (kind='outreach')
 +-- id (TEXT PK)                     +-- id (TEXT PK)
 +-- channel ("whatsapp")             +-- conversation_id      <- target session
 +-- session_key                      +-- origin_conversation_id <- origin session

@@ -165,7 +165,7 @@ The extraction prompt encodes the quality bar: only form memories from *other pe
 
 Mid-conversation, the agent can call `remember(hint?)`. This does not write anything itself — it queues a deferred extraction turn (`queue_remember_extraction`) that blocks on the session lock until the current reply finishes and is stored, then runs the same silent-turn flow with `force=True` and an optional topic hint. The WhatsApp bridge exposes the same thing to operators as `/silentmem`, which runs immediately and reports back what was recorded.
 
-`/verbose on|off|status` toggles per-session verbose notices (`session_routes.metadata.memory_verbose`): when on, any extraction turn that created entities or claims posts a `[memory]` system notice into the chat and publishes a `memory.verbose_notice` event on the event bus for active transports to deliver.
+`/verbose on|off|status` toggles per-session verbose notices (`conversations.policy_json.memory_verbose`): when on, any extraction turn that created entities or claims posts a `[memory]` system notice into the chat and publishes a `memory.verbose_notice` event on the event bus for active transports to deliver.
 
 ### Live corrections — `memory_correct`
 

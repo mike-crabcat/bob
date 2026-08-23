@@ -10,10 +10,8 @@ from uuid import uuid4
 
 from bob_server.context import AppContext
 from bob_server.database import Database
-from bob_server.models import SessionRouteCreate, SessionRouteKind
 from bob_server.services.agentmail_client import AgentMailClient
 from bob_server.services.base import BaseService, json_dumps, utcnow
-from bob_server.services.session_route_service import SessionRouteService
 
 
 logger = logging.getLogger(__name__)
@@ -149,20 +147,10 @@ async def resolve_or_create_email_thread(
     now = utcnow()
     now_iso = now.isoformat()
 
-    from bob_server.context import AppContext
+    from bob_server.repositories.conversations import ConversationRepository
 
-    ctx = AppContext(db=db, settings=db.get_settings())
-    route_service = SessionRouteService(ctx)
-    await route_service.create_route(SessionRouteCreate(
-        channel="email",
-        session_key=session_key,
-        kind=SessionRouteKind.THREAD,
-        chat_id=agentmail_thread_id,
-        metadata={
-            "inbox_id": inbox["id"],
-            "agentmail_inbox_id": inbox["agentmail_inbox_id"],
-        },
-    ))
+    await ConversationRepository(db).register_endpoint(
+        session_key, endpoint_kind="thread", address=agentmail_thread_id)
 
     thread_id = str(uuid4())
     await db.execute(

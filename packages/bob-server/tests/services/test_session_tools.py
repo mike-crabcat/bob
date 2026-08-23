@@ -39,17 +39,7 @@ async def seeded(ctx):
         "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
         "VALUES ('c2', 'Mike', '+61400000001', ?, ?)", (NOW, NOW))
 
-    for key, chat_id in ((GROUP_KEY, "111@g.us"), (OTHER_GROUP_KEY, "222@g.us")):
-        await ctx.db.execute(
-            "INSERT INTO session_routes (id, channel, session_key, kind, chat_id, created_at, updated_at) "
-            "VALUES (?, 'whatsapp', ?, 'group', ?, ?, ?)",
-            (f"sr-{chat_id}", key, chat_id, NOW, NOW))
-    await ctx.db.execute(
-        "INSERT INTO session_routes (id, channel, session_key, kind, contact_id, created_at, updated_at) "
-        "VALUES ('sr-dm', 'whatsapp', ?, 'dm', 'c2', ?, ?)", (DM_KEY, NOW, NOW))
-
-    # find_session reads bindings (Increment 4) — seed the mirrored rows the
-    # route service dual-write would produce.
+    # find_session reads bindings (Increment 4).
     from bob_server.repositories.conversations import ConversationRepository
     repo = ConversationRepository(ctx.db)
     await repo.ensure(GROUP_KEY, address="111@g.us", endpoint_kind="group")

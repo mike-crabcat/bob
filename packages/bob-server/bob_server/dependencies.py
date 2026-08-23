@@ -9,7 +9,6 @@ from bob_server.context import AppContext
 from bob_server.database import Database
 from bob_server.exceptions import ForbiddenError
 from bob_server.services.calendar_service import CalendarService
-from bob_server.services.session_route_service import SessionRouteService
 
 
 def get_settings(request: Request) -> Settings:
@@ -50,9 +49,3 @@ def get_calendar_service(ctx: AppContext = Depends(get_app_context)) -> Calendar
     """Build a calendar service for the current request."""
 
     return CalendarService(ctx)
-
-
-def get_session_route_service(ctx: AppContext = Depends(get_app_context)) -> SessionRouteService:
-    """Build a session route service for the current request."""
-
-    return SessionRouteService(ctx)

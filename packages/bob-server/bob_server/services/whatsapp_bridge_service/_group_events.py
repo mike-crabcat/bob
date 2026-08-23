@@ -12,9 +12,7 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from bob_server.models import SessionRouteCreate, SessionRouteKind
 from bob_server.services.base import utcnow
-from bob_server.services.session_route_service import SessionRouteService
 from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone
 
 
@@ -118,18 +116,10 @@ class GroupEventsMixin:
                  1 if contact.get("is_trusted") else 0, now_iso),
             )
 
-        # Ensure session route exists
-        route_service = SessionRouteService(self.ctx)
-        from bob_server.exceptions import ConflictError
-        try:
-            await route_service.create_route(SessionRouteCreate(
-                channel="whatsapp",
-                session_key=session_key,
-                kind=SessionRouteKind.GROUP,
-                chat_id=group_jid,
-            ))
-        except ConflictError:
-            pass
+        # Ensure the endpoint binding exists
+        from bob_server.repositories.conversations import ConversationRepository
+        await ConversationRepository(self.db).register_endpoint(
+            session_key, endpoint_kind="group", address=group_jid)
 
     async def _handle_group_member_change(self, payload: dict[str, Any]) -> None:
         """Handle incremental group member join/leave events."""
@@ -243,18 +233,10 @@ class GroupEventsMixin:
             if sender_contact:
                 sender_name = sender_contact["name"]
 
-        # Ensure session route exists
-        route_service = SessionRouteService(self.ctx)
-        from bob_server.exceptions import ConflictError
-        try:
-            await route_service.create_route(SessionRouteCreate(
-                channel="whatsapp",
-                session_key=session_key,
-                kind=SessionRouteKind.GROUP,
-                chat_id=group_jid,
-            ))
-        except ConflictError:
-            pass
+        # Ensure the endpoint binding exists
+        from bob_server.repositories.conversations import ConversationRepository
+        await ConversationRepository(self.db).register_endpoint(
+            session_key, endpoint_kind="group", address=group_jid)
 
         # Store notification as user message and dispatch
         settings = self._get_settings()

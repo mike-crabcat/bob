@@ -176,6 +176,32 @@ class ConversationRepository:
             (session_key, conversation_id, channel, kind, address,
              endpoint_kind, _now_iso()))
 
+    async def register_endpoint(
+        self,
+        session_key: str,
+        *,
+        endpoint_kind: str,
+        address: str | None = None,
+        contact_id: str | None = None,
+    ) -> None:
+        """Ensure the conversation + binding for a channel endpoint carries
+        routing truth (address, endpoint_kind, contact_id). This replaced
+        session_routes.create_route (Increment 4): channel ingress paths call
+        it whenever a message arrives on an endpoint. Idempotent; fills in
+        blanks on existing bindings, never overwrites."""
+        if not address and contact_id:
+            c = await self.db.fetch_one(
+                "SELECT phone_number, email FROM contacts WHERE id = ?",
+                (str(contact_id),))
+            if c:
+                address = c["phone_number"] or c["email"]
+        await self.ensure(session_key, address=address, endpoint_kind=endpoint_kind)
+        if contact_id:
+            await self.db.execute(
+                """UPDATE bindings SET contact_id = COALESCE(contact_id, ?), is_active = 1
+                   WHERE session_key = ?""",
+                (str(contact_id), session_key))
+
     async def merge(
         self,
         source_conversation_ids: list[str],

@@ -93,20 +93,10 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
 
     instructions = build_inbound_instructions(phone_number, contact_name, agenda)
 
-    # Create session route
-    from bob_server.services.session_route_service import SessionRouteService
-    from bob_server.models import SessionRouteCreate, SessionRouteKind
-    route_service = SessionRouteService(ctx)
-    from bob_server.exceptions import ConflictError
-    try:
-        await route_service.create_route(SessionRouteCreate(
-            channel="phone",
-            session_key=session_key,
-            kind=SessionRouteKind.DM,
-            contact_id=contact_id,
-        ))
-    except ConflictError:
-        pass
+    # Register the endpoint binding
+    from bob_server.repositories.conversations import ConversationRepository
+    await ConversationRepository(ctx.db).register_endpoint(
+        session_key, endpoint_kind="call", contact_id=str(contact_id))
 
     # Insert DB record
     await db.execute(

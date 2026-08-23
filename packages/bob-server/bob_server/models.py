@@ -21,12 +21,6 @@ class BobModel(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-class SessionRouteKind(StrEnum):
-    GROUP = "group"
-    DM = "dm"
-    THREAD = "thread"
-
-
 class EventStatus(StrEnum):
     TENTATIVE = "tentative"
     CONFIRMED = "confirmed"
@@ -344,69 +338,6 @@ class ContactResponse(ContactFields, EntityRef, SoftDeleteFields):
     created_at: datetime
     updated_at: datetime
     is_trusted: bool = False
-
-
-class SessionRouteFields(BobModel):
-    channel: Literal["whatsapp", "email", "phone"]
-    session_key: str = Field(min_length=1, max_length=255)
-    kind: SessionRouteKind
-    chat_id: str | None = None
-    contact_id: UUID | None = None
-    metadata: MetadataDict = Field(default_factory=dict)
-
-    @field_validator("session_key", "chat_id")
-    @classmethod
-    def route_strings_must_not_be_blank(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("route values must not be blank")
-        return stripped
-
-    @model_validator(mode="after")
-    def validate_route_shape(self) -> "SessionRouteFields":
-        if self.kind == SessionRouteKind.GROUP:
-            if self.chat_id is None:
-                raise ValueError("group session routes require chat_id")
-            if self.contact_id is not None:
-                raise ValueError("group session routes cannot include contact_id")
-        if self.kind == SessionRouteKind.DM:
-            if self.contact_id is None:
-                raise ValueError("dm session routes require contact_id")
-        if self.kind == SessionRouteKind.THREAD:
-            if self.chat_id is None:
-                raise ValueError("thread session routes require chat_id")
-            if self.contact_id is not None:
-                raise ValueError("thread session routes cannot include contact_id")
-        return self
-
-
-class SessionRouteCreate(SessionRouteFields):
-    pass
-
-
-class SessionRouteUpdate(BobModel):
-    chat_id: str | None = None
-    contact_id: UUID | None = None
-    metadata: MetadataDict | None = None
-    is_active: bool | None = None
-
-    @field_validator("chat_id")
-    @classmethod
-    def update_chat_id_must_not_be_blank(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("chat_id must not be blank")
-        return stripped
-
-
-class SessionRouteResponse(SessionRouteFields, EntityRef, SoftDeleteFields):
-    is_active: bool = True
-    created_at: datetime
-    updated_at: datetime
 
 
 # ---------------------------------------------------------------------------

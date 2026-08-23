@@ -21,10 +21,8 @@ from fastapi import HTTPException
 
 from bob_server.config import Settings
 from bob_server.context import AppContext
-from bob_server.models import SessionRouteCreate, SessionRouteKind
 from bob_server.services.base import BaseService, utcnow
 from bob_server.services.openai_service import strip_citation_markers
-from bob_server.services.session_route_service import SessionRouteService
 from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
 
 logger = logging.getLogger(__name__)
@@ -337,7 +335,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         """Listen for memory.verbose_notice events and forward to WhatsApp.
 
         Filters to WhatsApp-routed sessions; resolves the chat_id via
-        session_routes and calls send_message. Silently drops events for
+        bindings and calls send_message. Silently drops events for
         other transports.
         """
         assert self._verbose_queue is not None
@@ -625,35 +623,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
              contact_id, 1 if is_trusted else 0, now_iso),
         )
 
-        # Create session route — DM needs contact_id, group needs chat_id
-        route_service = SessionRouteService(self.ctx)
-        from bob_server.exceptions import ConflictError
-        try:
-            if chat_kind == "group":
-                await route_service.create_route(SessionRouteCreate(
-                    channel="whatsapp",
-                    session_key=session_key,
-                    kind=SessionRouteKind.GROUP,
-                    chat_id=chat_id,
-                    metadata={
-                        "sender_jid": sender_jid,
-                        "sender_name": sender_name,
-                    },
-                ))
-            else:
-                await route_service.create_route(SessionRouteCreate(
-                    channel="whatsapp",
-                    session_key=session_key,
-                    kind=SessionRouteKind.DM,
-                    contact_id=contact_id,
-                    chat_id=chat_id,
-                    metadata={
-                        "sender_jid": sender_jid,
-                        "sender_name": sender_name,
-                    },
-                ))
-        except ConflictError:
-            pass  # Route already exists, proceed with dispatch
+        # Register the endpoint binding — DM carries contact_id, group the JID
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        if chat_kind == "group":
+            await repo.register_endpoint(
+                session_key, endpoint_kind="group", address=chat_id)
+        else:
+            await repo.register_endpoint(
+                session_key, endpoint_kind="dm", address=chat_id,
+                contact_id=str(contact_id) if contact_id else None)
 
         # Resolve agenda
         from bob_server.services.session_agenda_service import SessionAgendaService

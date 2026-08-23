@@ -29,7 +29,7 @@ def make_session_tools(
 
     ``session_key`` is the session this dispatch is running in. It stays
     accessible even for untrusted contexts — group sessions have no
-    ``session_routes.contact_id``, so without this an untrusted dispatch
+    ``bindings.contact_id``, so without this an untrusted dispatch
     with no resolved contact (e.g. a routine run) could not see even the
     conversation it posts into.
     """

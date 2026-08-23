@@ -69,19 +69,14 @@ def _messages(n: int = 6) -> list[dict]:
 
 
 async def _seed_route(db, session_key: str, autoplan: bool | None = None) -> None:
-    import json as _json
-    from uuid import uuid4
+    """Seed the conversation + binding an ingress path would register."""
+    from bob_server.repositories.conversations import ConversationRepository
 
-    await db.execute(
-        "INSERT INTO session_routes (id, session_key, kind, channel, chat_id, is_active, metadata, created_at, updated_at) "
-        "VALUES (?, ?, 'group', 'whatsapp', ?, 1, ?, datetime('now'), datetime('now'))",
-        (str(uuid4()), session_key, f"{session_key.split(':')[-1]}@g.us", _json.dumps({})),
-    )
+    repo = ConversationRepository(db)
+    await repo.register_endpoint(
+        session_key, endpoint_kind="group",
+        address=f"{session_key.split(':')[-1]}@g.us")
     if autoplan is not None:
-        from bob_server.repositories.conversations import ConversationRepository
-
-        repo = ConversationRepository(db)
-        await repo.ensure(session_key)
         await repo.set_policy(session_key, {"dream_autoplan": autoplan})
 
 async def _seed_run_row(db) -> None:

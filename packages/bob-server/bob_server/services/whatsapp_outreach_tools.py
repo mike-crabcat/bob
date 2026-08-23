@@ -48,9 +48,6 @@ def make_whatsapp_outreach_tools(
         e.g. "Find out if John can meet on Thursday and what time works." The target
         session will be instructed to work toward this objective and report back when complete.
         Optionally attach an image or media file by providing media_path."""
-        from bob_server.exceptions import ConflictError
-        from bob_server.models import SessionRouteCreate, SessionRouteKind
-        from bob_server.services.session_route_service import SessionRouteService
         from bob_server.services.session_service import SessionService
 
         db = ctx.db
@@ -123,17 +120,10 @@ def make_whatsapp_outreach_tools(
         except Exception:
             logger.warning("failed to create outreach goal", exc_info=True)
 
-        # Ensure a route exists for the target DM (no outreach state on it).
-        route_service = SessionRouteService(ctx)
-        try:
-            await route_service.create_route(SessionRouteCreate(
-                channel="whatsapp",
-                session_key=target_session_key,
-                kind=SessionRouteKind.DM,
-                contact_id=contact["id"],
-            ))
-        except ConflictError:
-            pass
+        # Ensure the target DM binding exists (no outreach state on it).
+        from bob_server.repositories.conversations import ConversationRepository
+        await ConversationRepository(db).register_endpoint(
+            target_session_key, endpoint_kind="dm", contact_id=str(contact["id"]))
 
         # Store the outreach message in target session history as assistant (bob sent it)
         session_service = SessionService(ctx)
