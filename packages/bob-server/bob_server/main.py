@@ -36,7 +36,6 @@ from bob_server.heartbeat import (
     MemoryReconciliationTask,
     SessionIdleSummaryTask,
 )
-from bob_server.services.routine_scheduler import RoutineSchedulerTask
 from bob_server.models import HealthResponse
 from bob_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, persona, session_routes, webhooks, whatsapp
 from bob_server.services.event_bus import EventBus
@@ -121,7 +120,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(SessionIdleSummaryTask())
         runner.register(LLMCallStalenessTask())
         runner.register(LocationFetchTask())
-        runner.register(RoutineSchedulerTask())
         runner.register(MemoryReconciliationTask())
         runner.register(DreamTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))

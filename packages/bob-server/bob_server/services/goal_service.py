@@ -132,10 +132,32 @@ async def _append_goal_event(ctx: AppContext, goal: dict[str, Any], event_type: 
                        exc_info=True)
 
 
-async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> None:
-    """Deliver a claimed wakeup: wake its conversation with goal context (if
-    the linked goal is still active) or a plain scheduled-wake notice."""
+async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
+    """Deliver a claimed wakeup. Returns True if a recurrence (when present)
+    should be rescheduled, False to let the series lapse.
+
+    Kinds:
+      routine — look up the routine definition and dispatch it (detached, so
+                a slow LLM run never blocks the pump). Deleted/disabled
+                routines end their series; a validity-window miss skips the
+                run but keeps the series alive.
+      wake    — goal-deadline or plain scheduled wake for a conversation.
+    """
     from bob_server.services.wake_service import wake_conversation
+
+    if wakeup.get("kind") == "routine":
+        from bob_server.services import routine_service as routines
+
+        payload = json.loads(wakeup.get("payload_json") or "{}")
+        routine = await routines.RoutineService(ctx).get_by_id(
+            payload.get("routine_id", ""))
+        if not routine or not routine["enabled"]:
+            return False  # definition gone/disabled: series ends
+        if routines._outside_validity_window(routine):
+            return True   # skip this run, keep the schedule
+        await routines.append_fired_event(ctx, routine, wakeup["not_before"])
+        routines.fire_routine_detached(ctx, routine)
+        return True
 
     goal = None
     if wakeup["goal_id"]:
@@ -161,31 +183,58 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> None:
         call_category=category,
         metadata={"wakeup_id": wakeup["id"], "goal_id": wakeup["goal_id"]},
     )
+    return True
+
+
+def _next_occurrence(wakeup: dict[str, Any]) -> str | None:
+    """Compute the next not_before for a recurring wakeup, or None.
+
+    Specs: '+<minutes>m' simple interval, or 'cron:<expr>' interpreted in the
+    wakeup's tz. Always stored as UTC ISO so claim_due's TEXT compare is safe
+    (the routines continuous-fire regression, now guarded at this seam).
+    """
+    rec = wakeup.get("recurrence")
+    if not rec:
+        return None
+    try:
+        if rec.startswith("+") and rec.endswith("m"):
+            minutes = int(rec[1:-1])
+            return (datetime.now(timezone.utc)
+                    + timedelta(minutes=minutes)).isoformat()
+        if rec.startswith("cron:"):
+            from bob_server.cron import next_cron_occurrence
+            occurrence = next_cron_occurrence(rec[5:], timezone=wakeup.get("tz"))
+            return occurrence.astimezone(timezone.utc).isoformat()
+    except (ValueError, TypeError):
+        pass
+    logger.warning("wakeup %s: bad recurrence %r", wakeup.get("id"), rec)
+    return None
 
 
 async def pump_due_wakeups(ctx: AppContext, *, limit: int = 20) -> int:
-    """Claim and deliver due wakeups. Recurrence: after firing, a recurrence
-    spec reschedules the next occurrence (simple '+<minutes>m' interval v1)."""
+    """Claim and deliver due wakeups. Recurrence ('+<minutes>m' or
+    'cron:<expr>') reschedules the next occurrence after firing — claim-first,
+    so a slow delivery can never double-fire a slot."""
     repo = WakeupRepository(ctx.db)
     claimed = await repo.claim_due(limit=limit)
     for wakeup in claimed:
+        reschedule = True
         try:
-            await fire_wakeup(ctx, wakeup)
+            reschedule = await fire_wakeup(ctx, wakeup)
         except Exception:
             logger.exception("wakeup %s delivery failed", wakeup["id"])
-        rec = wakeup["recurrence"]
-        if rec and rec.startswith("+") and rec.endswith("m"):
-            try:
-                minutes = int(rec[1:-1])
-                next_at = (datetime.now(timezone.utc)
-                           + timedelta(minutes=minutes)).isoformat()
-                await repo.schedule(
-                    conversation_id=wakeup["conversation_id"],
-                    not_before=next_at,
-                    goal_id=wakeup["goal_id"],
-                    recurrence=rec,
-                    tz=wakeup["tz"],
-                )
-            except (ValueError, TypeError):
-                logger.warning("wakeup %s: bad recurrence %r", wakeup["id"], rec)
+        if not reschedule:
+            continue
+        next_at = _next_occurrence(wakeup)
+        if next_at:
+            payload = json.loads(wakeup.get("payload_json") or "{}")
+            await repo.schedule(
+                conversation_id=wakeup["conversation_id"],
+                not_before=next_at,
+                goal_id=wakeup["goal_id"],
+                recurrence=wakeup["recurrence"],
+                tz=wakeup["tz"],
+                kind=wakeup.get("kind") or "wake",
+                payload=payload,
+            )
     return len(claimed)

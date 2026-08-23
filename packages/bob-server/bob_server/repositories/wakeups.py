@@ -8,6 +8,7 @@ outstanding wakeups.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -32,15 +33,17 @@ class WakeupRepository:
         recurrence: str | None = None,
         tz: str | None = None,
         created_by_turn: str | None = None,
+        kind: str = "wake",
+        payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         wid = str(uuid.uuid4())
         await self.db.execute(
             """INSERT INTO wakeups
                (id, conversation_id, goal_id, not_before, recurrence, tz,
-                status, created_by_turn, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)""",
+                status, created_by_turn, created_at, kind, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
             (wid, conversation_id, goal_id, not_before, recurrence, tz,
-             created_by_turn, _now_iso()),
+             created_by_turn, _now_iso(), kind, json.dumps(payload or {})),
         )
         return (await self.get(wid))  # type: ignore[return-value]
 
@@ -60,6 +63,14 @@ class WakeupRepository:
             "UPDATE wakeups SET status = 'cancelled' "
             "WHERE goal_id = ? AND status = 'scheduled'",
             (goal_id,),
+        )
+
+    async def cancel_for_routine(self, routine_id: str) -> int:
+        return await self.db.execute(
+            "UPDATE wakeups SET status = 'cancelled' "
+            "WHERE kind = 'routine' AND status = 'scheduled' "
+            "AND json_extract(payload_json, '$.routine_id') = ?",
+            (routine_id,),
         )
 
     async def claim_due(self, *, limit: int = 20) -> list[dict[str, Any]]:

@@ -1,13 +1,23 @@
-"""DB CRUD for routines."""
+"""Routines: definition CRUD + firing.
+
+Scheduling rides the unified wakeups mechanism (Bob3): each enabled routine
+has one scheduled wakeup row (kind='routine', recurrence='cron:<expr>').
+The wakeup pump claims due rows and calls fire_routine(); CRUD here keeps
+the wakeup in sync. The legacy RoutineSchedulerTask is gone.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from bob_server.services.base import BaseService
+
+logger = logging.getLogger(__name__)
 
 _ROUTINE_COLUMNS = (
     "id, session_key, name, schedule, prompt, enabled, next_run_at, last_run_at, "
@@ -132,50 +142,41 @@ class RoutineService(BaseService):
 
         result = await self.get_routine(session_key, name)
         assert result is not None
+        await self._sync_wakeup(result)
         return result
 
+    async def _sync_wakeup(self, routine: dict[str, Any]) -> None:
+        """Keep exactly one scheduled routine-wakeup per enabled routine."""
+        from bob_server.repositories.wakeups import WakeupRepository
+
+        repo = WakeupRepository(self.db)
+        await repo.cancel_for_routine(routine["id"])
+        if routine["enabled"] and routine.get("next_run_at"):
+            await repo.schedule(
+                conversation_id=routine["session_key"],
+                not_before=routine["next_run_at"],
+                recurrence=f"cron:{routine['schedule']}",
+                tz=routine.get("timezone"),
+                kind="routine",
+                payload={"routine_id": routine["id"]},
+            )
+
     async def delete_routine(self, session_key: str, name: str) -> bool:
+        existing = await self.get_routine(session_key, name)
         count = await self.db.execute(
             "DELETE FROM routines WHERE session_key = ? AND name = ?",
             (session_key, name),
         )
+        if existing:
+            from bob_server.repositories.wakeups import WakeupRepository
+            await WakeupRepository(self.db).cancel_for_routine(existing["id"])
         return count > 0
 
-    async def get_due_routines(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
-        # Compare via datetime() on both sides: SQLite parses each ISO string
-        # (honoring its UTC offset) and normalizes to UTC for the TEXT compare.
-        # A bare `next_run_at <= ?` would compare offsets-naively and report a
-        # Europe/Paris routine (e.g. ...T06:30+02:00) as already due under a
-        # server clock in Australia/Perth (...T11:xx+08:00), because '06' < '11'
-        # lexicographically — causing continuous re-firing every heartbeat.
-        now_iso = (now or datetime.now(UTC)).isoformat()
-        rows = await self.db.fetch_all(
-            f"SELECT {_ROUTINE_COLUMNS} FROM routines "
-            "WHERE enabled = 1 AND datetime(next_run_at) <= datetime(?)",
-            (now_iso,),
+    async def get_by_id(self, routine_id: str) -> dict[str, Any] | None:
+        row = await self.db.fetch_one(
+            f"SELECT {_ROUTINE_COLUMNS} FROM routines WHERE id = ?", (routine_id,)
         )
-        due: list[dict[str, Any]] = []
-        for r in rows or []:
-            row = dict(r)
-            if _outside_validity_window(row):
-                continue
-            due.append(row)
-        return due
-
-    async def claim(self, routine_id: str, next_run_at: str, *, now: datetime | None = None) -> bool:
-        """Atomically advance next_run_at. Returns True if this caller won the claim.
-
-        Guards against duplicate dispatch when the heartbeat ticks faster than
-        the routine body runs: a second heartbeat's UPDATE matches zero rows
-        because next_run_at has already moved past `now`.
-        """
-        now_iso = (now or datetime.now(UTC)).isoformat()
-        count = await self.db.execute(
-            "UPDATE routines SET next_run_at = ?, updated_at = ? "
-            "WHERE id = ? AND datetime(next_run_at) <= datetime(?)",
-            (next_run_at, now_iso, routine_id, now_iso),
-        )
-        return count > 0
+        return dict(row) if row else None
 
     async def mark_run(self, routine_id: str) -> None:
         """Record last_run_at on a routine already claimed via claim()."""
@@ -184,3 +185,122 @@ class RoutineService(BaseService):
             "UPDATE routines SET last_run_at = ?, updated_at = ? WHERE id = ?",
             (now, now, routine_id),
         )
+
+
+async def append_fired_event(ctx: Any, routine: dict[str, Any], slot: str) -> None:
+    """Append routine.fired (audit-only). Idempotent per routine id + run slot,
+    so a crashed-and-replayed claim can't double-append. Best-effort — an
+    append failure must never block the routine."""
+    try:
+        from bob_server.repositories import Event, EventLogRepository
+
+        session_key = routine["session_key"]
+        await EventLogRepository(ctx.db).append(Event(
+            event_type="routine.fired",
+            binding_key=session_key,
+            conversation_id=session_key,
+            source="routine",
+            external_id=f"{routine['id']}:{slot}",
+            payload={"routine_id": routine["id"], "name": routine.get("name"),
+                     "slot": slot},
+        ))
+    except Exception:
+        logger.warning("routine.fired event append failed for %s",
+                       routine.get("id"), exc_info=True)
+
+
+def fire_routine_detached(ctx: Any, routine: dict[str, Any]) -> None:
+    """Run a routine dispatch without blocking the caller (the wakeup pump)."""
+    asyncio.create_task(fire_routine(ctx, routine))
+
+
+async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
+    """Execute one routine run: self-contained prompt → LLM turn with delivery
+    tools. Moved from the deleted RoutineSchedulerTask."""
+    from uuid import uuid4
+
+    from bob_server.services.llm_dispatch import LLMDispatchService
+    from bob_server.services.prompt_assembler import (
+        build_chat_messages,
+        load_workspace_prompt,
+    )
+    from bob_server.services.session_service import SessionService
+    from bob_server.services.tool_registry import build_common_tools
+    from bob_server.services.tools import Tool
+    from bob_server.services.wake_service import session_key_to_chat_id
+
+    session_key = routine["session_key"]
+    prompt = routine["prompt"]
+    name = routine["name"]
+
+    try:
+        prompt = f"{_format_routine_now(routine)}\n\n{prompt}"
+
+        session_svc = SessionService(ctx)
+        await session_svc.add_message(session_key, "user", prompt, channel="routine")
+
+        settings = ctx.settings
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=ctx.db)
+
+        # Resolve session trust level for correct tool set
+        route = await ctx.db.fetch_one(
+            "SELECT channel, kind, contact_id FROM session_routes WHERE session_key = ?",
+            (session_key,),
+        )
+        is_trusted = False
+        contact_id = route["contact_id"] if route else None
+        if route and contact_id:
+            from bob_server.repositories.contacts import ContactRepository
+            trusted = await ContactRepository(ctx.db).is_trusted(contact_id)
+            if trusted is not None:
+                is_trusted = trusted
+
+        # Routines carry their own self-contained prompt — skip session history
+        # (which includes the original "set up this routine" conversation)
+        messages = await build_chat_messages(
+            prompt, "",
+            system_content=workspace_prompt,
+        )
+        tools = build_common_tools(
+            ctx, session_key=session_key, is_trusted=is_trusted,
+            contact_id=contact_id, include_routines=False,
+        )
+
+        # Add channel-specific delivery tools
+        wa_bridge = ctx.whatsapp_bridge
+        chat_id = session_key_to_chat_id(session_key)
+        if chat_id and wa_bridge and wa_bridge.connected:
+            async def _send_whatsapp_message(text: str) -> str:
+                if text.strip().upper() == "NO_REPLY":
+                    return "No reply sent."
+                request_id = await wa_bridge.send_message(chat_id, text)
+                return f"Message sent (request_id={request_id})"
+
+            tools.append(Tool(
+                name="send_whatsapp_message",
+                description=(
+                    "Send a reply to the current WhatsApp conversation. "
+                    "You MUST call this tool to deliver your response — your text output will NOT be sent."
+                ),
+                parameters={
+                    "text": {"type": "string", "description": "The message text to send."},
+                },
+                required=["text"],
+                handler=_send_whatsapp_message,
+            ))
+
+        dispatch_id = str(uuid4())
+        response = await LLMDispatchService(ctx).chat_with_tools(
+            messages, tools,
+            call_category="routine",
+            session_key=session_key,
+            dispatch_id=dispatch_id,
+        )
+
+        await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id)
+
+        await RoutineService(ctx).mark_run(routine["id"])
+
+        logger.info("Routine '%s' fired for session %s", name, session_key)
+    except Exception:
+        logger.exception("Routine '%s' failed for session %s", name, session_key)

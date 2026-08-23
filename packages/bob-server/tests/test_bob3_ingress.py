@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from bob_server.heartbeat import EventLogReconciliationTask
-from bob_server.services.routine_scheduler import RoutineSchedulerTask
 
 from tests.services.test_email_inbound_characterization import (
     _make_service as _make_email_service,
@@ -161,17 +160,16 @@ async def test_phone_status_append_never_raises_for_unknown_call(db):
 
 
 async def test_routine_fired_event_is_idempotent_per_slot(ctx, db):
-    task = RoutineSchedulerTask()
+    from bob_server.services.routine_service import append_fired_event
+
     routine = {
         "id": "routine-1",
         "name": "Morning brief",
         "session_key": "agent:main:whatsapp:dm:614000000010",
-        "next_run_at": "2026-08-22T07:00:00+00:00",
     }
-    await task._append_fired_event(ctx, routine)
-    await task._append_fired_event(ctx, routine)  # replayed claim
-    routine2 = dict(routine, next_run_at="2026-08-23T07:00:00+00:00")
-    await task._append_fired_event(ctx, routine2)
+    await append_fired_event(ctx, routine, "2026-08-22T07:00:00+00:00")
+    await append_fired_event(ctx, routine, "2026-08-22T07:00:00+00:00")  # replayed claim
+    await append_fired_event(ctx, routine, "2026-08-23T07:00:00+00:00")
 
     events = await _events(db, "routine")
     assert [e["external_id"] for e in events] == [

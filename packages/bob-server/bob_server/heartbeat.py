@@ -463,7 +463,7 @@ class DreamTask:
 
     Never blocks the heartbeat loop: gates are checked cheaply, then the run
     is spawned via asyncio.create_task with the runner's single-flight lock
-    guarding overlap (established pattern — routine_scheduler, email dispatch).
+    guarding overlap (established pattern — wakeup pump, email dispatch).
     """
 
     name = "dream"
