@@ -969,6 +969,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         kill -9 during an armed attention window loses zero messages.
 
         Returns the number of sessions re-armed."""
+        from bob_server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).undispatched_conversations(
             channel="whatsapp")
         resumed = 0
