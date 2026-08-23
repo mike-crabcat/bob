@@ -218,7 +218,10 @@ class EmailDeliveryService(BaseService):
             try:
                 from bob_server.repositories.conversations import ConversationRepository
                 conversation = await ConversationRepository(self.db).ensure(
-                    session_key, title=subject)
+                    session_key, title=subject,
+                    address=(session_key.rsplit(":", 1)[-1]
+                             if ":email:thread:" in session_key else None),
+                    endpoint_kind="thread")
                 session_key = conversation["id"]
             except Exception:
                 logger.warning("conversation ensure failed for %s", session_key, exc_info=True)

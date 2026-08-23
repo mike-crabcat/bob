@@ -226,3 +226,46 @@ async def test_wake_channel_resolution_uses_bindings_after_merge(ctx, db):
                      "person-merged-1")
     channel, key = await conversation_channel(ctx, "person-merged-1")
     assert channel == "whatsapp" and key == "agent:main:whatsapp:dm:888"
+
+
+async def test_ensure_stores_and_backfills_address_endpoint_kind(ctx, db):
+    """Increment 2: ensure() records the wire address / endpoint kind and
+    fills them in on existing bindings without overwriting."""
+    repo = ConversationRepository(db)
+    # Created blind (pre-knowledge path).
+    await repo.ensure("agent:main:whatsapp:dm:61400000042")
+    row = await db.fetch_one(
+        "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
+        ("agent:main:whatsapp:dm:61400000042",))
+    assert row["address"] is None and row["endpoint_kind"] is None
+
+    # Ingress later knows the truth → fill-in.
+    await repo.ensure("agent:main:whatsapp:dm:61400000042",
+                      address="+61400000042", endpoint_kind="dm")
+    row = await db.fetch_one(
+        "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
+        ("agent:main:whatsapp:dm:61400000042",))
+    assert row["address"] == "+61400000042" and row["endpoint_kind"] == "dm"
+
+    # Never overwritten by a later differing value.
+    await repo.ensure("agent:main:whatsapp:dm:61400000042",
+                      address="OTHER", endpoint_kind="group")
+    row = await db.fetch_one(
+        "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
+        ("agent:main:whatsapp:dm:61400000042",))
+    assert row["address"] == "+61400000042" and row["endpoint_kind"] == "dm"
+
+    # Fresh create with knowledge stores it directly; bind() too.
+    await repo.ensure("agent:main:whatsapp:group:12036",
+                      address="12036@g.us", endpoint_kind="group")
+    row = await db.fetch_one(
+        "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
+        ("agent:main:whatsapp:group:12036",))
+    assert row["address"] == "12036@g.us" and row["endpoint_kind"] == "group"
+
+    await repo.bind("voice:call:abc", "agent:main:whatsapp:group:12036",
+                    channel="voice", address="+61400000042", endpoint_kind="call")
+    row = await db.fetch_one(
+        "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
+        ("voice:call:abc",))
+    assert row["address"] == "+61400000042" and row["endpoint_kind"] == "call"

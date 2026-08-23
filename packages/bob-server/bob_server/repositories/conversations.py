@@ -71,11 +71,27 @@ class ConversationRepository:
             "SELECT * FROM bindings WHERE conversation_id = ? ORDER BY created_at",
             (conversation_id,))
 
-    async def ensure(self, session_key: str, *, title: str | None = None) -> dict[str, Any]:
+    async def ensure(
+        self,
+        session_key: str,
+        *,
+        title: str | None = None,
+        address: str | None = None,
+        endpoint_kind: str | None = None,
+    ) -> dict[str, Any]:
         """Get-or-create the 1:1 conversation + binding for a session_key
-        (the lazy path for session_keys created after the backfill)."""
+        (the lazy path for session_keys created after the backfill).
+        When the caller knows the wire address / endpoint kind, they are
+        stored on the binding — and filled in on existing bindings that
+        predate this knowledge (never overwritten)."""
         existing = await self.resolve(session_key)
         if existing:
+            if address or endpoint_kind:
+                await self.db.execute(
+                    """UPDATE bindings SET address = COALESCE(address, ?),
+                              endpoint_kind = COALESCE(endpoint_kind, ?)
+                       WHERE session_key = ?""",
+                    (address, endpoint_kind, session_key))
             return existing
         now = _now_iso()
         await self.db.execute(
@@ -84,9 +100,10 @@ class ConversationRepository:
             (session_key, _kind_of(session_key), title, now, now))
         await self.db.execute(
             """INSERT OR IGNORE INTO bindings
-               (session_key, conversation_id, channel, kind, created_at)
-               VALUES (?, ?, ?, 'thread', ?)""",
-            (session_key, session_key, _channel_of(session_key), now))
+               (session_key, conversation_id, channel, kind, address, endpoint_kind, created_at)
+               VALUES (?, ?, ?, 'thread', ?, ?, ?)""",
+            (session_key, session_key, _channel_of(session_key),
+             address, endpoint_kind, now))
         return (await self.resolve(session_key))  # type: ignore[return-value]
 
     async def bind(
@@ -97,15 +114,17 @@ class ConversationRepository:
         channel: str,
         kind: str = "thread",
         address: str | None = None,
+        endpoint_kind: str | None = None,
     ) -> None:
         """Attach an additional binding to an EXISTING conversation — e.g. a
         voice call endpoint bound to the person's conversation (Phase VI
         item 5). Idempotent; never creates a conversation."""
         await self.db.execute(
             """INSERT OR IGNORE INTO bindings
-               (session_key, conversation_id, channel, kind, address, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_key, conversation_id, channel, kind, address, _now_iso()))
+               (session_key, conversation_id, channel, kind, address, endpoint_kind, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_key, conversation_id, channel, kind, address,
+             endpoint_kind, _now_iso()))
 
     async def merge(
         self,

@@ -564,7 +564,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         binding_key = session_key
         try:
             from bob_server.repositories.conversations import ConversationRepository
-            conversation = await ConversationRepository(self.db).ensure(session_key)
+            conversation = await ConversationRepository(self.db).ensure(
+                session_key,
+                address=chat_id if chat_kind == "group" else phone_number,
+                endpoint_kind=chat_kind)
             session_key = conversation["id"]
         except Exception:
             logger.warning("conversation resolve failed for %s", session_key, exc_info=True)

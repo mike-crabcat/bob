@@ -151,10 +151,15 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
             "error": r["error"],
         })
 
-    # 4. Effects — bindings.address is often NULL; the routable address lives
-    # in the session_key tail (e.g. agent:main:whatsapp:group:<id> ->
-    # <id>@g.us). Match payload chat_id/to/session_key against key segments.
+    # 4. Effects — primary match on bindings.address (truthful post-451);
+    # key-tail parsing kept as last-resort fallback for pre-route rows
+    # (e.g. agent:main:whatsapp:group:<id> -> <id>@g.us).
     segments = {k.rsplit(":", 1)[-1] for k in keys} | set(keys)
+    for row in await db.fetch_all(
+            "SELECT address FROM bindings WHERE conversation_id = ? AND address IS NOT NULL",
+            (conversation_id,)):
+        segments.add(row["address"])
+        segments.add(str(row["address"]).split("@", 1)[0])
     effect_rows = await db.fetch_all(
         f"""SELECT id, kind, status, attempt, error, created_at,
                    COALESCE(json_extract(payload_json, '$.origin_session_key'),

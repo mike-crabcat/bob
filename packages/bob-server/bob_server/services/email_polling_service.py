@@ -103,7 +103,12 @@ async def _canonical_session_key(db: Database, binding_key: str) -> str:
     today; diverges only after an explicit merge."""
     try:
         from bob_server.repositories.conversations import ConversationRepository
-        conversation = await ConversationRepository(db).ensure(binding_key)
+        # Email binding keys are agent:{aid}:email:thread:{thread_id}; the
+        # thread id is the wire address for the thread endpoint.
+        thread_id = binding_key.rsplit(":", 1)[-1] if ":email:thread:" in binding_key else None
+        conversation = await ConversationRepository(db).ensure(
+            binding_key, address=thread_id,
+            endpoint_kind="thread" if thread_id else None)
         return conversation["id"]
     except Exception:
         logger.warning("conversation resolve failed for %s", binding_key, exc_info=True)

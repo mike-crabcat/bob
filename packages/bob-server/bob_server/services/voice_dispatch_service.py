@@ -531,7 +531,8 @@ class VoiceDispatchService(BaseService):
             conv = await repo.ensure(f"agent:main:whatsapp:dm:{digits}")
             await repo.bind(
                 row["session_key"], conv["id"],
-                channel="voice", address=contact.get("phone_number"))
+                channel="voice", address=contact.get("phone_number"),
+                endpoint_kind="call")
             return conv["id"]
         except Exception:
             logger.warning("failed to bind call %s to person conversation",
