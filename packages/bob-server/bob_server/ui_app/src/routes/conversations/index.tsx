@@ -108,6 +108,11 @@ function ConversationsPage() {
                     {c.channel}
                   </span>
                   <span className="text-text truncate text-xs">{c.title || c.id}</span>
+                  {c.merged_into && (
+                    <span className="text-[9px] px-1 border border-yellow-500/60 text-yellow-400 shrink-0">
+                      → merged
+                    </span>
+                  )}
                   {c.binding_count > 1 && (
                     <span className="text-[9px] px-1 border border-accent/60 text-accent shrink-0">
                       ×{c.binding_count}

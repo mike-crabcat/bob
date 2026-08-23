@@ -55,3 +55,12 @@ and voice is a binding, but `subagent_service.py` still owns run/message/
 check/list/kill lifecycle. The plan's end state dissolves it into the goal +
 executor machinery. Non-urgent; the alias-normalisation mess is already
 contained.
+
+## 5. Conversation-centric rework of remaining dashboard pages (S–M)
+
+Dashboard v3 increments 1–4 are shipped (health strip, conversations rename +
+decision timeline, goals & wakeups page, merge badges/provenance/unmerge).
+Deliberately deferred from increment 4: reworking contacts, phone, and skills
+pages to link into `/conversations/*` natively (they still link/label by
+legacy session concepts where applicable). Do this opportunistically when
+touching those pages.
