@@ -8,6 +8,10 @@ Two sanctioned patterns plus an enforcement test that stops regression.
 
 Reviewed 2026-08-23 by gpt-5.6-sol subagent; all 12 findings folded in.
 
+**STATUS: COMPLETE (2026-08-23).** All 6 increments shipped and live.
+WRITE_ALLOWLIST is empty; READ_ALLOWLIST is 17 documented seams (see
+tests/test_sql_ownership.py). Enforcement + ratchet run in every deploy.
+
 ## Current state (measured 2026-08-23, post-migration-458)
 
 - 9 repositories exist: contacts, conversations, effects, event_log, goals,
