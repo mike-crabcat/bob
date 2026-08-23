@@ -585,10 +585,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if not phone:
                     continue
                 # Try session participants first (group members with display names)
-                participant = await self.db.fetch_one(
-                    "SELECT display_name FROM session_participants WHERE identifier = ? AND session_key = ? LIMIT 1",
-                    (phone, session_key),
-                )
+                from bob_server.repositories.participants import ParticipantRepository
+                participant = await ParticipantRepository(self.db).get(session_key, phone)
                 if participant and participant["display_name"]:
                     mention_map[phone] = participant["display_name"]
                     continue
@@ -598,30 +596,20 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if contact_match and contact_match["name"]:
                     mention_map[phone] = contact_match["name"]
                 # Upsert mentioned user as participant so dispatch-time resolution can find them
-                await self.db.execute(
-                    """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-                       VALUES (?, ?, ?, ?, 0, ?)
-                       ON CONFLICT(session_key, identifier) DO UPDATE SET
-                           last_active_at = excluded.last_active_at""",
-                    (session_key, phone, mention_map.get(phone, phone), None, now_iso),
-                )
+                from bob_server.repositories.participants import ParticipantRepository
+                await ParticipantRepository(self.db).touch(
+                    session_key, phone, mention_map.get(phone, phone), now_iso)
             # Replace @phone_number patterns with @DisplayName
             for phone, name in mention_map.items():
                 bare = phone.lstrip("+")
                 text = re.sub(rf"@{re.escape(bare)}\b", f"@{name}", text)
 
         # Upsert sender as session participant
-        await self.db.execute(
-            """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(session_key, identifier) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                   is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
-                   last_active_at = excluded.last_active_at""",
-            (session_key, phone_number, sender_name or phone_number,
-             contact_id, 1 if is_trusted else 0, now_iso),
-        )
+        from bob_server.repositories.participants import ParticipantRepository
+        await ParticipantRepository(self.db).upsert(
+            session_key, phone_number,
+            display_name=sender_name or phone_number,
+            contact_id=contact_id, is_trusted=bool(is_trusted), now_iso=now_iso)
 
         # Register the endpoint binding — DM carries contact_id, group the JID
         from bob_server.repositories.conversations import ConversationRepository

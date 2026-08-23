@@ -839,16 +839,11 @@ class EmailPollingService(BaseService):
                 contact_id = contact["id"]
                 is_trusted = 1 if contact.get("is_trusted") else 0
             display_name = name or email_lower
-            await self.db.execute(
-                """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_key, identifier) DO UPDATE SET
-                       display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE session_participants.display_name END,
-                       contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                       is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
-                       last_active_at = excluded.last_active_at""",
-                (session_key, email_lower, display_name, contact_id, is_trusted, now_iso),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            await ParticipantRepository(self.db).upsert(
+                session_key, email_lower,
+                display_name=display_name, contact_id=contact_id,
+                is_trusted=bool(is_trusted), now_iso=now_iso)
 
     def _should_poll(self, inbox: dict[str, Any], poll_interval: float) -> bool:
         """Check if enough time has elapsed since the last poll for this inbox."""

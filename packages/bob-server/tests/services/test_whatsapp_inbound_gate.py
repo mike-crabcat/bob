@@ -62,7 +62,7 @@ def _dm_payload(phone: str, text: str = "/who") -> dict:
 
 async def _participant_rows(db, phone: str) -> list:
     return await db.fetch_all(
-        "SELECT * FROM session_participants WHERE identifier = ?", (phone,),
+        "SELECT * FROM participants WHERE identifier = ?", (phone,),
     )
 
 

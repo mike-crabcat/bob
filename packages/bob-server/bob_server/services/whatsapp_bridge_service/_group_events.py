@@ -92,11 +92,13 @@ class GroupEventsMixin:
                 (now_iso, now_iso, group_id, *seen_contact_ids),
             )
 
-        # Upsert all participants into session_participants
+        # Upsert all participants
         agent_id = "main"
         key_part = group_jid.split("@")[0] if "@" in group_jid else group_jid
         session_key = f"agent:{agent_id}:whatsapp:group:{key_part}"
 
+        from bob_server.repositories.participants import ParticipantRepository
+        participants_repo = ParticipantRepository(self.db)
         for p in participants:
             p_jid = p.get("jid", "")
             phone_number = _jid_to_phone(p_jid)
@@ -104,19 +106,11 @@ class GroupEventsMixin:
             contact = await self._contacts().get_by_phone(phone_number)
             if not contact:
                 continue
-            await self.db.execute(
-                """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_key, identifier) DO UPDATE SET
-                       display_name = excluded.display_name,
-                       contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                       is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
-                       last_active_at = excluded.last_active_at""",
-                (session_key, phone_number, display_name or contact["id"], contact["id"],
-                 1 if contact.get("is_trusted") else 0, now_iso),
-            )
-
-        # Ensure the endpoint binding exists
+            await participants_repo.upsert(
+                session_key, phone_number,
+                display_name=display_name or contact["id"],
+                contact_id=contact["id"],
+                is_trusted=bool(contact.get("is_trusted")), now_iso=now_iso)
         from bob_server.repositories.conversations import ConversationRepository
         await ConversationRepository(self.db).register_endpoint(
             session_key, endpoint_kind="group", address=group_jid)
@@ -158,7 +152,7 @@ class GroupEventsMixin:
         join_names: list[str] = []
         for jid in joined_jids:
             phone_number = _jid_to_phone(jid)
-            # Try to get a display name from existing session_participants or contacts
+            # Try to get a display name from existing participants or contacts
             display_name = ""
             existing = await self._contacts().get_by_phone(phone_number)
             if existing:
@@ -182,16 +176,12 @@ class GroupEventsMixin:
             # Upsert session participant
             contact = await self._contacts().get_by_phone(phone_number)
             if contact:
-                await self.db.execute(
-                    """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-                       VALUES (?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(session_key, identifier) DO UPDATE SET
-                           display_name = COALESCE(excluded.display_name, session_participants.display_name),
-                           contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                           last_active_at = excluded.last_active_at""",
-                    (session_key, phone_number, display_name or phone_number, contact["id"],
-                     1 if contact.get("is_trusted") else 0, now_iso),
-                )
+                from bob_server.repositories.participants import ParticipantRepository
+                await ParticipantRepository(self.db).upsert(
+                    session_key, phone_number,
+                    display_name=display_name or phone_number,
+                    contact_id=contact["id"],
+                    is_trusted=bool(contact.get("is_trusted")), now_iso=now_iso)
 
         leave_names: list[str] = []
         for jid in left_jids:

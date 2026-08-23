@@ -228,11 +228,8 @@ class MemoryService(BaseService):
         is_group = ":group:" in session_key
         sender_names: dict[str, str] = {}
         if is_group:
-            participants = await self.db.fetch_all(
-                "SELECT contact_id, display_name FROM session_participants "
-                "WHERE session_key = ?",
-                (session_key,),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            participants = await ParticipantRepository(self.db).list_for(session_key)
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]
@@ -266,11 +263,8 @@ class MemoryService(BaseService):
         """Channel-type + participant roster block for the silent-turn prompt."""
         is_group = ":group:" in session_key
         if is_group:
-            members = await self.db.fetch_all(
-                "SELECT contact_id, display_name FROM session_participants "
-                "WHERE session_key = ?",
-                (session_key,),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            members = await ParticipantRepository(self.db).list_for(session_key)
             roster = ", ".join(
                 (m["display_name"] or m["contact_id"])
                 for m in members
@@ -284,11 +278,9 @@ class MemoryService(BaseService):
                 "group-* entities before recording anything."
             )
             return f"# Channel context\n\n{line}"
-        row = await self.db.fetch_one(
-            "SELECT contact_id, display_name FROM session_participants "
-            "WHERE session_key = ? LIMIT 1",
-            (session_key,),
-        )
+        from bob_server.repositories.participants import ParticipantRepository
+        p_rows = await ParticipantRepository(self.db).list_for(session_key)
+        row = p_rows[0] if p_rows else None
         who = row["display_name"] if row and row["display_name"] else "the other participant"
         return (
             "# Channel context\n\n"

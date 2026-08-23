@@ -43,11 +43,8 @@ def make_session_tools(
             return None
         keys: set[str] = set()
         if contact_id:
-            rows = await db.fetch_all(
-                "SELECT DISTINCT session_key FROM session_participants WHERE contact_id = ?",
-                (contact_id,),
-            )
-            keys |= {r["session_key"] for r in rows}
+            from bob_server.repositories.participants import ParticipantRepository
+            keys |= set(await ParticipantRepository(db).conversations_for_contact(contact_id))
         if current_session_key:
             keys.add(current_session_key)
         return keys

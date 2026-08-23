@@ -367,10 +367,11 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
     p_rows = await db.fetch_all(
         "SELECT sp.display_name, sp.identifier, sp.contact_id, sp.is_trusted, sp.last_active_at, "
         "COALESCE(c.name, sp.display_name, sp.identifier) as resolved_name "
-        "FROM session_participants sp "
+        "FROM participants sp "
         "LEFT JOIN contacts c ON c.id = sp.contact_id AND c.deleted_at IS NULL "
-        "WHERE sp.session_key = ? ORDER BY sp.last_active_at DESC",
-        (session_key,),
+        "WHERE sp.conversation_id = COALESCE((SELECT conversation_id FROM bindings WHERE session_key = ?), ?) "
+        "ORDER BY sp.last_active_at DESC",
+        (session_key, session_key),
     )
     for row in p_rows:
         participants.append({
@@ -382,7 +383,9 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         })
 
     agenda_row = await db.fetch_one(
-        "SELECT agenda FROM session_agendas WHERE session_key = ?", (session_key,)
+        "SELECT agenda FROM agendas WHERE conversation_id = "
+        "COALESCE((SELECT conversation_id FROM bindings WHERE session_key = ?), ?)",
+        (session_key, session_key),
     )
     current_agenda = agenda_row["agenda"] if agenda_row else ""
 
@@ -392,7 +395,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         "COALESCE(c.name, sp.display_name) as sender_name "
         "FROM session_messages sm "
         "LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL "
-        "LEFT JOIN session_participants sp ON sp.contact_id = sm.sender_id AND sp.session_key = sm.session_key "
+        "LEFT JOIN participants sp ON sp.contact_id = sm.sender_id "
+        "AND sp.conversation_id = COALESCE((SELECT conversation_id FROM bindings WHERE session_key = sm.session_key), sm.session_key) "
         "WHERE sm.rowid IN ("
         "  SELECT rowid FROM session_messages"
         "  WHERE session_key = ? ORDER BY created_at DESC LIMIT 200"
@@ -435,11 +439,8 @@ async def put_conversation_agenda(request: Request, session_key: str) -> dict[st
     agenda = (body.get("agenda") or "").strip()
     db = _db(request)
     now = _utc_now()
-    await db.execute(
-        """INSERT INTO session_agendas (session_key, agenda, updated_at) VALUES (?, ?, ?)
-           ON CONFLICT(session_key) DO UPDATE SET agenda = excluded.agenda, updated_at = excluded.updated_at""",
-        (session_key, agenda, now),
-    )
+    from bob_server.repositories.participants import AgendaRepository
+    await AgendaRepository(db).set(session_key, agenda, now)
     return {"ok": True}
 
 

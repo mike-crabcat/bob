@@ -136,17 +136,11 @@ def make_whatsapp_outreach_tools(
         # Upsert the contact as a participant in the target session
         from bob_server.services.base import utcnow
         now_iso = utcnow().isoformat()
-        await db.execute(
-            """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(session_key, identifier) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                   is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
-                   last_active_at = excluded.last_active_at""",
-            (target_session_key, phone, contact["name"],
-             contact["id"], 1, now_iso),
-        )
+        from bob_server.repositories.participants import ParticipantRepository
+        await ParticipantRepository(db).upsert(
+            target_session_key, phone,
+            display_name=contact["name"], contact_id=contact["id"],
+            is_trusted=True, now_iso=now_iso)
 
         logger.info(
             "Outreach sent to %s (%s) session=%s request=%s objective=%s",

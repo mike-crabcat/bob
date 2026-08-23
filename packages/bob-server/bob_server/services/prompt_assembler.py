@@ -286,11 +286,8 @@ async def build_chat_messages(
         sender_names: dict[str, str] = {}
         mention_names: dict[str, str] = {}
         if is_group:
-            participants = await db.fetch_all(
-                "SELECT contact_id, display_name, identifier FROM session_participants "
-                "WHERE session_key = ?",
-                (session_key,),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            participants = await ParticipantRepository(db).list_for(session_key)
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]

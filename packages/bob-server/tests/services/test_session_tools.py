@@ -83,7 +83,7 @@ async def test_untrusted_group_context_cannot_find_other_sessions(seeded):
 async def test_untrusted_contact_finds_participating_sessions(seeded):
     # Trevor participates in the Leeming Boys group but is dispatching from his DM.
     await seeded.db.execute(
-        "INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at) "
+        "INSERT INTO participants (conversation_id, identifier, display_name, contact_id, is_trusted, last_active_at) "
         "VALUES (?, '+61431939512', 'Trevor', 'c1', 0, ?)", (GROUP_KEY, NOW))
     tools = make_session_tools(seeded, is_trusted=False, contact_id="c1", session_key=DM_KEY)
     result = json.loads(await _tool(tools, "find_session").handler(query="Leeming Boys"))

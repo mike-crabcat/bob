@@ -24,8 +24,8 @@ async def get_contacts(request: Request) -> dict[str, Any]:
             """SELECT c.id, c.name, c.phone_number, c.email,
                       c.is_trusted, c.is_default, c.allow_inbound_dm,
                       c.created_at, c.updated_at,
-                      (SELECT COUNT(*) FROM session_participants sp WHERE sp.contact_id = c.id) as session_count,
-                      (SELECT MAX(sp.last_active_at) FROM session_participants sp WHERE sp.contact_id = c.id) as last_active
+                      (SELECT COUNT(*) FROM participants sp WHERE sp.contact_id = c.id) as session_count,
+                      (SELECT MAX(sp.last_active_at) FROM participants sp WHERE sp.contact_id = c.id) as last_active
                FROM contacts c
                WHERE c.deleted_at IS NULL
                ORDER BY c.name"""
@@ -62,25 +62,21 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         return {"id": None}
 
     sessions: list[dict[str, Any]] = []
-    participants_table = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_participants'"
+    session_rows = await db.fetch_all(
+        """SELECT sp.conversation_id AS session_key, sp.last_active_at,
+                  (SELECT COUNT(*) FROM llm_call_log l WHERE l.session_key = sp.conversation_id) as call_count
+           FROM participants sp
+           WHERE sp.contact_id = ?
+           ORDER BY sp.last_active_at DESC""",
+        (contact_id,),
     )
-    if participants_table:
-        session_rows = await db.fetch_all(
-            """SELECT sp.session_key, sp.last_active_at,
-                      (SELECT COUNT(*) FROM llm_call_log l WHERE l.session_key = sp.session_key) as call_count
-               FROM session_participants sp
-               WHERE sp.contact_id = ?
-               ORDER BY sp.last_active_at DESC""",
-            (contact_id,),
-        )
-        for row in session_rows:
-            sessions.append({
-                "session_key": row["session_key"],
-                "channel": _parse_channel(row["session_key"]),
-                "call_count": row["call_count"],
-                "last_active": _utc(row["last_active_at"]),
-            })
+    for row in session_rows:
+        sessions.append({
+            "session_key": row["session_key"],
+            "channel": _parse_channel(row["session_key"]),
+            "call_count": row["call_count"],
+            "last_active": _utc(row["last_active_at"]),
+        })
 
     groups: list[dict[str, Any]] = []
     groups_table = await db.fetch_one(

@@ -176,7 +176,7 @@ class EmailDeliveryService(BaseService):
             origin_session_key=origin_session_key,
         )
 
-        # Persist agenda to session_agendas immediately (not waiting for lazy migration)
+        # Persist agenda immediately (not waiting for lazy migration)
         if agenda and thread:
             from bob_server.services.session_agenda_service import SessionAgendaService
             await SessionAgendaService(self.ctx).set_agenda(thread["session_key"], agenda)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -83,12 +84,10 @@ async def dashboard_websocket(websocket: WebSocket) -> None:
                         session_key = msg.get("session_key", "")
                         agenda = msg.get("agenda", "")
                         if session_key:
-                            await db.execute(
-                                """INSERT INTO session_agendas (session_key, agenda, updated_at)
-                                   VALUES (?, ?, datetime('now'))
-                                   ON CONFLICT(session_key) DO UPDATE SET agenda=excluded.agenda, updated_at=excluded.updated_at""",
-                                (session_key, agenda),
-                            )
+                            from bob_server.repositories.participants import AgendaRepository
+                            await AgendaRepository(db).set(
+                                session_key, agenda,
+                                datetime.now(timezone.utc).isoformat())
 
                 elif task is event_task:
                     try:

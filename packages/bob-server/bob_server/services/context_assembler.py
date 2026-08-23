@@ -34,7 +34,7 @@ class ContextAssembler:
     async def participants_prompt(
             self, session_key: str, *, include_identifier: bool = False) -> str:
         """Participants block. Group sessions prefer the rich whatsappgroups
-        membership; DMs and email threads use session_participants.
+        membership; DMs and email threads use participants.
 
         ``include_identifier`` reproduces the email format (``Name <addr>``);
         WhatsApp omits identifiers (names only).
@@ -44,10 +44,8 @@ class ContextAssembler:
             if rich:
                 return rich
 
-        rows = await self.db.fetch_all(
-            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
-            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
-            (session_key,))
+        from bob_server.repositories.participants import ParticipantRepository
+        rows = await ParticipantRepository(self.db).list_for(session_key)
         if not rows:
             return ""
         lines = ["## Participants"]
