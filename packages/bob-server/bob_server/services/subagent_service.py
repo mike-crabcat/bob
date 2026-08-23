@@ -80,7 +80,7 @@ class SubagentService(BaseService):
 
         requested_modality = modality
         normalised_type = _normalise_voice_agent_type(agent_type)
-        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local")):
+        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local", "script")):
             agent_type = "openai_voice"
             # Unknown modality vocabulary defaults to phone — never guess toward
             # a modality the caller didn't clearly pick... except that bare
@@ -229,6 +229,12 @@ class SubagentService(BaseService):
                     persona=persona,
                     model=model,
                 )
+            elif agent_type == "script":
+                from bob_server.services.session_service import SessionService
+                await SessionService(self.ctx).add_message(
+                    session_key, "user", task, channel="subagent",
+                )
+                result = await self._run_script(task)
             else:
                 workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
                 result = await self._run_claude(
@@ -260,7 +266,7 @@ class SubagentService(BaseService):
         # (user message already stored before execution for local, or stored here for claude)
         from bob_server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
-        if agent_type != "local":
+        if agent_type not in ("local", "script"):
             await session_svc.add_message(session_key, "user", task, channel="subagent")
         await session_svc.add_message(session_key, "assistant", result_text, channel="subagent")
 
@@ -466,7 +472,7 @@ class SubagentService(BaseService):
         results (goal already settled) wake the parent directly.
         """
         row = await self.db.fetch_one(
-            "SELECT parent_session_key FROM subagents WHERE id = ?",
+            "SELECT parent_session_key, agent_type FROM subagents WHERE id = ?",
             (subagent_id,),
         )
         if not row:
@@ -474,11 +480,20 @@ class SubagentService(BaseService):
         parent_session_key = row["parent_session_key"]
 
         short_id = subagent_id[:8]
-        content = (
-            f"[Subagent {short_id}] {result_text}\n\n"
-            f"Relay this result to the user with a summary. "
-            f"You can also use message_subagent to reply or kill_subagent to terminate."
-        )
+        if row["agent_type"] == "script":
+            content = (
+                f"[Script {short_id}] {result_text}\n\n"
+                f"This background script you started has finished. If it produced "
+                f"an artifact the user asked for (image, document, file), send it "
+                f"to them now with a short comment in your own voice. If it "
+                f"failed, tell the user plainly and decide whether to retry."
+            )
+        else:
+            content = (
+                f"[Subagent {short_id}] {result_text}\n\n"
+                f"Relay this result to the user with a summary. "
+                f"You can also use message_subagent to reply or kill_subagent to terminate."
+            )
 
         from bob_server.repositories.goals import GoalRepository
         from bob_server.services.goal_service import settle_goal
@@ -539,6 +554,51 @@ class SubagentService(BaseService):
                 "subagent_id": subagent_id,
                 "status": status,
             })
+
+    async def _run_script(self, command: str) -> dict[str, Any]:
+        """Run a shell command in the workspace as a background job (Bob3:
+        async skill execution). Same sandbox and skill env as the bash tool;
+        the parent conversation is woken with the output when it finishes."""
+        from bob_server.services.skill_env import build_skill_env
+        from bob_server.services.workspace_tools import _check_command_safety
+
+        settings = self._get_settings()
+        workspace = settings.harness.workspace_dir.expanduser().resolve()
+        violation = _check_command_safety(
+            command,
+            db_path=settings.db_path,
+            data_dir=settings.data_dir,
+            config_dir=settings.config_dir,
+        )
+        if violation:
+            raise RuntimeError(f"script blocked by sandbox: {violation}")
+
+        venv_dir = settings.harness.venv_dir.expanduser()
+        logger.info("script subagent: %s", command)
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", command,
+            cwd=str(workspace),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RuntimeError("script timed out after 900s")
+
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        parts = [f"exit_code={proc.returncode}"]
+        if out:
+            parts.append(f"stdout:\n{out[-4000:]}")
+        if err:
+            parts.append(f"stderr:\n{err[-2000:]}")
+        result_text = "\n".join(parts)
+        if proc.returncode != 0:
+            raise RuntimeError(f"script failed: {result_text}")
+        return {"result": result_text, "cost_usd": 0.0, "session_id": ""}
 
     async def _run_local(
         self,
