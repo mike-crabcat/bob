@@ -113,6 +113,10 @@ export function NeedsAttention() {
       postAPI(`/effects/${id}/${action}`, {}),
     onSettled: () => qc.invalidateQueries({ queryKey: ["ops-status"] }),
   });
+  const retryTurn = useMutation({
+    mutationFn: (id: string) => postAPI(`/turns/${id}/retry`, {}),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["ops-status"] }),
+  });
 
   if (!s) return null;
   const items =
@@ -171,6 +175,13 @@ export function NeedsAttention() {
                 {new Date(t.lease_expires_at).toLocaleString()}
               </div>
             </div>
+            <button
+              className="border border-border px-2 py-0.5 hover:bg-border shrink-0"
+              disabled={retryTurn.isPending}
+              onClick={() => retryTurn.mutate(t.id)}
+            >
+              retry now
+            </button>
           </div>
         ))}
       </div>

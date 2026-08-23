@@ -119,6 +119,41 @@ async def get_status(request: Request) -> dict[str, Any]:
     }
 
 
+@router.post("/api/turns/{turn_id}/retry")
+async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
+    """Re-arm dispatch for a stuck turn's conversation. The turn claim path
+    itself releases the expired lease and re-claims its events, so this just
+    pushes a new dispatch through the normal inbound pipeline."""
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    row = await db.fetch_one(
+        """SELECT id, conversation_id, status,
+                  (status IN ('pending','running')
+                   AND lease_expires_at IS NOT NULL
+                   AND lease_expires_at < strftime('%Y-%m-%dT%H:%M:%f', 'now')) AS stuck
+           FROM turns WHERE id = ?""", (turn_id,))
+    if not row:
+        return {"ok": False, "error": "turn not found"}
+    if not row["stuck"]:
+        return {"ok": False, "error": "turn is not stuck (still leased or already settled)"}
+
+    conversation_id = row["conversation_id"]
+    if ":whatsapp:" not in (conversation_id or ""):
+        return {"ok": False, "error": f"retry not supported for channel of {conversation_id}"}
+
+    bridge = getattr(request.app.state, "whatsapp_bridge_service", None)
+    if bridge is None:
+        return {"ok": False, "error": "whatsapp bridge not running"}
+    try:
+        await bridge.wake_session(conversation_id)
+    except Exception as exc:
+        logger.warning("dashboard: stuck-turn retry failed for %s", turn_id, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+    logger.info("dashboard: stuck turn %s re-armed by operator (%s)", turn_id, conversation_id)
+    return {"ok": True}
+
+
 @router.post("/api/effects/{effect_id}/retry")
 async def retry_effect(effect_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
