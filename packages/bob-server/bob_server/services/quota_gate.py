@@ -74,6 +74,17 @@ def record_success() -> None:
     _trip_count = 0
 
 
+def status() -> dict:
+    """Introspection for the dashboard: gate state without touching it."""
+    remaining = max(0.0, _open_until - time.monotonic())
+    return {
+        "open": remaining > 0,
+        "trip_count": _trip_count,
+        "remaining_s": round(remaining),
+        "cooldown_s": COOLDOWN_S,
+    }
+
+
 def reset() -> None:
     """Test helper: return the gate to its initial state."""
     global _open_until, _trip_count

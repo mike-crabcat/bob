@@ -12,13 +12,14 @@ from fastapi import APIRouter
 
 from bob_server.routers.dashboard_api import (
     home, sessions, contacts, calls, workspace, memory,
-    frontend_errors, skills, subagents, phone, persona, dreams, auth,
+    frontend_errors, skills, subagents, phone, persona, dreams, auth, ops,
 )
 
 
 router = APIRouter()
 router.include_router(auth.router)
 router.include_router(home.router)
+router.include_router(ops.router)
 router.include_router(sessions.router)
 router.include_router(contacts.router)
 router.include_router(calls.router)
