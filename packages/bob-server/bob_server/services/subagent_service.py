@@ -129,6 +129,8 @@ class SubagentService(BaseService):
                 )
             except Exception as e:
                 logger.warning("openai_voice subagent %s dispatch failed: %s", short_id, e)
+                from bob_server.services import occupancy
+                occupancy.mark_idle_by_ref(subagent_id)
                 await self._update_status(subagent_id, "failed", error=str(e))
                 return {"ok": False, "error": str(e), "subagent_id": subagent_id, "session_key": session_key}
 

@@ -168,6 +168,13 @@ async def mark_voice_subagent_complete(db: Any, subagent_id: str, result_text: s
     Shared by the phone path (routers/phone.py) and the browser voice_link path
     (VoiceSessionService.complete) — previously two copies of the same SQL.
     """
+    # Occupancy (Phase VI item 6): the call is over — release the person's
+    # conversation and drain any messages queued during the call.
+    try:
+        from bob_server.services import occupancy
+        occupancy.mark_idle_by_ref(subagent_id)
+    except Exception:
+        logger.warning("occupancy release failed for %s", subagent_id[:8], exc_info=True)
     try:
         await db.execute(
             """UPDATE subagents
@@ -435,7 +442,14 @@ class VoiceDispatchService(BaseService):
             raise ValueError(f"contact not found: {contact_id}")
 
         await self._update_subagent_status(subagent_id, "running")
-        await self._bind_call_to_person(subagent_id, contact)
+        person_conversation_id = await self._bind_call_to_person(subagent_id, contact)
+
+        # Occupancy (Phase VI item 6): register the live call BEFORE placing
+        # it — enforces MAX_LIVE_CALLS and lets ingress queue inbound text on
+        # this person's conversation for the post-call turn.
+        if person_conversation_id:
+            from bob_server.services import occupancy
+            occupancy.mark_live(person_conversation_id, subagent_id)
 
         settings = self._get_settings()
         instructions = build_outbound_instructions(contact["name"], task)
@@ -499,17 +513,18 @@ class VoiceDispatchService(BaseService):
 
         return {"call_id": result["call_id"], "call_sid": result["call_sid"]}
 
-    async def _bind_call_to_person(self, subagent_id: str, contact: dict[str, Any]) -> None:
+    async def _bind_call_to_person(self, subagent_id: str, contact: dict[str, Any]) -> str | None:
         """Voice as a binding (Phase VI item 5): the call's subagent session
         key becomes a binding on the person's conversation, so transcripts
-        and outcomes land as events on the person, not on an orphan key."""
+        and outcomes land as events on the person, not on an orphan key.
+        Returns the person's conversation id (None if unresolvable)."""
         digits = re.sub(r"\D", "", contact.get("phone_number") or "")
         if not digits:
-            return
+            return None
         row = await self.db.fetch_one(
             "SELECT session_key FROM subagents WHERE id = ?", (subagent_id,))
         if row is None:
-            return
+            return None
         try:
             from bob_server.repositories.conversations import ConversationRepository
             repo = ConversationRepository(self.db)
@@ -517,9 +532,11 @@ class VoiceDispatchService(BaseService):
             await repo.bind(
                 row["session_key"], conv["id"],
                 channel="voice", address=contact.get("phone_number"))
+            return conv["id"]
         except Exception:
             logger.warning("failed to bind call %s to person conversation",
                            subagent_id[:8], exc_info=True)
+            return None
 
     async def _update_subagent_status(self, subagent_id: str, status: str) -> None:
         await self.db.execute(

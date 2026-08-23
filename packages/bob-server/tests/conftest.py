@@ -34,3 +34,12 @@ async def ctx(db):
     """Provide an AppContext with the test database and default settings."""
     settings = Settings.from_env()
     return AppContext(db=db, settings=settings)
+
+
+@pytest.fixture(autouse=True)
+def _reset_occupancy():
+    """Occupancy is module-level state — never let it leak across tests."""
+    from bob_server.services import occupancy
+    occupancy.reset_for_tests()
+    yield
+    occupancy.reset_for_tests()

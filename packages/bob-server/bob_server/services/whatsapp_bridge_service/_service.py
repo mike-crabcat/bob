@@ -139,6 +139,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         self._recovery_task = asyncio.create_task(_recovery_sweep(), name="wa_recovery_sweep")
 
+        # Post-call drain (Bob3 Phase VI item 6): when a live call ends,
+        # occupancy wakes the conversation so queued messages run as one turn.
+        from bob_server.services import occupancy
+        occupancy.set_drain(self.wake_session)
+
         # Subscribe to memory verbose notices and forward to WhatsApp.
         if self.ctx.event_bus:
             self._verbose_queue = self.ctx.event_bus.subscribe()
@@ -793,6 +798,17 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 pass
 
         from bob_server.services.attention import AttentionCoordinator
+
+        # Occupancy (Bob3 Phase VI item 6): while a call is live on this
+        # conversation, non-urgent text stays stored-but-undispatched and the
+        # post-call drain (wake_session) runs it as one turn. Urgent text
+        # dispatches immediately.
+        from bob_server.services import occupancy
+        if occupancy.is_live(session_key) and not occupancy.is_urgent(text or ""):
+            occupancy.defer(session_key)
+            logger.info("occupancy: call live on %s — queued message for post-call turn",
+                        session_key)
+            return
 
         await AttentionCoordinator(self.ctx).submit(
             session_key, _run_dispatch,
