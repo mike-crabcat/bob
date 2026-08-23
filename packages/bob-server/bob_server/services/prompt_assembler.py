@@ -14,6 +14,10 @@ from typing import Any
 
 from bob_server.services.memory.claim_types import ENTITY_TYPES
 
+# Only the N most recent media attachments are base64-inlined into replayed
+# history; older ones are text stubs (path only) to keep prompt size bounded.
+MAX_INLINE_MEDIA = 3
+
 logger = logging.getLogger(__name__)
 
 
@@ -282,11 +286,8 @@ async def build_chat_messages(
         sender_names: dict[str, str] = {}
         mention_names: dict[str, str] = {}
         if is_group:
-            participants = await db.fetch_all(
-                "SELECT contact_id, display_name, identifier FROM session_participants "
-                "WHERE session_key = ?",
-                (session_key,),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            participants = await ParticipantRepository(db).list_for(session_key)
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]
@@ -295,16 +296,9 @@ async def build_chat_messages(
                     if digits:
                         mention_names[digits] = p["display_name"]
 
-        rows = await db.fetch_all(
-            "SELECT role, content, sender_id, metadata, tool_summary, tool_blocks_json "
-            "FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "AND rowid IN (SELECT rowid FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "ORDER BY created_at DESC LIMIT ?) "
-            "ORDER BY created_at ASC",
-            (session_key, session_key, max_history),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(db).recent_dialogue(
+            session_key, limit=max_history)
 
         # Indices of the last N assistant rows — these get full tool-block
         # replay. Older rows fall back to the short summary prefix.
@@ -315,6 +309,28 @@ async def build_chat_messages(
                 last_assistant_indices.add(i)
                 seen += 1
                 if seen >= 3:
+                    break
+
+        # Indices of the most recent user rows with media attachments — only
+        # these get base64-inlined images/frames. Older media rows replay as
+        # text stubs with the file path (re-viewable via tools), otherwise
+        # every past photo is re-billed on every turn for max_history turns.
+        inline_media_indices: set[int] = set()
+        media_seen = 0
+        for i in range(len(rows) - 1, -1, -1):
+            if rows[i]["role"] != "user":
+                continue
+            raw = rows[i].get("metadata")
+            if not raw:
+                continue
+            try:
+                m = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if m.get("image_path") or m.get("video_path"):
+                inline_media_indices.add(i)
+                media_seen += 1
+                if media_seen >= MAX_INLINE_MEDIA:
                     break
 
         for i, row in enumerate(rows):
@@ -343,7 +359,6 @@ async def build_chat_messages(
             is_gif = bool(meta.get("is_gif"))
 
             if video_path and row["role"] == "user" and os.path.isfile(video_path):
-                frame_path = _extract_video_frame(video_path)
                 text_prefix = ""
                 if is_group and row["sender_id"]:
                     name = sender_names.get(row["sender_id"])
@@ -351,6 +366,10 @@ async def build_chat_messages(
                         text_prefix = f"[{name}] "
                 attachment_note = "[GIF attached]" if is_gif else "[Video attached]"
                 text_content = text_prefix + (content if content and content not in ("[GIF]", "[Video]") else attachment_note)
+                if i not in inline_media_indices:
+                    messages.append({"role": "user", "content": f"{text_content} (file at {video_path})"})
+                    continue
+                frame_path = _extract_video_frame(video_path)
                 if frame_path and os.path.isfile(frame_path):
                     with open(frame_path, "rb") as f:
                         frame_data = base64.b64encode(f.read()).decode()
@@ -371,6 +390,12 @@ async def build_chat_messages(
                     name = sender_names.get(row["sender_id"])
                     if name:
                         text_prefix = f"[{name}] "
+                if i not in inline_media_indices:
+                    messages.append({
+                        "role": "user",
+                        "content": f"{text_prefix}{content} (image file at {image_path} — view it with a tool if needed)",
+                    })
+                    continue
                 with open(image_path, "rb") as f:
                     image_data = base64.b64encode(f.read()).decode()
                 messages.append({

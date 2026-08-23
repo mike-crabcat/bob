@@ -7,6 +7,7 @@ apply fixes (add/retract/supersede claims, create/delete entities).
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import uuid
@@ -724,7 +725,9 @@ async def reconcile_entity(
     async def _on_entity_merged(canonical_id: str) -> None:
         """Queue reconciliation on the merged entity."""
         if schedule_reconciliation_fn:
-            await schedule_reconciliation_fn([canonical_id])
+            result = schedule_reconciliation_fn([canonical_id])
+            if inspect.isawaitable(result):
+                await result
 
     recon_tools = make_reconciliation_tools(db, on_entity_merged=_on_entity_merged)
 

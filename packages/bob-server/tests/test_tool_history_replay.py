@@ -237,7 +237,7 @@ async def test_replay_handles_rows_without_trace(ctx, db):
     session_key = "test:replay:legacy"
     # Insert a legacy assistant row directly with no trace columns set.
     await db.execute(
-        "INSERT INTO session_messages (id, session_key, role, content) "
+        "INSERT INTO messages (id, conversation_id, role, content) "
         "VALUES (?, ?, 'assistant', 'legacy reply')",
         ("legacy-1", session_key),
     )
@@ -258,3 +258,46 @@ async def test_dispatch_failure_clears_trace():
     _dispatch_tool_trace.pop("doomed", None)
     assert "doomed" not in _dispatch_tool_trace
     assert Dispatch.pop_tool_trace("doomed") is None
+
+
+async def test_replay_inlines_only_recent_media(ctx, db, tmp_path):
+    """Only the MAX_INLINE_MEDIA most recent image rows get base64 inlined;
+    older ones replay as text stubs with the file path (cost control)."""
+    session_key = "test:replay:media"
+    svc = SessionService(ctx)
+    paths = []
+    for n in range(5):
+        p = tmp_path / f"img{n}.jpg"
+        p.write_bytes(b"\xff\xd8fakejpeg" + bytes([n]))
+        paths.append(str(p))
+        await svc.add_message(
+            session_key, "user", f"photo {n}",
+            metadata={"image_path": str(p)})
+        await svc.add_message(session_key, "assistant", f"nice photo {n}")
+
+    # Spread created_at so chronological order is deterministic (production
+    # rows never share one second the way this test loop does).
+    await db.execute(
+        "UPDATE messages SET created_at = "
+        "datetime('now', '-1 hour', '+' || rowid || ' seconds') "
+        "WHERE conversation_id = ?",
+        (session_key,))
+
+    messages = await build_chat_messages(session_key=session_key, db=db)
+
+    inlined = [
+        m for m in messages
+        if isinstance(m.get("content"), list)
+        and any(p.get("type") == "input_image" for p in m["content"])
+    ]
+    assert len(inlined) == 3, f"expected 3 inlined images, got {len(inlined)}"
+    inlined_text = json.dumps(inlined)
+    assert paths[4] in inlined_text and paths[2] in inlined_text
+    assert paths[0] not in inlined_text
+
+    stubs = [
+        m for m in messages
+        if isinstance(m.get("content"), str) and "image file at" in m["content"]
+    ]
+    assert len(stubs) == 2
+    assert any(paths[0] in m["content"] for m in stubs)

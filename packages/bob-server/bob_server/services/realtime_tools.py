@@ -46,10 +46,8 @@ def make_realtime_tools(
         """Look up the contact record for the number being called (name, notes)."""
         if not phone_number:
             return json.dumps({"error": "no phone number associated with this call"})
-        row = await ctx.db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE phone_number = ? AND deleted_at IS NULL",
-            (phone_number,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        row = await ContactRepository(ctx.db).get_by_phone(phone_number)
         if row is None:
             return json.dumps({"found": False})
         return json.dumps({"found": True, "name": row["name"], "contact_id": row["id"]})

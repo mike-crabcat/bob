@@ -40,9 +40,8 @@ class ReviewService(BaseService):
 
     async def build_roster(self, session_key: str) -> tuple[str, str]:
         """Contact roster for the session: 'contact-hex8|Name|person-slug' lines + header."""
-        rows = await self.db.fetch_all(
-            "SELECT id, name FROM contacts WHERE deleted_at IS NULL ORDER BY name"
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        rows = await ContactRepository(self.db).list_active()
         lines = []
         for r in rows or []:
             name = (r["name"] or "").strip() or r["id"]

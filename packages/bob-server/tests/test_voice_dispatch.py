@@ -297,3 +297,115 @@ def test_invalid_realtime_voice_falls_back(monkeypatch):
     monkeypatch.setenv("BOB_OPENAI_REALTIME_VOICE", "ash")
     settings = Settings.from_env()
     assert settings.openai_realtime.voice == "ash"
+
+
+# -- Voice as a binding (Bob3 Phase VI item 5) --
+
+async def test_dispatch_binds_call_to_person_conversation(ctx):
+    """The call's subagent session key becomes a binding on the person's
+    conversation, so transcripts/outcomes land on the person."""
+    from bob_server.repositories.conversations import ConversationRepository
+    from bob_server.services.voice_dispatch_service import VoiceDispatchService
+
+    await ctx.db.execute(
+        """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
+           VALUES ('contact-vb', 'Sarah', '+61411222333', 1, datetime('now'), datetime('now'))""",
+    )
+    await ctx.db.execute(
+        """INSERT INTO subagents (id, parent_session_key, session_key, task, status, agent_type, created_at, updated_at)
+           VALUES ('sub-vb', 'agent:main:whatsapp:group:g1', 'subagent:g:vb', 'call sarah',
+                   'created', 'openai_voice', datetime('now'), datetime('now'))""",
+    )
+    await VoiceDispatchService(ctx).dispatch_contact_call(
+        "sub-vb", "confirm dinner", "contact-vb", "voice_link",
+        "agent:main:whatsapp:group:g1",
+    )
+    conv = await ConversationRepository(ctx.db).resolve("subagent:g:vb")
+    assert conv is not None
+    assert conv["id"] == "agent:main:whatsapp:dm:61411222333"
+    binding = await ConversationRepository(ctx.db).get_binding("subagent:g:vb")
+    assert binding["channel"] == "voice"
+    assert binding["address"] == "+61411222333"
+
+
+async def test_append_call_completed_event_lands_on_person(ctx):
+    """call.completed events resolve through the call binding to the person's
+    conversation; binding_key preserves the call endpoint."""
+    from bob_server.repositories.conversations import ConversationRepository
+    from bob_server.services.voice_dispatch_service import append_call_completed_event
+
+    repo = ConversationRepository(ctx.db)
+    person = await repo.ensure("agent:main:whatsapp:dm:61499000111")
+    await repo.bind("subagent:x:call1", person["id"], channel="voice")
+
+    await append_call_completed_event(
+        ctx.db,
+        external_id="call-abc",
+        call_session_key="subagent:x:call1",
+        origin_session_key="agent:main:whatsapp:group:origin",
+        status="completed",
+        outcome={"ok": True, "details": "dinner confirmed"},
+        duration_seconds=42.0,
+    )
+    ev = await ctx.db.fetch_one(
+        "SELECT * FROM event_log WHERE source='voice' AND external_id='call-abc'")
+    assert ev is not None
+    assert ev["event_type"] == "call.completed"
+    assert ev["conversation_id"] == "agent:main:whatsapp:dm:61499000111"
+    assert ev["binding_key"] == "subagent:x:call1"
+
+    # Idempotent on (source, external_id).
+    await append_call_completed_event(
+        ctx.db, external_id="call-abc", call_session_key="subagent:x:call1",
+        origin_session_key="", status="completed")
+    rows = await ctx.db.fetch_all(
+        "SELECT id FROM event_log WHERE source='voice' AND external_id='call-abc'")
+    assert len(rows) == 1
+
+
+async def test_append_call_completed_event_falls_back_to_origin(ctx):
+    """Unbound call (e.g. legacy/inbound): the event lands on the origin
+    conversation."""
+    from bob_server.services.voice_dispatch_service import append_call_completed_event
+
+    await append_call_completed_event(
+        ctx.db,
+        external_id="call-unbound",
+        call_session_key="",
+        origin_session_key="agent:main:whatsapp:dm:61400000009",
+        status="failed",
+    )
+    ev = await ctx.db.fetch_one(
+        "SELECT conversation_id, binding_key FROM event_log WHERE external_id='call-unbound'")
+    assert ev["conversation_id"] == "agent:main:whatsapp:dm:61400000009"
+    assert ev["binding_key"] == "agent:main:whatsapp:dm:61400000009"
+
+
+async def test_subagent_spawn_recorded_as_effect(ctx, monkeypatch):
+    """claude/local spawns ride a durable subagent_spawn effect; the executor
+    starts the run."""
+    from bob_server.services.subagent_service import SubagentService
+
+    ran: list[str] = []
+
+    async def _fake_run(self, subagent_id, task):
+        ran.append(subagent_id)
+
+    monkeypatch.setattr(SubagentService, "_run_subagent", _fake_run)
+
+    result = await SubagentService(ctx).create_subagent(
+        "write a haiku", "agent:main:whatsapp:dm:61400000001", agent_type="local",
+    )
+    assert result["ok"] is True
+    effect = await ctx.db.fetch_one(
+        "SELECT kind, status, payload_json FROM effects WHERE kind='subagent_spawn'")
+    assert effect is not None
+    assert effect["status"] == "delivered"
+    import json as _json
+    payload = _json.loads(effect["payload_json"])
+    assert payload["executor"] == "local"
+    assert payload["subagent_id"] == result["subagent_id"]
+    # Let the spawned task run.
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)
+    assert ran == [result["subagent_id"]]

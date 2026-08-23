@@ -13,6 +13,35 @@ from bob_server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
+
+def _register_email_executors() -> None:
+    """Bob3 Phase IV: email sends are effects. Executors call the delivery
+    service, so test patches on EmailDeliveryService methods keep working."""
+    from bob_server.services import effects as effects_svc
+
+    async def _exec_reply(ctx, payload):
+        from bob_server.services.email_delivery_service import EmailDeliveryService
+        result = await EmailDeliveryService(ctx).send_reply(
+            inbox_id=payload["inbox_id"], thread_id=payload["thread_id"],
+            text=payload["text"], attachments=payload.get("attachments"))
+        return (result or {}).get("message_id") or (result or {}).get("thread_id")
+
+    async def _exec_send(ctx, payload):
+        from bob_server.services.email_delivery_service import EmailDeliveryService
+        result = await EmailDeliveryService(ctx).send_new_email(
+            inbox_id=payload["inbox_id"], to=payload["to"],
+            subject=payload["subject"], text=payload["text"],
+            agenda=payload.get("agenda"),
+            origin_session_key=payload.get("origin_session_key"),
+            attachments=payload.get("attachments"))
+        return (result or {}).get("thread_id")
+
+    effects_svc.register_executor("email_reply", _exec_reply)
+    effects_svc.register_executor("email_send", _exec_send)
+
+
+_register_email_executors()
+
 MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25 MB
 
 # Attachments we never persist to disk — executables and code files. Bob can
@@ -119,25 +148,26 @@ def make_email_tools(
             if errors:
                 return f"Error with attachments: {'; '.join(errors)}"
 
-        svc = EmailDeliveryService(ctx)
-        try:
-            await svc.send_reply(
-                inbox_id=inbox_id,
-                thread_id=thread_id,
-                text=body,
-                attachments=attachment_dicts,
-            )
-            if reply_tracker is not None:
-                reply_tracker[0] = True
-            if reply_body_tracker is not None:
-                reply_body_tracker.append(body)
-            result = {"ok": True, "thread_id": thread_id}
-            if attachment_dicts:
-                result["attachments_sent"] = [a["filename"] for a in attachment_dicts]
-            return json.dumps(result)
-        except Exception as e:
-            logger.warning("email_reply failed: %s", e)
-            return f"Error sending reply: {e}"
+        from uuid import uuid4 as _uuid4
+
+        from bob_server.services.effects import emit_and_deliver
+
+        outcome = await emit_and_deliver(
+            ctx, kind="email_reply",
+            idempotency_key=f"email_reply:{thread_id}:{_uuid4().hex}",
+            payload={"inbox_id": inbox_id, "thread_id": thread_id,
+                     "text": body, "attachments": attachment_dicts})
+        if not outcome.get("ok"):
+            logger.warning("email_reply failed: %s", outcome.get("error"))
+            return f"Error sending reply: {outcome.get('error', 'delivery failed')}"
+        if reply_tracker is not None:
+            reply_tracker[0] = True
+        if reply_body_tracker is not None:
+            reply_body_tracker.append(body)
+        result = {"ok": True, "thread_id": thread_id}
+        if attachment_dicts:
+            result["attachments_sent"] = [a["filename"] for a in attachment_dicts]
+        return json.dumps(result)
 
     @tool
     async def email_skip() -> str:
@@ -149,14 +179,8 @@ def make_email_tools(
         """List all attachments across all messages in this email thread.
         Shows filename, content type, size, download status, and attachment_id.
         Use download_attachment with the attachment_id to save a file to the workspace."""
-        messages = await ctx.db.fetch_all(
-            "SELECT agentmail_message_id, sender_email, sender_name, "
-            "subject, message_timestamp, attachments_json "
-            "FROM email_messages "
-            "WHERE thread_id = ? AND has_attachments = 1 "
-            "ORDER BY message_timestamp ASC",
-            (thread_id,),
-        )
+        from bob_server.services.email_store import EmailStore
+        messages = await EmailStore(ctx.db).attachment_messages(thread_id)
 
         if not messages:
             return json.dumps({"attachments": [], "message": "No attachments found in this thread"})
@@ -204,12 +228,9 @@ def make_email_tools(
             return "Error: attachment_id is required."
 
         # Find the message that owns this attachment_id
-        messages = await ctx.db.fetch_all(
-            "SELECT agentmail_message_id, attachments_json "
-            "FROM email_messages "
-            "WHERE thread_id = ? AND has_attachments = 1",
-            (thread_id,),
-        )
+        from bob_server.services.email_store import EmailStore
+        _store = EmailStore(ctx.db)
+        messages = await _store.attachment_messages(thread_id)
 
         target_msg_id = None
         target_att = None
@@ -286,22 +307,17 @@ def make_email_tools(
         dest.write_bytes(content)
 
         # Update attachments_json to mark as downloaded
-        msg_row = await ctx.db.fetch_one(
-            "SELECT attachments_json FROM email_messages WHERE agentmail_message_id = ?",
-            (target_msg_id,),
-        )
-        if msg_row and msg_row.get("attachments_json"):
+        existing_json = await _store.attachments_json_of(target_msg_id)
+        if existing_json:
             try:
-                atts = json.loads(msg_row["attachments_json"])
+                atts = json.loads(existing_json)
                 for att in atts:
                     if att.get("attachment_id") == attachment_id:
                         att["downloaded"] = True
                         att["path"] = str(dest)
                         att["size"] = len(content)
-                await ctx.db.execute(
-                    "UPDATE email_messages SET attachments_json = ? WHERE agentmail_message_id = ?",
-                    (json.dumps(atts), target_msg_id),
-                )
+                await _store.set_attachments_json_by_agentmail(
+                    target_msg_id, json.dumps(atts))
             except (ValueError, TypeError):
                 pass
 
@@ -351,30 +367,29 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
                 return f"Error with attachments: {'; '.join(errors)}"
 
         # Resolve default inbox
-        inbox = await ctx.db.fetch_one(
-            "SELECT id FROM email_inboxes WHERE deleted_at IS NULL AND is_active = 1 LIMIT 1",
-        )
+        from bob_server.services.email_store import EmailStore
+        inbox = await EmailStore(ctx.db).first_active_inbox()
         if inbox is None:
             return "Error: no active email inbox configured"
 
-        try:
-            svc = EmailDeliveryService(ctx)
-            result = await svc.send_new_email(
-                inbox_id=inbox["id"],
-                to=to,
-                subject=subject,
-                text=body,
-                agenda=agenda,
-                origin_session_key=session_key,
-                attachments=attachment_dicts,
-            )
-            response = {"ok": True, "thread_id": result.get("thread_id", "")}
-            if attachment_dicts:
-                response["attachments_sent"] = [a["filename"] for a in attachment_dicts]
-            return json.dumps(response)
-        except Exception as e:
-            logger.warning("email_send failed: %s", e)
-            return f"Error sending email: {e}"
+        from uuid import uuid4 as _uuid4
+
+        from bob_server.services.effects import emit_and_deliver
+
+        outcome = await emit_and_deliver(
+            ctx, kind="email_send",
+            idempotency_key=f"email_send:{_uuid4().hex}",
+            payload={"inbox_id": inbox["id"], "to": to, "subject": subject,
+                     "text": body, "agenda": agenda,
+                     "origin_session_key": session_key,
+                     "attachments": attachment_dicts})
+        if not outcome.get("ok"):
+            logger.warning("email_send failed: %s", outcome.get("error"))
+            return f"Error sending email: {outcome.get('error', 'delivery failed')}"
+        response = {"ok": True, "thread_id": outcome.get("external_result_id", "")}
+        if attachment_dicts:
+            response["attachments_sent"] = [a["filename"] for a in attachment_dicts]
+        return json.dumps(response)
 
     return [email_send]
 
@@ -396,25 +411,16 @@ def make_email_thread_tools(
         """Read the full transcript of an email thread by its agentmail thread ID.
         Returns subject, participants, and all messages in chronological order.
         Use this to look up the original context behind an email-sourced memory bulletin."""
-        thread = await ctx.db.fetch_one(
-            "SELECT agentmail_thread_id, subject, inbox_id, contact_id, last_message_at "
-            "FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
-            (thread_id,),
-        )
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(ctx.db)
+        thread = await store.thread_by_agentmail_any(thread_id)
         if thread is None:
             return json.dumps({"error": f"Thread not found: {thread_id}"})
 
-        messages = await ctx.db.fetch_all(
-            "SELECT sender_email, sender_name, subject, text_body, message_timestamp "
-            "FROM email_messages WHERE thread_id = ? ORDER BY message_timestamp ASC",
-            (thread_id,),
-        )
+        messages = await store.thread_messages(thread_id)
 
         # Resolve inbox address to detect outbound messages
-        inbox = await ctx.db.fetch_one(
-            "SELECT email_address FROM email_inboxes WHERE id = ?",
-            (thread["inbox_id"],),
-        )
+        inbox = await store.get_inbox(thread["inbox_id"], include_deleted=True)
         inbox_email = (inbox["email_address"] or "").lower() if inbox else ""
 
         lines = []
@@ -448,47 +454,10 @@ def make_email_thread_tools(
         if not terms:
             return json.dumps({"error": "Empty query", "results": []})
 
-        # Build WHERE clause for text search across subjects and message bodies
-        # Each term must match in subject or any message body
-        msg_conditions = " OR ".join(
-            "(em.text_body LIKE ? OR em.subject LIKE ?)" for _ in terms
-        )
-        msg_params = []
-        for t in terms:
-            like = f"%{t}%"
-            msg_params.extend([like, like])
-
+        from bob_server.services.email_store import EmailStore
         # Scope: untrusted contacts only see their own threads
-        scope_clause = ""
-        scope_params: list[str] = []
-        if not is_trusted and contact_id:
-            scope_clause = "AND et.contact_id = ?"
-            scope_params.append(contact_id)
-
-        # Find threads where the subject matches or any message matches
-        sql = (
-            "SELECT et.agentmail_thread_id, et.subject, et.contact_id, "
-            "et.message_count, et.last_message_at, "
-            "c.name as contact_name, "
-            "COUNT(DISTINCT em.id) as matching_messages, "
-            "CASE WHEN et.subject LIKE ? THEN 1 ELSE 0 END as subject_match "
-            "FROM email_threads et "
-            "LEFT JOIN email_messages em ON em.thread_id = et.agentmail_thread_id "
-            f"AND ({msg_conditions}) "
-            "LEFT JOIN contacts c ON c.id = et.contact_id "
-            f"WHERE et.deleted_at IS NULL AND et.is_active = 1 {scope_clause} "
-            "GROUP BY et.agentmail_thread_id "
-            "HAVING matching_messages > 0 OR subject_match = 1 "
-            "ORDER BY subject_match DESC, matching_messages DESC, et.last_message_at DESC "
-            "LIMIT 20"
-        )
-
-        # Subject match term (first term for ranking)
-        subject_like = f"%{terms[0]}%"
-
-        params = [subject_like] + msg_params + scope_params
-
-        rows = await ctx.db.fetch_all(sql, tuple(params))
+        scope_contact = contact_id if (not is_trusted and contact_id) else None
+        rows = await EmailStore(ctx.db).search_threads(terms, contact_id=scope_contact)
 
         results = []
         for row in rows:
@@ -504,3 +473,58 @@ def make_email_thread_tools(
         return json.dumps({"query": query, "result_count": len(results), "results": results})
 
     return [email_thread_read, email_thread_search]
+
+
+def make_email_thread_result_tools(
+    ctx: AppContext,
+    *,
+    thread_id: str,
+    origin_session_key: str,
+    agenda: str,
+    wa_service: object | None = None,
+) -> list:
+    """finish_email_thread for a thread with an origin session: completing
+    relays the result by waking the origin conversation (Bob3 Phase V wake
+    path — channel-agnostic). ``wa_service`` is accepted for backward
+    compatibility and unused."""
+
+    @tool
+    async def finish_email_thread(result: str) -> str:
+        """Complete the email thread task and relay the result back to the requesting session.
+        Call when you have achieved the objective from the email conversation.
+        The result will be dispatched to the originating session, which will decide
+        how to relay it."""
+        from bob_server.services.wake_service import wake_conversation
+
+        db = ctx.db
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(db)
+        thread_row = await store.thread_by_id_or_agentmail(thread_id)
+        subject = thread_row["subject"] if thread_row else "unknown"
+        contact_name = "unknown"
+        if thread_row and thread_row.get("contact_id"):
+            from bob_server.repositories.contacts import ContactRepository
+            contact = await ContactRepository(db).get(thread_row["contact_id"])
+            if contact:
+                contact_name = contact["name"]
+
+        await store.clear_thread_origin(thread_id)
+
+        result_content = (
+            f"## Email Thread Result\n"
+            f"Subject: {subject}\n"
+            f"Contact: {contact_name}\n"
+            f"Agenda: {agenda}\n\n"
+            f"{result}"
+        )
+        await wake_conversation(
+            ctx, origin_session_key, result_content,
+            call_category="email_thread_result",
+        )
+        logger.info(
+            "Email thread result dispatched from thread %s to origin session %s",
+            thread_id, origin_session_key,
+        )
+        return json.dumps({"ok": True, "dispatched_to": origin_session_key})
+
+    return [finish_email_thread]

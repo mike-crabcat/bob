@@ -31,7 +31,6 @@ _register_service_commands(app)
 # Subapp registration
 from bob_server.cli.contacts import app as contact_app  # noqa: E402
 from bob_server.cli.memory_cmds import app as memory_app  # noqa: E402
-from bob_server.cli.session_routes import app as session_route_app  # noqa: E402
 from bob_server.cli.calendars import app as calendar_app  # noqa: E402
 from bob_server.cli.events import app as event_app  # noqa: E402
 from bob_server.cli.context_cmds import app as context_app  # noqa: E402
@@ -40,12 +39,12 @@ from bob_server.cli.email_cmds import app as email_app  # noqa: E402
 from bob_server.cli.calls import app as phone_app  # noqa: E402
 from bob_server.cli.openai_cmds import app as openai_app  # noqa: E402
 from bob_server.cli.eval_cmds import app as eval_app  # noqa: E402
+from bob_server.cli.replay_cmds import app as replay_app  # noqa: E402
 from bob_server.cli.whatsapp_cmds import app as whatsapp_app  # noqa: E402
 from bob_server.cli.dream_cmds import app as dream_app  # noqa: E402
 
 app.add_typer(contact_app, name="contact")
 app.add_typer(memory_app, name="memory")
-app.add_typer(session_route_app, name="session-route")
 app.add_typer(calendar_app, name="calendar")
 app.add_typer(event_app, name="event")
 app.add_typer(context_app, name="context")
@@ -54,6 +53,7 @@ app.add_typer(email_app, name="email")
 app.add_typer(phone_app, name="call")
 app.add_typer(openai_app, name="openai")
 app.add_typer(eval_app, name="eval")
+app.add_typer(replay_app, name="replay")
 app.add_typer(whatsapp_app, name="whatsapp")
 app.add_typer(dream_app, name="dream")
 

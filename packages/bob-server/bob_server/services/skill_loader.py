@@ -64,6 +64,13 @@ def load_skills_index(workspace_dir: Path) -> str:
     lines.append(
         "When a skill trigger matches the user's request, call the `use_skill` tool "
         "with the skill name to load the full instructions and script paths.\n"
+        "\n"
+        "SLOW SCRIPTS: if a skill script is expected to take more than ~10 seconds "
+        "(image generation, browser automation, PDF/video rendering), do NOT run it "
+        "with the bash tool — that blocks this whole conversation. Instead: send the "
+        "user a short ack first, then create_subagent(task='<the exact bash command>', "
+        "agent_type='script') and end your turn. You'll be woken with the output when "
+        "it finishes; send the artifact then.\n"
     )
     for skill_name in sorted(mtimes):
         md = skills_dir / skill_name / "skill.md"

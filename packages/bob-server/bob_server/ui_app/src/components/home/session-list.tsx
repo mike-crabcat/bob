@@ -30,7 +30,7 @@ const CHANNEL_COLORS: Record<string, string> = {
 
 export function SessionList({ sessions }: Props) {
   if (sessions.length === 0) {
-    return <div className="text-xs text-muted text-center py-3">no active sessions</div>;
+    return <div className="text-xs text-muted text-center py-3">no active conversations</div>;
   }
 
   return (
@@ -40,7 +40,7 @@ export function SessionList({ sessions }: Props) {
         return (
           <Link
             key={s.session_key}
-            to="/sessions/$sessionKey"
+            to="/conversations/$sessionKey"
             params={{ sessionKey: s.session_key }}
             className="flex items-center gap-2 px-2 py-1.5 hover:bg-border transition-colors"
           >

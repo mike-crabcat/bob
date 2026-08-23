@@ -21,10 +21,8 @@ from fastapi import HTTPException
 
 from bob_server.config import Settings
 from bob_server.context import AppContext
-from bob_server.models import SessionRouteCreate, SessionRouteKind
 from bob_server.services.base import BaseService, utcnow
 from bob_server.services.openai_service import strip_citation_markers
-from bob_server.services.session_route_service import SessionRouteService
 from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
 
 logger = logging.getLogger(__name__)
@@ -36,14 +34,7 @@ _quota_notify_last: dict[str, float] = {}
 _QUOTA_NOTIFY_MIN_INTERVAL = 3600.0  # 1 hour
 
 
-def _is_quota_error(exc: Exception) -> bool:
-    """True if the exception looks like an OpenAI insufficient-quota failure.
-
-    openai_service wraps the SDK's RateLimitError in a RuntimeError, so we
-    detect by message rather than by type.
-    """
-    msg = str(exc).lower()
-    return "insufficient_quota" in msg or ("429" in msg and "quota" in msg)
+from bob_server.services.dispatch_runner import _is_quota_error
 
 
 async def _notify_quota_exhausted(wa_service: Any, chat_id: str, session_key: str) -> None:
@@ -99,11 +90,29 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         self._last_bridge_status: dict[str, Any] = {}
         self._last_qr_code: str | None = None
         self._last_pairing_code: str | None = None
-        self._subagent_queue: asyncio.Queue[dict[str, Any]] | None = None
-        self._subagent_listener_task: asyncio.Task | None = None
         self._verbose_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._verbose_listener_task: asyncio.Task | None = None
         self._presence_subscribed: set[str] = set()
+        self._register_send_executors()
+
+    def _register_send_executors(self) -> None:
+        """Bind this instance as the executor for WhatsApp send effects
+        (Bob3 Phase IV outbox). Last-constructed instance wins — there is
+        one live bridge per process."""
+        from bob_server.services import effects as effects_svc
+
+        async def _exec_send(ctx: Any, payload: dict[str, Any]) -> str:
+            return await self.send_message(
+                payload["chat_id"], payload["text"],
+                reply_to=payload.get("reply_to"))
+
+        async def _exec_media(ctx: Any, payload: dict[str, Any]) -> str:
+            return await self.send_media(
+                payload["chat_id"], payload["file_path"],
+                caption=payload.get("caption", ""))
+
+        effects_svc.register_executor("whatsapp_send", _exec_send)
+        effects_svc.register_executor("whatsapp_send_media", _exec_media)
 
     @property
     def connected(self) -> bool:
@@ -115,13 +124,26 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             return
         self._task = asyncio.create_task(self._run_loop(), name="whatsapp_bridge")
 
-        # Subscribe to subagent result events and trigger dispatches
+        # Bob3 Phase III recovery: re-arm dispatch for sessions whose stored
+        # messages never dispatched (crash during an armed attention window).
+        async def _recovery_sweep() -> None:
+            try:
+                await asyncio.sleep(10)  # let the bridge connect first
+                resumed = await self.resume_pending_sessions()
+                if resumed:
+                    logger.info("recovery sweep re-armed %d session(s)", resumed)
+            except Exception:
+                logger.warning("recovery sweep failed", exc_info=True)
+
+        self._recovery_task = asyncio.create_task(_recovery_sweep(), name="wa_recovery_sweep")
+
+        # Post-call drain (Bob3 Phase VI item 6): when a live call ends,
+        # occupancy wakes the conversation so queued messages run as one turn.
+        from bob_server.services import occupancy
+        occupancy.set_drain(self.wake_session)
+
+        # Subscribe to memory verbose notices and forward to WhatsApp.
         if self.ctx.event_bus:
-            self._subagent_queue = self.ctx.event_bus.subscribe()
-            self._subagent_listener_task = asyncio.create_task(
-                self._subagent_event_loop(), name="subagent_listener"
-            )
-            # Subscribe to memory verbose notices and forward to WhatsApp.
             self._verbose_queue = self.ctx.event_bus.subscribe()
             self._verbose_listener_task = asyncio.create_task(
                 self._verbose_event_loop(), name="verbose_listener"
@@ -135,16 +157,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             except asyncio.CancelledError:
                 pass
             self._task = None
-        if self._subagent_listener_task is not None:
-            self._subagent_listener_task.cancel()
-            try:
-                await self._subagent_listener_task
-            except asyncio.CancelledError:
-                pass
-            self._subagent_listener_task = None
-        if self._subagent_queue is not None and self.ctx.event_bus:
-            self.ctx.event_bus.unsubscribe(self._subagent_queue)
-            self._subagent_queue = None
         if self._verbose_listener_task is not None:
             self._verbose_listener_task.cancel()
             try:
@@ -319,31 +331,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         except Exception:
             logger.warning("failed to send ack for %s", message_id, exc_info=True)
 
-    async def _subagent_event_loop(self) -> None:
-        """Listen for subagent.result_ready events and trigger dispatches."""
-        assert self._subagent_queue is not None
-        try:
-            while True:
-                event = await self._subagent_queue.get()
-                event_type = event.get("type", "")
-                if event_type != "subagent.result_ready":
-                    continue
-                payload = event.get("payload", {})
-                parent_session_key = payload.get("parent_session_key", "")
-                if ":whatsapp:" not in parent_session_key:
-                    continue
-                try:
-                    await self._dispatch_subagent_result(parent_session_key)
-                except Exception:
-                    logger.exception("failed to dispatch subagent result for %s", parent_session_key)
-        except asyncio.CancelledError:
-            pass
-
     async def _verbose_event_loop(self) -> None:
         """Listen for memory.verbose_notice events and forward to WhatsApp.
 
         Filters to WhatsApp-routed sessions; resolves the chat_id via
-        session_routes and calls send_message. Silently drops events for
+        bindings and calls send_message. Silently drops events for
         other transports.
         """
         assert self._verbose_queue is not None
@@ -360,232 +352,28 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if not text:
                     continue
                 try:
-                    route = await self.db.fetch_one(
-                        "SELECT chat_id FROM session_routes "
-                        "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-                        (session_key,),
-                    )
-                    if not route or not route["chat_id"]:
+                    from bob_server.repositories.conversations import (
+                        ConversationRepository, wa_send_jid)
+                    route = await ConversationRepository(self.db).route_for(session_key)
+                    jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
+                    if not jid:
                         continue
-                    await self.send_message(route["chat_id"], text)
+                    await self.send_message(jid, text)
                 except Exception:
                     logger.exception("failed to forward verbose notice for %s", session_key)
         except asyncio.CancelledError:
             pass
 
-    async def _dispatch_subagent_result(self, session_key: str) -> None:
-        """Dispatch a subagent result into the parent WhatsApp session."""
-        settings = self._get_settings()
-        if not settings.openai.enabled:
-            return
-
-        # Resolve context from session route
-        route = await self.db.fetch_one(
-            "SELECT channel, kind, contact_id, chat_id, metadata FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if not route or route["channel"] != "whatsapp":
-            return
-
-        chat_id = route["chat_id"]
-        contact_id = route["contact_id"]
-        is_trusted = False
-        if contact_id:
-            contact = await self.db.fetch_one(
-                "SELECT is_trusted FROM contacts WHERE id = ? AND deleted_at IS NULL",
-                (contact_id,),
-            )
-            if contact:
-                is_trusted = bool(contact.get("is_trusted", 0))
-
-        # Build system prompt
-        from bob_server.services.session_agenda_service import SessionAgendaService
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
-
-        agenda_svc = SessionAgendaService(self.ctx)
-        agenda = await agenda_svc.get_effective_agenda(
-            session_key, "whatsapp",
-            contact_id=contact_id, is_trusted=is_trusted,
-        )
-        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-        participants_prompt = await self._build_participants_prompt(session_key)
-
-        from bob_server.services.dream.injection import build_session_plans_prompt
-
-        dream_plans_prompt = await build_session_plans_prompt(
-            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled,
-        )
-
-        system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, agenda, dream_plans_prompt) if p
-        )
-
-        # Build tools
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.tools import Tool
-        from bob_server.services.tool_registry import build_common_tools
-        from bob_server.services.group_tools import make_group_tools
-
-        tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id)
-
-        # Add group tools if this is a group session
-        route_for_kind = await self.db.fetch_one(
-            "SELECT kind FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if route_for_kind and route_for_kind["kind"] == "group":
-            tools.extend(make_group_tools(self.ctx, session_key=session_key))
-
-        wa_service = self
-        message_was_sent = [False]
-        sent_texts: list[str] = []
-
-        async def _send_whatsapp_message(text: str) -> str:
-            message_was_sent[0] = True
-            if text.strip().upper() == "NO_REPLY":
-                return "No reply sent."
-            text = strip_citation_markers(text)
-            sent_texts.append(text)
-            request_id = await wa_service.send_message(chat_id, text)
-            return f"Message sent (request_id={request_id})"
-
-        tools.append(Tool(
-            name="send_whatsapp_message",
-            description=(
-                "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response."
-            ),
-            parameters={"text": {"type": "string", "description": "The message text to send."}},
-            required=["text"],
-            handler=_send_whatsapp_message,
-        ))
-
-        dispatch_id = str(uuid4())
-
-        async def _run_dispatch() -> str:
-            from bob_server.services.session_service import SessionService
-            from bob_server.services.session_dispatch_gate import SessionDispatchGate
-
-            session_svc = SessionService(self.ctx)
-            async with SessionDispatchGate.get_lock(session_key):
-                claimed = await session_svc.mark_dispatched(session_key)
-                if claimed == 0:
-                    return ""
-
-                messages = await build_chat_messages(
-                    None, session_key,
-                    db=self.db,
-                    system_content=system_content,
-                    max_history=100,
-                )
-
-                result = await LLMDispatchService(self.ctx).chat_with_tools(
-                    messages, tools,
-                    call_category="subagent_result",
-                    session_key=session_key,
-                    dispatch_id=dispatch_id,
-                    contact_id=contact_id,
-                )
-                if not message_was_sent[0] and result.strip():
-                    from bob_server.services.tap import tap_dispatch, tap_enabled
-                    if tap_enabled():
-                        result = await tap_dispatch(
-                            self.ctx, messages=messages, tools=tools,
-                            session_key=session_key,
-                            send_tool_name="send_whatsapp_message",
-                            first_result=result,
-                            call_category="subagent_result",
-                            dispatch_id=dispatch_id,
-                            contact_id=contact_id,
-                        )
-
-                # Only delivered replies belong in replayed history; raw output can leak <tool_call> XML.
-                if message_was_sent[0] and sent_texts:
-                    assistant_text = "\n\n".join(p for p in sent_texts if p.strip())
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
-
-                return result
-
-        asyncio.create_task(_run_dispatch())
-
-    async def _build_participants_prompt(self, session_key: str) -> str:
-        # For group sessions, use the group members table for richer info
-        if ":group:" in session_key:
-            route = await self.db.fetch_one(
-                "SELECT chat_id FROM session_routes WHERE session_key = ?",
-                (session_key,),
-            )
-            if route and route["chat_id"]:
-                group = await self.db.fetch_one(
-                    "SELECT id, name, member_count FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-                    (route["chat_id"],),
-                )
-                if group:
-                    members = await self.db.fetch_all(
-                        """SELECT gm.display_name, gm.is_admin, gm.is_super_admin,
-                                  c.name as contact_name, c.is_trusted
-                           FROM whatsappgroup_members gm
-                           JOIN contacts c ON c.id = gm.contact_id AND c.deleted_at IS NULL
-                           WHERE gm.group_id = ? AND gm.left_at IS NULL
-                           ORDER BY gm.is_super_admin DESC, gm.is_admin DESC, gm.display_name ASC""",
-                        (group["id"],),
-                    )
-                    if members:
-                        lines = [f"## Participants ({len(members)} members in {group['name'] or 'group'})"]
-                        for m in members:
-                            name = m["display_name"] or m["contact_name"] or "Unknown"
-                            badges = []
-                            if m["is_super_admin"]:
-                                badges.append("super admin")
-                            elif m["is_admin"]:
-                                badges.append("admin")
-                            trust = "trusted" if m["is_trusted"] else "untrusted"
-                            badges.append(trust)
-                            lines.append(f"- {name} ({', '.join(badges)})")
-                        return "\n".join(lines)
-
-        # Fallback: session_participants for DMs or when group data unavailable
-        rows = await self.db.fetch_all(
-            "SELECT display_name, identifier, contact_id, is_trusted, last_active_at "
-            "FROM session_participants WHERE session_key = ? ORDER BY last_active_at DESC",
-            (session_key,),
-        )
-        if not rows:
-            return ""
-        lines = ["## Participants"]
-        for r in rows:
-            name = r["display_name"] or r["identifier"]
-            if r["contact_id"]:
-                trust = "trusted" if r["is_trusted"] else "untrusted"
-                lines.append(f"- {name} (contact, {trust})")
-            else:
-                lines.append(f"- {name} ({r['identifier']}, not in contacts)")
-        return "\n".join(lines)
-
     async def _lookup_contact(self, phone_number: str) -> tuple[str, bool] | None:
         """Return (contact_id, is_trusted) for an existing contact, or None.
 
-        Exact match first, then prefix-match fallback to catch WhatsApp JIDs with
-        extra trailing digits (e.g. +614154068544 should match existing +61415406854).
+        Fuzzy: exact match first, then prefix-match fallback for WhatsApp JIDs
+        with extra trailing digits (see ContactRepository.get_by_phone_fuzzy).
         """
-        contact = await self.db.fetch_one(
-            "SELECT id, is_trusted FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-            (phone_number,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(self.db).get_by_phone_fuzzy(phone_number)
         if contact:
             return contact["id"], bool(contact.get("is_trusted", 0))
-
-        if len(phone_number) > 6:
-            prefix_matches = await self.db.fetch_all(
-                "SELECT id, is_trusted, phone_number FROM contacts WHERE deleted_at IS NULL "
-                "AND (phone_number = ? OR ? LIKE phone_number || '%' OR phone_number LIKE ? || '%') "
-                "ORDER BY LENGTH(phone_number) DESC LIMIT 1",
-                (phone_number[:-1], phone_number, phone_number),
-            )
-            if prefix_matches:
-                best = prefix_matches[0]
-                logger.info("resolved contact %s via prefix match: %s → %s", best["id"], phone_number, best["phone_number"])
-                return best["id"], bool(best.get("is_trusted", 0))
         return None
 
     async def _resolve_or_seed_contact(self, phone_number: str, display_name: str = "") -> tuple[str, bool]:
@@ -593,24 +381,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         existing = await self._lookup_contact(phone_number)
         if existing:
             return existing
-        new_id = str(uuid4())
-        now_iso = utcnow().isoformat()
-        await self.db.execute(
-            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-               VALUES (?, ?, ?, 0, ?, ?)""",
-            (new_id, display_name or phone_number, phone_number, now_iso, now_iso),
-        )
-        logger.info("auto-seeded untrusted contact %s for phone %s", new_id, phone_number)
-
-        # Auto-create person memory entry
-        from bob_server.services.memory import MemoryService
-        mem_svc = MemoryService(self.ctx)
-        await mem_svc.ensure_person_entry(
-            self.ctx.settings.harness.workspace_dir,
-            contact_id=new_id, name=display_name or phone_number,
-            phone_number=phone_number, channel="WhatsApp",
-        )
-
+        from bob_server.services.channel_policies import ContactResolver
+        new_id = await ContactResolver(self.ctx).seed_untrusted_by_phone(
+            phone_number, display_name)
         return new_id, False
 
 
@@ -644,40 +417,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             key_part = sender_jid.split("@")[0]
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
-        # Check if patience is enabled for this session
-        route_row = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route_row or not route_row["metadata"]:
-            return
-        try:
-            route_meta = json.loads(route_row["metadata"])
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not route_meta.get("patience_enabled"):
-            return
-
-        import time as _time
-        from bob_server.services.patience_buffer import PendingItem, PatienceBufferRegistry
-
-        item = PendingItem(
-            item_type="typing",
-            timestamp=_time.monotonic(),
-            sender_jid=sender_jid,
-            sender_name=sender_name or "",
-            payload={},
-        )
-        buffer = PatienceBufferRegistry.get(session_key)
-
-        # Keep only the latest typing event per sender to avoid buffer bloat
-        buffer.items = [i for i in buffer.items if i.item_type != "typing" or i.sender_jid != sender_jid]
-        buffer.add(item)
-
-        logger.info("patience: typing indicator from %s in %s, buffer=%d messages + %d typing",
-                     sender_name, session_key,
-                     len([i for i in buffer.items if i.item_type == "message"]),
-                     len([i for i in buffer.items if i.item_type == "typing"]))
+        # Typing extends an armed attention window (Tier 1 presence awareness).
+        from bob_server.services.attention import AttentionCoordinator
+        AttentionCoordinator(self.ctx).notify_typing(session_key, sender_name or "")
 
 
     async def _on_message(self, msg: dict[str, Any]) -> None:
@@ -782,66 +524,25 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             return
         contact_id = None
         is_trusted = False
-        contact = await self.db.fetch_one(
-            """SELECT id, name, is_trusted, allow_inbound_dm
-               FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1""",
-            (phone_number,),
-        )
-        if contact and chat_kind == "dm" and not bool(contact.get("allow_inbound_dm", 1)):
-            # Contact exists but is outbound-only (agent-created for a call, or
-            # operator-restricted). Same treatment as unknown numbers, distinct
-            # log line so "why can't X reach me" is answerable from journalctl.
-            logger.warning(
-                "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
-                phone_number, contact["id"], sender_name, text[:80],
-            )
-            return
-        if contact:
-            contact_id = contact["id"]
-            is_trusted = bool(contact.get("is_trusted", 0))
-            logger.info("resolved contact %s (trusted=%s) for phone %s", contact_id, is_trusted, phone_number)
-            # Backfill name from WhatsApp if contact has no real name
-            if sender_name and contact["name"] in ("", phone_number):
-                await self.db.execute(
-                    "UPDATE contacts SET name = ?, updated_at = ? WHERE id = ?",
-                    (sender_name, utcnow().isoformat(), contact_id),
+        from bob_server.services.channel_policies import WhatsAppInboundPolicy
+        resolution = await WhatsAppInboundPolicy(self.ctx).resolve_sender(
+            chat_kind=chat_kind, phone_number=phone_number, sender_name=sender_name)
+        if not resolution.accepted:
+            if resolution.drop_reason == "inbound_disabled":
+                # Distinct log line so "why can't X reach me" is answerable
+                # from journalctl.
+                logger.warning(
+                    "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
+                    phone_number, resolution.contact_id, sender_name, text[:80],
                 )
-                from bob_server.services.memory import MemoryService
-                await MemoryService(self.ctx).sync_person_display_name_for_contact(
-                    contact_id, sender_name,
+            else:
+                logger.warning(
+                    "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
+                    phone_number, sender_jid, sender_name, text[:80],
                 )
-        elif chat_kind == "dm":
-            # Security gate: drop DMs from numbers with no contact row.
-            # Group sync auto-seeds contacts for everyone Bob has seen in a group,
-            # so any legitimate acquaintance already has a row. Pure unknowns get
-            # logged and never become a session.
-            logger.warning(
-                "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
-                phone_number, sender_jid, sender_name, text[:80],
-            )
             return
-        else:
-            logger.info("no contact found for phone %s", phone_number)
-            # Auto-seed an untrusted contact for unknown WhatsApp senders
-            new_id = str(uuid4())
-            now_iso = utcnow().isoformat()
-            await self.db.execute(
-                """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-                   VALUES (?, ?, ?, 0, ?, ?)""",
-                (new_id, sender_name or phone_number, phone_number, now_iso, now_iso),
-            )
-            contact_id = new_id
-            is_trusted = False
-            logger.info("auto-seeded untrusted contact %s for phone %s", contact_id, phone_number)
-
-            # Auto-create person memory entry for new contacts
-            from bob_server.services.memory import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            await mem_svc.ensure_person_entry(
-                settings.harness.workspace_dir,
-                contact_id=contact_id, name=sender_name or phone_number,
-                phone_number=phone_number, channel="WhatsApp",
-            )
+        contact_id = resolution.contact_id
+        is_trusted = resolution.is_trusted
 
         # Derive session key
         agent_id = "main"
@@ -850,6 +551,23 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         else:
             key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
+
+        # Bob3 Phase VI item 3: canonicalize onto the conversation id. The
+        # channel-derived key above is the binding; everything downstream
+        # (participants, routes, messages, events, dispatch) keys under the
+        # conversation, so a merged binding lands in its survivor
+        # conversation with no per-call-site changes. 1:1 today (ensure()
+        # backfills conversation.id = session_key) — diverges only on merge.
+        binding_key = session_key
+        try:
+            from bob_server.repositories.conversations import ConversationRepository
+            conversation = await ConversationRepository(self.db).ensure(
+                session_key,
+                address=chat_id if chat_kind == "group" else phone_number,
+                endpoint_kind=chat_kind)
+            session_key = conversation["id"]
+        except Exception:
+            logger.warning("conversation resolve failed for %s", session_key, exc_info=True)
 
         # Slash command interception — trusted contacts only, never stored or dispatched
         if text.startswith("/"):
@@ -867,75 +585,42 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if not phone:
                     continue
                 # Try session participants first (group members with display names)
-                participant = await self.db.fetch_one(
-                    "SELECT display_name FROM session_participants WHERE identifier = ? AND session_key = ? LIMIT 1",
-                    (phone, session_key),
-                )
+                from bob_server.repositories.participants import ParticipantRepository
+                participant = await ParticipantRepository(self.db).get(session_key, phone)
                 if participant and participant["display_name"]:
                     mention_map[phone] = participant["display_name"]
                     continue
                 # Then try contacts table
-                contact_match = await self.db.fetch_one(
-                    "SELECT name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                    (phone,),
-                )
+                from bob_server.repositories.contacts import ContactRepository
+                contact_match = await ContactRepository(self.db).get_by_phone(phone)
                 if contact_match and contact_match["name"]:
                     mention_map[phone] = contact_match["name"]
                 # Upsert mentioned user as participant so dispatch-time resolution can find them
-                await self.db.execute(
-                    """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-                       VALUES (?, ?, ?, ?, 0, ?)
-                       ON CONFLICT(session_key, identifier) DO UPDATE SET
-                           last_active_at = excluded.last_active_at""",
-                    (session_key, phone, mention_map.get(phone, phone), None, now_iso),
-                )
+                from bob_server.repositories.participants import ParticipantRepository
+                await ParticipantRepository(self.db).touch(
+                    session_key, phone, mention_map.get(phone, phone), now_iso)
             # Replace @phone_number patterns with @DisplayName
             for phone, name in mention_map.items():
                 bare = phone.lstrip("+")
                 text = re.sub(rf"@{re.escape(bare)}\b", f"@{name}", text)
 
         # Upsert sender as session participant
-        await self.db.execute(
-            """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(session_key, identifier) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                   is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
-                   last_active_at = excluded.last_active_at""",
-            (session_key, phone_number, sender_name or phone_number,
-             contact_id, 1 if is_trusted else 0, now_iso),
-        )
+        from bob_server.repositories.participants import ParticipantRepository
+        await ParticipantRepository(self.db).upsert(
+            session_key, phone_number,
+            display_name=sender_name or phone_number,
+            contact_id=contact_id, is_trusted=bool(is_trusted), now_iso=now_iso)
 
-        # Create session route — DM needs contact_id, group needs chat_id
-        route_service = SessionRouteService(self.ctx)
-        from bob_server.exceptions import ConflictError
-        try:
-            if chat_kind == "group":
-                await route_service.create_route(SessionRouteCreate(
-                    channel="whatsapp",
-                    session_key=session_key,
-                    kind=SessionRouteKind.GROUP,
-                    chat_id=chat_id,
-                    metadata={
-                        "sender_jid": sender_jid,
-                        "sender_name": sender_name,
-                    },
-                ))
-            else:
-                await route_service.create_route(SessionRouteCreate(
-                    channel="whatsapp",
-                    session_key=session_key,
-                    kind=SessionRouteKind.DM,
-                    contact_id=contact_id,
-                    chat_id=chat_id,
-                    metadata={
-                        "sender_jid": sender_jid,
-                        "sender_name": sender_name,
-                    },
-                ))
-        except ConflictError:
-            pass  # Route already exists, proceed with dispatch
+        # Register the endpoint binding — DM carries contact_id, group the JID
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        if chat_kind == "group":
+            await repo.register_endpoint(
+                session_key, endpoint_kind="group", address=chat_id)
+        else:
+            await repo.register_endpoint(
+                session_key, endpoint_kind="dm", address=chat_id,
+                contact_id=str(contact_id) if contact_id else None)
 
         # Resolve agenda
         from bob_server.services.session_agenda_service import SessionAgendaService
@@ -944,40 +629,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             session_key, "whatsapp",
             contact_id=contact_id, is_trusted=is_trusted,
         )
-
-        # Build system prompt: workspace context + agenda + participants
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
-        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-
-        participants_prompt = await self._build_participants_prompt(session_key)
-
-        # Inject person profile for DM sessions
-        person_context = ""
-        if contact_id and chat_kind != "group":
-            from bob_server.services.memory import MemoryService
-            mem_svc = MemoryService(self.ctx)
-            entry = await mem_svc.find_person_entry(
-                settings.harness.workspace_dir, contact_id=contact_id,
-            )
-            if entry:
-                person_context = f"## Person Profile\n\n{entry}"
-
-        # Inject group entity hint for group sessions
-        group_memory_hint = ""
-        if chat_kind == "group":
-            group_row = await self.db.fetch_one(
-                "SELECT wg.memory_entity_id FROM whatsappgroups wg "
-                "JOIN session_routes sr ON sr.chat_id = wg.whatsapp_jid "
-                "WHERE sr.session_key = ? AND wg.deleted_at IS NULL",
-                (session_key,),
-            )
-            if group_row and group_row["memory_entity_id"]:
-                eid = group_row["memory_entity_id"]
-                group_memory_hint = (
-                    "## Group Memory\n\n"
-                    f"This is a WhatsApp group with accumulated memory entity `{eid}`.\n"
-                    f"Use `recall('{eid}')` to look up group knowledge."
-                )
 
         # Handle shared contacts — auto-seed into contacts table
         shared_contacts = payload.get("contacts", [])
@@ -991,17 +642,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 # Auto-seed contact from shared vCard
                 if phone:
                     normalized_phone = _jid_to_phone(phone)
-                    existing = await self.db.fetch_one(
-                        "SELECT id FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-                        (normalized_phone,),
-                    )
+                    from bob_server.repositories.contacts import ContactRepository
+                    repo = ContactRepository(self.db)
+                    existing = await repo.get_by_phone(normalized_phone)
                     if not existing:
-                        new_cid = str(uuid4())
-                        await self.db.execute(
-                            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-                               VALUES (?, ?, ?, 0, ?, ?)""",
-                            (new_cid, name, normalized_phone, now_iso, now_iso),
-                        )
+                        await repo.create(name=name, phone_number=normalized_phone)
                         logger.info("auto-seeded shared contact %s (%s)", name, normalized_phone)
                     contacts_lines.append(f"- **{name}** — {normalized_phone}")
                 else:
@@ -1058,46 +703,132 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             fallback_text = f"[Document: {document_filename}]"
         else:
             fallback_text = ""
-        await SessionService(self.ctx).add_message(
-            session_key, "user", text or fallback_text,
-            channel="whatsapp", sender_id=contact_id, dispatched=0,
-            metadata=message_metadata,
+        # Store the user message and append the ingress event in ONE
+        # transaction (Bob3 invariants 1+2): the event log is the durable
+        # record of accepted stimuli, keyed (source=whatsapp, external_id=
+        # wa_message_id) so bridge redeliveries can't double-accept. Audit
+        # -only in Phase I — dispatch still runs off session_messages.
+        from bob_server.repositories import Event, EventLogRepository
+
+        event_repo = EventLogRepository(self.db)
+        session_svc = SessionService(self.ctx)
+        async with self.db.transaction() as txn:
+            stored_msg_id = await session_svc.add_message(
+                session_key, "user", text or fallback_text,
+                channel="whatsapp", sender_id=contact_id, dispatched=0,
+                metadata=message_metadata, txn=txn,
+            )
+            ingress_event_id = await event_repo.append(Event(
+                event_type="message.received",
+                binding_key=binding_key,
+                conversation_id=session_key,
+                source="whatsapp",
+                external_id=wa_message_id or None,
+                payload={
+                    "session_message_id": stored_msg_id,
+                    "chat_kind": chat_kind,
+                    "sender_name": sender_name,
+                    "contact_id": contact_id,
+                    "has_media": bool(message_metadata),
+                },
+            ), txn=txn)
+
+        logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
+
+        dispatch_spec = await self._build_inbound_dispatch_spec(
+            session_key=session_key,
+            chat_id=chat_id,
+            chat_kind=chat_kind,
+            contact_id=contact_id,
+            is_trusted=is_trusted,
+            sender_name=sender_name,
+            text_preview=text[:100],
         )
+
+        async def _run_dispatch() -> str:
+            from bob_server.services.dispatch_runner import DispatchRunner
+            return await DispatchRunner(self.ctx).run(dispatch_spec)
+
+        # Attention coordinator (Bob3 Phase III cutover): Tier 0 addressed
+        # detection + Tier 1 windows decide WHEN this dispatch runs; Tier 2
+        # (probe_enabled) decides WHETHER an unaddressed group batch runs.
+        # Route metadata keeps the legacy flag names for operator continuity.
+        # Policy lives on the conversation (Increment 3).
+        from bob_server.repositories.conversations import ConversationRepository
+        policy = await ConversationRepository(self.db).get_policy(session_key)
+        probe_enabled = bool(policy.get("patience_enabled")) and bool(
+            policy.get("patience_relevance_gating"))
+
+        from bob_server.services.attention import AttentionCoordinator
+
+        # Occupancy (Bob3 Phase VI item 6): while a call is live on this
+        # conversation, non-urgent text stays stored-but-undispatched and the
+        # post-call drain (wake_session) runs it as one turn. Urgent text
+        # dispatches immediately.
+        from bob_server.services import occupancy
+        if occupancy.is_live(session_key) and not occupancy.is_urgent(text or ""):
+            occupancy.defer(session_key)
+            logger.info("occupancy: call live on %s — queued message for post-call turn",
+                        session_key)
+            return
+
+        await AttentionCoordinator(self.ctx).submit(
+            session_key, _run_dispatch,
+            text=text or fallback_text,
+            chat_kind=chat_kind,
+            bot_name=settings.patience.bot_name,
+            mentioned_jids=tuple(mentioned_jids or ()),
+            sender_name=sender_name or "",
+            probe_enabled=probe_enabled,
+            probe_model=settings.patience.model,
+            event_id=ingress_event_id,
+        )
+
+        # Auto-subscribe to presence for this chat so typing indicators can
+        # extend the attention window.
+        if chat_id not in self._presence_subscribed:
+            await self.subscribe_presence(chat_id)
+            self._presence_subscribed.add(chat_id)
+
+    async def _build_inbound_dispatch_spec(
+        self,
+        *,
+        session_key: str,
+        chat_id: str,
+        chat_kind: str,
+        contact_id: str | None,
+        is_trusted: bool,
+        sender_name: str = "",
+        text_preview: str = "",
+    ) -> "DispatchSpec":
+        """Assemble the full inbound-WhatsApp DispatchSpec (system prompt,
+        tools, send tool, quota handling). Shared by the live inbound path
+        and the crash-recovery sweep (`resume_pending_sessions`)."""
+        from bob_server.services.context_assembler import ContextAssembler
+        from bob_server.services.prompt_assembler import load_workspace_prompt
+
+        settings = self._get_settings()
+        assembler = ContextAssembler(self.ctx)
+        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
+        participants_prompt = await assembler.participants_prompt(session_key)
+
+        person_context = ""
+        if chat_kind != "group":
+            person_context = await assembler.person_profile(contact_id)
+
+        group_memory_hint = ""
+        if chat_kind == "group":
+            group_memory_hint = await assembler.group_memory_hint(session_key)
 
         # Dream plans — Tier 1 injection for sessions with linked plans
-        from bob_server.services.dream.injection import build_session_plans_prompt
-
-        dream_plans_prompt = await build_session_plans_prompt(
-            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled,
-        )
+        dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
 
         # Check for active outreach request and inject into system prompt
-        outreach_prompt = ""
-        route_for_outreach = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if route_for_outreach and route_for_outreach["metadata"]:
-            try:
-                route_meta = json.loads(route_for_outreach["metadata"])
-            except (json.JSONDecodeError, TypeError):
-                route_meta = {}
-            if "outreach_initiated_from" in route_meta:
-                outreach_prompt = (
-                    "## Active Outreach Request\n"
-                    "You proactively sent a message to this contact.\n"
-                    f"- Requested by: {route_meta.get('outreach_requestor', 'unknown')}\n"
-                    f"- Objective: {route_meta.get('outreach_objective', 'unknown')}\n"
-                    f"- Your initial message: \"{route_meta.get('outreach_message', '')}\"\n\n"
-                    "Your goal is to achieve the objective through this conversation. "
-                    "When you have the information needed, call the finish_outreach tool to relay the result back."
-                )
+        outreach_prompt = await assembler.outreach_prompt(session_key)
 
         system_content = "\n\n".join(
             p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, outreach_prompt) if p
         )
-
-        logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
 
         from bob_server.services.llm_dispatch import LLMDispatchService
         from bob_server.services.tools import Tool
@@ -1118,6 +849,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
+        # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
+        if is_trusted:
+            from bob_server.services.goal_tools import make_goal_tools
+            tools.extend(make_goal_tools(self.ctx, session_key))
+
         # Voice outreach: attach whenever the requester is a trusted contact, in any
         # chat context (DM or group). Untrusted users don't get the tool — it costs
         # real money (Twilio) and can ping arbitrary contacts, so it's gated on
@@ -1127,28 +863,29 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.voice_outreach_tools import make_voice_outreach_tools
             tools.extend(make_voice_outreach_tools(self.ctx, self, session_key))
 
-        # Outreach reply tool for active outreach targets
-        route = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if route and route["metadata"]:
-            try:
-                meta = json.loads(route["metadata"])
-            except (json.JSONDecodeError, TypeError):
-                meta = {}
-            if "outreach_initiated_from" in meta:
-                from bob_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
-                tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))
+        # Outreach reply tool for active outreach targets (goal-backed).
+        from bob_server.repositories.goals import GoalRepository
+        active_outreach = await GoalRepository(self.db).active_outreach(session_key)
+        if active_outreach:
+            from bob_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
+            tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))
 
         message_was_sent = [False]
         sent_texts: list[str] = []
+        send_seq = [0]
 
         async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+            # Bob3 Phase IV: sends go through the effects outbox — recorded
+            # durably, delivered inline, retried by the pump after a crash.
+            # History (sent_texts) is written from delivery confirmation.
+            from bob_server.services.effects import emit_and_deliver
+
             message_was_sent[0] = True
             if text.strip().upper() == "NO_REPLY":
                 return "No reply sent."
             text = strip_citation_markers(text)
+            seq = send_seq[0]
+            send_seq[0] += 1
             if media_path:
                 workspace = settings.harness.workspace_dir.expanduser().resolve()
                 resolved = (workspace / media_path).resolve()
@@ -1159,12 +896,22 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 prepared = await _prepare_media(str(resolved))
                 if prepared is None:
                     return "Error: failed to prepare media for sending"
+                result = await emit_and_deliver(
+                    self.ctx, kind="whatsapp_send_media",
+                    idempotency_key=f"whatsapp_send_media:{dispatch_id}:{seq}",
+                    payload={"chat_id": chat_id, "file_path": prepared, "caption": text})
+                if not result.get("ok"):
+                    return f"Error sending media: {result.get('error', 'delivery failed')}"
                 sent_texts.append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
-                request_id = await wa_service.send_media(chat_id, prepared, caption=text)
-                return f"Media sent (request_id={request_id})"
+                return f"Media sent (request_id={result.get('external_result_id')})"
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send",
+                idempotency_key=f"whatsapp_send:{dispatch_id}:{seq}",
+                payload={"chat_id": chat_id, "text": text})
+            if not result.get("ok"):
+                return f"Error sending message: {result.get('error', 'delivery failed')}"
             sent_texts.append(text)
-            request_id = await wa_service.send_message(chat_id, text)
-            return f"Message sent (request_id={request_id})"
+            return f"Message sent (request_id={result.get('external_result_id')})"
 
         tools.append(Tool(
             name="send_whatsapp_message",
@@ -1183,131 +930,89 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         dispatch_id = str(uuid4())
 
-        async def _run_dispatch() -> str:
-            from bob_server.services.session_service import SessionService
-            from bob_server.services.session_dispatch_gate import SessionDispatchGate
+        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
-            session_svc = SessionService(self.ctx)
-            async with SessionDispatchGate.get_lock(session_key):
-                # Capture IDs of the messages we're about to claim, so we can
-                # restore them if the LLM call fails due to quota exhaustion.
-                # Without this, mark_dispatched silently swallows messages that
-                # never got a reply.
-                pre_rows = await self.db.fetch_all(
-                    "SELECT id FROM session_messages "
-                    "WHERE session_key = ? AND role = 'user' AND dispatched = 0",
-                    (session_key,),
-                )
-                claimed_ids = [r["id"] for r in pre_rows]
-                if not claimed_ids:
-                    return ""
-                await session_svc.mark_dispatched(session_key)
+        async def _on_quota_exhausted() -> None:
+            await _notify_quota_exhausted(wa_service, chat_id, session_key)
 
-                messages = await build_chat_messages(
-                    None, session_key,
-                    db=self.db,
-                    system_content=system_content,
-                    max_history=100,
-                )
-
-                try:
-                    result = await LLMDispatchService(self.ctx).chat_with_tools(
-                        messages, tools,
-                        call_category="whatsapp_incoming",
-                        session_key=session_key,
-                        dispatch_id=dispatch_id,
-                        contact_id=contact_id,
-                    )
-                except Exception as exc:
-                    if _is_quota_error(exc):
-                        placeholders = ",".join("?" for _ in claimed_ids)
-                        await self.db.execute(
-                            f"UPDATE session_messages SET dispatched = 0 "
-                            f"WHERE id IN ({placeholders})",
-                            tuple(claimed_ids),
-                        )
-                        logger.warning(
-                            "quota exhausted for %s; restored %d message(s) for retry",
-                            session_key, len(claimed_ids),
-                        )
-                        await _notify_quota_exhausted(wa_service, chat_id, session_key)
-                        return ""
-                    raise
-                # Tap: if LLM produced text but didn't use send_whatsapp_message,
-                # give it a second chance with a reminder.
-                if not message_was_sent[0] and result.strip():
-                    from bob_server.services.tap import tap_dispatch, tap_enabled
-                    if tap_enabled():
-                        result = await tap_dispatch(
-                            self.ctx, messages=messages, tools=tools,
-                            session_key=session_key,
-                            send_tool_name="send_whatsapp_message",
-                            first_result=result,
-                            call_category="whatsapp_incoming",
-                            dispatch_id=dispatch_id,
-                            contact_id=contact_id,
-                        )
-                # Record to unified session history — combine LLM text output + all sent messages
-                # If nothing was sent and the result is just a NO_REPLY variant, skip recording
-                # to avoid poisoning future decisions with a pattern of non-responses.
-                # Only delivered replies belong in replayed history; raw output can leak <tool_call> XML.
-                if message_was_sent[0] and sent_texts:
-                    assistant_text = "\n\n".join(p for p in sent_texts if p.strip())
-                    await session_svc.add_message(session_key, "assistant", assistant_text, channel="whatsapp", dispatch_id=dispatch_id)
-                if self.ctx.event_bus:
-                    await self.ctx.event_bus.publish("whatsapp.message.received", {
-                        "session_key": session_key,
-                        "sender_name": sender_name,
-                        "chat_kind": chat_kind,
-                        "text_preview": text[:100],
-                    })
-                return result
-
-        # Check if patience is enabled for this session (per-session via route metadata)
-        patience_enabled = False
-        relevance_gating_enabled = False
-        route_row = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
+        dispatch_spec = DispatchSpec(
+            session_key=session_key,
+            system_content=system_content,
+            tools=tools,
+            call_category="whatsapp_incoming",
+            send_tool_name="send_whatsapp_message",
+            dispatch_id=dispatch_id,
+            contact_id=contact_id,
+            channel="whatsapp",
+            max_history=100,
+            history_policy="delivered_only",
+            message_was_sent=message_was_sent,
+            sent_texts=sent_texts,
+            quota_restore=True,
+            on_quota_exhausted=_on_quota_exhausted,
+            event=("whatsapp.message.received", {
+                "session_key": session_key,
+                "sender_name": sender_name,
+                "chat_kind": chat_kind,
+                "text_preview": text_preview,
+            }),
         )
-        if route_row and route_row["metadata"]:
+
+        return dispatch_spec
+
+    async def resume_pending_sessions(self) -> int:
+        """Crash-recovery sweep (Bob3 Phase III item 5): re-arm dispatch for
+        WhatsApp sessions holding stored-but-undispatched user messages, so a
+        kill -9 during an armed attention window loses zero messages.
+
+        Returns the number of sessions re-armed."""
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).undispatched_conversations(
+            channel="whatsapp")
+        resumed = 0
+        for session_key in rows:
             try:
-                route_meta = json.loads(route_row["metadata"])
-                patience_enabled = route_meta.get("patience_enabled", False)
-                relevance_gating_enabled = route_meta.get("patience_relevance_gating", False)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        logger.info(
-            "patience check: session=%s route_found=%s enabled=%s relevance=%s",
-            session_key, route_row is not None, patience_enabled, relevance_gating_enabled,
+                await self.wake_session(session_key)
+                resumed += 1
+                logger.info("recovery: re-armed dispatch for %s", session_key)
+            except Exception:
+                logger.warning("recovery: failed to resume %s", session_key, exc_info=True)
+        return resumed
+
+    async def wake_session(self, session_key: str) -> None:
+        """Arm a dispatch for a session with stored-but-undispatched messages.
+
+        Shared by the crash-recovery sweep and the Bob3 wake path (goal
+        completions, subagent results, deadline wakeups): the caller stores
+        an undispatched user message, then this runs a turn through the full
+        inbound pipeline (attention coordinator, turn claims, effect sends).
+        """
+        from bob_server.repositories.conversations import (
+            ConversationRepository, wa_send_jid)
+        route = await ConversationRepository(self.db).route_for(session_key)
+        jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
+        if not jid:
+            raise RuntimeError(f"no active route for session {session_key}")
+        chat_kind = "group" if ":group:" in session_key else "dm"
+        contact_id = route["contact_id"]
+        is_trusted = False
+        if contact_id:
+            from bob_server.repositories.contacts import ContactRepository
+            trusted = await ContactRepository(self.db).is_trusted(contact_id)
+            is_trusted = bool(trusted)
+
+        spec = await self._build_inbound_dispatch_spec(
+            session_key=session_key,
+            chat_id=jid,
+            chat_kind=chat_kind,
+            contact_id=contact_id,
+            is_trusted=is_trusted,
         )
 
-        # Always route through the buffer. Patience-on runs the LLM gate on top;
-        # patience-off uses a fixed settle delay to absorb bursts.
-        import time as _time
-        from bob_server.services.patience_buffer import PendingItem
-        from bob_server.services.patience_gate import submit_to_patience
+        from bob_server.services.attention import AttentionCoordinator
+        from bob_server.services.dispatch_runner import DispatchRunner
 
-        item = PendingItem(
-            item_type="message",
-            timestamp=_time.monotonic(),
-            sender_jid=sender_jid,
-            sender_name=sender_name or "",
-            payload={"text": text},
-        )
-        await submit_to_patience(
-            self.ctx, session_key, item, _run_dispatch,
-            bot_name=settings.patience.bot_name,
-            model=settings.patience.model,
-            max_pending_items=settings.patience.max_pending_items,
-            max_context_messages=settings.patience.max_context_messages,
-            relevance_gating_enabled=relevance_gating_enabled,
-            patience_enabled=patience_enabled,
-            settle_seconds=settings.patience.patience_off_settle_seconds,
-        )
+        async def _run_dispatch(s=spec) -> str:
+            return await DispatchRunner(self.ctx).run(s)
 
-        # Auto-subscribe to presence for this chat (only meaningful when patience is on,
-        # since typing-indicator extension is a patience-on feature).
-        if patience_enabled and chat_id not in self._presence_subscribed:
-            await self.subscribe_presence(chat_id)
-            self._presence_subscribed.add(chat_id)
+        await AttentionCoordinator(self.ctx).resume_pending(session_key, _run_dispatch)

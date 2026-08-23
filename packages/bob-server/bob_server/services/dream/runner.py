@@ -317,7 +317,7 @@ class DreamRunner(BaseService):
         return newest is not None and newest > ref
 
     async def _session_autoplan(self, session_key: str) -> bool:
-        """Autoplan is session-scoped (session_routes metadata, /autoplan command)."""
+        """Autoplan is session-scoped (conversations.policy_json, /autoplan command)."""
         from bob_server.services.dream import config as dream_config
 
         return await dream_config.get_session_autoplan(

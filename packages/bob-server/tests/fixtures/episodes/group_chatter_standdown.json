@@ -1,0 +1,15 @@
+{
+  "name": "group_chatter_standdown",
+  "description": "Unaddressed group chatter: Tier 2 probe says STAND_DOWN, messages are flushed without a turn and no effects are emitted.",
+  "probe_decision": "STAND_DOWN",
+  "llm_reply": "should never be called",
+  "messages": [
+    {"kind": "group", "phone": "+614000000010", "text": "lol yeah", "msg_id": "rp-g1"},
+    {"kind": "group", "phone": "+614000000010", "text": "so anyway", "msg_id": "rp-g2"}
+  ],
+  "expect": {
+    "turns": 0,
+    "send_effects": 0,
+    "all_messages_claimed": true
+  }
+}

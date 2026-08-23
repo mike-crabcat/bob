@@ -16,15 +16,8 @@ async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    row = await db.fetch_one(
-        """SELECT id, created_at, provider, model, call_category, session_key,
-                  system_prompt, user_message, messages_json, tools_json,
-                  response_text, latency_seconds, ttft_seconds,
-                  prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                  status, error_message, tool_blocks_json
-           FROM llm_call_log WHERE id = ?""",
-        (call_id,),
-    )
+    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    row = await LlmCallLogRepository(db).get(call_id)
     if not row:
         return {"error": "not found"}
 

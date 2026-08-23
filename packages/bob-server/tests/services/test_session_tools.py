@@ -39,14 +39,14 @@ async def seeded(ctx):
         "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
         "VALUES ('c2', 'Mike', '+61400000001', ?, ?)", (NOW, NOW))
 
-    for key, chat_id in ((GROUP_KEY, "111@g.us"), (OTHER_GROUP_KEY, "222@g.us")):
-        await ctx.db.execute(
-            "INSERT INTO session_routes (id, channel, session_key, kind, chat_id, created_at, updated_at) "
-            "VALUES (?, 'whatsapp', ?, 'group', ?, ?, ?)",
-            (f"sr-{chat_id}", key, chat_id, NOW, NOW))
+    # find_session reads bindings (Increment 4).
+    from bob_server.repositories.conversations import ConversationRepository
+    repo = ConversationRepository(ctx.db)
+    await repo.ensure(GROUP_KEY, address="111@g.us", endpoint_kind="group")
+    await repo.ensure(OTHER_GROUP_KEY, address="222@g.us", endpoint_kind="group")
+    await repo.ensure(DM_KEY, address="+61400000001", endpoint_kind="dm")
     await ctx.db.execute(
-        "INSERT INTO session_routes (id, channel, session_key, kind, contact_id, created_at, updated_at) "
-        "VALUES ('sr-dm', 'whatsapp', ?, 'dm', 'c2', ?, ?)", (DM_KEY, NOW, NOW))
+        "UPDATE bindings SET contact_id = 'c2' WHERE session_key = ?", (DM_KEY,))
 
     session_svc = SessionService(ctx)
     await session_svc.add_message(GROUP_KEY, "user", "Lunch Sunday?", channel="whatsapp")
@@ -83,7 +83,7 @@ async def test_untrusted_group_context_cannot_find_other_sessions(seeded):
 async def test_untrusted_contact_finds_participating_sessions(seeded):
     # Trevor participates in the Leeming Boys group but is dispatching from his DM.
     await seeded.db.execute(
-        "INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at) "
+        "INSERT INTO participants (conversation_id, identifier, display_name, contact_id, is_trusted, last_active_at) "
         "VALUES (?, '+61431939512', 'Trevor', 'c1', 0, ?)", (GROUP_KEY, NOW))
     tools = make_session_tools(seeded, is_trusted=False, contact_id="c1", session_key=DM_KEY)
     result = json.loads(await _tool(tools, "find_session").handler(query="Leeming Boys"))

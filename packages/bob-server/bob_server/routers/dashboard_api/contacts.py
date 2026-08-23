@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from bob_server.repositories.contacts import ContactRepository
 
 
 router = APIRouter()
@@ -20,16 +21,7 @@ async def get_contacts(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='contacts'"
     )
     if table_exists:
-        rows = await db.fetch_all(
-            """SELECT c.id, c.name, c.phone_number, c.email,
-                      c.is_trusted, c.is_default, c.allow_inbound_dm,
-                      c.created_at, c.updated_at,
-                      (SELECT COUNT(*) FROM session_participants sp WHERE sp.contact_id = c.id) as session_count,
-                      (SELECT MAX(sp.last_active_at) FROM session_participants sp WHERE sp.contact_id = c.id) as last_active
-               FROM contacts c
-               WHERE c.deleted_at IS NULL
-               ORDER BY c.name"""
-        )
+        rows = await ContactRepository(db).dashboard_list()
         for row in rows:
             contacts.append({
                 "id": row["id"],
@@ -52,49 +44,28 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    contact = await db.fetch_one(
-        """SELECT id, name, phone_number, email, metadata,
-                  is_trusted, is_default, allow_inbound_dm, created_at, updated_at
-           FROM contacts WHERE id = ? AND deleted_at IS NULL""",
-        (contact_id,),
-    )
+    contact = await ContactRepository(db).get(contact_id)
     if not contact:
         return {"id": None}
 
     sessions: list[dict[str, Any]] = []
-    participants_table = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_participants'"
-    )
-    if participants_table:
-        session_rows = await db.fetch_all(
-            """SELECT sp.session_key, sp.last_active_at,
-                      (SELECT COUNT(*) FROM llm_call_log l WHERE l.session_key = sp.session_key) as call_count
-               FROM session_participants sp
-               WHERE sp.contact_id = ?
-               ORDER BY sp.last_active_at DESC""",
-            (contact_id,),
-        )
-        for row in session_rows:
-            sessions.append({
-                "session_key": row["session_key"],
-                "channel": _parse_channel(row["session_key"]),
-                "call_count": row["call_count"],
-                "last_active": _utc(row["last_active_at"]),
-            })
+    from bob_server.repositories.participants import ParticipantRepository
+    session_rows = await ParticipantRepository(db).contact_session_rollup(contact_id)
+    for row in session_rows:
+        sessions.append({
+            "session_key": row["session_key"],
+            "channel": _parse_channel(row["session_key"]),
+            "call_count": row["call_count"],
+            "last_active": _utc(row["last_active_at"]),
+        })
 
     groups: list[dict[str, Any]] = []
     groups_table = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='whatsappgroup_members'"
     )
     if groups_table:
-        group_rows = await db.fetch_all(
-            """SELECT g.name, g.whatsapp_jid, gm.is_admin, gm.joined_at
-               FROM whatsappgroup_members gm
-               JOIN whatsappgroups g ON g.id = gm.group_id
-               WHERE gm.contact_id = ? AND gm.left_at IS NULL AND g.deleted_at IS NULL
-               ORDER BY g.name""",
-            (contact_id,),
-        )
+        from bob_server.repositories.groups import GroupRepository
+        group_rows = await GroupRepository(db).groups_for_contact(contact_id)
         for row in group_rows:
             groups.append({
                 "name": row["name"],
@@ -141,13 +112,7 @@ async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
     if not updates:
         return {"ok": True, "updated": False}
 
-    updates["updated_at"] = _utc_now()
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
-    values = list(updates.values()) + [contact_id]
-    await db.execute(
-        f"UPDATE contacts SET {set_clause} WHERE id = ? AND deleted_at IS NULL",
-        tuple(values),
-    )
+    await ContactRepository(db).update_fields(contact_id, updates)
 
     # Propagate name change to linked person entity's display_name snapshot
     if "name" in updates:
@@ -167,7 +132,7 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    row = await db.fetch_one("SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL", (contact_id,))
+    row = await ContactRepository(db).get(contact_id)
     if not row:
         return {"error": "contact not found"}
 
@@ -181,17 +146,14 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
     # Find person entity: try contact_id claim first, then name-slug match
     entity_id: str | None = None
     hex8 = str(contact_id)[:8]
-    claim_row = await db.fetch_one(
-        "SELECT subject_id FROM memory_claims "
-        "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active' LIMIT 1",
-        (hex8,),
-    )
-    if claim_row:
-        entity_id = claim_row["subject_id"]
+    from bob_server.services.memory import admin as memory_admin
+    claim_entity = await memory_admin.entity_id_for_contact_hex(db, hex8)
+    if claim_entity:
+        entity_id = claim_entity
     else:
         # Fallback: derive slug from contact name and look up person-{slug}
         import re
-        name_row = await db.fetch_one("SELECT name FROM contacts WHERE id = ?", (contact_id,))
+        name_row = await ContactRepository(db).get_any(contact_id)
         if name_row and name_row["name"]:
             slug = re.sub(r"[^a-z0-9\-]", "", name_row["name"].strip().lower().replace(" ", "-"))
             entity_id = f"person-{slug}"
@@ -228,7 +190,7 @@ async def get_contact_claims(request: Request, contact_id: str) -> Any:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    row = await db.fetch_one("SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL", (contact_id,))
+    row = await ContactRepository(db).get(contact_id)
     if not row:
         return {"error": "contact not found"}
 
@@ -237,16 +199,13 @@ async def get_contact_claims(request: Request, contact_id: str) -> Any:
     # Find person entity: try contact_id claim first, then name-slug match
     entity_id: str | None = None
     hex8 = str(contact_id)[:8]
-    claim_row = await db.fetch_one(
-        "SELECT subject_id FROM memory_claims "
-        "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active' LIMIT 1",
-        (hex8,),
-    )
-    if claim_row:
-        entity_id = claim_row["subject_id"]
+    from bob_server.services.memory import admin as memory_admin
+    claim_entity = await memory_admin.entity_id_for_contact_hex(db, hex8)
+    if claim_entity:
+        entity_id = claim_entity
     else:
         import re
-        name_row = await db.fetch_one("SELECT name FROM contacts WHERE id = ?", (contact_id,))
+        name_row = await ContactRepository(db).get_any(contact_id)
         if name_row and name_row["name"]:
             slug = re.sub(r"[^a-z0-9\-]", "", name_row["name"].strip().lower().replace(" ", "-"))
             entity_id = f"person-{slug}"

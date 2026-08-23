@@ -92,6 +92,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         Always provide a reason explaining why the correction is needed."""
         from bob_server.services.memory.claim_service import write_claim, update_entity_fts
         from bob_server.services.memory.models import Claim
+        from bob_server.services.memory import admin as memory_admin
         from datetime import datetime
         import uuid
 
@@ -102,38 +103,18 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             if not entity_id:
                 return json.dumps({"error": "entity_id is required for remove_entity"})
             # Check entity exists
-            row = await ctx.db.fetch_one(
-                "SELECT entity_id, entity_type FROM memory_entities WHERE entity_id = ? AND status = 'active'",
-                (entity_id,),
-            )
+            row = await memory_admin.get_active_entity(ctx.db, entity_id)
             if not row:
                 return json.dumps({"error": f"Entity not found or already archived: {entity_id}"})
 
             # Archive the entity
-            await ctx.db.execute(
-                "UPDATE memory_entities SET status = 'archived' WHERE entity_id = ?",
-                (entity_id,),
-            )
+            await memory_admin.archive_entity(ctx.db, entity_id)
             # Supersede all active claims
-            claims = await ctx.db.fetch_all(
-                "SELECT id FROM memory_claims WHERE subject_id = ? AND status = 'active'",
-                (entity_id,),
-            )
-            for c in claims:
-                await ctx.db.execute(
-                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
-                    (c["id"],),
-                )
+            claims = await memory_admin.active_claim_ids(ctx.db, subject_id=entity_id)
+            await memory_admin.supersede_claims(ctx.db, claims)
             # Also remove claims referencing this entity as object_id
-            ref_claims = await ctx.db.fetch_all(
-                "SELECT id FROM memory_claims WHERE object_id = ? AND status = 'active'",
-                (entity_id,),
-            )
-            for c in ref_claims:
-                await ctx.db.execute(
-                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
-                    (c["id"],),
-                )
+            ref_claims = await memory_admin.active_claim_ids(ctx.db, object_id=entity_id)
+            await memory_admin.supersede_claims(ctx.db, ref_claims)
             # Write a truth claim to prevent re-creation
             truth_claim = Claim(
                 id=f"claim-correct-{uuid.uuid4().hex[:8]}",
@@ -161,22 +142,12 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             if not entity_id or not claim_type_key:
                 return json.dumps({"error": "entity_id and claim_type_key required for remove_claim"})
             # Find matching active claims
-            params: list = [entity_id, claim_type_key]
-            extra = ""
-            if value:
-                extra = " AND (value = ? OR object_id = ?)"
-                params.extend([value, value])
-            rows = await ctx.db.fetch_all(
-                f"SELECT id FROM memory_claims WHERE subject_id = ? AND claim_type_key = ? AND status = 'active'{extra}",
-                tuple(params),
-            )
+            rows = await memory_admin.active_claim_ids(
+                ctx.db, subject_id=entity_id, claim_type_key=claim_type_key,
+                value_or_object=value or None)
             if not rows:
-                return json.dumps({"error": f"No matching active claim found"})
-            for r in rows:
-                await ctx.db.execute(
-                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
-                    (r["id"],),
-                )
+                return json.dumps({"error": "No matching active claim found"})
+            await memory_admin.supersede_claims(ctx.db, rows)
             # Write truth claim
             truth_claim = Claim(
                 id=f"claim-correct-{uuid.uuid4().hex[:8]}",
@@ -203,10 +174,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 return json.dumps({"error": "new_value or new_object_id required for add_claim"})
             if new_value and new_object_id:
                 return json.dumps({"error": "Provide exactly one of new_value or new_object_id, not both"})
-            subject_row = await ctx.db.fetch_one(
-                "SELECT 1 FROM memory_entities WHERE entity_id = ?",
-                (entity_id,),
-            )
+            subject_row = await memory_admin.entity_exists(ctx.db, entity_id)
             if not subject_row:
                 return json.dumps({
                     "error": f"subject_id {entity_id!r} has no row in memory_entities — "
@@ -237,10 +205,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         elif action == "set_truth":
             if not entity_id or not value:
                 return json.dumps({"error": "entity_id and value required for set_truth"})
-            subject_row = await ctx.db.fetch_one(
-                "SELECT 1 FROM memory_entities WHERE entity_id = ?",
-                (entity_id,),
-            )
+            subject_row = await memory_admin.entity_exists(ctx.db, entity_id)
             if not subject_row:
                 return json.dumps({
                     "error": f"subject_id {entity_id!r} has no row in memory_entities — "
@@ -267,16 +232,10 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         elif action == "rename_entity":
             if not entity_id or not new_entity_id:
                 return json.dumps({"error": "entity_id and new_entity_id required for rename_entity"})
-            row = await ctx.db.fetch_one(
-                "SELECT entity_id, entity_type, display_name FROM memory_entities WHERE entity_id = ? AND status = 'active'",
-                (entity_id,),
-            )
+            row = await memory_admin.get_active_entity(ctx.db, entity_id)
             if not row:
                 return json.dumps({"error": f"Entity not found or already archived: {entity_id}"})
-            existing = await ctx.db.fetch_one(
-                "SELECT 1 FROM memory_entities WHERE entity_id = ?",
-                (new_entity_id,),
-            )
+            existing = await memory_admin.entity_exists(ctx.db, new_entity_id)
             if existing:
                 return json.dumps({"error": f"Target entity_id already exists: {new_entity_id}"})
             expected_prefix = f"{row['entity_type']}-"
@@ -284,16 +243,9 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 return json.dumps({
                     "error": f"new_entity_id must start with {expected_prefix!r} (entity type is {row['entity_type']!r})"
                 })
-            if new_display_name:
-                await ctx.db.execute(
-                    "UPDATE memory_entities SET entity_id = ?, display_name = ? WHERE entity_id = ?",
-                    (new_entity_id, new_display_name, entity_id),
-                )
-            else:
-                await ctx.db.execute(
-                    "UPDATE memory_entities SET entity_id = ? WHERE entity_id = ?",
-                    (new_entity_id, entity_id),
-                )
+            await memory_admin.rename_entity_row(
+                ctx.db, entity_id, new_entity_id,
+                new_display_name=new_display_name or None)
             from bob_server.services.memory.cleanup import (
                 rewrite_claims, rewrite_bulletin_entities, rewrite_entity_relations,
             )
@@ -302,12 +254,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             rewritten_bulletins = await rewrite_bulletin_entities(ctx.db, rename_map)
             rewritten_related = await rewrite_entity_relations(ctx.db, rename_map)
             # Old FTS row and embedding reference an entity_id that no longer exists
-            await ctx.db.execute(
-                "DELETE FROM memory_entities_fts WHERE entity_id = ?", (entity_id,)
-            )
-            await ctx.db.execute(
-                "DELETE FROM memory_entity_embeddings WHERE entity_id = ?", (entity_id,)
-            )
+            await memory_admin.purge_entity_index(ctx.db, entity_id)
             await update_entity_fts(ctx.db, new_entity_id)
 
             logger.info("Entity renamed via memory_correct: %s -> %s — %s",
@@ -329,29 +276,16 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 return json.dumps({"error": "new_value or new_object_id required for replace_claim"})
             if new_value and new_object_id:
                 return json.dumps({"error": "Provide exactly one of new_value or new_object_id, not both"})
-            subject_row = await ctx.db.fetch_one(
-                "SELECT 1 FROM memory_entities WHERE entity_id = ?",
-                (entity_id,),
-            )
+            subject_row = await memory_admin.entity_exists(ctx.db, entity_id)
             if not subject_row:
                 return json.dumps({
                     "error": f"subject_id {entity_id!r} has no row in memory_entities — "
                              f"replace_claim cannot create entities. Use action=create_entity first."
                 })
-            params: list = [entity_id, claim_type_key]
-            extra = ""
-            if value:
-                extra = " AND (value = ? OR object_id = ?)"
-                params.extend([value, value])
-            rows = await ctx.db.fetch_all(
-                f"SELECT id FROM memory_claims WHERE subject_id = ? AND claim_type_key = ? AND status = 'active'{extra}",
-                tuple(params),
-            )
-            for r in rows:
-                await ctx.db.execute(
-                    "UPDATE memory_claims SET status = 'superseded' WHERE id = ?",
-                    (r["id"],),
-                )
+            rows = await memory_admin.active_claim_ids(
+                ctx.db, subject_id=entity_id, claim_type_key=claim_type_key,
+                value_or_object=value or None)
+            await memory_admin.supersede_claims(ctx.db, rows)
             replacement = Claim(
                 id=f"claim-correct-{uuid.uuid4().hex[:8]}",
                 claim_type_key=claim_type_key,
@@ -387,10 +321,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 return json.dumps({
                     "error": f"entity_id must start with {expected_prefix!r} to match entity_type {entity_type!r}"
                 })
-            existing = await ctx.db.fetch_one(
-                "SELECT 1 FROM memory_entities WHERE entity_id = ?",
-                (entity_id,),
-            )
+            existing = await memory_admin.entity_exists(ctx.db, entity_id)
             if existing:
                 return json.dumps({
                     "error": f"Entity already exists: {entity_id}. Use replace_claim/set_truth on it instead."
@@ -398,11 +329,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             display_name = new_display_name or (
                 entity_id.split("-", 1)[-1].replace("-", " ").title() if "-" in entity_id else entity_id
             )
-            await ctx.db.execute(
-                "INSERT OR IGNORE INTO memory_entities (entity_id, entity_type, display_name, status) "
-                "VALUES (?, ?, ?, 'active')",
-                (entity_id, entity_type, display_name),
-            )
+            await memory_admin.insert_entity(ctx.db, entity_id, entity_type, display_name)
             try:
                 new_claims = json.loads(claims_json) if claims_json else []
             except json.JSONDecodeError:

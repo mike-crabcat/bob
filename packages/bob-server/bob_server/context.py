@@ -15,6 +15,5 @@ class AppContext:
 
     db: Database
     settings: Settings
-    voice_engines: Any | None = None
     event_bus: Any | None = None
     whatsapp_bridge: Any | None = None

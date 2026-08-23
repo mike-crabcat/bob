@@ -57,17 +57,9 @@ class ReflectionService(BaseService):
         parts: list[str] = []
 
         # LLM call history — get the latest N, then display chronologically
-        call_rows = await self.db.fetch_all(
-            """SELECT * FROM (
-                   SELECT id, call_category, status, model, user_message, response_text,
-                          error_message, messages_json, created_at
-                   FROM llm_call_log
-                   WHERE session_key = ?
-                   ORDER BY created_at DESC
-                   LIMIT ?
-               ) ORDER BY created_at ASC""",
-            (session_key, _MAX_CALLS),
-        )
+        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        call_rows = await LlmCallLogRepository(self.db).recent_for_transcript(
+            session_key, limit=_MAX_CALLS)
         if call_rows:
             parts.append(f"## LLM Calls ({len(call_rows)} most recent)")
             for i, row in enumerate(call_rows, 1):
@@ -86,13 +78,9 @@ class ReflectionService(BaseService):
                     parts.append(f"    Tool calls:\n{tool_log}")
 
         # Session messages
-        msg_rows = await self.db.fetch_all(
-            """SELECT role, content FROM session_messages
-               WHERE session_key = ?
-               ORDER BY created_at ASC
-               LIMIT ?""",
-            (session_key, _MAX_MESSAGES),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        msg_rows = await HistoryRepository(self.db).messages(
+            session_key, limit=_MAX_MESSAGES)
         if msg_rows:
             parts.append(f"\n## Session Messages ({len(msg_rows)} total)")
             for row in msg_rows:

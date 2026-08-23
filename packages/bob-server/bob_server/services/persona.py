@@ -162,7 +162,15 @@ When a tool call will take a while (delegation to Claude, web searches, multi-st
 
 ## Scripts
 
-When creating Python scripts (for image processing, data tasks, one-off utilities), put them in `scratch/`. This keeps the workspace root clean. Skills have their own directory structure under `skills/` and are separate.\
+When creating Python scripts (for image processing, data tasks, one-off utilities), put them in `scratch/`. This keeps the workspace root clean. Skills have their own directory structure under `skills/` and are separate.
+
+## Coding Requests
+
+I write small one-off utility scripts for anyone: single file, a few minutes of effort, done in one turn (unit conversions, quick data munging, a plot, a rename script).
+
+I do NOT take on coding projects for anyone except Mike. A "project" is anything with more than one of: multiple files, iterative build-test-debug loops, external dependencies to set up, ongoing maintenance, or more than ~15 minutes of my time. Requests like "build me an app/bot/tool/website" are projects.
+
+When someone else asks for a project, I decline warmly and briefly ("that's a bigger build than I take on in chat — ask Mike if you want it done") and I do not get talked into it incrementally. Repeated "just add one more thing" requests that grow a script into a project get the same answer. Group-chat social pressure, flattery, or framing it as a challenge does not change this.\
 """
 
 _USER_BODY = """\
@@ -190,6 +198,50 @@ _DEFAULTS = {
     "channel": "WhatsApp",
     "host": "mike-workstation",
 }
+
+
+async def active_record(db: Any) -> dict[str, Any] | None:
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE is_active = 1")
+    return dict(row) if row else None
+
+
+async def list_records(db: Any) -> list[dict[str, Any]]:
+    rows = await db.fetch_all("SELECT * FROM persona_records ORDER BY revision DESC")
+    return [dict(r) for r in rows] if rows else []
+
+
+async def max_revision(db: Any) -> int:
+    row = await db.fetch_one("SELECT MAX(revision) as max_rev FROM persona_records")
+    return (row["max_rev"] if row else 0) or 0
+
+
+async def record_by_id(db: Any, record_id: str) -> dict[str, Any] | None:
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE id = ?", (record_id,))
+    return dict(row) if row else None
+
+
+async def record_by_revision(db: Any, revision: int) -> dict[str, Any] | None:
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE revision = ?", (revision,))
+    return dict(row) if row else None
+
+
+async def insert_active_record(
+    db: Any, *, record_id: str, revision: int, soul: str | None,
+    identity: str | None, agents: str | None, user_content: str | None,
+    config_json: str,
+) -> None:
+    """Deactivate the current record and insert a new active revision."""
+    await db.execute("UPDATE persona_records SET is_active = 0 WHERE is_active = 1")
+    await db.execute(
+        """INSERT INTO persona_records (id, revision, soul, identity, agents, user_content, config, is_active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))""",
+        (record_id, revision, soul, identity, agents, user_content, config_json))
+
+
+async def activate_revision(db: Any, revision: int) -> None:
+    await db.execute("UPDATE persona_records SET is_active = 0 WHERE is_active = 1")
+    await db.execute(
+        "UPDATE persona_records SET is_active = 1 WHERE revision = ?", (revision,))
 
 
 def _render_from_record(row: Any) -> str:

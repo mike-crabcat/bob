@@ -84,7 +84,7 @@ def start_prewarm(
     meta = meta or {}
     # Mirror _run_realtime_call's bridge construction exactly — the session
     # config (instructions/voice/tools) must match what it would have sent.
-    ctx = AppContext(db=db, settings=settings, voice_engines=None)
+    ctx = AppContext(db=db, settings=settings)
     tools = make_realtime_tools(ctx, phone_number=phone_number)
     instructions = meta.get("instructions") or agenda
     voice = meta.get("voice") or rt.voice

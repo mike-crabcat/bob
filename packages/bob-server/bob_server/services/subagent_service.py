@@ -58,6 +58,10 @@ def _get_lock(subagent_id: str) -> asyncio.Lock:
 class SubagentService(BaseService):
     """Manages async subagent lifecycle — create, run, message, check, list, kill."""
 
+    def _repo(self):
+        from bob_server.repositories.subagents import SubagentRepository
+        return SubagentRepository(self.db)
+
     async def create_subagent(
         self,
         task: str,
@@ -80,7 +84,7 @@ class SubagentService(BaseService):
 
         requested_modality = modality
         normalised_type = _normalise_voice_agent_type(agent_type)
-        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local")):
+        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local", "script")):
             agent_type = "openai_voice"
             # Unknown modality vocabulary defaults to phone — never guess toward
             # a modality the caller didn't clearly pick... except that bare
@@ -94,14 +98,26 @@ class SubagentService(BaseService):
         session_key = f"subagent:{parent_session_key}:{short_id}"
         now = utcnow().isoformat()
 
-        await self.db.execute(
-            """INSERT INTO subagents
-               (id, parent_session_key, session_key, task, status, agent_type, persona, model,
-                contact_id, modality, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?)""",
-            (subagent_id, parent_session_key, session_key, task, agent_type,
-             int(persona), model, contact_id, modality, now, now),
-        )
+        await self._repo().insert(
+            subagent_id=subagent_id, parent_session_key=parent_session_key,
+            session_key=session_key, task=task, agent_type=agent_type,
+            persona=int(persona), model=model, contact_id=contact_id,
+            modality=modality, now_iso=now)
+
+        # Bob3 Phase V: a subagent is a goal held on behalf of the parent
+        # conversation. Completion settles the goal and wakes the parent.
+        try:
+            from bob_server.services.goal_service import create_goal
+            await create_goal(
+                self.ctx,
+                conversation_id=session_key,
+                objective=task[:2000],
+                origin_conversation_id=parent_session_key,
+                kind="call" if agent_type == "openai_voice" else "subagent",
+                external_ref=subagent_id,
+            )
+        except Exception:
+            logger.warning("failed to create goal for subagent %s", short_id, exc_info=True)
 
         # openai_voice dispatches synchronously so we can return voice_url / call_sid
         # to the LLM in the tool result. No background task — the row stays in
@@ -114,6 +130,8 @@ class SubagentService(BaseService):
                 )
             except Exception as e:
                 logger.warning("openai_voice subagent %s dispatch failed: %s", short_id, e)
+                from bob_server.services import occupancy
+                occupancy.mark_idle_by_ref(subagent_id)
                 await self._update_status(subagent_id, "failed", error=str(e))
                 return {"ok": False, "error": str(e), "subagent_id": subagent_id, "session_key": session_key}
 
@@ -139,8 +157,24 @@ class SubagentService(BaseService):
                 )
             return result
 
-        t = asyncio.create_task(self._run_subagent(subagent_id, task))
-        _running_tasks[subagent_id] = t
+        # Bob3 Phase VI item 5: the spawn is a durable effect — claude/local
+        # are executor kinds on the SpawnSubagent record. The executor starts
+        # the background run; the pump can re-deliver after a crash (the
+        # executor guards against re-spawning finished or running subagents).
+        from bob_server.services import effects as effects_svc
+        spawn = await effects_svc.emit_and_deliver(
+            self.ctx,
+            kind="subagent_spawn",
+            idempotency_key=f"subagent_spawn:{subagent_id}",
+            payload={"subagent_id": subagent_id, "task": task,
+                     "executor": agent_type,
+                     "parent_session_key": parent_session_key},
+        )
+        if not spawn.get("ok"):
+            await self._update_status(subagent_id, "failed",
+                                      error=str(spawn.get("error")))
+            return {"ok": False, "error": str(spawn.get("error")),
+                    "subagent_id": subagent_id, "session_key": session_key}
 
         logger.info("Subagent created: id=%s session=%s", short_id, session_key)
         return {
@@ -173,10 +207,7 @@ class SubagentService(BaseService):
         short_id = subagent_id[:8]
         await self._update_status(subagent_id, "running")
 
-        row = await self.db.fetch_one(
-            "SELECT agent_type, persona, session_key, model FROM subagents WHERE id = ?",
-            (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         agent_type = row["agent_type"] if row else "claude"
         session_key = row["session_key"] if row else ""
         persona = bool(row["persona"]) if row else False
@@ -196,6 +227,12 @@ class SubagentService(BaseService):
                     persona=persona,
                     model=model,
                 )
+            elif agent_type == "script":
+                from bob_server.services.session_service import SessionService
+                await SessionService(self.ctx).add_message(
+                    session_key, "user", task, channel="subagent",
+                )
+                result = await self._run_script(task)
             else:
                 workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
                 result = await self._run_claude(
@@ -206,7 +243,7 @@ class SubagentService(BaseService):
         except Exception as e:
             logger.error("Subagent %s failed: %s", short_id, e)
             await self._update_status(subagent_id, "failed", error=str(e))
-            await self._notify_parent(subagent_id, f"ERROR: {e}")
+            await self._notify_parent(subagent_id, f"ERROR: {e}", failed=True)
             _running_tasks.pop(subagent_id, None)
             return
 
@@ -215,19 +252,15 @@ class SubagentService(BaseService):
         cost = result.get("cost_usd", 0)
 
         now = utcnow().isoformat()
-        await self.db.execute(
-            """UPDATE subagents
-               SET status = 'waiting_for_parent', result = ?,
-                   claude_session_id = ?, cost_usd = ?, updated_at = ?
-               WHERE id = ?""",
-            (result_text, claude_session_id, cost, now, subagent_id),
-        )
+        await self._repo().store_result(
+            subagent_id, result=result_text, claude_session_id=claude_session_id,
+            cost_usd=cost, now_iso=now)
 
         # Store assistant message in subagent session
         # (user message already stored before execution for local, or stored here for claude)
         from bob_server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
-        if agent_type != "local":
+        if agent_type not in ("local", "script"):
             await session_svc.add_message(session_key, "user", task, channel="subagent")
         await session_svc.add_message(session_key, "assistant", result_text, channel="subagent")
 
@@ -241,9 +274,7 @@ class SubagentService(BaseService):
         _running_tasks.pop(subagent_id, None)
 
     async def message_subagent(self, subagent_id: str, message: str) -> dict[str, Any]:
-        row = await self.db.fetch_one(
-            "SELECT * FROM subagents WHERE id = ?", (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
         if row["agent_type"] == "openai_voice":
@@ -292,13 +323,9 @@ class SubagentService(BaseService):
             total_cost = (row["cost_usd"] or 0) + cost
 
             now = utcnow().isoformat()
-            await self.db.execute(
-                """UPDATE subagents
-                   SET status = 'waiting_for_parent', result = ?,
-                       claude_session_id = ?, cost_usd = ?, updated_at = ?
-                   WHERE id = ?""",
-                (result_text, claude_session_id, total_cost, now, subagent_id),
-            )
+            await self._repo().store_result(
+                subagent_id, result=result_text, claude_session_id=claude_session_id,
+                cost_usd=total_cost, now_iso=now)
 
             # Store messages in subagent session
             if agent_type != "local":
@@ -312,10 +339,7 @@ class SubagentService(BaseService):
             return {"ok": True, "result": result_text, "subagent_id": subagent_id}
 
     async def check_subagent(self, subagent_id: str) -> dict[str, Any]:
-        row = await self.db.fetch_one(
-            "SELECT id, status, result, error_message, cost_usd, task, created_at FROM subagents WHERE id = ?",
-            (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
         return {
@@ -330,16 +354,8 @@ class SubagentService(BaseService):
         }
 
     async def list_subagents(self, parent_session_key: str, status: str = "") -> list[dict[str, Any]]:
-        query = (
-            "SELECT id, status, substr(task, 1, 100) as task_preview, cost_usd, created_at "
-            "FROM subagents WHERE parent_session_key = ?"
-        )
-        params: list[str] = [parent_session_key]
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        query += " ORDER BY created_at DESC LIMIT 20"
-        rows = await self.db.fetch_all(query, tuple(params))
+        rows = await self._repo().list_for_parent(
+            parent_session_key, status=status, limit=20)
         return [
             {
                 "id": row["id"],
@@ -352,9 +368,7 @@ class SubagentService(BaseService):
         ]
 
     async def kill_subagent(self, subagent_id: str) -> dict[str, Any]:
-        row = await self.db.fetch_one(
-            "SELECT status, agent_type FROM subagents WHERE id = ?", (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
 
@@ -371,27 +385,33 @@ class SubagentService(BaseService):
 
             try:
                 now_iso = utcnow().isoformat()
-                await self.db.execute(
-                    "UPDATE voice_sessions SET status = 'expired', completed_at = ? WHERE subagent_id = ? AND status IN ('pending', 'active')",
-                    (now_iso, subagent_id),
-                )
+                from bob_server.services.voice_session_service import VoiceSessionService
+                await VoiceSessionService.from_db(self.db).expire_for_subagent(
+                    subagent_id, now_iso)
                 # Keep the phone_calls mirror row in sync (calls UI).
-                await self.db.execute(
-                    "UPDATE phone_calls SET status = 'canceled', completed_at = ? WHERE subagent_id = ? AND direction = 'voice_link' AND status IN ('ringing', 'active')",
-                    (now_iso, subagent_id),
-                )
+                from bob_server.repositories.phone_calls import PhoneCallRepository
+                await PhoneCallRepository(self.db).cancel_voice_links_for_subagent(
+                    subagent_id, now_iso)
             except Exception:
                 logger.warning("Failed to expire voice_session for killed subagent %s", subagent_id[:8], exc_info=True)
 
-            call = await self.db.fetch_one(
-                "SELECT call_sid, status FROM phone_calls WHERE subagent_id = ? ORDER BY started_at DESC LIMIT 1",
-                (subagent_id,),
-            )
+            from bob_server.repositories.phone_calls import PhoneCallRepository
+            call = await PhoneCallRepository(self.db).latest_for_subagent(subagent_id)
             if call and call["status"] in ("active", "ringing"):
                 if hangup_twilio_call(self._get_settings(), call["call_sid"]):
                     logger.info("Hung up phone call %s for killed subagent %s", call["call_sid"], subagent_id[:8])
 
         await self._update_status(subagent_id, "killed")
+        try:
+            from bob_server.repositories.goals import GoalRepository
+            goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
+            if goal and goal["status"] == "active":
+                from bob_server.services.goal_service import settle_goal
+                await settle_goal(self.ctx, goal["id"], status="cancelled",
+                                  result="subagent killed", wake_origin=False)
+        except Exception:
+            logger.warning("failed to cancel goal for killed subagent %s",
+                           subagent_id[:8], exc_info=True)
         logger.info("Subagent %s killed", subagent_id[:8])
         return {"ok": True, "subagent_id": subagent_id, "status": "killed"}
 
@@ -402,47 +422,73 @@ class SubagentService(BaseService):
         for minutes-to-hours while the contact hasn't picked up yet.
         """
         now = utcnow().isoformat()
-        count = await self.db.execute(
-            "UPDATE subagents SET status = 'failed', error_message = 'Server restarted', updated_at = ? "
-            "WHERE status IN ('created', 'running') AND agent_type != 'openai_voice'",
-            (now,),
-        )
+        count = await self._repo().fail_stale(now)
         if count:
             logger.info("Cleaned up %d stale subagents", count)
         return count
 
     # -- Internal helpers --
 
-    async def _notify_parent(self, subagent_id: str, result_text: str) -> None:
-        """Inject a subagent result message into the parent session and publish event."""
-        row = await self.db.fetch_one(
-            "SELECT parent_session_key FROM subagents WHERE id = ?",
-            (subagent_id,),
-        )
+    async def _notify_parent(
+        self, subagent_id: str, result_text: str, *, failed: bool = False,
+    ) -> None:
+        """Relay a subagent result to the parent conversation (Bob3 Phase V).
+
+        First result settles the linked goal, whose completion wakes the
+        origin conversation with the result — on any channel. Follow-up
+        results (goal already settled) wake the parent directly.
+        """
+        row = await self._repo().get(subagent_id)
         if not row:
             return
+        parent_session_key = row["parent_session_key"]
 
         short_id = subagent_id[:8]
-        content = (
-            f"[Subagent {short_id}] {result_text}\n\n"
-            f"Relay this result to the user by calling send_whatsapp_message with a summary. "
-            f"You can also use message_subagent to reply or kill_subagent to terminate."
-        )
+        if row["agent_type"] == "script":
+            content = (
+                f"[Script {short_id}] {result_text}\n\n"
+                f"This background script you started has finished. If it produced "
+                f"an artifact the user asked for (image, document, file), send it "
+                f"to them now with a short comment in your own voice. If it "
+                f"failed, tell the user plainly and decide whether to retry."
+            )
+        else:
+            content = (
+                f"[Subagent {short_id}] {result_text}\n\n"
+                f"Relay this result to the user with a summary. "
+                f"You can also use message_subagent to reply or kill_subagent to terminate."
+            )
 
-        from bob_server.services.session_service import SessionService
-        session_svc = SessionService(self.ctx)
-        await session_svc.add_message(
-            row["parent_session_key"],
-            "user",
-            content,
-            channel="subagent",
-            dispatched=0,
-        )
+        from bob_server.repositories.goals import GoalRepository
+        from bob_server.services.goal_service import settle_goal
+        from bob_server.services.wake_service import wake_conversation
+
+        settled = False
+        try:
+            goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
+            if goal and goal["status"] == "active":
+                settled = await settle_goal(
+                    self.ctx, goal["id"],
+                    status="failed" if failed else "completed",
+                    result=content,
+                )
+        except Exception:
+            logger.warning("failed to settle goal for subagent %s", short_id, exc_info=True)
+
+        if not settled:
+            try:
+                await wake_conversation(
+                    self.ctx, parent_session_key, content,
+                    call_category="subagent_result",
+                )
+            except Exception:
+                logger.exception("failed to wake parent %s for subagent %s",
+                                 parent_session_key, short_id)
 
         if self.ctx.event_bus:
             await self.ctx.event_bus.publish("subagent.result_ready", {
                 "subagent_id": subagent_id,
-                "parent_session_key": row["parent_session_key"],
+                "parent_session_key": parent_session_key,
                 "result": result_text,
             })
 
@@ -454,16 +500,7 @@ class SubagentService(BaseService):
         error: str | None = None,
     ) -> None:
         now = utcnow().isoformat()
-        if error:
-            await self.db.execute(
-                "UPDATE subagents SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
-                (status, error, now, subagent_id),
-            )
-        else:
-            await self.db.execute(
-                "UPDATE subagents SET status = ?, updated_at = ? WHERE id = ?",
-                (status, now, subagent_id),
-            )
+        await self._repo().set_status(subagent_id, status, now, error=error)
         await self._publish_event(subagent_id, status)
 
     async def _publish_event(self, subagent_id: str, status: str) -> None:
@@ -472,6 +509,51 @@ class SubagentService(BaseService):
                 "subagent_id": subagent_id,
                 "status": status,
             })
+
+    async def _run_script(self, command: str) -> dict[str, Any]:
+        """Run a shell command in the workspace as a background job (Bob3:
+        async skill execution). Same sandbox and skill env as the bash tool;
+        the parent conversation is woken with the output when it finishes."""
+        from bob_server.services.skill_env import build_skill_env
+        from bob_server.services.workspace_tools import _check_command_safety
+
+        settings = self._get_settings()
+        workspace = settings.harness.workspace_dir.expanduser().resolve()
+        violation = _check_command_safety(
+            command,
+            db_path=settings.db_path,
+            data_dir=settings.data_dir,
+            config_dir=settings.config_dir,
+        )
+        if violation:
+            raise RuntimeError(f"script blocked by sandbox: {violation}")
+
+        venv_dir = settings.harness.venv_dir.expanduser()
+        logger.info("script subagent: %s", command)
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", command,
+            cwd=str(workspace),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RuntimeError("script timed out after 900s")
+
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        parts = [f"exit_code={proc.returncode}"]
+        if out:
+            parts.append(f"stdout:\n{out[-4000:]}")
+        if err:
+            parts.append(f"stderr:\n{err[-2000:]}")
+        result_text = "\n".join(parts)
+        if proc.returncode != 0:
+            raise RuntimeError(f"script failed: {result_text}")
+        return {"result": result_text, "cost_usd": 0.0, "session_id": ""}
 
     async def _run_local(
         self,
@@ -582,3 +664,31 @@ class SubagentService(BaseService):
             return json.loads(output)
         except json.JSONDecodeError:
             return {"result": output, "session_id": "", "cost_usd": 0}
+
+
+def _register_spawn_executor() -> None:
+    """SpawnSubagent effect executor (Bob3 Phase VI item 5): claude/local are
+    executor kinds on the durable spawn record. Starts the background run and
+    returns immediately; guards against re-spawning on pump re-delivery."""
+    from bob_server.services import effects as effects_svc
+
+    async def _exec_spawn(ctx, payload):
+        subagent_id = payload["subagent_id"]
+        from bob_server.repositories.subagents import SubagentRepository
+        sub_status = await SubagentRepository(ctx.db).status_of(subagent_id)
+        if sub_status is None:
+            raise RuntimeError(f"subagent {subagent_id} not found")
+        if sub_status not in ("created", "running"):
+            return subagent_id  # already finished — idempotent re-delivery
+        existing = _running_tasks.get(subagent_id)
+        if existing is not None and not existing.done():
+            return subagent_id  # run already in flight
+        svc = SubagentService(ctx)
+        t = asyncio.create_task(svc._run_subagent(subagent_id, payload.get("task", "")))
+        _running_tasks[subagent_id] = t
+        return subagent_id
+
+    effects_svc.register_executor("subagent_spawn", _exec_spawn)
+
+
+_register_spawn_executor()

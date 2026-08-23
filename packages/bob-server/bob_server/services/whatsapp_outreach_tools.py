@@ -48,18 +48,13 @@ def make_whatsapp_outreach_tools(
         e.g. "Find out if John can meet on Thursday and what time works." The target
         session will be instructed to work toward this objective and report back when complete.
         Optionally attach an image or media file by providing media_path."""
-        from bob_server.exceptions import ConflictError
-        from bob_server.models import SessionRouteCreate, SessionRouteKind
-        from bob_server.services.session_route_service import SessionRouteService
         from bob_server.services.session_service import SessionService
 
         db = ctx.db
 
         # Look up contact
-        contact = await db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE id = ? AND deleted_at IS NULL",
-            (contact_id,),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(db).get(contact_id)
         if contact is None:
             return json.dumps({"ok": False, "error": "Contact not found"})
 
@@ -94,51 +89,41 @@ def make_whatsapp_outreach_tools(
 
         # Derive requestor name from current session context
         requestor_name = "the agent"
-        current_route = await db.fetch_one(
-            "SELECT contact_id FROM session_routes WHERE session_key = ?",
-            (current_session_key,),
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        current_route = await ConversationRepository(db).route_for(current_session_key)
         if current_route and current_route.get("contact_id"):
-            requestor = await db.fetch_one(
-                "SELECT name FROM contacts WHERE id = ?",
-                (current_route["contact_id"],),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            requestor = await ContactRepository(db).get(current_route["contact_id"])
             if requestor:
                 requestor_name = requestor["name"]
 
-        # Create or update session route with outreach metadata
-        outreach_meta = {
-            "outreach_initiated_from": current_session_key,
-            "outreach_objective": objective,
-            "outreach_requestor": requestor_name,
-            "outreach_message": message,
-        }
-        route_service = SessionRouteService(ctx)
+        # Bob3 Phase V + Increment 3: outreach state lives ON the goal
+        # (strategy carries requestor/message for the target-side prompt).
+        # A 24h deadline wakeup resurfaces unanswered outreach in the origin
+        # conversation.
+        goal_id = None
         try:
-            await route_service.create_route(SessionRouteCreate(
-                channel="whatsapp",
-                session_key=target_session_key,
-                kind=SessionRouteKind.DM,
-                contact_id=contact["id"],
-                metadata=outreach_meta,
-            ))
-        except ConflictError:
-            # Route exists — update metadata with outreach info
-            existing = await db.fetch_one(
-                "SELECT metadata FROM session_routes WHERE session_key = ?",
-                (target_session_key,),
+            from datetime import datetime, timedelta, timezone
+
+            from bob_server.services.goal_service import create_goal
+            phone_digits_g = re.sub(r"\D", "", phone)
+            goal = await create_goal(
+                ctx,
+                conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
+                objective=objective,
+                origin_conversation_id=current_session_key,
+                kind="outreach",
+                strategy={"requestor": requestor_name, "message": message},
+                deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
             )
-            meta = {}
-            if existing and existing["metadata"]:
-                try:
-                    meta = json.loads(existing["metadata"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            meta.update(outreach_meta)
-            await db.execute(
-                "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
-                (json.dumps(meta), target_session_key),
-            )
+            goal_id = goal["id"]
+        except Exception:
+            logger.warning("failed to create outreach goal", exc_info=True)
+
+        # Ensure the target DM binding exists (no outreach state on it).
+        from bob_server.repositories.conversations import ConversationRepository
+        await ConversationRepository(db).register_endpoint(
+            target_session_key, endpoint_kind="dm", contact_id=str(contact["id"]))
 
         # Store the outreach message in target session history as assistant (bob sent it)
         session_service = SessionService(ctx)
@@ -151,17 +136,11 @@ def make_whatsapp_outreach_tools(
         # Upsert the contact as a participant in the target session
         from bob_server.services.base import utcnow
         now_iso = utcnow().isoformat()
-        await db.execute(
-            """INSERT INTO session_participants (session_key, identifier, display_name, contact_id, is_trusted, last_active_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(session_key, identifier) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   contact_id = COALESCE(excluded.contact_id, session_participants.contact_id),
-                   is_trusted = CASE WHEN excluded.contact_id IS NOT NULL THEN excluded.is_trusted ELSE session_participants.is_trusted END,
-                   last_active_at = excluded.last_active_at""",
-            (target_session_key, phone, contact["name"],
-             contact["id"], 1, now_iso),
-        )
+        from bob_server.repositories.participants import ParticipantRepository
+        await ParticipantRepository(db).upsert(
+            target_session_key, phone,
+            display_name=contact["name"], contact_id=contact["id"],
+            is_trusted=True, now_iso=now_iso)
 
         logger.info(
             "Outreach sent to %s (%s) session=%s request=%s objective=%s",
@@ -212,10 +191,8 @@ def make_whatsapp_outreach_tools(
         db = ctx.db
 
         # Look up contact by name
-        contact = await db.fetch_one(
-            "SELECT id, name, phone_number FROM contacts WHERE name LIKE ? AND deleted_at IS NULL LIMIT 1",
-            (f"%{contact_name}%",),
-        )
+        from bob_server.repositories.contacts import ContactRepository
+        contact = await ContactRepository(db).search_by_name(f"%{contact_name}%")
         if contact is None:
             return json.dumps({"ok": False, "error": f"No contact found matching '{contact_name}'"})
 
@@ -280,53 +257,30 @@ def make_outreach_reply_tools(
         Call when you have achieved the objective or obtained the requested information.
         The result will be dispatched to the originating session, which will decide
         how to handle it (potentially messaging the requesting contact)."""
-        from bob_server.services.session_service import SessionService
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
-        from bob_server.services.workspace_tools import make_workspace_tools
-        from bob_server.services.tools import Tool
-        from bob_server.services.session_agenda_service import SessionAgendaService
+        from bob_server.services.goal_service import settle_goal
+        from bob_server.services.wake_service import wake_conversation
 
         db = ctx.db
 
-        # Find originating session and outreach metadata from route
-        route = await db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
-            (current_session_key,),
-        )
-        if not route or not route["metadata"]:
+        # The active outreach goal held by this conversation IS the state.
+        from bob_server.repositories.goals import GoalRepository
+        goal = await GoalRepository(db).active_outreach(current_session_key)
+        if not goal or not goal["origin_conversation_id"]:
             return json.dumps({"ok": False, "error": "No active outreach to report"})
 
-        meta = json.loads(route["metadata"])
-        origin_session_key = meta.get("outreach_initiated_from")
-        if not origin_session_key:
-            return json.dumps({"ok": False, "error": "No active outreach to report"})
-
-        objective = meta.get("outreach_objective", "unknown")
-        requestor = meta.get("outreach_requestor", "unknown")
+        origin_session_key = goal["origin_conversation_id"]
+        objective = goal["objective"] or "unknown"
+        goal_id = goal["id"]
+        try:
+            strategy = json.loads(goal["strategy_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            strategy = {}
+        requestor = strategy.get("requestor", "unknown")
 
         # Look up target contact name for context
-        target_contact = await db.fetch_one(
-            "SELECT c.name FROM session_routes sr "
-            "JOIN contacts c ON c.id = sr.contact_id AND c.deleted_at IS NULL "
-            "WHERE sr.session_key = ?",
-            (current_session_key,),
-        )
-        target_contact_name = target_contact["name"] if target_contact else "unknown"
-
-        # Clear outreach metadata from route
-        meta.pop("outreach_initiated_from", None)
-        meta.pop("outreach_objective", None)
-        meta.pop("outreach_requestor", None)
-        meta.pop("outreach_message", None)
-        await db.execute(
-            "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
-            (json.dumps(meta) if meta else None, current_session_key),
-        )
-
-        # Build result content for source session
-        origin_chat_id = _session_key_to_chat_id(origin_session_key)
-        settings = ctx.settings
+        from bob_server.repositories.conversations import ConversationRepository
+        target_contact_name = await ConversationRepository(db).contact_name_for(
+            current_session_key) or "unknown"
 
         result_content = (
             f"## Outreach Result\n"
@@ -336,96 +290,26 @@ def make_outreach_reply_tools(
             f"{result}"
         )
 
-        # Store result in source session's message history
-        session_svc = SessionService(ctx)
-        await session_svc.add_message(
-            origin_session_key, "user", result_content,
-            channel="whatsapp",
-            metadata={"outreach_result": True, "source_session": current_session_key},
-        )
-
-        # Dispatch an LLM call in the source session to receive the result
-        agenda_svc = SessionAgendaService(ctx)
-        origin_agenda = await agenda_svc.get_effective_agenda(
-            origin_session_key, "whatsapp",
-        )
-
-        workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=db)
-        system_content = "\n\n".join(
-            p for p in (workspace_prompt, origin_agenda) if p
-        )
-
-        messages = await build_chat_messages(
-            result_content,
-            origin_session_key,
-            db=db,
-            system_content=system_content,
-            max_history=20,
-        )
-
-        # Build tools for source session
-        origin_tools = make_workspace_tools(ctx, session_key=origin_session_key)
-
-        message_was_sent = [False]
-
-        async def _send_reply(text: str) -> str:
-            message_was_sent[0] = True
-            if text.strip().upper() == "NO_REPLY":
-                return "No reply sent."
-            text = strip_citation_markers(text)
-            if not origin_chat_id:
-                return "Error: cannot resolve chat for source session"
-            if not wa_service.connected:
-                return "Error: WhatsApp bridge not connected"
-            await wa_service.send_message(origin_chat_id, text)
-            return "Message sent"
-
-        origin_tools.append(Tool(
-            name="send_whatsapp_message",
-            description=(
-                "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent."
-            ),
-            parameters={"text": {"type": "string", "description": "The message text to send."}},
-            required=["text"],
-            handler=_send_reply,
-        ))
-
-        dispatch_id = str(uuid4())
-
-        async def _run_dispatch() -> str:
-            llm_result = await LLMDispatchService(ctx).chat_with_tools(
-                messages, origin_tools,
+        # Bob3 Phase V: settling the goal wakes the origin conversation with
+        # the result (any channel). Legacy outreach without a goal wakes
+        # the origin directly.
+        settled = False
+        if goal_id:
+            try:
+                settled = await settle_goal(
+                    ctx, goal_id, status="completed", result=result_content,
+                )
+            except Exception:
+                logger.warning("failed to settle outreach goal %s", goal_id, exc_info=True)
+        if not settled:
+            await wake_conversation(
+                ctx, origin_session_key, result_content,
                 call_category="outreach_result",
-                session_key=origin_session_key,
-                dispatch_id=dispatch_id,
+                metadata={"outreach_result": True, "source_session": current_session_key},
             )
-
-            # Tap: if LLM didn't use send_whatsapp_message, give it a second chance.
-            if not message_was_sent[0] and llm_result.strip():
-                from bob_server.services.tap import tap_dispatch, tap_enabled
-                if tap_enabled():
-                    llm_result = await tap_dispatch(
-                        ctx, messages=messages, tools=origin_tools,
-                        session_key=origin_session_key,
-                        send_tool_name="send_whatsapp_message",
-                        first_result=llm_result,
-                        call_category="outreach_result",
-                        dispatch_id=dispatch_id,
-                    )
-
-            # Record in source session history
-            await session_svc.add_message(
-                origin_session_key, "assistant", llm_result,
-                channel="whatsapp",
-            )
-
-            return llm_result
-
-        asyncio.create_task(_run_dispatch())
 
         logger.info(
-            "Outreach finished from %s to %s, dispatching result to source session",
+            "Outreach finished from %s to %s, result relayed via wake path",
             current_session_key, origin_session_key,
         )
 

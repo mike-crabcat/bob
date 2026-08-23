@@ -36,10 +36,8 @@ async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only
         from bob_server.services.llm_dispatch import LLMDispatchService
 
         if all:
-            rows = await db.fetch_all(
-                "SELECT entity_id FROM memory_entities WHERE status = 'active'"
-            )
-            entity_ids = [r["entity_id"] for r in rows]
+            from bob_server.services.memory import admin as memory_admin
+            entity_ids = await memory_admin.all_active_entity_ids(db)
 
         if not entity_ids:
             typer.echo("No entity IDs specified. Use --all or provide entity IDs.")

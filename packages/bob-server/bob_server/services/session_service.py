@@ -40,7 +40,9 @@ class SessionService(BaseService):
         dispatched: int = 1,
         dispatch_id: str | None = None,
         synthetic: bool | None = None,
+        provenance: str | None = None,
         message_id: str | None = None,
+        txn: Any | None = None,
     ) -> str:
         """Store a message. Returns the message ID.
 
@@ -56,6 +58,10 @@ class SessionService(BaseService):
         ``message_id`` lets a caller pre-set the id (e.g. a silent extraction
         turn that threads its own message id as claim provenance before the
         message row exists). Defaults to a freshly generated uuid.
+
+        ``txn`` (a ``Database.transaction`` executor) makes the insert part
+        of a caller-owned atomic unit — used at ingress to compose message
+        persistence with the event-log append (Bob3 invariant 2).
         """
         tool_summary: str | None = None
         tool_blocks_json: str | None = None
@@ -71,22 +77,29 @@ class SessionService(BaseService):
                 synthetic = False
         msg_id = message_id or str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
-        await self.db.execute(
-            """INSERT INTO session_messages
-               (id, session_key, role, content, sender_id, channel, metadata,
-                dispatched, synthetic, tool_summary, tool_blocks_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, session_key, role, content, sender_id, channel, meta_json,
-             dispatched, 1 if synthetic else 0, tool_summary, tool_blocks_json),
+        # Canonical conversation id via bindings; the raw key is preserved as
+        # binding_key (which endpoint the message rode).
+        from bob_server.repositories.conversations import ConversationRepository
+        conversation_id = await ConversationRepository(self.db).resolve_cid(
+            session_key, txn=txn)
+        await (txn or self.db).execute(
+            """INSERT INTO messages
+               (id, conversation_id, binding_key, role, content, sender_id, channel, metadata,
+                dispatched, synthetic, provenance, tool_summary, tool_blocks_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, conversation_id, session_key, role, content, sender_id, channel, meta_json,
+             dispatched, 1 if synthetic else 0, provenance, tool_summary, tool_blocks_json),
         )
         return msg_id
 
     async def mark_dispatched(self, session_key: str) -> int:
         """Mark all undispatched user messages as dispatched. Returns count marked."""
+        from bob_server.repositories.history import HistoryRepository
+        cid = await HistoryRepository(self.db)._cid(session_key)
         count = await self.db.execute(
-            "UPDATE session_messages SET dispatched = 1 "
-            "WHERE session_key = ? AND dispatched = 0 AND role = 'user'",
-            (session_key,),
+            "UPDATE messages SET dispatched = 1 "
+            "WHERE conversation_id = ? AND dispatched = 0 AND role = 'user'",
+            (cid,),
         )
         return count
 
@@ -98,28 +111,17 @@ class SessionService(BaseService):
         roles: list[str] | None = None,
     ) -> list[SessionMessage]:
         """Retrieve messages for a session, oldest first."""
-        if roles:
-            placeholders = ",".join("?" for _ in roles)
-            rows = await self.db.fetch_all(
-                f"SELECT * FROM session_messages "
-                f"WHERE session_key = ? AND role IN ({placeholders}) "
-                f"ORDER BY created_at ASC LIMIT ?",
-                (session_key, *roles, limit),
-            )
-        else:
-            rows = await self.db.fetch_all(
-                "SELECT * FROM session_messages "
-                "WHERE session_key = ? ORDER BY created_at ASC LIMIT ?",
-                (session_key, limit),
-            )
-
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).messages(
+            session_key, limit=limit, roles=roles)
         return [self._row_to_message(r) for r in rows]
 
     async def delete_session(self, session_key: str) -> None:
-        """Delete all messages for a session."""
+        """Delete all messages for a session (conversation-wide)."""
+        from bob_server.repositories.history import HistoryRepository
         await self.db.execute(
-            "DELETE FROM session_messages WHERE session_key = ?",
-            (session_key,),
+            "DELETE FROM messages WHERE conversation_id = ?",
+            (await HistoryRepository(self.db)._cid(session_key),),
         )
 
     def _row_to_message(self, row: Any) -> SessionMessage:

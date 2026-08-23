@@ -25,13 +25,19 @@ from bob_server.heartbeat import (
     EmailSyncTask,
     HeartbeatRunner,
     LLMCallStalenessTask,
+    LlmLogRetentionTask,
+    EventLogReconciliationTask,
+    AttentionShadowAgreementTask,
+    EffectPumpTask,
+    WakeupPumpTask,
+    DeletionPropagationTask,
+    GrowthMonitoringTask,
     LocationFetchTask,
     MemoryReconciliationTask,
     SessionIdleSummaryTask,
 )
-from bob_server.services.routine_scheduler import RoutineSchedulerTask
 from bob_server.models import HealthResponse
-from bob_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, persona, session_routes, webhooks, whatsapp
+from bob_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, persona, webhooks, whatsapp
 from bob_server.services.event_bus import EventBus
 from bob_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
@@ -86,22 +92,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app_ctx.event_bus = event_bus
         app.state.event_bus = event_bus
 
-        # Voice engines are constructed cheaply; GPU models load lazily on the
-        # first legacy /voice/ws connection (realtime calls do STT/TTS at
-        # OpenAI). BOB_VOICE_PRELOAD=true restores eager startup loading.
-        if resolved_settings.voice.enabled:
-            try:
-                from bob_server.services.voice_engines import VoiceEngineManager
-
-                voice_engines = VoiceEngineManager(resolved_settings.voice)
-                if resolved_settings.voice.preload:
-                    await voice_engines.ensure_ready()
-                app.state.voice_engines = voice_engines
-                app_ctx.voice_engines = voice_engines
-            except Exception:
-                logger.exception("Voice engine init failed — disabling voice")
-                resolved_settings.voice.enabled = False
-
         # Conditional WhatsApp bridge service
         wa_bridge_service = None
         if resolved_settings.whatsapp_bridge.enabled:
@@ -120,10 +110,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(EmailPollingTask())
         runner.register(EmailSyncTask())
         runner.register(CallCleanupTask())
+        runner.register(LlmLogRetentionTask())
+        runner.register(EventLogReconciliationTask())
+        runner.register(AttentionShadowAgreementTask())
+        runner.register(EffectPumpTask())
+        runner.register(WakeupPumpTask())
+        runner.register(DeletionPropagationTask())
+        runner.register(GrowthMonitoringTask())
         runner.register(SessionIdleSummaryTask())
         runner.register(LLMCallStalenessTask())
         runner.register(LocationFetchTask())
-        runner.register(RoutineSchedulerTask())
         runner.register(MemoryReconciliationTask())
         runner.register(DreamTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
@@ -183,7 +179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(calendars.router)
     app.include_router(context.router)
-    app.include_router(session_routes.router)
+
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
     app.include_router(persona.router, prefix="/api/v1")

@@ -10,59 +10,37 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
-import { Route as SkillsIndexRouteImport } from './routes/skills/index'
-import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
-import { Route as PhoneIndexRouteImport } from './routes/phone/index'
-import { Route as PersonaIndexRouteImport } from './routes/persona/index'
-import { Route as MemoryIndexRouteImport } from './routes/memory/index'
-import { Route as DreamsIndexRouteImport } from './routes/dreams/index'
+import { Route as GoalsRouteImport } from './routes/goals'
+import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as ContactsIndexRouteImport } from './routes/contacts/index'
-import { Route as SkillsDelegationIdRouteImport } from './routes/skills/$delegationId'
-import { Route as SessionsSessionKeyRouteImport } from './routes/sessions/$sessionKey'
 import { Route as ContactsContactIdRouteImport } from './routes/contacts/$contactId'
-import { Route as SessionsSessionKeyIndexRouteImport } from './routes/sessions/$sessionKey/index'
+import { Route as ConversationsIndexRouteImport } from './routes/conversations/index'
+import { Route as ConversationsSessionKeyRouteImport } from './routes/conversations/$sessionKey'
+import { Route as DreamsIndexRouteImport } from './routes/dreams/index'
+import { Route as MemoryIndexRouteImport } from './routes/memory/index'
+import { Route as PersonaIndexRouteImport } from './routes/persona/index'
+import { Route as PhoneIndexRouteImport } from './routes/phone/index'
+import { Route as SessionsSplatRouteImport } from './routes/sessions.$'
+import { Route as SkillsIndexRouteImport } from './routes/skills/index'
+import { Route as SkillsDelegationIdRouteImport } from './routes/skills/$delegationId'
+import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
+import { Route as ConversationsSessionKeyIndexRouteImport } from './routes/conversations/$sessionKey/index'
 import { Route as PhoneCallIdIndexRouteImport } from './routes/phone/$callId/index'
-import { Route as SessionsSessionKeyCallsCallIdRouteImport } from './routes/sessions/$sessionKey/calls/$callId'
+import { Route as ConversationsSessionKeyCallsCallIdRouteImport } from './routes/conversations/$sessionKey/calls/$callId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
-  id: '/workspace/',
-  path: '/workspace/',
+const GoalsRoute = GoalsRouteImport.update({
+  id: '/goals',
+  path: '/goals',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SkillsIndexRoute = SkillsIndexRouteImport.update({
-  id: '/skills/',
-  path: '/skills/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SessionsIndexRoute = SessionsIndexRouteImport.update({
-  id: '/sessions/',
-  path: '/sessions/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PhoneIndexRoute = PhoneIndexRouteImport.update({
-  id: '/phone/',
-  path: '/phone/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PersonaIndexRoute = PersonaIndexRouteImport.update({
-  id: '/persona/',
-  path: '/persona/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const MemoryIndexRoute = MemoryIndexRouteImport.update({
-  id: '/memory/',
-  path: '/memory/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DreamsIndexRoute = DreamsIndexRouteImport.update({
-  id: '/dreams/',
-  path: '/dreams/',
+const SessionsRoute = SessionsRouteImport.update({
+  id: '/sessions',
+  path: '/sessions',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContactsIndexRoute = ContactsIndexRouteImport.update({
@@ -70,153 +48,214 @@ const ContactsIndexRoute = ContactsIndexRouteImport.update({
   path: '/contacts/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SkillsDelegationIdRoute = SkillsDelegationIdRouteImport.update({
-  id: '/skills/$delegationId',
-  path: '/skills/$delegationId',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SessionsSessionKeyRoute = SessionsSessionKeyRouteImport.update({
-  id: '/sessions/$sessionKey',
-  path: '/sessions/$sessionKey',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ContactsContactIdRoute = ContactsContactIdRouteImport.update({
   id: '/contacts/$contactId',
   path: '/contacts/$contactId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SessionsSessionKeyIndexRoute = SessionsSessionKeyIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => SessionsSessionKeyRoute,
+const ConversationsIndexRoute = ConversationsIndexRouteImport.update({
+  id: '/conversations/',
+  path: '/conversations/',
+  getParentRoute: () => rootRouteImport,
 } as any)
+const ConversationsSessionKeyRoute = ConversationsSessionKeyRouteImport.update({
+  id: '/conversations/$sessionKey',
+  path: '/conversations/$sessionKey',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DreamsIndexRoute = DreamsIndexRouteImport.update({
+  id: '/dreams/',
+  path: '/dreams/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MemoryIndexRoute = MemoryIndexRouteImport.update({
+  id: '/memory/',
+  path: '/memory/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PersonaIndexRoute = PersonaIndexRouteImport.update({
+  id: '/persona/',
+  path: '/persona/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PhoneIndexRoute = PhoneIndexRouteImport.update({
+  id: '/phone/',
+  path: '/phone/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SessionsSplatRoute = SessionsSplatRouteImport.update({
+  id: '/$',
+  path: '/$',
+  getParentRoute: () => SessionsRoute,
+} as any)
+const SkillsIndexRoute = SkillsIndexRouteImport.update({
+  id: '/skills/',
+  path: '/skills/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsDelegationIdRoute = SkillsDelegationIdRouteImport.update({
+  id: '/skills/$delegationId',
+  path: '/skills/$delegationId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
+  id: '/workspace/',
+  path: '/workspace/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConversationsSessionKeyIndexRoute =
+  ConversationsSessionKeyIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => ConversationsSessionKeyRoute,
+  } as any)
 const PhoneCallIdIndexRoute = PhoneCallIdIndexRouteImport.update({
   id: '/phone/$callId/',
   path: '/phone/$callId/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SessionsSessionKeyCallsCallIdRoute =
-  SessionsSessionKeyCallsCallIdRouteImport.update({
+const ConversationsSessionKeyCallsCallIdRoute =
+  ConversationsSessionKeyCallsCallIdRouteImport.update({
     id: '/calls/$callId',
     path: '/calls/$callId',
-    getParentRoute: () => SessionsSessionKeyRoute,
+    getParentRoute: () => ConversationsSessionKeyRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/goals': typeof GoalsRoute
+  '/sessions': typeof SessionsRouteWithChildren
   '/contacts/$contactId': typeof ContactsContactIdRoute
-  '/sessions/$sessionKey': typeof SessionsSessionKeyRouteWithChildren
+  '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
+  '/sessions/$': typeof SessionsSplatRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
+  '/conversations/': typeof ConversationsIndexRoute
   '/dreams/': typeof DreamsIndexRoute
   '/memory/': typeof MemoryIndexRoute
   '/persona/': typeof PersonaIndexRoute
   '/phone/': typeof PhoneIndexRoute
-  '/sessions/': typeof SessionsIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
+  '/conversations/$sessionKey/': typeof ConversationsSessionKeyIndexRoute
   '/phone/$callId/': typeof PhoneCallIdIndexRoute
-  '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
-  '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
+  '/conversations/$sessionKey/calls/$callId': typeof ConversationsSessionKeyCallsCallIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/goals': typeof GoalsRoute
+  '/sessions': typeof SessionsRouteWithChildren
   '/contacts/$contactId': typeof ContactsContactIdRoute
+  '/sessions/$': typeof SessionsSplatRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts': typeof ContactsIndexRoute
+  '/conversations': typeof ConversationsIndexRoute
   '/dreams': typeof DreamsIndexRoute
   '/memory': typeof MemoryIndexRoute
   '/persona': typeof PersonaIndexRoute
   '/phone': typeof PhoneIndexRoute
-  '/sessions': typeof SessionsIndexRoute
   '/skills': typeof SkillsIndexRoute
   '/workspace': typeof WorkspaceIndexRoute
+  '/conversations/$sessionKey': typeof ConversationsSessionKeyIndexRoute
   '/phone/$callId': typeof PhoneCallIdIndexRoute
-  '/sessions/$sessionKey': typeof SessionsSessionKeyIndexRoute
-  '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
+  '/conversations/$sessionKey/calls/$callId': typeof ConversationsSessionKeyCallsCallIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/goals': typeof GoalsRoute
+  '/sessions': typeof SessionsRouteWithChildren
   '/contacts/$contactId': typeof ContactsContactIdRoute
-  '/sessions/$sessionKey': typeof SessionsSessionKeyRouteWithChildren
+  '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
+  '/sessions/$': typeof SessionsSplatRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
+  '/conversations/': typeof ConversationsIndexRoute
   '/dreams/': typeof DreamsIndexRoute
   '/memory/': typeof MemoryIndexRoute
   '/persona/': typeof PersonaIndexRoute
   '/phone/': typeof PhoneIndexRoute
-  '/sessions/': typeof SessionsIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
+  '/conversations/$sessionKey/': typeof ConversationsSessionKeyIndexRoute
   '/phone/$callId/': typeof PhoneCallIdIndexRoute
-  '/sessions/$sessionKey/': typeof SessionsSessionKeyIndexRoute
-  '/sessions/$sessionKey/calls/$callId': typeof SessionsSessionKeyCallsCallIdRoute
+  '/conversations/$sessionKey/calls/$callId': typeof ConversationsSessionKeyCallsCallIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/goals'
+    | '/sessions'
     | '/contacts/$contactId'
-    | '/sessions/$sessionKey'
+    | '/conversations/$sessionKey'
+    | '/sessions/$'
     | '/skills/$delegationId'
     | '/contacts/'
+    | '/conversations/'
     | '/dreams/'
     | '/memory/'
     | '/persona/'
     | '/phone/'
-    | '/sessions/'
     | '/skills/'
     | '/workspace/'
+    | '/conversations/$sessionKey/'
     | '/phone/$callId/'
-    | '/sessions/$sessionKey/'
-    | '/sessions/$sessionKey/calls/$callId'
+    | '/conversations/$sessionKey/calls/$callId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/goals'
+    | '/sessions'
     | '/contacts/$contactId'
+    | '/sessions/$'
     | '/skills/$delegationId'
     | '/contacts'
+    | '/conversations'
     | '/dreams'
     | '/memory'
     | '/persona'
     | '/phone'
-    | '/sessions'
     | '/skills'
     | '/workspace'
+    | '/conversations/$sessionKey'
     | '/phone/$callId'
-    | '/sessions/$sessionKey'
-    | '/sessions/$sessionKey/calls/$callId'
+    | '/conversations/$sessionKey/calls/$callId'
   id:
     | '__root__'
     | '/'
+    | '/goals'
+    | '/sessions'
     | '/contacts/$contactId'
-    | '/sessions/$sessionKey'
+    | '/conversations/$sessionKey'
+    | '/sessions/$'
     | '/skills/$delegationId'
     | '/contacts/'
+    | '/conversations/'
     | '/dreams/'
     | '/memory/'
     | '/persona/'
     | '/phone/'
-    | '/sessions/'
     | '/skills/'
     | '/workspace/'
+    | '/conversations/$sessionKey/'
     | '/phone/$callId/'
-    | '/sessions/$sessionKey/'
-    | '/sessions/$sessionKey/calls/$callId'
+    | '/conversations/$sessionKey/calls/$callId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  GoalsRoute: typeof GoalsRoute
+  SessionsRoute: typeof SessionsRouteWithChildren
   ContactsContactIdRoute: typeof ContactsContactIdRoute
-  SessionsSessionKeyRoute: typeof SessionsSessionKeyRouteWithChildren
+  ConversationsSessionKeyRoute: typeof ConversationsSessionKeyRouteWithChildren
   SkillsDelegationIdRoute: typeof SkillsDelegationIdRoute
   ContactsIndexRoute: typeof ContactsIndexRoute
+  ConversationsIndexRoute: typeof ConversationsIndexRoute
   DreamsIndexRoute: typeof DreamsIndexRoute
   MemoryIndexRoute: typeof MemoryIndexRoute
   PersonaIndexRoute: typeof PersonaIndexRoute
   PhoneIndexRoute: typeof PhoneIndexRoute
-  SessionsIndexRoute: typeof SessionsIndexRoute
   SkillsIndexRoute: typeof SkillsIndexRoute
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
   PhoneCallIdIndexRoute: typeof PhoneCallIdIndexRoute
@@ -231,53 +270,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/workspace/': {
-      id: '/workspace/'
-      path: '/workspace'
-      fullPath: '/workspace/'
-      preLoaderRoute: typeof WorkspaceIndexRouteImport
+    '/goals': {
+      id: '/goals'
+      path: '/goals'
+      fullPath: '/goals'
+      preLoaderRoute: typeof GoalsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/skills/': {
-      id: '/skills/'
-      path: '/skills'
-      fullPath: '/skills/'
-      preLoaderRoute: typeof SkillsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/sessions/': {
-      id: '/sessions/'
+    '/sessions': {
+      id: '/sessions'
       path: '/sessions'
-      fullPath: '/sessions/'
-      preLoaderRoute: typeof SessionsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/phone/': {
-      id: '/phone/'
-      path: '/phone'
-      fullPath: '/phone/'
-      preLoaderRoute: typeof PhoneIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/persona/': {
-      id: '/persona/'
-      path: '/persona'
-      fullPath: '/persona/'
-      preLoaderRoute: typeof PersonaIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/memory/': {
-      id: '/memory/'
-      path: '/memory'
-      fullPath: '/memory/'
-      preLoaderRoute: typeof MemoryIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dreams/': {
-      id: '/dreams/'
-      path: '/dreams'
-      fullPath: '/dreams/'
-      preLoaderRoute: typeof DreamsIndexRouteImport
+      fullPath: '/sessions'
+      preLoaderRoute: typeof SessionsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/contacts/': {
@@ -287,20 +291,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ContactsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/skills/$delegationId': {
-      id: '/skills/$delegationId'
-      path: '/skills/$delegationId'
-      fullPath: '/skills/$delegationId'
-      preLoaderRoute: typeof SkillsDelegationIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/sessions/$sessionKey': {
-      id: '/sessions/$sessionKey'
-      path: '/sessions/$sessionKey'
-      fullPath: '/sessions/$sessionKey'
-      preLoaderRoute: typeof SessionsSessionKeyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/contacts/$contactId': {
       id: '/contacts/$contactId'
       path: '/contacts/$contactId'
@@ -308,12 +298,82 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ContactsContactIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/sessions/$sessionKey/': {
-      id: '/sessions/$sessionKey/'
+    '/conversations/': {
+      id: '/conversations/'
+      path: '/conversations'
+      fullPath: '/conversations/'
+      preLoaderRoute: typeof ConversationsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/conversations/$sessionKey': {
+      id: '/conversations/$sessionKey'
+      path: '/conversations/$sessionKey'
+      fullPath: '/conversations/$sessionKey'
+      preLoaderRoute: typeof ConversationsSessionKeyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dreams/': {
+      id: '/dreams/'
+      path: '/dreams'
+      fullPath: '/dreams/'
+      preLoaderRoute: typeof DreamsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/memory/': {
+      id: '/memory/'
+      path: '/memory'
+      fullPath: '/memory/'
+      preLoaderRoute: typeof MemoryIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/persona/': {
+      id: '/persona/'
+      path: '/persona'
+      fullPath: '/persona/'
+      preLoaderRoute: typeof PersonaIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/phone/': {
+      id: '/phone/'
+      path: '/phone'
+      fullPath: '/phone/'
+      preLoaderRoute: typeof PhoneIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sessions/$': {
+      id: '/sessions/$'
+      path: '/$'
+      fullPath: '/sessions/$'
+      preLoaderRoute: typeof SessionsSplatRouteImport
+      parentRoute: typeof SessionsRoute
+    }
+    '/skills/': {
+      id: '/skills/'
+      path: '/skills'
+      fullPath: '/skills/'
+      preLoaderRoute: typeof SkillsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills/$delegationId': {
+      id: '/skills/$delegationId'
+      path: '/skills/$delegationId'
+      fullPath: '/skills/$delegationId'
+      preLoaderRoute: typeof SkillsDelegationIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workspace/': {
+      id: '/workspace/'
+      path: '/workspace'
+      fullPath: '/workspace/'
+      preLoaderRoute: typeof WorkspaceIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/conversations/$sessionKey/': {
+      id: '/conversations/$sessionKey/'
       path: '/'
-      fullPath: '/sessions/$sessionKey/'
-      preLoaderRoute: typeof SessionsSessionKeyIndexRouteImport
-      parentRoute: typeof SessionsSessionKeyRoute
+      fullPath: '/conversations/$sessionKey/'
+      preLoaderRoute: typeof ConversationsSessionKeyIndexRouteImport
+      parentRoute: typeof ConversationsSessionKeyRoute
     }
     '/phone/$callId/': {
       id: '/phone/$callId/'
@@ -322,40 +382,58 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PhoneCallIdIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/sessions/$sessionKey/calls/$callId': {
-      id: '/sessions/$sessionKey/calls/$callId'
+    '/conversations/$sessionKey/calls/$callId': {
+      id: '/conversations/$sessionKey/calls/$callId'
       path: '/calls/$callId'
-      fullPath: '/sessions/$sessionKey/calls/$callId'
-      preLoaderRoute: typeof SessionsSessionKeyCallsCallIdRouteImport
-      parentRoute: typeof SessionsSessionKeyRoute
+      fullPath: '/conversations/$sessionKey/calls/$callId'
+      preLoaderRoute: typeof ConversationsSessionKeyCallsCallIdRouteImport
+      parentRoute: typeof ConversationsSessionKeyRoute
     }
   }
 }
 
-interface SessionsSessionKeyRouteChildren {
-  SessionsSessionKeyIndexRoute: typeof SessionsSessionKeyIndexRoute
-  SessionsSessionKeyCallsCallIdRoute: typeof SessionsSessionKeyCallsCallIdRoute
+interface SessionsRouteChildren {
+  SessionsSplatRoute: typeof SessionsSplatRoute
 }
 
-const SessionsSessionKeyRouteChildren: SessionsSessionKeyRouteChildren = {
-  SessionsSessionKeyIndexRoute: SessionsSessionKeyIndexRoute,
-  SessionsSessionKeyCallsCallIdRoute: SessionsSessionKeyCallsCallIdRoute,
+const SessionsRouteChildren: SessionsRouteChildren = {
+  SessionsSplatRoute: SessionsSplatRoute,
 }
 
-const SessionsSessionKeyRouteWithChildren =
-  SessionsSessionKeyRoute._addFileChildren(SessionsSessionKeyRouteChildren)
+const SessionsRouteWithChildren = SessionsRoute._addFileChildren(
+  SessionsRouteChildren,
+)
+
+interface ConversationsSessionKeyRouteChildren {
+  ConversationsSessionKeyIndexRoute: typeof ConversationsSessionKeyIndexRoute
+  ConversationsSessionKeyCallsCallIdRoute: typeof ConversationsSessionKeyCallsCallIdRoute
+}
+
+const ConversationsSessionKeyRouteChildren: ConversationsSessionKeyRouteChildren =
+  {
+    ConversationsSessionKeyIndexRoute: ConversationsSessionKeyIndexRoute,
+    ConversationsSessionKeyCallsCallIdRoute:
+      ConversationsSessionKeyCallsCallIdRoute,
+  }
+
+const ConversationsSessionKeyRouteWithChildren =
+  ConversationsSessionKeyRoute._addFileChildren(
+    ConversationsSessionKeyRouteChildren,
+  )
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  GoalsRoute: GoalsRoute,
+  SessionsRoute: SessionsRouteWithChildren,
   ContactsContactIdRoute: ContactsContactIdRoute,
-  SessionsSessionKeyRoute: SessionsSessionKeyRouteWithChildren,
+  ConversationsSessionKeyRoute: ConversationsSessionKeyRouteWithChildren,
   SkillsDelegationIdRoute: SkillsDelegationIdRoute,
   ContactsIndexRoute: ContactsIndexRoute,
+  ConversationsIndexRoute: ConversationsIndexRoute,
   DreamsIndexRoute: DreamsIndexRoute,
   MemoryIndexRoute: MemoryIndexRoute,
   PersonaIndexRoute: PersonaIndexRoute,
   PhoneIndexRoute: PhoneIndexRoute,
-  SessionsIndexRoute: SessionsIndexRoute,
   SkillsIndexRoute: SkillsIndexRoute,
   WorkspaceIndexRoute: WorkspaceIndexRoute,
   PhoneCallIdIndexRoute: PhoneCallIdIndexRoute,

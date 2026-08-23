@@ -214,27 +214,15 @@ async def _resolve_entity(db: Any, query: str) -> dict | None:
 
 async def _dream_items_block(db, entity_id: str) -> str:
     """Compact open dream items linked to an entity, for recall augmentation."""
-    rows = await db.fetch_all(
-        "SELECT item_type, item_id FROM dream_item_links WHERE entity_id = ?", (entity_id,)
-    )
+    from bob_server.services.dream.store import DreamStore
+    items = await DreamStore.from_db(db).items_for_entity(entity_id)
     lines: list[str] = []
-    for r in rows or []:
-        if r["item_type"] == "plan":
-            p = await db.fetch_one(
-                "SELECT id, status, title, proposed_action FROM dream_plans "
-                "WHERE id = ? AND status IN ('proposed','approved','actioned')",
-                (r["item_id"],),
-            )
-            if p:
-                lines.append(f"  - [plan/{p['status']}] {p['title']} — next: {p['proposed_action']}")
-        else:
-            res = await db.fetch_one(
-                "SELECT id, status, title FROM dream_resolutions "
-                "WHERE id = ? AND status IN ('open','in_program')",
-                (r["item_id"],),
-            )
-            if res:
-                lines.append(f"  - [resolution/{res['status']}] {res['title']}")
+    for it in items:
+        if it["item_type"] == "plan":
+            if it["status"] in ("proposed", "approved", "actioned"):
+                lines.append(f"  - [plan/{it['status']}] {it['title']} — next: {it['proposed_action']}")
+        elif it["status"] in ("open", "in_program"):
+            lines.append(f"  - [resolution/{it['status']}] {it['title']}")
     if not lines:
         return ""
     return "Open dream items:\n" + "\n".join(lines)

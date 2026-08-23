@@ -20,16 +20,8 @@ async def get_phone_calls(request: Request) -> dict[str, Any]:
     )
     if not table_exists:
         return {"calls": []}
-    rows = await db.fetch_all(
-        """SELECT pc.id, pc.call_sid, pc.phone_number, pc.direction, pc.status,
-                  pc.agenda, pc.exchange_count, pc.duration_seconds, pc.recording_path,
-                  pc.started_at, pc.completed_at,
-                  c.id as contact_id, c.name as contact_name
-           FROM phone_calls pc
-           LEFT JOIN contacts c ON c.phone_number = pc.phone_number AND c.deleted_at IS NULL
-           ORDER BY pc.started_at DESC
-           LIMIT 50"""
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    rows = await PhoneCallRepository(db).recent_with_contacts(limit=50)
     calls: list[dict[str, Any]] = []
     for row in rows:
         calls.append({
@@ -55,27 +47,11 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    call = await db.fetch_one(
-        """SELECT pc.id, pc.call_sid, pc.phone_number, pc.direction, pc.status,
-                  pc.agenda, pc.exchange_count, pc.duration_seconds, pc.recording_path,
-                  pc.started_at, pc.completed_at, pc.transcript, pc.outcome,
-                  c.id as contact_id, c.name as contact_name
-           FROM phone_calls pc
-           LEFT JOIN contacts c ON c.phone_number = pc.phone_number AND c.deleted_at IS NULL
-           WHERE pc.id = ? OR pc.call_sid = ?""",
-        (call_id, call_id),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    call = await PhoneCallRepository(db).detail_with_contact(call_id)
     if not call:
         return {"error": "Call not found"}
-    exchanges = await db.fetch_all(
-        """SELECT exchange_index, user_transcript, assistant_transcript,
-                  stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
-                  started_at, created_at
-           FROM phone_call_exchanges
-           WHERE call_id = ?
-           ORDER BY exchange_index""",
-        (call["id"],),
-    )
+    exchanges: list = []
     return {
         "call": {
             "id": call["id"],
@@ -135,10 +111,8 @@ async def hangup_phone_call(request: Request, call_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    call = await db.fetch_one(
-        "SELECT call_sid, status FROM phone_calls WHERE id = ? OR call_sid = ?",
-        (call_id, call_id),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    call = await PhoneCallRepository(db).get(call_id)
     if not call:
         return {"error": "Call not found"}
     if call["status"] not in ("active", "ringing"):
@@ -156,10 +130,8 @@ async def get_phone_recording(request: Request, call_id: str) -> Any:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    call = await db.fetch_one(
-        "SELECT recording_path FROM phone_calls WHERE id = ? OR call_sid = ?",
-        (call_id, call_id),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    call = await PhoneCallRepository(db).get(call_id)
     if not call or not call["recording_path"]:
         return {"error": "No recording available"}
     rec_path = Path(call["recording_path"])

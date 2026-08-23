@@ -2,344 +2,389 @@
 
 ## Purpose and Intent
 
-Outreach is the mechanism by which the Bob AI agent proactively initiates a WhatsApp conversation with a trusted contact on a user's behalf, pursues a defined objective through that conversation, and relays the results back to the session where the request originated. After the initial request the entire cycle runs autonomously -- no further human involvement is required.
+Outreach is the mechanism by which the Bob AI agent proactively initiates a conversation with a third party on a user's behalf, pursues a defined objective through that conversation, and relays the result back to the conversation where the request originated. After the initial request the cycle runs autonomously — no further human involvement is required.
 
-The motivating use case: a trusted contact messages Bob asking "can you find out if John is free Thursday?" Bob opens a second conversation with John, negotiates the answer, reports back, and the original contact receives a reply.
+The motivating use case: a trusted contact messages Bob asking "can you find out if John is free Thursday?". Bob opens a second WhatsApp DM with John, negotiates the answer, reports back, and the original contact receives a reply.
 
-This is a multi-session coordination mechanism. A single outreach operation spans two independent WhatsApp DM sessions: the requestor's session (where the ask originated) and the target's session (where the agent carries out the conversation). The bridge service detects outreach state on incoming messages and adjusts the agent's prompt and tool set accordingly, so the same LLM loop that handles ordinary messages also drives the outreach negotiation.
+This is a multi-conversation coordination mechanism. A single outreach operation spans two independent WhatsApp sessions:
+
+- **The origin session** (requestor) — where the ask originated. Bob relays the final result back here.
+- **The target session** — the contact Bob reaches out to. The same LLM loop that handles ordinary messages also drives the outreach negotiation, but with an outreach objective injected into its system prompt and a `finish_outreach` tool added to its toolset.
+
+Since the original implementation, outreach has been re-based on the Bob3 **goals + wake** substrate. An outreach is now modelled as a *goal* (`goals.kind='outreach'`) held by the target conversation on behalf of the origin conversation, with a 24-hour deadline wakeup that resurfaces unanswered outreach in the origin conversation. Result relay goes through the channel-agnostic **wake path** rather than a bespoke WhatsApp-only dispatch. The same substrate carries the sibling delegation flows (subagents, phone calls, email threads — see "Related Paths" below).
 
 ## Architecture
 
 ```
-  Requestor (WhatsApp DM)              Target Contact (WhatsApp DM)
-  +---------------------+              +---------------------+
-  |  Session A           |             |  Session B           |
-  |  agent:main:         |             |  agent:main:         |
-  |  whatsapp:dm:AAAA    |             |  whatsapp:dm:BBBB    |
-  |                      |             |                      |
-  |  Tools available:    |             |  Tools available:    |
-  |  - send_whatsapp_    |             |  - send_whatsapp_    |
-  |    message           |             |    message           |
-  |  - send_whatsapp_    |             |  - send_whatsapp_    |
-  |    to_contact        |             |    media             |
-  |  - get_contact_      |             |  - finish_outreach   |
-  |    session_messages  |             |                      |
-  |  - search_contacts   |             |                      |
-  +----------+-----------+             +----------+-----------+
-             |                                    |
-             |  1. "Ask John about Thursday"      |
-             |  --> send_whatsapp_to_contact -->  |
-             |       (validates trust, sends      |
-             |        message, seeds route        |
-             |        metadata, logs history)     |
-             |                                    |
-             |              2. Target replies     |
-             |              --> incoming message  |
-             |                  (bridge detects   |
-             |                   outreach         |
-             |                   metadata in      |
-             |                   route, injects   |
-             |                   outreach prompt  |
-             |                   + finish_outreach|
-             |                   tool)            |
-             |                                    |
-             |              3. Agent pursues the  |
-             |                 objective through  |
-             |                 the conversation,  |
-             |                 then calls         |
-             |                 finish_outreach    |
-             |                                    |
-             | <-- 4. Result dispatched --------- |
-             |     (result stored as user msg     |
-             |      in Session A, LLM invoked     |
-             |      with send_whatsapp_message    |
-             |      to relay answer to requestor) |
-             +------------------------------------+
+   Requestor (WhatsApp DM)                Target Contact (WhatsApp DM)
+   +----------------------+              +----------------------+
+   | Session A (origin)    |             | Session B (target)   |
+   | agent:main:whatsapp:  |             | agent:main:whatsapp: |
+   | dm:61412345678        |             | dm:61498765432       |
+   +----------+-----------+             +----------+-----------+
+              |                                    ^
+              | 1. "Ask John about Thursday"        |
+              |    LLM calls send_whatsapp_to_     |
+              |    contact(contact_id, message,    |
+              |    objective)                      |
+              |                 +------------------+
+              |                 |  - validate contact + bridge
+              |                 |  - send message (WhatsApp)
+              |                 |  - create goal (kind='outreach',
+              |                 |    deadline = +24h, origin = A)
+              |                 |  - seed route metadata:
+              |                 |      outreach_initiated_from=A
+              |                 |      outreach_objective, ...
+              |                 |  - store opening msg in B
+              v                 v
+      goals table           goals.strategy_json
+   (origin_conversation_id=A)  (active-outreach marker)
+              |                                    |
+              |                          2. Target replies
+              |                          bridge detects outreach
+              |                          metadata in route ->
+              |                          "Active Outreach Request"
+              |                          block in system prompt +
+              |                          finish_outreach tool
+              |                                    |
+              |                          3. Agent converses,
+              |                             pursues objective,
+              |                             calls finish_outreach(result)
+              |                                    |
+              |   4a. settle_goal(completed)  <----+  (CAS transition,
+              |       -> wakes origin with            cancels the 24h
+              |          "Goal completed"            deadline wakeup)
+              |       (fallback if no goal:
+              |        wake_conversation directly)
+              v                                    |
+   +------------------------------------------------------------+
+   | wake_conversation (services/wake_service.py)                |
+   |  - store result as UNDISPATCHED user message in Session A   |
+   |    (crash-safe: startup sweep re-arms it)                   |
+   |  - bridge.wake_session(A) -> full inbound dispatch spec:    |
+   |    attention coordinator -> DispatchRunner -> LLM           |
+   |  - Session A turn gets send_whatsapp_message and texts the  |
+   |    requestor the answer                                     |
+   +------------------------------------------------------------+
 
+   24h deadline (unanswered):  wakeup pump -> wake_conversation(A)
+   with "Goal deadline reached ... decide how to proceed"
+```
 
+The WhatsApp transport itself:
+
+```
                     +----------------------+
-                    |   WhatsApp Bridge     |
-                    |   (Go companion)      |
-                    |                      |
-   Bob Server  <----+   WebSocket          +--> WhatsApp API
-   (Python/FastAPI) |   ws://host:8430/ws  |    (whatsmeow)
-                    |                      |
+                    |  WhatsApp Bridge      |
+                    |  (Go companion,       |
+                    |   whatsmeow)          |
+   Bob Server  <----+  WebSocket           +--> WhatsApp
+   (Python/FastAPI) |  ws://host:8430/ws   |
                     +----------------------+
 ```
 
 ## Flow
 
-### 1. Initiation
+### 1. Initiation — `send_whatsapp_to_contact`
 
-A trusted contact in a WhatsApp DM session asks the agent to reach out to someone else. The agent calls `send_whatsapp_to_contact` with:
+The tool is defined in `make_whatsapp_outreach_tools` (`services/whatsapp_outreach_tools.py`). Parameters: `contact_id`, `message` (the opening text), `objective` (what the agent must achieve, e.g. "Find out if John can meet Thursday and what time works"), and optional `media_path` (workspace-relative attachment).
 
-- `contact_id` -- the target contact (must exist in the `contacts` table)
-- `message` -- the opening message to send
-- `objective` -- what the agent needs to achieve, e.g. "Find out if John can meet Thursday and what time works"
-- `media_path` -- optional workspace-relative path to an image or media attachment
+Steps performed:
 
-The tool is defined in `make_whatsapp_outreach_tools` (`packages/bob-server/bob_server/services/whatsapp_outreach_tools.py`) and performs these steps:
-
-1. Validates the target contact exists and has a phone number.
+1. Loads the contact; fails if missing or has no phone number.
 2. Checks the WhatsApp bridge is connected.
-3. Converts the phone number to a JID (`_phone_to_jid` strips non-digits and appends `@s.whatsapp.net`) and sends the message -- via `send_media` if `media_path` is provided, otherwise `send_message`. The media path is resolved within the workspace directory and rejected if it escapes.
-4. Creates or updates the target session route with outreach metadata:
-   - `outreach_initiated_from` -- the requestor's session key
-   - `outreach_objective` -- the stated goal
-   - `outreach_requestor` -- the requestor's name
-   - `outreach_message` -- the initial message text
-5. Stores the sent message in the target session history as an `assistant` message (Bob authored it) with `metadata.outreach = True`.
-6. Upserts the target contact as a participant in the target session.
-7. Logs the outreach in both sessions' LLM call logs under `call_category="whatsapp_outreach"` (see Logging below).
+3. Converts the phone number to a JID (`_phone_to_jid`: strip non-digits, append `@s.whatsapp.net`) and sends — `send_media` (after `_prepare_media`; the media path is resolved within the workspace and rejected if it escapes) when `media_path` is given, otherwise `send_message`.
+4. Derives the target session key `agent:main:whatsapp:dm:{phone_digits}` — exactly what the bridge will compute when the target replies.
+5. Resolves the requestor's display name from the current session route's contact.
+6. **Creates a goal** (`goal_service.create_goal`, Bob3 Phase V): `kind="outreach"`, `conversation_id` = target session, `origin_conversation_id` = current session, `deadline` = now + 24h. A deadline schedules a wakeup for the origin conversation so unanswered outreach resurfaces. Failures are logged and swallowed — outreach still works without the goal (legacy path).
+7. Creates or updates the target session route with outreach metadata (see Data Model). If the route already exists, the `ConflictError` from `SessionRouteService.create_route` is caught and the outreach fields are merged into the existing `metadata` JSON.
+8. Stores the sent message in the target session history as an `assistant` message (Bob authored it) with `metadata = {"outreach": true, "objective": ..., "requestor": ...}`.
+9. Upserts the target contact as a (trusted) participant of the target session.
+10. Logs the event in **both** sessions' LLM call logs (see Logging).
 
-If a route already exists for the target session key, the `ConflictError` from `SessionRouteService.create_route` is caught and the existing route's `metadata` is updated by merging in the outreach fields.
+### 2. Target conversation
 
-### 2. Target Conversation
+When the target replies, the bridge delivers the message through the normal inbound pipeline (`_handle_incoming_message` in `services/whatsapp_bridge_service/_service.py`): sender resolution/trust, conversation canonicalisation, participant upsert, route ensure, message + ingress event stored in one transaction, then the attention coordinator gates when the dispatch runs.
 
-When the target contact replies, the WhatsApp bridge delivers the incoming message as normal. During dispatch setup in `_handle_incoming_message` (in `whatsapp_bridge_service.py`), the bridge service:
+The dispatch spec (`_build_inbound_dispatch_spec`) detects outreach state on the session route:
 
-1. Resolves the session key from the sender's JID.
-2. Looks up the session route's `metadata`.
-3. Detects `outreach_initiated_from` in the metadata.
-4. Injects an **outreach prompt** into the assembled system message, explaining the active objective and instructing the agent to call `finish_outreach` when done.
-5. Adds the `finish_outreach` tool to the agent's toolset via `make_outreach_reply_tools`.
+- `ContextAssembler.outreach_prompt(session_key)` (`services/context_assembler.py`) checks the route metadata for `outreach_initiated_from` and, if present, appends this block to the system message:
 
-The outreach prompt appended to the system message reads:
+  ```
+  ## Active Outreach Request
+  You proactively sent a message to this contact.
+  - Requested by: {outreach_requestor}
+  - Objective: {outreach_objective}
+  - Your initial message: "{outreach_message}"
+
+  Your goal is to achieve the objective through this conversation. When you have
+  the information needed, call the finish_outreach tool to relay the result back.
+  ```
+
+- `make_outreach_reply_tools` adds the `finish_outreach` tool.
+
+The agent then converses normally — replying via `send_whatsapp_message`, using workspace/memory/docs tools as needed — until the objective is met.
+
+### 3. Completion — `finish_outreach(result)`
+
+1. Reads the outreach metadata from the current session route; returns an error if no outreach is active.
+2. Resolves the objective, requestor, `outreach_goal_id`, and the target contact's name.
+3. Clears the five outreach fields from the route metadata (`outreach_initiated_from`, `outreach_objective`, `outreach_requestor`, `outreach_message`, `outreach_goal_id`), setting `metadata` to NULL when no keys remain.
+4. Builds a structured result: `## Outreach Result` with contact, objective, requestor and the result text.
+5. **Goal path**: `settle_goal(status="completed", result=...)`. The status change is a CAS on `active` (exactly one settler wins), which cancels the outstanding wakeups, appends a `goal.completed` event to the event log, and — because the goal's origin differs from its working conversation — wakes the origin conversation with `call_category="goal_result"`.
+6. **Legacy fallback** (no goal, or settle failed): `wake_conversation(origin, result, call_category="outreach_result", metadata={"outreach_result": true, "source_session": ...})` directly.
+
+`finish_outreach` itself does not dispatch an LLM call — the result relay is entirely the wake path's job (below). Because the tool call runs inside the target session's dispatch, this ordering means the origin's turn starts concurrently with the target's turn finishing.
+
+### 4. Result relay — the wake path
+
+`wake_conversation` (`services/wake_service.py`) is the single channel-agnostic entry point:
+
+1. Resolves the conversation's channel (via `conversations`/`bindings`, preferring a WhatsApp binding as it has the richest pipeline).
+2. Stores the content as a **user** message with `dispatched=0` in the origin session — durable, so a crash before dispatch is recovered by the bridge's startup sweep (`resume_pending_sessions`, run ~10s after the bridge connects).
+3. For WhatsApp, calls `bridge.wake_session(session_key)`, which rebuilds the full inbound dispatch spec (system prompt with all layers, tools including `send_whatsapp_message`) and submits it through `AttentionCoordinator.resume_pending`. The origin's turn therefore runs through exactly the same hardened pipeline as a live inbound message: session lock, turn claim, effects-based sends, delivered-only history.
+4. Non-WhatsApp origins get a generic workspace-tools turn (`_generic_wake_dispatch`).
+
+The origin turn receives the result text as new context and — typically — calls `send_whatsapp_message` to text the answer to the requestor. If it produces text but never calls the send tool, the **tap** fallback (`services/tap.py`) gives it one reminder turn — but only when `BOB_ENABLE_TAP` is set (off by default; nothing sent means nothing recorded).
+
+### 5. Deadline wakeup — unanswered outreach
+
+At initiation, the 24h deadline schedules a wakeup row for the **origin** conversation. The heartbeat's `WakeupPumpTask` (`heartbeat.py`) runs `pump_due_wakeups` every tick; a due wakeup whose goal is still `active` wakes the origin with:
 
 ```
-## Active Outreach Request
-You proactively sent a message to this contact.
-- Requested by: {requestor_name}
-- Objective: {outreach_objective}
-- Your initial message: "{outreach_message}"
+## Goal deadline reached
+Objective: {objective}
+Status: still active (no result yet)
+Progress: {progress or 'none recorded'}
 
-Your goal is to achieve the objective through this conversation.
-When you have the information needed, call the finish_outreach tool to relay the result back.
+Decide how to proceed: follow up, revise the goal, or report back.
 ```
 
-The agent then has a normal conversation with the target, pursuing the objective. It can use `send_whatsapp_message` to reply and `finish_outreach` to signal completion.
+(`call_category="goal_deadline"`). The goal the agent sees is also visible via `list_goals`, and it can `update_goal` to record progress along the way. Settling the goal (via `finish_outreach`, `complete_goal`, or cancellation) cancels the outstanding wakeup.
 
-### 3. Completion
+## Dispatch Pipeline
 
-When the agent calls `finish_outreach(result)` (defined in `make_outreach_reply_tools`):
+Every LLM invocation for WhatsApp runs through `DispatchRunner` (`services/dispatch_runner.py`) driven by a `DispatchSpec`. For inbound messages, the **attention coordinator** (`services/attention/`) decides *when* the dispatch runs, not a per-message task:
 
-1. Reads outreach metadata (`outreach_initiated_from`, `outreach_objective`, `outreach_requestor`) from the current session route.
-2. Looks up the target contact's name for inclusion in the result.
-3. Clears the outreach fields from the route's metadata (`outreach_initiated_from`, `outreach_objective`, `outreach_requestor`, `outreach_message`), setting `metadata` to NULL when no keys remain.
-4. Builds a structured result message containing the target contact name, objective, requestor, and result text.
-5. Stores the result as a `user` message in the **requestor's session** (Session A) with `metadata.outreach_result = True`.
-6. Dispatches a new LLM call (`call_category="outreach_result"`) in the requestor's session, with workspace tools plus a `send_whatsapp_message` tool that targets the requestor's chat.
-7. If the agent produces a non-empty response but does not invoke `send_whatsapp_message`, the **tap dispatch** mechanism (`tap_dispatch` in `services/tap.py`) runs a follow-up LLM call reminding the agent that the send tool must be used. This ensures the requestor always receives an answer.
-8. The assistant response is recorded in the requestor session's history (unless it is a `NO_REPLY` variant).
+```
+  incoming message
+        |
+  store user message + append event_log row  (one transaction)
+        |
+  occupancy check: live call on this conversation?
+        |-- yes, not urgent --> defer; post-call drain (wake_session)
+        |                        runs queued texts as one turn
+        v
+  AttentionCoordinator.submit
+        |-- Tier 0: addressed?  (all DMs are addressed; group needs
+        |                        @mention / direct question)
+        |-- Tier 1: debounce window (2.5s addressed, 20s group chatter;
+        |           typing indicators extend; 90s hard cap)
+        |-- Tier 2: actionability probe for unaddressed group batches
+        |           (ACT / STAND_DOWN / WAIT; kill switch
+        |            BOB_ATTENTION_ALWAYS_ACT=1)
+        v
+  DispatchRunner.run(spec)
+        |-- acquire SessionDispatchGate lock (one dispatch per session)
+        |-- claim pending user messages (mark_dispatched)
+        |-- claim a durable turn (turns table, leased)
+        |-- build_chat_messages (system + delivered-only history)
+        |-- LLMDispatchService.chat_with_tools
+        |      |-- quota exhausted -> restore claimed messages,
+        |      |                    one-line "out of credit" notice
+        |      |                    (rate-limited to 1/hour/session)
+        |-- tap second-chance (BOB_ENABLE_TAP only)
+        |-- record assistant history (delivered_only policy:
+        |      only texts actually passed to send_whatsapp_message
+        |      enter history; nothing sent -> nothing recorded)
+        |-- complete the turn; publish event
+```
 
-The completion dispatch runs as a background `asyncio.Task` so it does not block the target session from continuing. The requestor session's lock (`SessionDispatchGate`) is acquired as normal, so the result dispatch serialises against any other activity in that session.
-
-## Key Components
-
-| Component | File | Role |
-|---|---|---|
-| Outreach tools | `services/whatsapp_outreach_tools.py` | `send_whatsapp_to_contact`, `get_contact_session_messages`, `finish_outreach` |
-| WhatsApp bridge | `services/whatsapp_bridge_service.py` | WebSocket client to the Go bridge; handles incoming messages, detects outreach state, injects the outreach prompt and reply tools |
-| Tool registry | `services/tool_registry.py` | `build_common_tools()` assembles shared tools; channel-specific tools (outreach, `send_whatsapp_message`) are added by the bridge |
-| Session routes | `services/session_route_service.py` | Routes map session keys to channels/chats; route `metadata` carries outreach state |
-| Session agenda | `services/session_agenda_service.py` | Selects the system prompt based on trust tier (unverified / known-untrusted / trusted) |
-| Dispatch gate | `services/session_dispatch_gate.py` | Per-session `asyncio.Lock` ensuring only one LLM dispatch runs per session at a time |
-| Prompt assembler | `services/prompt_assembler.py` | `load_workspace_prompt` and `build_chat_messages` used by the result dispatch |
-| Tap dispatch | `services/tap.py` | Follow-up LLM call when the agent produced text but did not use its send tool |
-| LLM dispatch | `services/llm_dispatch.py` | Routes LLM calls to the model with tool support; `_record_log` persists all interactions to `llm_call_log` |
-
-All paths under `packages/bob-server/bob_server/`.
+Outbound sends (including the origin turn's relay to the requestor) go through the **effects outbox** (`services/effects.py`): `emit_and_deliver(kind="whatsapp_send", idempotency_key=...)` records the effect durably before delivery, delivers inline via the bridge, and is retried by the heartbeat's `EffectPumpTask` after a crash. Idempotency keys (`whatsapp_send:{dispatch_id}:{seq}`) make retries safe. Media sends use `kind="whatsapp_send_media"`.
 
 ## Trust Model
 
-Outreach is only available to **trusted** contacts. Three trust tiers control agenda and tool access:
+Outreach initiation is gated on trust. The trust tier is resolved per inbound message by `WhatsAppInboundPolicy.resolve_sender` (`services/channel_policies.py`):
 
 ```
-                  +-----------------------------------------+
-  Unverified      |  Caution agenda. No contact tools.       |
-  (no contact)    |  Cannot initiate or receive outreach.    |
-                  +-----------------------------------------+
-                        |
-                        v
-                  +-----------------------------------------+
-  Known Untrusted |  Restricted agenda. Cannot modify        |
-  (contact,       |  config or share sensitive data.         |
-  is_trusted=0)   |  Cannot initiate outreach.               |
-                  +-----------------------------------------+
-                        |
-                        v
-                  +-----------------------------------------+
-  Trusted         |  Full agenda. Contact tools + outreach   |
-  (contact,       |  tools + reflection + delegation.        |
-  is_trusted=1)   |  Can initiate and receive outreach.      |
-                  +-----------------------------------------+
+  +----------------------------------------------------------+
+  | Unknown DM sender (no contact row)                        |
+  | -> DROPPED (security gate). Group sync auto-seeds         |
+  |    contacts for everyone Bob has seen in a group, so any  |
+  |    legitimate acquaintance already has a row.             |
+  +----------------------------------------------------------+
+                          |
+                          v
+  +----------------------------------------------------------+
+  | Known contact, is_trusted=0  ("known untrusted")          |
+  | -> accepted; restricted agenda (no config changes, no     |
+  |    sensitive data); NO outreach tools in DMs.             |
+  +----------------------------------------------------------+
+                          |
+                          v
+  +----------------------------------------------------------+
+  | Known contact, is_trusted=1  ("trusted")                  |
+  | -> full agenda; outreach tools, goal tools, voice tools,  |
+  |    contact tools, reflection, subagents.                  |
+  +----------------------------------------------------------+
 ```
 
-The trust tier is resolved in `_handle_incoming_message` by looking up the sender's phone number in the `contacts` table. Unknown WhatsApp senders are auto-seeded as unverified contacts with `is_trusted = 0`. The `_resolve_or_seed_contact` method also performs prefix matching on phone numbers to handle JIDs with extra trailing digits (e.g. `+614154068544` matching `+61415406854`).
+- Unknown **group** senders are auto-seeded as untrusted contacts and accepted; unknown **DM** senders are dropped outright. Contacts with `allow_inbound_dm=0` (e.g. agent-created call targets) are dropped from DMs too.
+- `SessionAgendaService.get_effective_agenda` selects the WhatsApp system prompt by tier: `WHATSAPP_DEFAULT_AGENDA` (no contact), `WHATSAPP_KNOWN_UNTRUSTED_AGENDA`, `WHATSAPP_TRUSTED_AGENDA`. The trusted agenda explicitly documents the outreach capability ("If asked to contact someone, use search_contacts ... then send_whatsapp_to_contact").
+- Outreach tool injection in `_build_inbound_dispatch_spec` is `contact_id and (is_trusted or chat_kind == "group")`: trusted senders in DMs, and any contact-resolved sender in a group chat. So a trusted participant can trigger outreach from a group conversation.
 
-The `SessionAgendaService.get_effective_agenda` uses the trust tier to select the appropriate WhatsApp system prompt:
+## Session Keys and Conversations
 
-| Tier | WhatsApp Agenda | Key Restrictions |
-|---|---|---|
-| Unverified | `WHATSAPP_DEFAULT_AGENDA` | No identity assumptions, no sensitive data, no link clicking |
-| Known Untrusted | `WHATSAPP_KNOWN_UNTRUSTED_AGENDA` | No config changes, stay within conversation bounds |
-| Trusted | `WHATSAPP_TRUSTED_AGENDA` | Full capabilities including outreach, contact search, subagents |
+Session keys follow `agent:{agent_id}:whatsapp:{kind}:{identifier}`:
 
-Note: outreach tools (`send_whatsapp_to_contact`, `get_contact_session_messages`) are also injected for **group** sessions where at least one participant is trusted, enabling outreach from group conversations where a trusted participant makes a request. The injection condition in `_handle_incoming_message` is `contact_id and (is_trusted or chat_kind == "group")`.
+- **DM**: `agent:main:whatsapp:dm:61412345678` (phone digits from the JID)
+- **Group**: `agent:main:whatsapp:group:abc123` (group id before `@g.us`)
 
-## Session Key Convention
+The outreach tools derive the target session key from the contact's phone digits using the same pattern, guaranteeing it matches what the bridge computes when the target replies.
 
-Session keys follow the format `agent:{agent_id}:whatsapp:{kind}:{identifier}`:
-
-- **DM**: `agent:main:whatsapp:dm:61412345678` (phone digits from sender JID)
-- **Group**: `agent:main:whatsapp:group:abc123` (group ID before `@g.us`)
-
-Phone-to-JID conversion (`_phone_to_jid`) strips non-digits and appends `@s.whatsapp.net`. The reverse (`_jid_to_phone`) normalises to `+CC` format, defaulting to the Australian country code (`+61`) when no country code is detectable.
-
-The bridge derives session keys in `_handle_incoming_message` using the sender JID's numeric part for DMs and the group chat ID for groups. The outreach tools derive the target session key from the contact's phone digits using the same `whatsapp:dm:` pattern, ensuring it matches what the bridge will compute when the target later replies.
+Since Bob3 Phase VI, the channel-derived key is a *binding*: on every inbound message the bridge calls `ConversationRepository.ensure(session_key)` and everything downstream (participants, routes, messages, events, dispatch, wake) keys under the canonical `conversations.id`. Today the mapping is 1:1 (`ensure()` backfills `id = session_key`); it diverges only when conversations are merged, in which case outreach state and results land on the survivor conversation. Phone normalisation (`_jid_to_phone` → `services/phone_utils.normalize_phone`) canonicalises to `+CC` format.
 
 ## Data Model
 
-The outreach state machine lives entirely in `session_routes.metadata` (a JSON column). There is no separate outreach table.
+There is no dedicated outreach table. Active-outreach state lives on the goal itself (`goals.strategy_json` carries requestor/message); the durable lifecycle lives in the Bob3 tables.
 
 ```
-session_routes
-+-- id (TEXT PK)
-+-- channel (TEXT)          -- "whatsapp"
-+-- session_key (TEXT)      -- "agent:main:whatsapp:dm:61412345678"
-+-- kind (TEXT)             -- "dm" | "group" | "thread"
-+-- contact_id (TEXT FK)    -- -> contacts.id  (set for DMs)
-+-- chat_id (TEXT)          -- set for groups/threads; NULL for DMs
-+-- metadata (TEXT JSON)    -- {outreach_initiated_from, outreach_objective, ...}
-+-- is_active (INT)
+goals (kind='outreach')
++-- id (TEXT PK)                     +-- id (TEXT PK)
++-- channel ("whatsapp")             +-- conversation_id      <- target session
++-- session_key                      +-- origin_conversation_id <- origin session
++-- kind ("dm"|"group")              +-- kind ("outreach")
++-- contact_id (FK -> contacts)      +-- objective
++-- chat_id                          +-- status (active|completed|failed|cancelled)
++-- metadata (TEXT JSON) <-- active  +-- version (optimistic CAS)
+|     outreach marker                +-- deadline (+24h at creation)
+|                                     +-- external_ref
+v                                     +-- result (set on settle)
+{ "outreach_initiated_from": ...,    +-- goal_transitions (history)
+    "outreach_objective": ...,        "outreach_goal_id": ... }
+    "outreach_requestor": ...,  }    wakeups
+                                      +-- conversation_id <- origin
+                                      +-- goal_id, not_before (+24h)
+                                      +-- status (scheduled|fired|cancelled)
+
+  event_log (append-only)            effects (outbox)
+  +-- goal.created / goal.completed  +-- whatsapp_send / whatsapp_send_media
+  +-- message.received (ingress)     +-- idempotency_key, status
 ```
 
-Outreach lifecycle as seen in metadata:
+Outreach lifecycle in the route metadata:
 
 ```
-  No outreach state         Active outreach              Outreach complete
-  +--------------+         +----------------------+     +------------------+
-  | { ... }      |  --->   | {                    |     | { ... }          |
-  |              |  send   |   outreach_initiated |     |  (fields popped) |
-  |              |         |   _from: "agent:...",|     |                  |
-  |              |         |   outreach_objective |     |                  |
-  |              |         |   outreach_requestor |     |                  |
-  |              |         |   outreach_message   |     |                  |
-  +--------------+         | }                    |     +------------------+
-                           +----------------------+
-                              |
-                              |  finish_outreach called
-                              |  (fields removed)
-                              v
+  No outreach state          Active outreach                    finish_outreach
+  +--------------+   send_whatsapp_to_contact   +------------------------+
+  | { ...other   | ---------------------------> | outreach_initiated_from|
+  |   keys... }  |                              | outreach_objective     |
+  |              |                              | outreach_requestor     |
+  |              |                              | outreach_message       |
+  |              |                              | outreach_goal_id       |
+  +--------------+                              +------------------------+
+        ^                                                  |
+        |   finish_outreach pops all five keys             |
+        +--------------------------------------------------+
+        (metadata set to NULL when no keys remain)
 ```
 
 ## Tool Inventory
 
-### Available in requestor session (trusted DM, no active incoming outreach)
+### Origin session (trusted WhatsApp sender)
+
+| Tool | Source | Purpose |
+|---|---|---|
+| `send_whatsapp_to_contact` | `whatsapp_outreach_tools` | Initiate outreach (message + objective) |
+| `get_contact_session_messages` | `whatsapp_outreach_tools` | Check whether a contact has replied |
+| `create_goal` / `update_goal` / `complete_goal` / `list_goals` | `goal_tools` | General goal tracking (outreach goals appear here) |
+| `initiate_voice_call` | `voice_outreach_tools` | Offer a browser voice-link in the current DM |
+| `send_whatsapp_message` | bridge dispatch spec | Reply in the current conversation (single tool; optional `media_path`) |
+| `search_contacts` and other contact tools | `contact_tools` | Find the target contact |
+
+### Target session (active outreach)
 
 | Tool | Purpose |
 |---|---|
-| `send_whatsapp_to_contact` | Initiate outreach to another contact |
-| `get_contact_session_messages` | Check messages in another contact's session |
-| `send_whatsapp_message` | Reply in current conversation |
-| `send_whatsapp_media` | Send an image in current conversation |
-| `search_contacts` | Look up contacts by name/phone/email |
+| `send_whatsapp_message` | Converse with the target contact |
+| `finish_outreach` | Settle the outreach and relay the result to the origin |
+| common tool set | Workspace, memory, docs, etc. as usual |
 
-### Available in target session (active outreach)
+### Tool injection points
 
-| Tool | Purpose |
-|---|---|
-| `send_whatsapp_message` | Reply to the target contact |
-| `send_whatsapp_media` | Send an image to the target contact |
-| `finish_outreach` | Complete outreach and relay result to requestor |
-
-### Available during result dispatch (requestor session)
-
-| Tool | Purpose |
-|---|---|
-| `send_whatsapp_message` | Relay the outreach result to the requestor |
-
-## Tool Injection Points
-
-The bridge service's `_handle_incoming_message` method controls which tools are available based on trust and outreach state. Tools are assembled in two stages: `build_common_tools()` from `tool_registry.py` provides the shared set, then the bridge adds channel-specific tools.
+`_build_inbound_dispatch_spec` assembles tools in layers — `build_common_tools()` (`tool_registry.py`) provides the shared set, then the bridge adds channel-specific tools:
 
 ```
 Incoming WhatsApp message
          |
-         v
-  Resolve contact + trust tier
+   resolve sender (WhatsAppInboundPolicy) -> contact_id, is_trusted
          |
-         +-- build_common_tools() provides:
-         |   - workspace tools
-         |   - memory tools
-         |   - docs tools
-         |   - changelog tools
-         |   - email_send tools
-         |
-         +-- Trusted contacts also get:
-         |   - contact tools (search_contacts, etc.)
-         |   - reflection tools
-         |   - subagent tools (if skill_dev_enabled)
-         |
-         +-- Trusted DMs or group sessions with a trusted contact:
-         |   - outreach tools (send_whatsapp_to_contact,
-         |     get_contact_session_messages)
-         |
-         +-- Channel-specific (always):
-         |   - send_whatsapp_message
-         |   - send_whatsapp_media
-         |
-         +-- Session route has outreach metadata?
-             |
-             +-- Yes: add finish_outreach tool
-                    + inject outreach prompt into system message
-             +-- No: nothing extra
+   build_common_tools():  workspace, memory, docs, changelog,
+   |                      email_send, email threads, session tools,
+   |                      routines (+ dream tools if enabled)
+   |
+   +-- trusted: contact tools, phone tools, reflection, subagents
+   |
+   +-- contact_id and (trusted or group):
+   |      send_whatsapp_to_contact, get_contact_session_messages
+   |
+   +-- trusted: goal tools (create/update/complete/list)
+   |
+   +-- trusted: initiate_voice_call (self-gates to DM-only)
+   |
+   +-- group chats: group tools
+   |
+   +-- always: send_whatsapp_message (text + optional media_path)
+   |
+   +-- route metadata has outreach_initiated_from?
+          yes -> finish_outreach + "Active Outreach Request" in system prompt
 ```
 
-## Dispatch Lifecycle
+The system prompt is layered similarly: workspace prompt (SOUL.md/IDENTITY.md/AGENTS.md/skills/memory indexes), participants, person profile (DMs), group memory hint (groups), dream plans, then the outreach block.
 
-Every LLM invocation goes through `LLMDispatchService`. For WhatsApp messages, the dispatch runs as a background `asyncio.Task` gated by a per-session lock (`SessionDispatchGate`) to ensure only one dispatch runs per session at a time:
+## Related Paths (same goal/wake substrate)
 
-1. Incoming message arrives; a background task is created via `asyncio.create_task`.
-2. The task acquires the session lock via `SessionDispatchGate.get_lock(session_key)`.
-3. It marks queued messages as dispatched (`SessionService.mark_dispatched`) to enable batching of rapid messages.
-4. `LLMDispatchService.chat_with_tools` runs the LLM call with the assembled tools.
-5. On success, the LLM response is logged with latency and token usage via `_record_log`.
-6. **Tap fallback**: if the LLM produced a non-empty text response but never called `send_whatsapp_message`, a second LLM call (`tap_dispatch`) is made, appending a reminder that the send tool must be used.
-7. The assistant response is recorded in session history.
-8. If the response is a `NO_REPLY` variant, it is not recorded to avoid poisoning future context.
+Outreach is one instance of a general pattern — a goal held by one conversation on behalf of another, settled with a wake-back:
 
-The same dispatch mechanism is used for incoming WhatsApp messages (`call_category="whatsapp_incoming"`) and the outreach result delivery (`call_category="outreach_result"`). The result dispatch runs from inside `finish_outreach` and follows the same gating, logging and tap fallback rules.
+| Flow | Initiation | Working-conversation signal | Completion |
+|---|---|---|---|
+| WhatsApp outreach | `send_whatsapp_to_contact` | route metadata + outreach prompt | `finish_outreach` → settle goal (kind `outreach`) |
+| Email thread | `email_send(to, subject, body, agenda)` records `origin_session_key` on the thread | "Active Thread Task" prompt + `finish_email_thread` injected by the email poller | `finish_email_thread` → `wake_conversation` (`email_thread_result`) |
+| Voice (task-oriented) | `create_subagent(agent_type="openai_voice", modality="phone"\|"voice_link")` | subagent goal (kind `subagent`/`call`), `external_ref` = subagent id | call summary → `phone_call_result_service` settles goal and wakes origin |
+| Subagents | `create_subagent(task)` | goal with `origin_conversation_id` = parent | first result settles goal, wakes parent |
 
-## System Prompt Assembly
+`initiate_voice_call` (in `voice_outreach_tools.py`) is a lighter sibling: it offers the *current* DM contact a browser voice-link (a `voice_sessions` row mirrored into `phone_calls`), sharing memory with the chat. It is not a cross-conversation delegation. The older `reach_out_with_voice_call` tool was retired (2026-08-14): its phone branch duplicated the subagent path and its defaults biased the LLM toward links when a real phone call was asked for.
 
-The system prompt for each WhatsApp dispatch is assembled by the bridge service from multiple layers:
+## Logging and Observability
 
-```
-  +--------------------+
-  | Workspace prompt   |  SOUL.md, IDENTITY.md, AGENTS.md, USER.md,
-  |                    |  skills index, memory index, grounding rules
-  +--------------------+
-  | Participants       |  Who is in this session (name, trust status)
-  +--------------------+
-  | Person profile     |  Memory profile for the DM contact (DM sessions only,
-  |                    |  via MemoryService.find_person_entry)
-  +--------------------+
-  | Group memory hint  |  Memory hint summarising trusted group members
-  |                    |  (group sessions only)
-  +--------------------+
-  | Outreach prompt    |  Active outreach objective (if applicable)
-  |                    |  + instruction to call finish_outreach
-  +--------------------+
-```
+Outreach events are recorded in the unified LLM call log (`llm_call_log` via `_record_log` in `llm_dispatch.py`):
 
-Each layer is conditionally included. The workspace prompt is cached and reloaded only when workspace files change on disk (tracked via `st_mtime`). The outreach layer is appended only when the session route's metadata contains `outreach_initiated_from`.
+- **Origin session**: `call_category="whatsapp_outreach"`, user message `Reach out to {name}: {objective}`, response = the sent text.
+- **Target session**: same category, prefixed `[Outreach initiated — requested by {requestor}]`.
+- Both rows use `provider="outreach"`, `status="completed"`.
 
-## Logging
+Result delivery appears as ordinary dispatches: `goal_result` (goal path) or `outreach_result` (legacy fallback) in the origin session, and `goal_deadline` when the 24h wakeup fires. Goal lifecycle events (`goal.created`, `goal.completed`) are appended to the append-only `event_log`. The dashboard session list (`routers/dashboard_api/sessions.py`) includes sessions that have messages but no `llm_call_log` rows, so freshly seeded outreach targets are visible immediately.
 
-Outreach actions are recorded in the unified LLM call log (`_record_log` in `llm_dispatch.py`) under both sessions:
+## Key Components
 
-- **Requestor session** (`current_session_key`): logs the outreach initiation with `call_category="whatsapp_outreach"`, recording `Reach out to {name}: {objective}` as the user message and the sent text as the response.
-- **Target session** (`target_session_key`): logs the same outreach event with a prefix indicating the requestor (`[Outreach initiated - requested by {requestor}]`), so it surfaces in the dashboard for both conversations.
+All paths under `packages/bob-server/bob_server/`.
 
-Both log entries use `provider="outreach"` and `status="completed"` so the dashboard's session view can show proactive outreach alongside ordinary incoming-message dispatches. The dashboard API (`routers/dashboard_api.py`) explicitly includes sessions that only have messages and no `llm_call_log` rows (e.g. newly seeded outreach targets) when listing sessions.
+| Component | File | Role |
+|---|---|---|
+| Outreach tools | `services/whatsapp_outreach_tools.py` | `send_whatsapp_to_contact`, `get_contact_session_messages`, `finish_outreach` |
+| Voice outreach tools | `services/voice_outreach_tools.py` | `initiate_voice_call` (browser voice-link offer) |
+| WhatsApp bridge | `services/whatsapp_bridge_service/` | WebSocket client to the Go bridge; inbound pipeline, dispatch spec assembly, `wake_session`, crash-recovery sweep |
+| Context assembler | `services/context_assembler.py` | Prompt layers: participants, person profile, group hint, dream plans, `outreach_prompt` |
+| Goal service | `services/goal_service.py` | `create_goal` / `settle_goal` / `fire_wakeup` / `pump_due_wakeups` |
+| Goal tools | `services/goal_tools.py` | LLM-facing goal CRUD via effects outbox |
+| Wake service | `services/wake_service.py` | Channel-agnostic `wake_conversation` result relay |
+| Attention coordinator | `services/attention/` | Tier 0/1/2 gating of when a dispatch runs |
+| Dispatch runner | `services/dispatch_runner.py` | Lock → claim → LLM → tap → history → turn/event bookkeeping |
+| Effects outbox | `services/effects.py` | Durable, idempotent external sends (`whatsapp_send`, `whatsapp_send_media`) |
+| Session routes | `services/session_route_service.py` | Routes map session keys to channels/chats; `metadata` carries active-outreach state |
+| Agenda service | `services/session_agenda_service.py` | Trust-tiered WhatsApp system prompts |
+| Channel policies | `services/channel_policies.py` | Inbound accept/drop rules, contact seeding |
+| Session dispatch gate | `services/session_dispatch_gate.py` | Per-session lock: one dispatch at a time |
+| Tap | `services/tap.py` | Second-chance dispatch when the send tool went unused (`BOB_ENABLE_TAP`) |
+| Heartbeat tasks | `heartbeat.py` | `WakeupPumpTask` (deadline wakeups), `EffectPumpTask` (send retries) |
+| Occupancy | `services/occupancy.py` | Defers non-urgent texts while a call is live; post-call drain via `wake_session` |

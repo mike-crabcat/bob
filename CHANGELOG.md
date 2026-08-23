@@ -2,6 +2,84 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-08-23
+
+### Added
+- Add a quota circuit breaker on all four LLM dispatch entry points: a 429 quota or credit-exhaustion failure fails subsequent calls fast for a five-minute cooldown (no API request, no call-log row) until the first success closes it, ending the ~1,700-calls-per-hour retry storm observed during an overnight credit outage
+- Move routine scheduling onto the unified wakeup pump: each enabled routine holds exactly one wakeup row with cron recurrence computed in the routine's timezone and stored as UTC, claim-first firing prevents a slow run from double-firing, and routine CRUD keeps the schedule in sync
+- Canonicalize session identity at ingress: WhatsApp and email resolve their channel-derived session key to a canonical conversation at the seam, so all downstream state keys under the conversation and a merged binding lands in its survivor with no per-call-site changes (resolution is fail-open, falling back to the raw channel key)
+- Bind voice calls to conversations: outbound contact calls bind their subagent session to the person's conversation so both phone and voice-link completions record idempotent call.completed events there, and claude/local subagent spawns become durable subagent_spawn effects with re-delivery guards — a failed spawn now marks the subagent failed and returns the error to the LLM instead of the run silently disappearing
+- Add a live-call occupancy state machine: while a call is live on a person's conversation, inbound WhatsApp text stays stored-but-undispatched and runs as one post-call turn, urgent text (hang-up or emergency vocabulary) bypasses the queue, concurrent live calls are capped at two before placement, and stale live entries expire after an hour
+- Add episode redaction tooling and probe evals to `bob replay`: export-episode samples production conversations into redacted replay fixtures (phone remapping, name aliasing, phone/email/URL masking, operator review still required), export-probe-candidates dumps recent shadow decisions for golden-label curation, and probe-matrix scores the attention probe against golden labels with a live confusion matrix
+- Add an operations health strip and needs-attention card to the dashboard home, backed by a new status endpoint surfacing quota-gate state, effects-outbox health, active and overdue goals, scheduled wakeups with next fire time, stuck turns with expired leases, undispatched inbound messages, and database size — dead-lettered effects can be retried or discarded directly from the card
+- Replace the dashboard sessions views with conversation-centric pages: a conversations list with channel filter chips, multi-binding and merge badges, and activity ranking, plus a conversation detail page with bindings provenance (per-binding unmerge) and a collapsible decision timeline merging attention-shadow decisions, tier-2 probe reasoning, turns, effects, and goal transitions
+- Add a Goals & wakeups dashboard page with expandable active and settled goal cards (progress, result, transition history, link to the owning conversation), a scheduled-wakeups list with recurrence, timezone, and live countdowns, and one-click cancel that settles through goal_service so pending wakeups are cancelled and the origin conversation woken
+
+### Changed
+- Canonicalize outbound-initiated email threads into conversations at send time (inbound ingress already did), classify email threads as kind='thread' instead of falling through to internal, and rank the conversations list by LLM call activity so email threads (which have no turn rows) surface at their true recency
+- Rename Sessions to Conversations throughout the dashboard (nav, headings, stat boxes, empty states) and redirect legacy /sessions URLs to their /conversations equivalents
+- Exclude quota-exhaustion 429 failures from the home 24h call chart and cost-by-category/model aggregates so zero-cost retry storms from a credit outage no longer drown out real activity; the raw rows remain in the LLM call log for audit
+- Mark conversations absorbed by a merge with a "→ merged" badge so merged-away threads are identifiable in the list
+
+### Fixed
+- Fix memory entity-merge reconciliation raising "'NoneType' object can't be awaited" on every merge by awaiting the scheduling callback only when it returns an awaitable
+- Fix recurring wakeups firing continuously when the server clock sits in a different timezone offset than a routine, by computing cron occurrences in the wakeup's timezone and storing them as UTC
+
+## 2026-08-21 – 2026-08-22
+
+### Security
+- Add a default-deny API token gate: all state-changing HTTP requests (POST/PUT/PATCH/DELETE) now require the API token or receive a 401, closing the incident path where the agent's own bash tool could POST anonymously to place real Twilio calls; the token is accepted as a Bearer or X-Dashboard-Secret header, dashboard cookie, or ?secret= query parameter, with Twilio webhook callbacks and the public voice-page log sink exempt and BOB_API_AUTH_DISABLED=true as a break-glass switch
+- Change the secret's default posture: an unset BOB_DASHBOARD_SECRET now auto-generates a urlsafe token persisted to the data directory (mode 0600, stable across restarts) instead of leaving the dashboard fully open, and is deliberately kept out of os.environ so the agent's bash tool cannot leak it via printenv
+
+### Added
+- Add a one-URL dashboard login for browsers and phones: GET /dashboard/api/auth?secret=<token> validates the token and sets a year-long cookie, replacing the hand-set-cookie-in-DevTools flow that was impossible on mobile — the URL tolerates raw-pasted tokens whose base64 '+' arrived decoded as a space, always writes the canonical secret, and reads the token from the URL directly so revisiting it heals a stale poisoned cookie
+- Add an assigned_identity memory claim type for playful identities a group has settled on for a member (or for Bob), with extraction carve-outs attributing the identity to its owner and reconciliation rules keeping group-settled identities from being retracted as banter
+- Add a daily LLM call-log retention task that strips prompt, message, response, and tool payloads from rows older than 30 days while keeping token, latency, status, and model metrics forever — a one-off backfill shrank the live database from 2.5GB to 691MB
+- Introduce a durable append-only event log at ingress (migration 400) with transactional writes: every accepted WhatsApp message, email, phone status webhook, and routine firing is recorded exactly once (unique source + external_id) in the same transaction as its legacy store write, so bridge redeliveries and webhook retries can no longer double-accept; the migration also lays down turn leases, an idempotency-keyed effects outbox with retry backoff and dead-lettering, wakeups, and subscriptions, with a daily legacy-vs-event-log reconciliation audit
+- Add an attention coordinator owning WhatsApp dispatch timing: structurally addressed messages dispatch after a 2.5s micro-window, unaddressed group chatter batches for 20s, typing indicators extend the window, and a 90s hard cap bounds latency; an LLM actionability probe (ACT/WAIT/STAND_DOWN) runs at window close for unaddressed group batches only, probe failure falls back to ACT so infrastructure can never cause silence, and BOB_ATTENTION_ALWAYS_ACT=1 is a kill switch — cut over live the same evening it was built (the planned shadow-agreement soak was skipped), making the attention_shadow table the live decision audit trail
+- Add durable goals as effects-backed LLM tools (create/update/complete/list) with CAS status transitions and versioned revisions: deadlines schedule wakeups so unanswered goals resurface, and settling a goal cancels its wakeups and wakes the originating conversation with the result
+- Add a unified channel-agnostic conversation wake path: subagent results, voice-call results, email-thread results, and outreach completions store their content as an undispatched message and dispatch through the channel's real pipeline, so a crash before dispatch is recovered by the startup sweep
+- Add conversations and bindings as the identity layer: channel session keys resolve to canonical conversations via a binding table mechanically backfilled 1:1 (conversation id = legacy session key, so existing event-log history resolves without rewrites), with merge moving bindings to a survivor with merged-from provenance and unmerge returning them to their pre-merge conversation
+- Add an effects outbox for all outbound sends: WhatsApp text/media and email replies/new email are recorded durably with idempotency keys before inline delivery (user-facing latency unchanged), and retried with backoff by a heartbeat pump after a crash, so a failed send no longer loses the turn and retries cannot duplicate a delivered effect
+- Add a replay harness with a type-enforced fake effect sink: curated episode fixtures replay through real ingress, attention, dispatch, and effects code with a scripted LLM and zero external actions, asserting burst-collapses-to-one-turn, group STAND_DOWN silence, and ACT sends
+- Add characterization test suites (~860 lines) pinning WhatsApp and email inbound behavior ahead of the re-architecture, including the unknown-DM-drop vs group-auto-seed asymmetry, trust-gated tools, NO_REPLY semantics, delivered-only history, and failure injection at the send and store-to-dispatch boundaries
+
+### Changed
+- Make dispatch turns durable: each dispatch claims a turn row under lease and marks it complete or failed, a startup recovery sweep re-arms dispatch for stored-but-undispatched messages after a crash, and messages arriving mid-turn get their own follow-up turn instead of stranding until the next stimulus
+- Write assistant history only from delivery confirmation, so a reply enters history only after its outbound effect actually delivered
+- Put subagents and outreach onto goals: a spawn creates a goal held for the parent whose completion wakes the parent on any channel (previously WhatsApp-only relay), killing a subagent cancels its goal, and WhatsApp outreach creates a 24h-deadline goal so unanswered outreach resurfaces automatically
+- Centralize contact access behind a ContactRepository with explicit per-channel inbound policies, codifying the pinned asymmetries (WhatsApp drops DMs from unknown numbers while auto-seeding unknown group senders as untrusted; email accepts and seeds every sender), and sweep the remaining ~24 inline contacts queries across 13 service modules onto the repository
+- Route all conversation-history reads through a single HistoryRepository and all system-prompt context blocks through a shared ContextAssembler, deleting the duplicated copies in the WhatsApp bridge and email poller; replace the five near-identical channel dispatch closures with a shared DispatchRunner (lock → claim → LLM → tap → history → publish) with per-channel differences made explicit as spec fields
+- Load local STT/TTS voice models lazily on the first legacy /voice/ws connection instead of at startup, freeing roughly 8GiB of idle GPU memory now that realtime calls do STT/TTS at OpenAI; clients see a loading status with push-to-talk disabled, failed loads retry on the next connection, and BOB_VOICE_PRELOAD=true restores eager loading
+- Restrict the appearance memory claim type to durable physical description only — one canonical description per person, photo-specific clothing at most as "in this photo…" — with reconciliation retracting photo captions, scheduling chatter, and directives, and consolidating duplicates
+
+### Fixed
+- Stop the realtime voice bridge interrupting itself on echoey phone lines: barge-in previously fired on bare voice-activity detection, so an analog landline echoing the agent's own audio back caused the agent to chop its opening sentence mid-word (both Broken Hill Hotel calls collapsed this way); the interrupt now waits for a non-empty user transcription confirming real human speech
+- Cancel and unwind all realtime session tasks when the bridge tears down on callee hangup, instead of leaking the duration timer (which fired "max duration reached" logs minutes after the call ended) and leaving the end-requested waiter permanently pending
+
+### Removed
+- Remove the legacy local voice pipeline (~4,700 lines): the /voice/ws endpoint, local STT→TTS engine stack, browser transport and protocol, voice session store, lesson progress service, and the language-practice frontend — all voice now runs through the OpenAI Realtime bridge, and the faster-whisper/omnivoice dependencies and [voice] extra are dropped
+- Remove the patience gate and its 450-line test suite, superseded by the attention coordinator, along with RoutineSchedulerTask's dedicated due/claim machinery absorbed by the wakeup pump
+- Remove the WhatsApp-bound subagent result relay, the generic thread_result_service, and the standalone email thread result tool module, replaced by the unified wake path (the finish_email_thread tool lives on inside email_tools)
+
+## 2026-08-16 – 2026-08-18
+
+### Added
+- Prewarm outbound-call realtime sessions: the OpenAI Realtime session is connected and fully configured while the phone rings, and the media stream claims it at answer so the callee's greeting flows into a live session instead of riding a setup-backlog burst into a half-configured one
+- Detect voicemail on outbound phone calls by matching the callee's opening words against recorded-greeting phrases: the agent leaves one short message and the bridge ends the call after a reply window if nobody speaks, with misdetected live humans self-correcting by replying
+- Add a get_session_messages tool so agents and routine runs can re-check what was actually said in a session (bounded, sender-attributed reads) instead of baking volatile facts into prompts
+- Add a BOB_PHONE_TWILIO_REGION setting to pin the Twilio client to a home region
+
+### Changed
+- Make dream autoplan session-scoped instead of a global runtime toggle: /autoplan sets a per-chat flag so only plans whose evidence came from that conversation auto-approve, the CLI toggles per session with --session, and the dashboard Controls tab lists enabled sessions with individual turn-off (a global boot default remains via BOB_DREAM_AUTO_APPROVE_PLANS)
+- Pass static stream TwiML inline when placing outbound Twilio calls, removing the webhook fetch from the answer critical path (the inbound TwiML webhook remains for per-call setup)
+- Reject routine prompts that instruct the run to create, modify, or delete routines, since routine dispatch withholds those tools and the instruction could never be obeyed
+
+### Fixed
+- Fix call recordings collapsing the call's opening seconds: inbound audio taps are stamped at Twilio arrival time rather than relay dequeue time, and burst-fed frames are laid back-to-back with correct bytes-vs-samples math so they can never overwrite earlier audio
+- Hold, instead of cancel, opening-window responses that have no transcription yet, so a real greeting whose transcription races response.created is no longer killed as noise, leaving the caller in dead air — released on human transcript, cancelled on empty transcription or decision timeout
+- Restore session visibility for untrusted dispatches with no resolved contact (routine runs in WhatsApp groups), which previously could see no sessions at all — not even the conversation they post into — and worked from stale remembered confirmations
+
 ## 2026-08-16
 
 ### Added

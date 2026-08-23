@@ -4,6 +4,7 @@ import { useWSConnected } from "@/hooks/use-live-data";
 import { SessionList } from "@/components/home/session-list";
 import { LLMChart } from "@/components/home/llm-chart";
 import { MemoryFeed } from "@/components/home/memory-feed";
+import { HealthStrip, NeedsAttention } from "@/components/home/ops-status";
 import { fetchAPI } from "@/lib/api";
 
 interface CostByCategory {
@@ -78,6 +79,8 @@ function HomePage() {
 
   return (
     <div className="flex flex-col gap-4 p-3">
+      <HealthStrip />
+      <NeedsAttention />
       <section>
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">llm calls · 24h</h2>
         <LLMChart buckets={home?.chart_buckets ?? []} categories={home?.chart_categories ?? []} />
@@ -117,7 +120,7 @@ function HomePage() {
       )}
 
       <section>
-        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">sessions</h2>
+        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">conversations</h2>
         <SessionList sessions={home?.active_sessions?.slice(0, 8) ?? []} />
       </section>
 
@@ -131,7 +134,7 @@ function HomePage() {
         <div className="grid grid-cols-2 gap-2 text-xs">
           <StatBox label="entities" value={home?.entity_count ?? 0} />
           <StatBox label="dispatches" value={home?.active_dispatches?.length ?? 0} />
-          <StatBox label="sessions" value={home?.active_sessions?.length ?? 0} />
+          <StatBox label="convos" value={home?.active_sessions?.length ?? 0} />
         </div>
       </section>
     </div>

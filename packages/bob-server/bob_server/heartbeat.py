@@ -11,6 +11,9 @@ from typing import Protocol, runtime_checkable
 
 from bob_server.context import AppContext
 from bob_server.database import Database
+from bob_server.repositories.contacts import ContactRepository
+from bob_server.repositories.event_log import EventLogRepository
+from bob_server.repositories.history import HistoryRepository
 
 
 logger = logging.getLogger(__name__)
@@ -124,30 +127,9 @@ class SessionIdleSummaryTask:
         self, db: Database, idle_threshold_minutes: float
     ) -> list[dict]:
         """Find sessions with messages newer than the last silent extraction turn."""
-        rows = await db.fetch_all(
-            """
-            SELECT
-                sm.session_key,
-                MAX(sm.created_at) AS last_message_at,
-                COALESCE(
-                    (SELECT MAX(ran_at) FROM memory_extraction_turns
-                     WHERE session_key = sm.session_key),
-                    '1970-01-01'
-                ) AS active_from,
-                COUNT(*) AS message_count
-            FROM session_messages sm
-            WHERE sm.session_key NOT LIKE 'subagent:%'
-              AND datetime(sm.created_at) > datetime(COALESCE(
-                (SELECT MAX(ran_at) FROM memory_extraction_turns
-                 WHERE session_key = sm.session_key),
-                '1970-01-01'
-              ))
-            GROUP BY sm.session_key
-            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
-            """,
-            (idle_threshold_minutes,),
-        )
-        return [dict(r) for r in rows] if rows else []
+        rows = await HistoryRepository(db).extraction_candidates(
+            idle_threshold_minutes=idle_threshold_minutes)
+        return rows
 
     async def run(self, ctx: AppContext) -> None:
         from bob_server.services.memory import MemoryService
@@ -194,10 +176,9 @@ class CallCleanupTask:
         max_age_days = settings.phone.call_recording_max_age_days
         cutoff = (now - timedelta(days=max_age_days)).isoformat()
 
-        old_calls = await ctx.db.fetch_all(
-            "SELECT id, recording_path FROM phone_calls WHERE completed_at < ?",
-            (cutoff,),
-        )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        calls_repo = PhoneCallRepository(ctx.db)
+        old_calls = await calls_repo.completed_before(cutoff)
         if not old_calls:
             _last_call_cleanup = now
             return
@@ -207,17 +188,139 @@ class CallCleanupTask:
                 audio_path = settings.data_dir / "calls" / call["recording_path"]
                 if audio_path.exists():
                     audio_path.unlink()
-            await ctx.db.execute(
-                "DELETE FROM phone_call_exchanges WHERE call_id = ?",
-                (call["id"],),
-            )
-            await ctx.db.execute(
-                "DELETE FROM phone_calls WHERE id = ?",
-                (call["id"],),
-            )
+            await calls_repo.delete(call["id"])
 
         _last_call_cleanup = now
         logger.info("Cleaned up %d old phone call(s)", len(old_calls))
+
+
+_last_llm_log_redaction: datetime | None = None
+
+
+class LlmLogRetentionTask:
+    """Redact heavy payloads from llm_call_log rows older than 30 days.
+
+    Rows and metrics (tokens, latency, status, model) are kept forever;
+    prompts, messages, responses, and tool blocks are stripped. This keeps
+    telemetry from dominating database size (it once reached 2.4GB of a
+    2.5GB file) without losing usage history. Bob3 plan Phase 0, decision 7.
+    """
+
+    name = "llm_log_retention"
+    payload_max_age_days = 30
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_llm_log_redaction
+        now = datetime.now(timezone.utc)
+        if _last_llm_log_redaction and (now - _last_llm_log_redaction) < timedelta(hours=24):
+            return
+        _last_llm_log_redaction = now
+
+        cutoff = (now - timedelta(days=self.payload_max_age_days)).isoformat()
+        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        redacted = await LlmCallLogRepository(ctx.db).redact_payloads_before(cutoff)
+        if redacted:
+            logger.info("Redacted payloads from %d llm_call_log row(s)", redacted)
+
+
+_last_event_log_reconcile: datetime | None = None
+
+
+class EventLogReconciliationTask:
+    """Daily audit: compare legacy channel stores against event_log (Bob3 Phase I).
+
+    Audit-only — logs unmatched counts, never writes. Compares the last 24h of
+    whatsapp session_messages and email_messages against event_log appends,
+    scoped to rows created after the first event of each source (i.e. after
+    the ingress-append deploy). Count divergence is expected signal: e.g.
+    WhatsApp has no in-service dedup while event_log dedups on wa_message_id.
+    """
+
+    name = "event_log_reconciliation"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_event_log_reconcile
+        now = datetime.now(timezone.utc)
+        if _last_event_log_reconcile and (now - _last_event_log_reconcile) < timedelta(hours=24):
+            return
+        _last_event_log_reconcile = now
+
+        since = (now - timedelta(hours=24)).isoformat()
+        async def _wa_count(since_iso: str) -> int:
+            return await HistoryRepository(ctx.db).count_since(
+                role="user", channel="whatsapp", since_iso=since_iso)
+
+        async def _email_count(since_iso: str) -> int:
+            from bob_server.services.email_store import EmailStore
+            return await EmailStore(ctx.db).inbound_count_since(since_iso)
+
+        for source, count_fn in (
+            ("whatsapp", _wa_count),
+            ("email", _email_count),
+        ):
+            baseline = await EventLogRepository(ctx.db).first_recorded_at(source)
+            if not baseline:
+                continue  # no events yet for this source; nothing to reconcile
+            window_start = max(since, baseline)
+            legacy_n = await count_fn(window_start)
+            events_n = await EventLogRepository(ctx.db).count_since(source, window_start)
+            if legacy_n != events_n:
+                logger.warning(
+                    "event_log reconciliation [%s]: legacy=%d events=%d since %s",
+                    source, legacy_n, events_n, window_start)
+            else:
+                logger.info(
+                    "event_log reconciliation [%s]: OK (%d rows) since %s",
+                    source, legacy_n, window_start)
+
+
+_last_attention_agreement: datetime | None = None
+
+
+class AttentionShadowAgreementTask:
+    """Daily Phase III soak metric: shadow decisions vs live dispatcher.
+
+    A shadow ACT agrees when the live dispatcher produced an assistant
+    message in that session within 10 minutes of the stimulus; a WAIT agrees
+    when it did not. Logged as telemetry only — the ≥90% ACT-agreement
+    cutover gate (plan Phase III exit) reads these lines over the soak week.
+    """
+
+    name = "attention_shadow_agreement"
+    _reply_window_minutes = 10
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_attention_agreement
+        now = datetime.now(timezone.utc)
+        if _last_attention_agreement and (now - _last_attention_agreement) < timedelta(hours=24):
+            return
+        _last_attention_agreement = now
+
+        since = (now - timedelta(hours=24)).isoformat()
+        rows = await ctx.db.fetch_all(
+            "SELECT id, session_key, decision, created_at FROM attention_shadow "
+            "WHERE created_at >= ? ORDER BY id", (since,))
+        if not rows:
+            return
+        stats = {"ACT": {"agree": 0, "total": 0}, "WAIT": {"agree": 0, "total": 0}}
+        for r in rows:
+            decision = r["decision"]
+            if decision not in stats:
+                continue
+            replied = await HistoryRepository(ctx.db).assistant_replied_between(
+                r["session_key"], r["created_at"],
+                window_minutes=self._reply_window_minutes)
+            live_acted = replied
+            agree = (decision == "ACT") == live_acted
+            stats[decision]["total"] += 1
+            if agree:
+                stats[decision]["agree"] += 1
+        for decision, s in stats.items():
+            if s["total"]:
+                pct = 100.0 * s["agree"] / s["total"]
+                logger.info(
+                    "attention shadow agreement [%s]: %.1f%% (%d/%d) over last 24h",
+                    decision, pct, s["agree"], s["total"])
 
 
 _last_memory_reconcile: datetime | None = None
@@ -249,26 +352,9 @@ class MemoryReconciliationTask:
         from bob_server.services.memory import MemoryService
         from bob_server.services.memory.reconciliation import filter_due_for_reconciliation
 
-        rows = await ctx.db.fetch_all(
-            """
-            SELECT entity_id, MAX(touched_at) AS last_touched FROM (
-                SELECT subject_id AS entity_id, created_at AS touched_at
-                FROM memory_claims
-                WHERE status = 'active'
-                  AND datetime(created_at) > datetime('now', '-24 hours')
-                UNION ALL
-                SELECT entity_id, created_at AS touched_at
-                FROM memory_entities
-                WHERE status = 'active'
-                  AND datetime(created_at) > datetime('now', '-24 hours')
-            )
-            GROUP BY entity_id
-            ORDER BY last_touched DESC
-            LIMIT ?
-            """,
-            (recon.daily_batch_max_entities,),
-        )
-        candidate_ids = [r["entity_id"] for r in rows] if rows else []
+        from bob_server.services.memory import admin as memory_admin
+        candidate_ids = await memory_admin.recently_touched_entity_ids(
+            ctx.db, limit=recon.daily_batch_max_entities)
         if not candidate_ids:
             _last_memory_reconcile = now
             return
@@ -304,11 +390,9 @@ class LLMCallStalenessTask:
     STALE_MINUTES = 30
 
     async def run(self, ctx: AppContext) -> None:
-        count = await ctx.db.execute(
-            "UPDATE llm_call_log SET status = 'failed', error_message = 'Stale running call — timed out' "
-            "WHERE status = 'running' AND created_at < datetime('now', ?)",
-            (f'-{self.STALE_MINUTES} minutes',),
-        )
+        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        count = await LlmCallLogRepository(ctx.db).fail_stale_running(
+            stale_minutes=self.STALE_MINUTES)
         if count:
             logger.warning("Marked %d stale LLM call(s) as failed", count)
 
@@ -318,7 +402,7 @@ class DreamTask:
 
     Never blocks the heartbeat loop: gates are checked cheaply, then the run
     is spawned via asyncio.create_task with the runner's single-flight lock
-    guarding overlap (established pattern — routine_scheduler, email dispatch).
+    guarding overlap (established pattern — wakeup pump, email dispatch).
     """
 
     name = "dream"
@@ -408,3 +492,89 @@ class LocationFetchTask:
             "LocationFetchTask recorded ping: lat %.4f lon %.4f zone=%s",
             lat, lon, payload.get("state"),
         )
+
+
+class EffectPumpTask:
+    """Deliver due pending effects (Bob3 Phase IV outbox).
+
+    The write path delivers inline; this pump exists for crash leftovers and
+    backoff retries. Runs every heartbeat tick — claim_due is a cheap indexed
+    query when the outbox is empty.
+    """
+
+    name = "effect_pump"
+
+    async def run(self, ctx: AppContext) -> None:
+        from bob_server.services.effects import pump_due_effects
+
+        processed = await pump_due_effects(ctx)
+        if processed:
+            logger.info("effect pump delivered/retried %d effect(s)", processed)
+
+
+class WakeupPumpTask:
+    """Fire due wakeups (Bob3 Phase V): goal deadlines and scheduled wakes."""
+
+    name = "wakeup_pump"
+
+    async def run(self, ctx: AppContext) -> None:
+        from bob_server.services.goal_service import pump_due_wakeups
+
+        fired = await pump_due_wakeups(ctx)
+        if fired:
+            logger.info("wakeup pump fired %d wakeup(s)", fired)
+
+
+_last_deletion_propagation: datetime | None = None
+
+
+class DeletionPropagationTask:
+    """Daily deletion propagation (Bob3 Phase VII, decision 7): events are
+    kept forever, but explicit deletions propagate as payload redaction.
+    Event rows referencing a deleted contact keep their identity/ordering
+    columns; the payload is replaced with a tombstone."""
+
+    name = "deletion_propagation"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_deletion_propagation
+        now = datetime.now(timezone.utc)
+        if _last_deletion_propagation and (now - _last_deletion_propagation) < timedelta(hours=24):
+            return
+        _last_deletion_propagation = now
+
+        deleted_ids = await ContactRepository(ctx.db).deleted_ids()
+        redacted = 0
+        repo = EventLogRepository(ctx.db)
+        for contact_id in deleted_ids:
+            redacted += await repo.redact_contact_payloads(contact_id)
+        if redacted:
+            logger.info("deletion propagation redacted %d event payload(s)", redacted)
+
+
+_last_growth_check: datetime | None = None
+
+
+class GrowthMonitoringTask:
+    """Daily DB growth telemetry (Bob3 Phase VII item 4): logs database size
+    and hot-table row counts so growth is visible against the Phase 0
+    baseline (journalctl-greppable: 'db growth')."""
+
+    name = "growth_monitoring"
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_growth_check
+        now = datetime.now(timezone.utc)
+        if _last_growth_check and (now - _last_growth_check) < timedelta(hours=24):
+            return
+        _last_growth_check = now
+
+        page_count = await ctx.db.fetch_one("PRAGMA page_count")
+        page_size = await ctx.db.fetch_one("PRAGMA page_size")
+        size_mb = (list(page_count.values())[0] * list(page_size.values())[0]) / (1024 * 1024)
+        counts = {}
+        for table in ("event_log", "messages", "llm_call_log",
+                      "effects", "turns", "goals"):
+            row = await ctx.db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
+            counts[table] = row["n"]
+        logger.info("db growth: size=%.1fMB rows=%s", size_mb, counts)

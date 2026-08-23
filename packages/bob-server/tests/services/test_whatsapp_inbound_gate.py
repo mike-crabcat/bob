@@ -36,6 +36,7 @@ async def _seed_contact(db, phone: str, *, trusted: int, allow_inbound: int) -> 
 def _make_service(db) -> tuple[WhatsAppBridgeService, AsyncMock]:
     svc = object.__new__(WhatsAppBridgeService)
     svc.db = db
+    svc.ctx = SimpleNamespace(db=db)  # channel policy resolves sender via ctx
     svc._ws = None  # _send_ack becomes a no-op
     svc._get_settings = lambda: SimpleNamespace(  # type: ignore[method-assign]
         openai=SimpleNamespace(enabled=True),
@@ -61,7 +62,7 @@ def _dm_payload(phone: str, text: str = "/who") -> dict:
 
 async def _participant_rows(db, phone: str) -> list:
     return await db.fetch_all(
-        "SELECT * FROM session_participants WHERE identifier = ?", (phone,),
+        "SELECT * FROM participants WHERE identifier = ?", (phone,),
     )
 
 

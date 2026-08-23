@@ -32,14 +32,12 @@ def make_phone_tools(
     async def get_call_status(call_id: str) -> str:
         """Check the status of a phone call. Returns current status, duration, and exchange count."""
         db = ctx.db
-        call = await db.fetch_one(
-            """SELECT id, call_sid, phone_number, direction, status, agenda,
-                      exchange_count, duration_seconds, started_at, completed_at
-               FROM phone_calls WHERE id = ? OR call_sid = ?""",
-            (call_id, call_id),
-        )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        call = await PhoneCallRepository(db).get(call_id)
         if not call:
             return json.dumps({"ok": False, "error": "Call not found"})
-        return json.dumps({"ok": True, **dict(call)})
+        keys = ("id", "call_sid", "phone_number", "direction", "status", "agenda",
+                "exchange_count", "duration_seconds", "started_at", "completed_at")
+        return json.dumps({"ok": True, **{k: call.get(k) for k in keys}})
 
     return [get_call_status]

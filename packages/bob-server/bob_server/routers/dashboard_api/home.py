@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from bob_server.repositories.llm_call_log import LlmCallLogRepository
 
 
 router = APIRouter()
@@ -22,22 +23,10 @@ async def get_home(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_call_log'"
     )
     msgs_exists_home = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_messages'"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
     )
     if log_exists:
-        rows = await db.fetch_all(
-            """SELECT session_key,
-                      COUNT(*) as call_count,
-                      MAX(created_at) || 'Z' as last_activity,
-                      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
-                      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
-                      ROUND(AVG(CASE WHEN latency_seconds IS NOT NULL THEN latency_seconds END), 2) as avg_latency
-               FROM llm_call_log
-               WHERE session_key IS NOT NULL
-               GROUP BY session_key
-               ORDER BY last_activity DESC
-               LIMIT 50"""
-        )
+        rows = await LlmCallLogRepository(db).activity_rollup(limit=50)
         for row in rows:
             key = row["session_key"]
             active_sessions.append({
@@ -51,16 +40,8 @@ async def get_home(request: Request) -> dict[str, Any]:
             })
     if msgs_exists_home:
         seen = {s["session_key"] for s in active_sessions}
-        msg_rows = await db.fetch_all(
-            """SELECT session_key,
-                      COUNT(*) as msg_count,
-                      MAX(created_at) || 'Z' as last_activity
-               FROM session_messages
-               WHERE session_key IS NOT NULL
-               GROUP BY session_key
-               ORDER BY last_activity DESC
-               LIMIT 50"""
-        )
+        from bob_server.repositories.history import HistoryRepository
+        msg_rows = await HistoryRepository(db).activity_rollup(limit=50)
         for row in msg_rows:
             key = row["session_key"]
             if key not in seen:
@@ -80,18 +61,7 @@ async def get_home(request: Request) -> dict[str, Any]:
     chart_buckets: list[dict[str, Any]] = []
     chart_categories: list[str] = []
     if log_exists:
-        chart_rows = await db.fetch_all(
-            """SELECT
-                  strftime('%Y-%m-%dT%H:%M',
-                      datetime(strftime('%s', created_at) - strftime('%s', created_at) % 900, 'unixepoch')
-                  ) as interval_start,
-                  call_category,
-                  COUNT(*) as count
-               FROM llm_call_log
-               WHERE created_at >= datetime('now', '-24 hours')
-               GROUP BY interval_start, call_category
-               ORDER BY interval_start"""
-        )
+        chart_rows = await LlmCallLogRepository(db).category_chart_24h()
         bucket_map: dict[str, dict[str, int]] = {}
         categories: set[str] = set()
         for row in chart_rows:
@@ -122,29 +92,14 @@ async def get_home(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entities'"
     )
     if entities_table:
-        e_total = await db.fetch_one(
-            "SELECT COUNT(*) AS c FROM memory_entities WHERE status = 'active'"
-        )
-        entity_count = (e_total["c"] if e_total else 0) or 0
+        from bob_server.services.memory import admin as memory_admin
+        entity_count = await memory_admin.active_entity_count(db)
 
         claims_table = await db.fetch_one(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_claims'"
         )
         if claims_table:
-            c_rows = await db.fetch_all(
-                """SELECT c.id, c.claim_type_key, c.subject_id, c.object_id, c.value,
-                          c.created_at,
-                          se.display_name AS subject_name,
-                          se.entity_type  AS subject_type,
-                          oe.display_name AS object_name,
-                          oe.entity_type  AS object_type
-                   FROM memory_claims c
-                   LEFT JOIN memory_entities se ON se.entity_id = c.subject_id
-                   LEFT JOIN memory_entities oe ON oe.entity_id = c.object_id
-                   WHERE c.status = 'active'
-                   ORDER BY c.created_at DESC
-                   LIMIT 10"""
-            )
+            c_rows = await memory_admin.recent_claims_with_names(db, limit=10)
             for row in c_rows:
                 recent_memory.append({
                     "id": row["id"],
@@ -163,17 +118,7 @@ async def get_home(request: Request) -> dict[str, Any]:
     cost_by_category: list[dict[str, Any]] = []
     total_cost_24h = 0.0
     if log_exists:
-        cost_rows = await db.fetch_all(
-            """SELECT call_category, model,
-                      SUM(COALESCE(prompt_tokens, 0)) as total_prompt_tokens,
-                      SUM(COALESCE(completion_tokens, 0)) as total_completion_tokens,
-                      SUM(COALESCE(cached_tokens, 0)) as total_cached_tokens,
-                      COUNT(*) as call_count
-               FROM llm_call_log
-               WHERE created_at >= datetime('now', '-24 hours')
-               GROUP BY call_category, model
-               ORDER BY call_category, model"""
-        )
+        cost_rows = await LlmCallLogRepository(db).cost_rollup_24h()
         # Pricing per 1M tokens (input, output). Cached input is billed at 10%
         # of the input rate (OpenAI's 90% prompt-cache discount).
         _PRICING: dict[str, tuple[float, float]] = {

@@ -50,7 +50,6 @@ def _row_to_thread(row: dict[str, Any]) -> EmailThreadResponse:
         agentmail_thread_id=row["agentmail_thread_id"],
         subject=row.get("subject"),
         contact_id=UUID(row["contact_id"]) if row.get("contact_id") else None,
-        project_id=UUID(row["project_id"]) if row.get("project_id") else None,
         session_key=row["session_key"],
         agenda=row.get("agenda"),
         message_count=int(row.get("message_count") or 0),
@@ -74,22 +73,17 @@ async def register_inbox(
     """Register an AgentMail inbox for email relay."""
     inbox_id = str(uuid4())
     now = utcnow().isoformat()
-    await database.execute(
-        """
-        INSERT INTO email_inboxes (id, agentmail_inbox_id, display_name, email_address, metadata, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            inbox_id,
-            payload.agentmail_inbox_id,
-            payload.display_name,
-            payload.email_address,
-            json_dumps(payload.metadata),
-            now,
-            now,
-        ),
+    from bob_server.services.email_store import EmailStore
+    store = EmailStore(database)
+    await store.insert_inbox(
+        inbox_id=inbox_id,
+        agentmail_inbox_id=payload.agentmail_inbox_id,
+        display_name=payload.display_name,
+        email_address=payload.email_address,
+        metadata_json=json_dumps(payload.metadata),
+        now_iso=now,
     )
-    row = await database.fetch_one("SELECT * FROM email_inboxes WHERE id = ?", (inbox_id,))
+    row = await store.get_inbox(inbox_id, include_deleted=True)
     return _row_to_inbox(row)
 
 
@@ -99,11 +93,8 @@ async def list_inboxes(
     database: Database = Depends(get_database),
 ) -> list[EmailInboxResponse]:
     """List registered email inboxes."""
-    query = "SELECT * FROM email_inboxes WHERE deleted_at IS NULL"
-    if active_only:
-        query += " AND is_active = 1"
-    query += " ORDER BY created_at ASC"
-    rows = await database.fetch_all(query)
+    from bob_server.services.email_store import EmailStore
+    rows = await EmailStore(database).list_inboxes(active_only=active_only)
     return [_row_to_inbox(row) for row in rows]
 
 
@@ -113,10 +104,8 @@ async def get_inbox(
     database: Database = Depends(get_database),
 ) -> EmailInboxResponse:
     """Get a registered email inbox."""
-    row = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
-        (str(inbox_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    row = await EmailStore(database).get_inbox(str(inbox_id))
     if row is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
     return _row_to_inbox(row)
@@ -129,10 +118,9 @@ async def update_inbox(
     database: Database = Depends(get_database),
 ) -> EmailInboxResponse:
     """Update a registered email inbox."""
-    existing = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
-        (str(inbox_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    store = EmailStore(database)
+    existing = await store.get_inbox(str(inbox_id))
     if existing is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
 
@@ -146,12 +134,8 @@ async def update_inbox(
         values["is_active"] = 1 if values["is_active"] else 0
     values["updated_at"] = utcnow().isoformat()
 
-    assignments = ", ".join(f"{field} = ?" for field in values)
-    await database.execute(
-        f"UPDATE email_inboxes SET {assignments} WHERE id = ?",
-        tuple(values.values()) + (str(inbox_id),),
-    )
-    row = await database.fetch_one("SELECT * FROM email_inboxes WHERE id = ?", (str(inbox_id),))
+    await store.update_inbox_fields(str(inbox_id), values)
+    row = await store.get_inbox(str(inbox_id), include_deleted=True)
     return _row_to_inbox(row)
 
 
@@ -161,17 +145,12 @@ async def remove_inbox(
     database: Database = Depends(get_database),
 ) -> None:
     """Soft-delete a registered email inbox."""
-    existing = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
-        (str(inbox_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    store = EmailStore(database)
+    existing = await store.get_inbox(str(inbox_id))
     if existing is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
-    now = utcnow().isoformat()
-    await database.execute(
-        "UPDATE email_inboxes SET deleted_at = ?, updated_at = ? WHERE id = ?",
-        (now, now, str(inbox_id)),
-    )
+    await store.soft_delete_inbox(str(inbox_id), utcnow().isoformat())
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +195,8 @@ async def reply_to_email(
     """Reply to an email message."""
     from bob_server.services.agentmail_client import AgentMailClient
 
-    inbox = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
-        (str(inbox_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    inbox = await EmailStore(database).get_inbox(str(inbox_id), active_only=True)
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found or inactive")
 
@@ -272,10 +249,8 @@ async def list_messages(
     """List messages in an inbox (proxied to AgentMail)."""
     from bob_server.services.agentmail_client import AgentMailClient
 
-    inbox = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
-        (str(inbox_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    inbox = await EmailStore(database).get_inbox(str(inbox_id))
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
 
@@ -306,10 +281,8 @@ async def download_attachment(
     """Download an email attachment from AgentMail."""
     from bob_server.services.agentmail_client import AgentMailClient
 
-    inbox = await database.fetch_one(
-        "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
-        (str(inbox_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    inbox = await EmailStore(database).get_inbox(str(inbox_id))
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
 
@@ -341,15 +314,10 @@ async def list_threads(
     database: Database = Depends(get_database),
 ) -> list[EmailThreadResponse]:
     """List tracked email threads."""
-    query = "SELECT * FROM email_threads WHERE deleted_at IS NULL"
-    params: list[Any] = []
-    if inbox_id is not None:
-        query += " AND inbox_id = ?"
-        params.append(str(inbox_id))
-    if active_only:
-        query += " AND is_active = 1"
-    query += " ORDER BY last_message_at DESC NULLS LAST"
-    rows = await database.fetch_all(query, tuple(params))
+    from bob_server.services.email_store import EmailStore
+    rows = await EmailStore(database).list_threads(
+        inbox_id=str(inbox_id) if inbox_id is not None else None,
+        active_only=active_only)
     return [_row_to_thread(row) for row in rows]
 
 
@@ -359,10 +327,8 @@ async def get_thread(
     database: Database = Depends(get_database),
 ) -> EmailThreadResponse:
     """Get a tracked email thread."""
-    row = await database.fetch_one(
-        "SELECT * FROM email_threads WHERE id = ? AND deleted_at IS NULL",
-        (str(thread_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    row = await EmailStore(database).get_thread(str(thread_id))
     if row is None:
         raise HTTPException(status_code=404, detail="Thread not found")
     return _row_to_thread(row)
@@ -378,15 +344,10 @@ async def update_thread_agenda(
     agenda = payload.get("agenda", "").strip()
     if not agenda:
         raise HTTPException(status_code=422, detail="agenda must not be empty")
-    now_iso = utcnow().isoformat()
-    await database.execute(
-        "UPDATE email_threads SET agenda = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
-        (agenda, now_iso, str(thread_id)),
-    )
-    row = await database.fetch_one(
-        "SELECT * FROM email_threads WHERE id = ?",
-        (str(thread_id),),
-    )
+    from bob_server.services.email_store import EmailStore
+    store = EmailStore(database)
+    await store.set_thread_agenda(str(thread_id), agenda, utcnow().isoformat())
+    row = await store.get_thread(str(thread_id), include_deleted=True)
     if row is None:
         raise HTTPException(status_code=404, detail="Thread not found")
     return _row_to_thread(row)

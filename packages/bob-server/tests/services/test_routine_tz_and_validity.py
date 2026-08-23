@@ -208,101 +208,113 @@ async def test_upsert_routine_defaults_null_tz_and_window(svc, session_key):
     assert routine["valid_until"] is None
 
 
-async def test_get_due_routines_filters_outside_validity_window(svc, session_key):
-    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
-    past = (datetime.now(UTC) - timedelta(days=10)).isoformat()
-    await svc.upsert_routine(
-        session_key=session_key,
-        name="expired",
-        schedule="* * * * *",
-        prompt="Should not fire.",
-        next_run_at=past,
-        timezone="UTC",
-        valid_until=yesterday,
-    )
-    due = await svc.get_due_routines()
-    names = [r["name"] for r in due]
-    assert "expired" not in names
+async def test_upsert_routine_schedules_wakeup(svc, session_key):
+    from bob_server.repositories.wakeups import WakeupRepository
 
-
-async def test_get_due_routines_includes_inside_validity_window(svc, session_key):
-    past = (datetime.now(UTC) - timedelta(days=10)).isoformat()
-    today = datetime.now(UTC).date().isoformat()
-    future = (datetime.now(UTC) + timedelta(days=10)).date().isoformat()
-    await svc.upsert_routine(
-        session_key=session_key,
-        name="active",
-        schedule="* * * * *",
-        prompt="Should fire.",
-        next_run_at=past,
-        timezone="UTC",
-        valid_from=today,
-        valid_until=future,
-    )
-    due = await svc.get_due_routines()
-    names = [r["name"] for r in due]
-    assert "active" in names
-
-
-# ---------------------------------------------------------------------------
-# Cross-timezone due-ness — the continuous-fire regression
-# ---------------------------------------------------------------------------
-
-
-async def test_cross_tz_future_routine_not_due_under_mismatched_offset(svc, session_key):
-    # A Europe/Paris routine due ~2h in the future. Under the old bare
-    # `next_run_at <= now` TEXT compare, the Paris ISO string (e.g. ...T18:30+02:00)
-    # sorts lexicographically below a Perth server now (...T...+08:00) on the
-    # same date and reads as "due" — firing every heartbeat. datetime() on both
-    # sides normalizes to UTC so the real-time answer wins.
-    paris = ZoneInfo("Europe/Paris")
-    future_paris = (datetime.now(UTC) + timedelta(hours=2)).astimezone(paris)
-    await svc.upsert_routine(
-        session_key=session_key,
-        name="paris-future",
-        schedule="30 6 * * *",
-        prompt="x",
-        next_run_at=future_paris.isoformat(),
-        timezone="Europe/Paris",
-    )
-    due = await svc.get_due_routines()
-    assert "paris-future" not in [r["name"] for r in due]
-
-
-async def test_cross_tz_past_routine_is_due_under_mismatched_offset(svc, session_key):
-    # Inverse: a Paris routine whose slot genuinely passed must still be due.
-    paris = ZoneInfo("Europe/Paris")
-    past_paris = (datetime.now(UTC) - timedelta(hours=2)).astimezone(paris)
-    await svc.upsert_routine(
-        session_key=session_key,
-        name="paris-past",
-        schedule="30 6 * * *",
-        prompt="x",
-        next_run_at=past_paris.isoformat(),
-        timezone="Europe/Paris",
-    )
-    due = await svc.get_due_routines()
-    assert "paris-past" in [r["name"] for r in due]
-
-
-async def test_claim_on_future_routine_returns_false_and_does_not_advance(svc, session_key):
-    # claim() must refuse a future routine, otherwise the per-heartbeat loop
-    # returns: claim "succeeds", rewrites next_run_at to the same future value,
-    # and the next heartbeat fires it again.
-    paris = ZoneInfo("Europe/Paris")
-    future_paris = (datetime.now(UTC) + timedelta(hours=2)).astimezone(paris)
     routine = await svc.upsert_routine(
         session_key=session_key,
-        name="paris-future-claim",
-        schedule="30 6 * * *",
-        prompt="x",
-        next_run_at=future_paris.isoformat(),
-        timezone="Europe/Paris",
+        name="wired",
+        schedule="0 7 * * *",
+        prompt="Send brief.",
+        next_run_at="2099-01-01T07:00:00+00:00",
+        timezone="UTC",
     )
-    won = await svc.claim(routine["id"], "2099-01-01T00:00:00+00:00")
-    assert won is False
-    refreshed = await svc.get_routine(session_key, "paris-future-claim")
-    assert refreshed["next_run_at"] == future_paris.isoformat()  # unchanged
+    rows = await WakeupRepository(svc.db).list_scheduled(session_key)
+    mine = [w for w in rows if w["kind"] == "routine"]
+    assert len(mine) == 1
+    w = mine[0]
+    assert w["recurrence"] == "cron:0 7 * * *"
+    assert w["not_before"] == "2099-01-01T07:00:00+00:00"
+    import json as _json
+    assert _json.loads(w["payload_json"])["routine_id"] == routine["id"]
+
+    # Re-upsert replaces (never duplicates) the scheduled wakeup.
+    await svc.upsert_routine(
+        session_key=session_key, name="wired", schedule="0 8 * * *",
+        prompt="Send brief.", next_run_at="2099-01-01T08:00:00+00:00",
+        timezone="UTC",
+    )
+    rows = await WakeupRepository(svc.db).list_scheduled(session_key)
+    mine = [w for w in rows if w["kind"] == "routine"]
+    assert len(mine) == 1 and mine[0]["recurrence"] == "cron:0 8 * * *"
+
+
+async def test_disable_and_delete_cancel_wakeup(svc, session_key):
+    from bob_server.repositories.wakeups import WakeupRepository
+
+    await svc.upsert_routine(
+        session_key=session_key, name="gone", schedule="0 7 * * *",
+        prompt="x", next_run_at="2099-01-01T07:00:00+00:00",
+    )
+    repo = WakeupRepository(svc.db)
+    assert [w for w in await repo.list_scheduled(session_key) if w["kind"] == "routine"]
+
+    await svc.upsert_routine(
+        session_key=session_key, name="gone", schedule="0 7 * * *",
+        prompt="x", enabled=False, next_run_at="2099-01-01T07:00:00+00:00",
+    )
+    assert not [w for w in await repo.list_scheduled(session_key) if w["kind"] == "routine"]
+
+    await svc.upsert_routine(
+        session_key=session_key, name="gone", schedule="0 7 * * *",
+        prompt="x", next_run_at="2099-01-01T07:00:00+00:00",
+    )
+    assert await svc.delete_routine(session_key, "gone")
+    assert not [w for w in await repo.list_scheduled(session_key) if w["kind"] == "routine"]
+
+
+async def test_fire_wakeup_skips_expired_routine_but_keeps_series(svc, session_key, monkeypatch):
+    # Validity window is enforced at fire time: an expired routine's slot is
+    # skipped (no dispatch) but returns True so recurrence bookkeeping stays
+    # uniform; a deleted/disabled routine ends the series (False).
+    from bob_server.services import goal_service, routine_service
+
+    fired = []
+    monkeypatch.setattr(routine_service, "fire_routine_detached",
+                        lambda ctx, r: fired.append(r["name"]))
+
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    expired = await svc.upsert_routine(
+        session_key=session_key, name="expired", schedule="* * * * *",
+        prompt="x", next_run_at="2020-01-01T00:00:00+00:00",
+        timezone="UTC", valid_until=yesterday,
+    )
+    wakeup = {"kind": "routine", "not_before": "2020-01-01T00:00:00+00:00",
+              "payload_json": '{"routine_id": "%s"}' % expired["id"]}
+    assert await goal_service.fire_wakeup(svc.ctx, wakeup) is True
+    assert fired == []
+
+    active = await svc.upsert_routine(
+        session_key=session_key, name="active", schedule="* * * * *",
+        prompt="x", next_run_at="2020-01-01T00:00:00+00:00", timezone="UTC",
+    )
+    wakeup["payload_json"] = '{"routine_id": "%s"}' % active["id"]
+    assert await goal_service.fire_wakeup(svc.ctx, wakeup) is True
+    assert fired == ["active"]
+
+    wakeup["payload_json"] = '{"routine_id": "no-such-routine"}'
+    assert await goal_service.fire_wakeup(svc.ctx, wakeup) is False
+
+
+async def test_cron_recurrence_stores_utc_not_before(svc, session_key):
+    # The continuous-fire regression guard, now at the wakeup seam: rescheduled
+    # occurrences must be stored as UTC ISO strings so claim_due's TEXT compare
+    # (not_before <= now-UTC) is offset-safe for e.g. Europe/Paris routines.
+    from bob_server.services.goal_service import _next_occurrence
+
+    next_at = _next_occurrence({
+        "id": "w1", "recurrence": "cron:30 6 * * *", "tz": "Europe/Paris",
+    })
+    assert next_at is not None
+    parsed = datetime.fromisoformat(next_at)
+    assert parsed.utcoffset() == timedelta(0), "must be stored in UTC"
+    assert parsed > datetime.now(UTC)
+
+    # Interval + malformed specs
+    plus = _next_occurrence({"id": "w2", "recurrence": "+15m", "tz": None})
+    assert plus and datetime.fromisoformat(plus) > datetime.now(UTC)
+    assert _next_occurrence({"id": "w3", "recurrence": "cron:not a cron", "tz": None}) is None
+    assert _next_occurrence({"id": "w4", "recurrence": None, "tz": None}) is None
 
 
 # ---------------------------------------------------------------------------

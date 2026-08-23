@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from bob_server.database import Database
 from bob_server.dependencies import get_database
 from bob_server.models import ContactCreate, ContactResponse, ContactUpdate
+from bob_server.repositories.contacts import ContactRepository
 from bob_server.services.phone_utils import normalize_phone
 
 
@@ -52,22 +53,13 @@ async def create_contact(
         )
 
     try:
-        await database.execute(
-            """
-            INSERT INTO contacts (id, name, phone_number, email, metadata, allow_inbound_dm,
-                                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(contact_id),
-                payload.name,
-                normalized_phone,
-                payload.email,
-                json.dumps(payload.metadata),
-                1 if payload.allow_inbound_dm else 0,
-                now,
-                now,
-            ),
+        await ContactRepository(database).create_full(
+            contact_id=str(contact_id),
+            name=payload.name,
+            phone_number=normalized_phone,
+            email=payload.email,
+            metadata_json=json.dumps(payload.metadata),
+            allow_inbound_dm=1 if payload.allow_inbound_dm else 0,
         )
     except Exception as e:
         if "UNIQUE constraint failed" in str(e):
@@ -77,10 +69,7 @@ async def create_contact(
             )
         raise
     
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ?",
-        (str(contact_id),),
-    )
+    row = await ContactRepository(database).get_any(str(contact_id))
     return _row_to_contact(row)
 
 
@@ -92,18 +81,8 @@ async def list_contacts(
     database: Database = Depends(get_database),
 ) -> list[ContactResponse]:
     """List contacts with optional pagination and search."""
-    base_query = "SELECT * FROM contacts WHERE deleted_at IS NULL"
-    params: list[Any] = []
-    
-    if search:
-        base_query += " AND (name LIKE ? OR phone_number LIKE ? OR email LIKE ?)"
-        search_pattern = f"%{search}%"
-        params.extend([search_pattern, search_pattern, search_pattern])
-    
-    base_query += " ORDER BY name LIMIT ? OFFSET ?"
-    params.extend([limit, skip])
-    
-    rows = await database.fetch_all(base_query, tuple(params))
+    rows = await ContactRepository(database).list_paged(
+        skip=skip, limit=limit, search=search)
     return [_row_to_contact(row) for row in rows]
 
 
@@ -113,10 +92,7 @@ async def get_contact(
     database: Database = Depends(get_database),
 ) -> ContactResponse:
     """Get a single contact by ID."""
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
-        (str(contact_id),),
-    )
+    row = await ContactRepository(database).get(str(contact_id))
     
     if not row:
         raise HTTPException(
@@ -136,10 +112,7 @@ async def update_contact(
 ) -> ContactResponse:
     """Update a contact."""
     # Check if contact exists
-    existing = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
-        (str(contact_id),),
-    )
+    existing = await ContactRepository(database).get(str(contact_id))
 
     if not existing:
         raise HTTPException(
@@ -148,7 +121,7 @@ async def update_contact(
         )
 
     # Build update fields
-    updates: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    updates: dict[str, Any] = {}
 
     if payload.name is not None:
         updates["name"] = payload.name
@@ -169,15 +142,8 @@ async def update_contact(
     if payload.metadata is not None:
         updates["metadata"] = json.dumps(payload.metadata)
 
-    # Build SET clause
-    set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-    values = list(updates.values()) + [str(contact_id)]
-
     try:
-        await database.execute(
-            f"UPDATE contacts SET {set_clause} WHERE id = ?",
-            tuple(values),
-        )
+        await ContactRepository(database).update_fields(str(contact_id), updates)
     except Exception as e:
         if "UNIQUE constraint failed" in str(e):
             raise HTTPException(
@@ -195,10 +161,7 @@ async def update_contact(
             str(contact_id), payload.name,
         )
 
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ?",
-        (str(contact_id),),
-    )
+    row = await ContactRepository(database).get_any(str(contact_id))
     return _row_to_contact(row)
 
 
@@ -210,10 +173,7 @@ async def delete_contact(
 ) -> Response:
     """Soft delete a contact."""
     # Check if contact exists
-    existing = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
-        (str(contact_id),),
-    )
+    existing = await ContactRepository(database).get(str(contact_id))
 
     if not existing:
         raise HTTPException(
@@ -222,11 +182,7 @@ async def delete_contact(
         )
 
     # Soft delete
-    now = datetime.now(timezone.utc).isoformat()
-    await database.execute(
-        "UPDATE contacts SET deleted_at = ? WHERE id = ?",
-        (now, str(contact_id)),
-    )
+    await ContactRepository(database).soft_delete(str(contact_id))
 
     # Retire the contact_id claim so the link doesn't dangle
     from bob_server.context import AppContext
@@ -250,10 +206,7 @@ async def get_contact_by_phone(
             detail=f"Could not parse phone number: {phone_number}",
         )
     
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE phone_number = ? AND deleted_at IS NULL",
-        (normalized,),
-    )
+    row = await ContactRepository(database).get_by_phone(normalized)
     
     if not row:
         raise HTTPException(
@@ -270,10 +223,7 @@ async def get_contact_by_email(
     database: Database = Depends(get_database),
 ) -> ContactResponse:
     """Lookup contact by email address."""
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE email = ? AND deleted_at IS NULL",
-        (email,),
-    )
+    row = await ContactRepository(database).get_by_email(email)
     
     if not row:
         raise HTTPException(
@@ -290,13 +240,7 @@ async def get_contacts_by_whatsapp_group(
     database: Database = Depends(get_database),
 ) -> list[ContactResponse]:
     """Find all contacts that are members of a WhatsApp group."""
-    rows = await database.fetch_all(
-        """SELECT c.* FROM contacts c
-           JOIN whatsappgroup_members gm ON gm.contact_id = c.id
-           JOIN whatsappgroups g ON g.id = gm.group_id
-           WHERE g.whatsapp_jid = ? AND c.deleted_at IS NULL AND gm.left_at IS NULL""",
-        (group_id,),
-    )
+    rows = await ContactRepository(database).members_of_group_jid(group_id)
 
     return [_row_to_contact(row) for row in rows]
 
@@ -306,10 +250,7 @@ async def get_default_contact(
     database: Database = Depends(get_database),
 ) -> ContactResponse:
     """Get the current default contact for notifications."""
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1",
-        (),
-    )
+    row = await ContactRepository(database).get_default()
 
     if not row:
         raise HTTPException(
@@ -327,10 +268,7 @@ async def set_default_contact(
 ) -> ContactResponse:
     """Set a contact as the default for notifications."""
     # Check if contact exists
-    existing = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL",
-        (str(contact_id),),
-    )
+    existing = await ContactRepository(database).get(str(contact_id))
 
     if not existing:
         raise HTTPException(
@@ -339,15 +277,9 @@ async def set_default_contact(
         )
 
     # Set as default (trigger will unset others)
-    await database.execute(
-        "UPDATE contacts SET is_default = 1 WHERE id = ?",
-        (str(contact_id),),
-    )
+    await ContactRepository(database).set_default(str(contact_id))
 
-    row = await database.fetch_one(
-        "SELECT * FROM contacts WHERE id = ?",
-        (str(contact_id),),
-    )
+    row = await ContactRepository(database).get_any(str(contact_id))
     return _row_to_contact(row)
 
 
@@ -356,10 +288,7 @@ async def clear_default_contact(
     database: Database = Depends(get_database),
 ) -> Response:
     """Clear the default contact."""
-    await database.execute(
-        "UPDATE contacts SET is_default = 0 WHERE is_default = 1",
-        (),
-    )
+    await ContactRepository(database).clear_default()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -371,10 +300,7 @@ async def get_contact_entity(
     database: Database = Depends(get_database),
 ) -> dict[str, Any]:
     """Get the entity document for a contact from the memory system."""
-    row = await database.fetch_one(
-        "SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL",
-        (str(contact_id),),
-    )
+    row = await ContactRepository(database).get(str(contact_id))
     if not row:
         raise HTTPException(status_code=404, detail="Contact not found")
 
@@ -406,10 +332,7 @@ async def get_contact_claims(
     database: Database = Depends(get_database),
 ) -> list[dict[str, Any]]:
     """Get active claims for a contact from the memory system."""
-    row = await database.fetch_one(
-        "SELECT id FROM contacts WHERE id = ? AND deleted_at IS NULL",
-        (str(contact_id),),
-    )
+    row = await ContactRepository(database).get(str(contact_id))
     if not row:
         raise HTTPException(status_code=404, detail="Contact not found")
 

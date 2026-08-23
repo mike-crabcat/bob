@@ -50,21 +50,11 @@ class SlashCommandsMixin:
             return
 
         enabled = arg == "on"
-        route = await self.db.fetch_one(
-            "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route:
-            await self.send_message(chat_id, "No session route found")
-            return
-
-        meta = json.loads(route["metadata"]) if route["metadata"] else {}
-        meta["patience_enabled"] = enabled
-        await self.db.execute(
-            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(meta), utcnow().isoformat(), route["id"]),
-        )
-        logger.info("patience %s for session %s (route %s)", arg, session_key, route["id"])
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        await repo.set_policy(session_key, {"patience_enabled": enabled})
+        logger.info("patience %s for conversation %s", arg, session_key)
 
         status = "enabled — waiting for silence before responding" if enabled else "disabled — responding immediately"
         await self.send_message(chat_id, f"Patience {status}")
@@ -82,22 +72,13 @@ class SlashCommandsMixin:
             return
 
         enabled = arg == "on"
-        route = await self.db.fetch_one(
-            "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route:
-            await self.send_message(chat_id, "No session route found")
-            return
-
-        meta = json.loads(route["metadata"]) if route["metadata"] else {}
-        patience_on = bool(meta.get("patience_enabled", False))
-        meta["patience_relevance_gating"] = enabled
-        await self.db.execute(
-            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(meta), utcnow().isoformat(), route["id"]),
-        )
-        logger.info("relevance %s for session %s (route %s)", arg, session_key, route["id"])
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        policy = await repo.get_policy(session_key)
+        patience_on = bool(policy.get("patience_enabled", False))
+        await repo.set_policy(session_key, {"patience_relevance_gating": enabled})
+        logger.info("relevance %s for conversation %s", arg, session_key)
 
         note = "" if patience_on else " (note: /patience is currently OFF — enable that first)"
         status = "enabled — patience LLM may skip dispatch entirely" if enabled else "disabled — patience LLM only decides timing"
@@ -105,9 +86,8 @@ class SlashCommandsMixin:
 
     async def _cmd_who(self, chat_id: str) -> None:
         """Reply with the active persona revision and creation timestamp."""
-        row = await self.db.fetch_one(
-            "SELECT revision, created_at FROM persona_records WHERE is_active = 1"
-        )
+        from bob_server.services import persona as persona_service
+        row = await persona_service.active_record(self.db)
         if row is None:
             await self.send_message(chat_id, "no active persona — using built-in defaults")
             return
@@ -126,17 +106,11 @@ class SlashCommandsMixin:
             await self.send_message(chat_id, "Usage: /verbose on|off|status")
             return
 
-        route = await self.db.fetch_one(
-            "SELECT id, metadata FROM session_routes "
-            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route:
-            await self.send_message(chat_id, "No session route found")
-            return
-
-        meta = json.loads(route["metadata"]) if route["metadata"] else {}
-        current = bool(meta.get("memory_verbose", False))
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        policy = await repo.get_policy(session_key)
+        current = bool(policy.get("memory_verbose", False))
 
         if arg == "status" or arg == "":
             state = "ON" if current else "OFF"
@@ -149,12 +123,8 @@ class SlashCommandsMixin:
             await self.send_message(chat_id, f"verbose already {state}")
             return
 
-        meta["memory_verbose"] = enabled
-        await self.db.execute(
-            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(meta), utcnow().isoformat(), route["id"]),
-        )
-        logger.info("verbose %s for session %s (route %s)", arg, session_key, route["id"])
+        await repo.set_policy(session_key, {"memory_verbose": enabled})
+        logger.info("verbose %s for conversation %s", arg, session_key)
         await self.send_message(chat_id, f"verbose {'ON' if enabled else 'OFF'}")
 
     async def _cmd_autoplan(self, args: str, session_key: str, chat_id: str) -> None:
@@ -183,17 +153,8 @@ class SlashCommandsMixin:
         current = await dream_config.get_session_autoplan(
             self.db, session_key, self.ctx.settings.dream.auto_approve_plans
         )
-        counters = await self.db.fetch_one(
-            """SELECT
-                 SUM(CASE WHEN p.status = 'draft' THEN 1 ELSE 0 END) AS drafts,
-                 SUM(CASE WHEN p.status = 'approved' AND p.announced_at IS NULL THEN 1 ELSE 0 END) AS pending,
-                 SUM(CASE WHEN p.announced_at IS NOT NULL THEN 1 ELSE 0 END) AS announced
-               FROM dream_plans p
-               JOIN dream_item_links l ON l.item_type = 'plan' AND l.item_id = p.id
-               WHERE l.session_key = ?""",
-            (session_key,),
-        )
-        c = counters or {}
+        from bob_server.services.dream import DreamStore
+        c = await DreamStore.from_db(self.db).autoplan_counters(session_key)
         counts = f"({c.get('drafts') or 0} draft, {c.get('pending') or 0} awaiting announce, {c.get('announced') or 0} announced)"
         if arg == "on":
             await self.send_message(

@@ -75,7 +75,7 @@ Both modes batch. Patience-on adds the LLM gate; patience-off uses a fixed short
 
 ## Per-session flags (route metadata)
 
-Both flags live in `session_routes.metadata` JSON. Set via slash commands from a trusted contact in the chat.
+Both flags live in `conversations.policy_json`. Set via slash commands from a trusted contact in the chat.
 
 ```json
 {

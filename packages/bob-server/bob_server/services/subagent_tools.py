@@ -31,6 +31,18 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         agent_type:
         - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
         - 'local': runs in-process via chat_with_tools (faster, no subprocess).
+        - 'script': runs `task` as a literal bash command in the workspace
+          (same sandbox/env as the bash tool) WITHOUT blocking this conversation.
+          USE THIS for any skill script expected to take more than ~10 seconds —
+          image generation (openai-image), browser automation, PDF rendering,
+          video/audio processing. Flow: (1) send the user a short ack message
+          FIRST ("On it — image coming shortly"), (2) create_subagent(
+          task="python skills/openai-image/openai_image.py --prompt '...' --output
+          /home/bob/workspace/generated-images/car.png", agent_type='script'),
+          (3) END YOUR TURN — do NOT poll check_subagent. When the script
+          finishes you will be woken automatically with the output; send the
+          artifact to the user then. Never run slow scripts with the bash tool —
+          it freezes the whole conversation while they run.
         - 'openai_voice': places a real voice call to a contact. `task` is a FACTUAL
           BRIEF, not a script: what to find out or achieve, plus constraints (budget,
           dates, what to avoid) — under ~80 words, e.g. "Ask if they have a Sega

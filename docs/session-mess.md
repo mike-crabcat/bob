@@ -1,3 +1,5 @@
+> **Resolved (Aug 2026):** `session_routes` was dropped in migration `455`; routing lives on `bindings` (see docs/datamodel.md). Kept for historical context.
+
 # Session data model is messy
 
 ## Problem

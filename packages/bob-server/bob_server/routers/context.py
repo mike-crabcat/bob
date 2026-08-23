@@ -14,6 +14,7 @@ from bob_server.models import (
     EventContextItem,
 )
 from bob_server.services.base import utcnow
+from bob_server.services.calendar_service import CalendarService
 
 
 router = APIRouter(prefix="/api/v1/context", tags=["context"])
@@ -22,16 +23,10 @@ router = APIRouter(prefix="/api/v1/context", tags=["context"])
 @router.get("/summary", response_model=ContextSummaryResponse)
 async def context_summary(database: Database = Depends(get_database)) -> ContextSummaryResponse:
     generated_at = utcnow()
-    event_rows = await database.fetch_all(
-        """
-        SELECT e.id, e.title, e.start_time, e.end_time, e.timezone, e.status, e.venue, e.calendar_id
-        FROM events AS e
-        INNER JOIN calendars AS c ON c.id = e.calendar_id
-        WHERE e.deleted_at IS NULL AND c.deleted_at IS NULL AND e.start_time >= ? AND e.start_time <= ?
-        ORDER BY e.start_time ASC
-        LIMIT 8
-        """,
-        (generated_at.isoformat(), (generated_at + timedelta(days=14)).isoformat()),
+    event_rows = await CalendarService.from_db(database).upcoming_context_events(
+        start_iso=generated_at.isoformat(),
+        end_iso=(generated_at + timedelta(days=14)).isoformat(),
+        limit=8,
     )
     return ContextSummaryResponse(
         generated_at=generated_at,
@@ -42,16 +37,8 @@ async def context_summary(database: Database = Depends(get_database)) -> Context
 @router.get("/calendar", response_model=ContextCalendarResponse)
 async def context_calendar(database: Database = Depends(get_database)) -> ContextCalendarResponse:
     generated_at = utcnow()
-    rows = await database.fetch_all(
-        """
-        SELECT e.id, e.title, e.start_time, e.end_time, e.timezone, e.status, e.venue, e.calendar_id
-        FROM events AS e
-        INNER JOIN calendars AS c ON c.id = e.calendar_id
-        WHERE e.deleted_at IS NULL AND c.deleted_at IS NULL AND e.start_time >= ?
-        ORDER BY e.start_time ASC
-        LIMIT 12
-        """,
-        (generated_at.isoformat(),),
+    rows = await CalendarService.from_db(database).upcoming_context_events(
+        start_iso=generated_at.isoformat(), limit=12,
     )
     return ContextCalendarResponse(
         generated_at=generated_at,

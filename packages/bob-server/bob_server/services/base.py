@@ -66,6 +66,14 @@ class BaseService:
         self.ctx = ctx
         self.db: Database = ctx.db
 
+    @classmethod
+    def from_db(cls, db: "Database"):
+        """Construct for callers that only hold a db handle (read paths)."""
+        svc = cls.__new__(cls)
+        svc.ctx = None
+        svc.db = db
+        return svc
+
     def _get_settings(self) -> "Settings":
         """Return the application settings."""
         return self.ctx.settings

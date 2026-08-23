@@ -154,24 +154,15 @@ You have access to workspace tools and can make outbound calls if needed.\
 
 
 class SessionAgendaService(BaseService):
-    """Manages per-session agendas stored in session_agendas table."""
+    """Manages per-conversation agendas stored in the agendas table."""
 
     async def get_agenda(self, session_key: str) -> str | None:
-        row = await self.db.fetch_one(
-            "SELECT agenda FROM session_agendas WHERE session_key = ?",
-            (session_key,),
-        )
-        if row and row["agenda"]:
-            return row["agenda"]
-        return None
+        from bob_server.repositories.participants import AgendaRepository
+        return await AgendaRepository(self.db).get(session_key)
 
     async def set_agenda(self, session_key: str, agenda: str) -> None:
-        now = utcnow().isoformat()
-        await self.db.execute(
-            """INSERT INTO session_agendas (session_key, agenda, updated_at) VALUES (?, ?, ?)
-               ON CONFLICT(session_key) DO UPDATE SET agenda = excluded.agenda, updated_at = excluded.updated_at""",
-            (session_key, agenda, now),
-        )
+        from bob_server.repositories.participants import AgendaRepository
+        await AgendaRepository(self.db).set(session_key, agenda, utcnow().isoformat())
 
     async def get_effective_agenda(
         self,
@@ -225,12 +216,9 @@ class SessionAgendaService(BaseService):
 
     async def _migrate_email_agenda(self, session_key: str) -> str | None:
         """Check if email_threads has an agenda for this session and migrate it."""
-        thread = await self.db.fetch_one(
-            "SELECT agenda FROM email_threads WHERE session_key = ? AND agenda IS NOT NULL AND agenda != '' AND deleted_at IS NULL LIMIT 1",
-            (session_key,),
-        )
-        if thread and thread["agenda"]:
-            agenda = thread["agenda"]
+        from bob_server.services.email_store import EmailStore
+        agenda = await EmailStore(self.db).agenda_for_session(session_key)
+        if agenda:
             await self.set_agenda(session_key, agenda)
             logger.info("Migrated email agenda for session %s", session_key)
             return agenda

@@ -206,21 +206,10 @@ class MemoryService(BaseService):
 
     async def _has_undigested_messages(self, session_key: str) -> bool:
         """True if there are session messages newer than the last silent turn."""
+        from bob_server.repositories.history import HistoryRepository
+        history = HistoryRepository(self.db)
         active_from = await self._last_silent_turn_at(session_key)
-        if active_from:
-            row = await self.db.fetch_one(
-                "SELECT COUNT(*) AS n FROM session_messages "
-                "WHERE session_key = ? AND datetime(created_at) > datetime(?) "
-                "AND role IN ('user', 'assistant')",
-                (session_key, active_from),
-            )
-            return bool(row and row["n"])
-        row = await self.db.fetch_one(
-            "SELECT COUNT(*) AS n FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant')",
-            (session_key,),
-        )
-        return bool(row and row["n"])
+        return bool(await history.count_dialogue(session_key, active_from))
 
     async def _render_silent_turn_history(
         self, session_key: str, *, max_history: int = 30, since_hours: float | None = None
@@ -239,29 +228,15 @@ class MemoryService(BaseService):
         is_group = ":group:" in session_key
         sender_names: dict[str, str] = {}
         if is_group:
-            participants = await self.db.fetch_all(
-                "SELECT contact_id, display_name FROM session_participants "
-                "WHERE session_key = ?",
-                (session_key,),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            participants = await ParticipantRepository(self.db).list_for(session_key)
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]
 
-        since_clause = ""
-        since_param: list[Any] = []
-        if since_hours is not None:
-            since_clause = " AND datetime(created_at) > datetime('now', ?) "
-            since_param = [f"-{since_hours} hours"]
-
-        rows = await self.db.fetch_all(
-            "SELECT role, content, sender_id, synthetic FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            "AND rowid IN (SELECT rowid FROM session_messages "
-            "WHERE session_key = ? AND role IN ('user', 'assistant') "
-            f"{since_clause} ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
-            (session_key, session_key, *since_param, max_history),
-        )
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(self.db).recent_dialogue(
+            session_key, limit=max_history, since_hours=since_hours)
 
         messages: list[dict[str, Any]] = []
         for row in rows:
@@ -288,11 +263,8 @@ class MemoryService(BaseService):
         """Channel-type + participant roster block for the silent-turn prompt."""
         is_group = ":group:" in session_key
         if is_group:
-            members = await self.db.fetch_all(
-                "SELECT contact_id, display_name FROM session_participants "
-                "WHERE session_key = ?",
-                (session_key,),
-            )
+            from bob_server.repositories.participants import ParticipantRepository
+            members = await ParticipantRepository(self.db).list_for(session_key)
             roster = ", ".join(
                 (m["display_name"] or m["contact_id"])
                 for m in members
@@ -306,11 +278,9 @@ class MemoryService(BaseService):
                 "group-* entities before recording anything."
             )
             return f"# Channel context\n\n{line}"
-        row = await self.db.fetch_one(
-            "SELECT contact_id, display_name FROM session_participants "
-            "WHERE session_key = ? LIMIT 1",
-            (session_key,),
-        )
+        from bob_server.repositories.participants import ParticipantRepository
+        p_rows = await ParticipantRepository(self.db).list_for(session_key)
+        row = p_rows[0] if p_rows else None
         who = row["display_name"] if row and row["display_name"] else "the other participant"
         return (
             "# Channel context\n\n"
@@ -496,6 +466,7 @@ class MemoryService(BaseService):
                 session_key, "assistant", content,
                 dispatch_id=dispatch_id,
                 synthetic=True,
+                provenance="extraction_marker",
                 message_id=turn_message_id,
                 metadata={"memory_extraction_turn": True, "trigger": trigger,
                           **({"hint": hint} if hint else {})},
@@ -553,18 +524,9 @@ class MemoryService(BaseService):
         if not new_entity_rows and not new_claim_rows:
             return
 
-        route = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes "
-            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route or not route["metadata"]:
-            return
-        try:
-            meta = json.loads(route["metadata"])
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not meta.get("memory_verbose"):
+        from bob_server.repositories.conversations import ConversationRepository
+        policy = await ConversationRepository(self.db).get_policy(session_key)
+        if not policy.get("memory_verbose"):
             return
 
         # Compose the human-readable notice.
@@ -751,10 +713,8 @@ class MemoryService(BaseService):
             )
             if rows and rows[0]["value"]:
                 hex8 = rows[0]["value"][:8]
-                row = await self.db.fetch_one(
-                    "SELECT name FROM contacts WHERE id LIKE ? LIMIT 1",
-                    (f"{hex8}%",),
-                )
+                from bob_server.repositories.contacts import ContactRepository
+                row = await ContactRepository(self.db).get_by_id_prefix(hex8)
                 if row and row["name"]:
                     return row["name"]
             slug = entity_id.removeprefix(et_def.prefix)
@@ -948,20 +908,13 @@ class MemoryService(BaseService):
         """Load group member canonical contact IDs for a session."""
         if not source_id:
             return None
-        route = await self.db.fetch_one(
-            "SELECT chat_id, kind FROM session_routes WHERE session_key = ?",
-            (source_id,),
-        )
-        if not route or route["kind"] != "group" or not route["chat_id"]:
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(source_id)
+        if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
-        rows = await self.db.fetch_all(
-            "SELECT gm.contact_id FROM whatsappgroup_members gm "
-            "JOIN contacts c ON c.id = gm.contact_id "
-            "WHERE gm.group_id = (SELECT id FROM whatsappgroups WHERE whatsapp_jid = ?) "
-            "AND gm.left_at IS NULL",
-            (route["chat_id"],),
-        )
-        return [f"contact-{str(r['contact_id'])[:8]}" for r in rows]
+        from bob_server.repositories.groups import GroupRepository
+        ids = await GroupRepository(self.db).member_contact_ids(route["address"])
+        return [f"contact-{cid[:8]}" for cid in map(str, ids)]
 
     @staticmethod
     def _format_group_members(directory: Any, member_ids: list[str]) -> str:
@@ -1116,17 +1069,12 @@ class MemoryService(BaseService):
         """Look up the group entity ID for a bulletin's source session."""
         if not source_id:
             return None
-        route = await self.db.fetch_one(
-            "SELECT chat_id, kind FROM session_routes WHERE session_key = ?",
-            (source_id,),
-        )
-        if not route or route["kind"] != "group" or not route["chat_id"]:
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(source_id)
+        if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
-        row = await self.db.fetch_one(
-            "SELECT memory_entity_id FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["chat_id"],),
-        )
-        return row["memory_entity_id"] if row and row["memory_entity_id"] else None
+        from bob_server.repositories.groups import GroupRepository
+        return await GroupRepository(self.db).memory_entity_id(route["address"])
 
     async def ensure_group_entity(
         self,
@@ -1135,20 +1083,16 @@ class MemoryService(BaseService):
         bulletin_id: str,
     ) -> str | None:
         """Ensure a group entity exists for a group session and link the bulletin."""
-        route = await self.db.fetch_one(
-            "SELECT chat_id, kind FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if not route or route["kind"] != "group" or not route["chat_id"]:
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(session_key)
+        if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
 
-        chat_id = route["chat_id"]
+        chat_id = route["address"]
 
-        group_row = await self.db.fetch_one(
-            "SELECT id, name, description, memory_entity_id, member_count "
-            "FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (chat_id,),
-        )
+        from bob_server.repositories.groups import GroupRepository
+        groups = GroupRepository(self.db)
+        group_row = await groups.get_by_jid(chat_id)
         if not group_row:
             return None
 
@@ -1171,10 +1115,7 @@ class MemoryService(BaseService):
             await self.write_entity(workspace_dir, entity)
             existing_entity_id = entity_id
 
-            await self.db.execute(
-                "UPDATE whatsappgroups SET memory_entity_id = ? WHERE id = ?",
-                (entity_id, group_row["id"]),
-            )
+            await groups.set_memory_entity(group_row["id"], entity_id)
 
         await self.db.execute(
             "INSERT OR IGNORE INTO memory_entity_bulletins (entity_id, bulletin_id) VALUES (?, ?)",

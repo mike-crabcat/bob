@@ -29,7 +29,7 @@ def make_session_tools(
 
     ``session_key`` is the session this dispatch is running in. It stays
     accessible even for untrusted contexts — group sessions have no
-    ``session_routes.contact_id``, so without this an untrusted dispatch
+    ``bindings.contact_id``, so without this an untrusted dispatch
     with no resolved contact (e.g. a routine run) could not see even the
     conversation it posts into.
     """
@@ -43,11 +43,8 @@ def make_session_tools(
             return None
         keys: set[str] = set()
         if contact_id:
-            rows = await db.fetch_all(
-                "SELECT DISTINCT session_key FROM session_participants WHERE contact_id = ?",
-                (contact_id,),
-            )
-            keys |= {r["session_key"] for r in rows}
+            from bob_server.repositories.participants import ParticipantRepository
+            keys |= set(await ParticipantRepository(db).conversations_for_contact(contact_id))
         if current_session_key:
             keys.add(current_session_key)
         return keys
@@ -61,19 +58,8 @@ def make_session_tools(
             return json.dumps({"error": "Query cannot be empty"})
 
         # Build name index: UNION of group sessions and DM sessions
-        rows = await db.fetch_all(
-            """
-            SELECT sr.session_key, wg.name AS display_name, 'group' AS kind, sr.channel
-            FROM session_routes sr
-            JOIN whatsappgroups wg ON wg.whatsapp_jid = sr.chat_id AND wg.deleted_at IS NULL
-            WHERE sr.deleted_at IS NULL AND sr.is_active = 1 AND sr.kind = 'group'
-            UNION ALL
-            SELECT sr.session_key, c.name AS display_name, 'dm' AS kind, sr.channel
-            FROM session_routes sr
-            JOIN contacts c ON c.id = sr.contact_id AND c.deleted_at IS NULL
-            WHERE sr.deleted_at IS NULL AND sr.is_active = 1 AND sr.kind = 'dm'
-            """
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        rows = await ConversationRepository(db).named_sessions()
 
         if not rows:
             return json.dumps({"matches": [], "message": "No sessions found"})
@@ -140,20 +126,11 @@ def make_session_tools(
         if not 1 <= limit <= 200:
             limit = 50
 
-        # Newest N, then flip to oldest-first for readability. rowid breaks
-        # created_at ties (second granularity) by insertion order. (SessionService
+        # Newest N, then flip to oldest-first for readability. (SessionService
         # .get_messages applies LIMIT to the oldest end, which is wrong here.)
-        rows = await db.fetch_all(
-            """
-            SELECT sm.role, sm.content, sm.channel, sm.created_at, c.name AS sender_name
-            FROM session_messages sm
-            LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
-            WHERE sm.session_key = ?
-            ORDER BY sm.created_at DESC, sm.rowid DESC LIMIT ?
-            """,
-            (target, limit),
-        )
-        messages = list(reversed(rows or []))
+        from bob_server.repositories.history import HistoryRepository
+        messages = await HistoryRepository(db).recent_with_sender_names(
+            target, limit=limit)
 
         return json.dumps({
             "session_key": target,

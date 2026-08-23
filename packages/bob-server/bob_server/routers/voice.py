@@ -1,4 +1,10 @@
-"""Voice chat WebSocket endpoint and static frontend serving."""
+"""Realtime voice WebSocket endpoint and static frontend serving.
+
+The legacy local STT→LLM→TTS pipeline (/voice/ws, voice_service,
+voice_engines, language-practice frontend) was removed in Bob3 Phase 0;
+`voice_lesson_progress` data is preserved in the database. All voice runs
+through the OpenAI Realtime bridge below.
+"""
 
 from __future__ import annotations
 
@@ -14,191 +20,13 @@ from fastapi.staticfiles import StaticFiles
 
 from bob_server.services.realtime_bridge import BrowserAudioSource, RealtimeBridge
 from bob_server.services.realtime_tools import make_realtime_tools
-from bob_server.services.voice_protocol import (
-    ErrorMessage,
-    HistoryEntry,
-    HistoryMessage,
-    StatusMessage,
-    parse_client_message,
-)
-from bob_server.services.voice_service import VoiceService
-from bob_server.services.voice_transport import BrowserTransport
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["voice"])
 
 
-class _PipelineWaiter:
-    """Wraps a transport and signals when the voice pipeline completes."""
-
-    def __init__(self, transport: BrowserTransport) -> None:
-        self._transport = transport
-        self.done = asyncio.Event()
-
-    async def send_audio(self, wav_bytes: bytes) -> None:
-        await self._transport.send_audio(wav_bytes)
-
-    async def send_status(self, state: str) -> None:
-        await self._transport.send_status(state)
-
-    async def send_error(self, message: str) -> None:
-        await self._transport.send_error(message)
-        self.done.set()
-
-    async def send_message(self, msg_type: str, data: dict) -> None:
-        if msg_type == "latency":
-            self.done.set()
-        await self._transport.send_message(msg_type, data)
-
 _FRONTEND_DIR = Path(__file__).parent.parent / "voice_frontend"
-
-
-def _get_engines(websocket: WebSocket) -> Any | None:
-    """Return VoiceEngineManager or None if voice deps are unavailable."""
-    engines = getattr(websocket.app.state, "voice_engines", None)
-    if engines is None:
-        logger.warning("Voice engines not loaded — voice dependencies may be missing")
-    return engines
-
-
-async def _send_voice_unavailable(websocket: WebSocket) -> None:
-    """Tell the client voice is unavailable, then reset it to idle."""
-    try:
-        await websocket.send_text(
-            ErrorMessage(message="Voice is unavailable — dependencies not installed. Install with: pip install bob-server[voice]").model_dump_json()
-        )
-        await websocket.send_text(StatusMessage(state="idle").model_dump_json())
-    except Exception:
-        pass
-
-
-def _get_session_key(user_id: str, session_mode: str) -> str:
-    return f"agent:main:voice:session:{user_id}:{session_mode}"
-
-
-@router.websocket("/ws")
-async def voice_websocket(websocket: WebSocket) -> None:
-    """LEGACY local voice pipeline (STT → LLM → TTS via VoiceService).
-
-    Serves the push-to-talk language-practice frontend (session modes like
-    beginner_french with lesson progress). New realtime voice surfaces use
-    /voice/realtime below. Do not build on this path — if the language
-    frontend migrates to the Realtime bridge, this endpoint and the local
-    voice stack (voice_service, voice_engines, voice_transport,
-    voice_session_store) should be deleted.
-    """
-    await websocket.accept()
-    client = websocket.client.host if websocket.client else "unknown"
-    logger.info("Voice WS connected from %s", client)
-
-    engines = _get_engines(websocket)
-    if engines is None:
-        await _send_voice_unavailable(websocket)
-        return
-
-    # Models load lazily here (first legacy-voice connection of the process).
-    try:
-        try:
-            await websocket.send_text(StatusMessage(state="loading").model_dump_json())
-        except Exception:
-            pass
-        await engines.ensure_ready()
-    except ImportError as exc:
-        logger.warning("Voice dependencies not installed: %s", exc)
-        await _send_voice_unavailable(websocket)
-        return
-    except Exception:
-        logger.exception("Voice engine load failed")
-        try:
-            await websocket.send_text(
-                ErrorMessage(message="Voice engines failed to load — see server logs").model_dump_json()
-            )
-            await websocket.send_text(StatusMessage(state="idle").model_dump_json())
-        except Exception:
-            pass
-        return
-    else:
-        try:
-            await websocket.send_text(StatusMessage(state="idle").model_dump_json())
-        except Exception:
-            pass
-
-    transport = BrowserTransport(websocket)
-    audio_chunks: list[bytes] = []
-    language: str | None = None
-    user_id: str = "mike"
-    session_mode: str = "chat"
-
-    from bob_server.context import AppContext
-    ctx = AppContext(db=websocket.app.state.db, settings=websocket.app.state.settings, voice_engines=engines, event_bus=websocket.app.state.event_bus)
-
-    try:
-        while True:
-            msg = await websocket.receive()
-            if msg.get("type") == "websocket.disconnect":
-                break
-
-            if "text" in msg:
-                parsed = parse_client_message(msg["text"])
-                if parsed is None:
-                    continue
-
-                match parsed:
-                    case parsed if parsed.type == "start_recording":
-                        audio_chunks = []
-                        language = parsed.language
-                        user_id = parsed.userId
-                        session_mode = parsed.sessionMode
-
-                    case parsed if parsed.type == "stop_recording":
-                        service = VoiceService(ctx, engines)
-                        waiter = _PipelineWaiter(transport)
-                        await service.process_audio(waiter, audio_chunks, language, user_id, session_mode)
-                        if not waiter.done.is_set():
-                            try:
-                                await asyncio.wait_for(waiter.done.wait(), timeout=120)
-                            except asyncio.TimeoutError:
-                                logger.warning("Voice pipeline timed out in browser WS")
-
-                    case parsed if parsed.type == "cancel":
-                        audio_chunks = []
-
-                    case parsed if parsed.type == "set_language":
-                        language = parsed.language
-
-                    case parsed if parsed.type == "session_history":
-                        from bob_server.services.session_service import SessionService
-
-                        svc = SessionService(ctx)
-                        key = _get_session_key(parsed.userId, parsed.sessionMode)
-                        msgs = await svc.get_messages(key, limit=200)
-                        await websocket.send_text(
-                            HistoryMessage(
-                                messages=[HistoryEntry(role=m.role, text=m.content, language=m.metadata.get("language")) for m in msgs]
-                            ).model_dump_json()
-                        )
-
-                    case parsed if parsed.type == "clear_history":
-                        from bob_server.services.session_service import SessionService
-                        from bob_server.services.lesson_progress_service import LessonProgressService
-
-                        svc = SessionService(ctx)
-                        key = _get_session_key(parsed.userId, parsed.sessionMode)
-                        await svc.delete_session(key)
-                        lesson_store = LessonProgressService(ctx)
-                        await lesson_store.reset_all_lessons(parsed.userId, parsed.sessionMode)
-
-                    case parsed if parsed.type == "replay_tts":
-                        service = VoiceService(ctx, engines)
-                        default_lang = "en" if parsed.sessionMode == "beginner_french" else (language or "en")
-                        await service.replay_tts(transport, parsed.text, default_lang)
-
-            elif "bytes" in msg:
-                audio_chunks.append(msg["bytes"])
-
-    except WebSocketDisconnect:
-        pass
 
 
 @router.websocket("/realtime")
@@ -223,7 +51,6 @@ async def voice_realtime(websocket: WebSocket) -> None:
     ctx = AppContext(
         db=websocket.app.state.db,
         settings=websocket.app.state.settings,
-        voice_engines=getattr(websocket.app.state, "voice_engines", None),
         event_bus=websocket.app.state.event_bus,
     )
     rt_settings = ctx.settings.openai_realtime

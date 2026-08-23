@@ -48,19 +48,14 @@ async def get_skill_delegations(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
+    from bob_server.services.skill_developer_service import SkillDeveloperService
     table_exists = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_delegations'"
     )
     if not table_exists:
         return {"delegations": []}
 
-    rows = await db.fetch_all(
-        """SELECT id, session_key, user_story, plan, status,
-                  files_created_json, result_summary, cost_usd,
-                  error_message, created_at, updated_at
-           FROM skill_delegations
-           ORDER BY created_at DESC LIMIT 50"""
-    )
+    rows = await SkillDeveloperService.from_db(db).list_delegations(limit=50)
     delegations: list[dict[str, Any]] = []
     for row in rows:
         files: list[str] = []
@@ -90,13 +85,8 @@ async def get_skill_delegation_detail(request: Request, delegation_id: str) -> d
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    row = await db.fetch_one(
-        """SELECT id, session_key, user_story, plan, status,
-                  files_created_json, result_summary, cost_usd,
-                  error_message, created_at, updated_at
-           FROM skill_delegations WHERE id = ?""",
-        (delegation_id,),
-    )
+    from bob_server.services.skill_developer_service import SkillDeveloperService
+    row = await SkillDeveloperService.from_db(db).get_delegation(delegation_id)
     if not row:
         return {"error": "not found"}
     files: list[str] = []

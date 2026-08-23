@@ -55,8 +55,8 @@ __all__ = [
     # Domain helpers
     "_resolve_inbox_id", "_parse_json_option", "_build_metadata",
     "_parse_time_expression", "_time_to_iso", "_resolve_calendar_id",
-    "_build_contact_payload", "_build_session_route_payload",
-    "_print_contact_table", "_print_session_route_table", "_print_event_table",
+    "_build_contact_payload",
+    "_print_contact_table", "_print_event_table",
 ]
 
 
@@ -382,51 +382,12 @@ def _build_contact_payload(
     return payload
 
 
-def _build_session_route_payload(
-    *,
-    session_key: Optional[str] = None,
-    channel: Optional[str] = None,
-    kind: Optional[str] = None,
-    chat_id: Optional[str] = None,
-    contact_id: Optional[str] = None,
-    metadata_json: Optional[str] = None,
-    is_active: Optional[bool] = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    if session_key is not None:
-        payload["session_key"] = session_key
-    if channel is not None:
-        payload["channel"] = channel
-    if kind is not None:
-        payload["kind"] = kind
-    if chat_id is not None:
-        payload["chat_id"] = chat_id
-    if contact_id is not None:
-        payload["contact_id"] = contact_id
-    if metadata_json is not None:
-        payload["metadata"] = _parse_json_option(metadata_json, "metadata-json", dict)
-    if is_active is not None:
-        payload["is_active"] = is_active
-    return payload
-
-
-
 def _print_contact_table(contacts: list[dict[str, Any]]) -> None:
     typer.echo(f"{'ID':<36} {'Phone':<18} {'Name'}")
     typer.echo("-" * 90)
     for contact in contacts:
         typer.echo(f"{contact['id']:<36} {contact['phone_number']:<18} {contact['name'][:32]}")
 
-
-
-def _print_session_route_table(routes: list[dict[str, Any]]) -> None:
-    typer.echo(f"{'ID':<36} {'Channel':<10} {'Kind':<8} {'Active':<8} {'Session Key'}")
-    typer.echo("-" * 110)
-    for route in routes:
-        active = "yes" if route.get("is_active", True) else "no"
-        typer.echo(
-            f"{route['id']:<36} {route['channel']:<10} {route['kind']:<8} {active:<8} {route['session_key'][:40]}"
-        )
 
 
 def _print_event_table(events: list[dict[str, Any]]) -> None:

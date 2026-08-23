@@ -17,7 +17,7 @@ from typing import Any
 
 from bob_server.context import AppContext
 from bob_server.services.base import BaseService, iso_utc, json_dumps, utcnow
-from bob_server.services.thread_result_service import _session_key_to_chat_id
+from bob_server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -172,5 +172,6 @@ class AnnounceService(BaseService):
             message,
             channel="whatsapp",
             synthetic=True,
+            provenance="dream_announcement",
             metadata={"dream_announce": [p["id"] for p in plans]},
         )

@@ -17,18 +17,12 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
     db = _db(request)
 
     # Build stats from database
-    type_rows = await db.fetch_all(
-        "SELECT entity_type, COUNT(*) AS count FROM memory_entities GROUP BY entity_type"
-    )
-    categories = {r["entity_type"]: r["count"] for r in type_rows}
+    from bob_server.services.memory import admin as memory_admin
+    categories = await memory_admin.entity_type_counts(db)
     total_entries = sum(categories.values())
 
     # Recent entries
-    recent_rows = await db.fetch_all(
-        "SELECT e.entity_id, e.entity_type, e.display_name, e.updated_at, "
-        " (SELECT COUNT(*) FROM memory_claims c WHERE c.subject_id = e.entity_id AND c.status = 'active') AS claim_count "
-        "FROM memory_entities e ORDER BY e.updated_at DESC LIMIT 50"
-    )
+    recent_rows = await memory_admin.recent_entities(db, limit=50)
     recent = []
     for r in recent_rows:
         recent.append({
@@ -65,10 +59,8 @@ async def get_memory_searches(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_search_log'"
     )
     if table_exists:
-        rows = await db.fetch_all(
-            "SELECT id, query, results_json, session_key, result_count, latency_seconds, created_at "
-            "FROM memory_search_log ORDER BY created_at DESC LIMIT 100"
-        )
+        from bob_server.services.memory import admin as memory_admin
+        rows = await memory_admin.list_search_log(db, limit=100)
         for row in rows:
             results = []
             abstract = ""
@@ -120,11 +112,11 @@ async def run_memory_search(request: Request) -> dict[str, Any]:
     # Log it
     from uuid import uuid4
     try:
-        await db.execute(
-            "INSERT INTO memory_search_log (id, query, results_json, session_key, result_count, latency_seconds) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (str(uuid4()), query, json.dumps(result), None, len(result.get("results", [])), latency),
-        )
+        from bob_server.services.memory import admin as memory_admin
+        await memory_admin.insert_search_log(
+            db, log_id=str(uuid4()), query=query, results_json=json.dumps(result),
+            session_key=None, result_count=len(result.get("results", [])),
+            latency_seconds=latency)
     except Exception:
         pass
 
@@ -157,18 +149,8 @@ async def get_memory_entities(request: Request) -> dict[str, Any]:
     db = _db(request)
     entity_type = request.query_params.get("type", "").strip()
 
-    query = (
-        "SELECT e.entity_id, e.entity_type, e.display_name, e.status, e.updated_at, "
-        "(SELECT COUNT(*) FROM memory_claims c WHERE c.subject_id = e.entity_id AND c.status = 'active') as claim_count "
-        "FROM memory_entities e"
-    )
-    params: list[str] = []
-    if entity_type:
-        query += " WHERE e.entity_type = ?"
-        params.append(entity_type)
-    query += " ORDER BY e.updated_at DESC"
-
-    rows = await db.fetch_all(query, tuple(params))
+    from bob_server.services.memory import admin as memory_admin
+    rows = await memory_admin.list_entities(db, entity_type=entity_type)
 
     # Build a summary per entity from key claims
     summary_keys = {
@@ -186,12 +168,7 @@ async def get_memory_entities(request: Request) -> dict[str, Any]:
     entity_ids = [r["entity_id"] for r in rows]
     summaries: dict[str, str] = {}
     if entity_ids:
-        placeholders = ",".join("?" for _ in entity_ids)
-        claim_rows = await db.fetch_all(
-            f"SELECT subject_id, claim_type_key, value, object_id FROM memory_claims "
-            f"WHERE subject_id IN ({placeholders}) AND status = 'active'",
-            tuple(entity_ids),
-        )
+        claim_rows = await memory_admin.claims_for_subjects(db, entity_ids)
         for cr in claim_rows:
             eid = cr["subject_id"]
             if eid in summaries:
@@ -273,10 +250,8 @@ async def get_memory_questions(request: Request) -> dict[str, Any]:
     db = _db(request)
 
     status_filter = request.query_params.get("status", "open").strip()
-    rows = await db.fetch_all(
-        "SELECT * FROM memory_questions WHERE status = ? ORDER BY created_at DESC LIMIT 100",
-        (status_filter,),
-    )
+    from bob_server.services.memory import admin as memory_admin
+    rows = await memory_admin.list_questions(db, status=status_filter, limit=100)
     questions = [
         {
             "id": r["id"],
@@ -332,28 +307,13 @@ async def get_memory_claims(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    conditions: list[str] = []
-    params: list[str] = []
-
-    claim_type = request.query_params.get("type", "").strip()
-    if claim_type:
-        conditions.append("claim_type_key = ?")
-        params.append(claim_type)
-    subject_id = request.query_params.get("subject_id", "").strip()
-    if subject_id:
-        conditions.append("subject_id = ?")
-        params.append(subject_id)
-    status = request.query_params.get("status", "").strip()
-    if status:
-        conditions.append("status = ?")
-        params.append(status)
-
-    query = "SELECT * FROM memory_claims"
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC LIMIT 200"
-
-    rows = await db.fetch_all(query, tuple(params))
+    from bob_server.services.memory import admin as memory_admin
+    rows = await memory_admin.list_claims(
+        db,
+        claim_type=request.query_params.get("type", "").strip(),
+        subject_id=request.query_params.get("subject_id", "").strip(),
+        status=request.query_params.get("status", "").strip(),
+        limit=200)
     claims = [
         {
             "id": r["id"],
@@ -384,11 +344,9 @@ async def merge_entities(request: Request) -> dict[str, Any]:
     db = _db(request)
 
     # Verify both entities exist
+    from bob_server.services.memory import admin as memory_admin
     for eid in (canonical_id, loser_id):
-        row = await db.fetch_one(
-            "SELECT entity_id FROM memory_entities WHERE entity_id = ? AND status = 'active'",
-            (eid,),
-        )
+        row = await memory_admin.get_active_entity(db, eid)
         if not row:
             return {"error": f"entity not found: {eid}"}
 

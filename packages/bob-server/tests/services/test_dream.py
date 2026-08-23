@@ -7,6 +7,7 @@ pipeline runs deterministically against the in-memory DB.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -16,6 +17,13 @@ from bob_server.services.dream.models import Evidence, PlanCandidate, Resolution
 
 SK = "wa:contact:whatsapp:dm:61412345678"
 SK_GROUP = "wa:group:whatsapp:group:1203634"
+
+# Dynamic days so tests don't rot as real time crosses the 7-day
+# backlog_evidence_days(7) / lookback(14d) boundaries. _OLD_DAY sits inside
+# the 14-day lookback (so the backlog session IS reviewed) but past the 7-day
+# backlog guard (so it must never auto-approve).
+_FRESH_DAY = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+_OLD_DAY = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
 
 REVIEW_PAYLOAD = {
     "resolutions": [
@@ -51,7 +59,7 @@ REVIEW_PAYLOAD = {
 
 def _messages(n: int = 6) -> list[dict]:
     return [
-        {"created_at": f"2026-08-16T0{i}:00:00Z", "role": "user" if i % 2 else "assistant",
+        {"created_at": f"{_FRESH_DAY}T0{i}:00:00Z", "role": "user" if i % 2 else "assistant",
          "sender_id": "c1", "content": "what time does the flight leave" if i == 2
          else ("we should catch up soon" if i == 4 else f"msg {i}")}
         for i in range(1, n + 1)
@@ -61,15 +69,15 @@ def _messages(n: int = 6) -> list[dict]:
 
 
 async def _seed_route(db, session_key: str, autoplan: bool | None = None) -> None:
-    import json as _json
-    from uuid import uuid4
+    """Seed the conversation + binding an ingress path would register."""
+    from bob_server.repositories.conversations import ConversationRepository
 
-    meta = {} if autoplan is None else {"dream_autoplan": autoplan}
-    await db.execute(
-        "INSERT INTO session_routes (id, session_key, kind, channel, chat_id, is_active, metadata, created_at, updated_at) "
-        "VALUES (?, ?, 'group', 'whatsapp', ?, 1, ?, datetime('now'), datetime('now'))",
-        (str(uuid4()), session_key, f"{session_key.split(':')[-1]}@g.us", _json.dumps(meta)),
-    )
+    repo = ConversationRepository(db)
+    await repo.register_endpoint(
+        session_key, endpoint_kind="group",
+        address=f"{session_key.split(':')[-1]}@g.us")
+    if autoplan is not None:
+        await repo.set_policy(session_key, {"dream_autoplan": autoplan})
 
 async def _seed_run_row(db) -> None:
     """dream_plans/resolutions have FK source_run_id → dream_runs; seed the row tests reference."""
@@ -81,7 +89,7 @@ async def _seed_run_row(db) -> None:
 async def _seed_messages(db, session_key: str, messages: list[dict]) -> None:
     for m in messages:
         await db.execute(
-            "INSERT INTO session_messages (session_key, role, content, created_at, sender_id, dispatched) "
+            "INSERT INTO messages (conversation_id, role, content, created_at, sender_id, dispatched) "
             "VALUES (?, ?, ?, ?, ?, 1)",
             (session_key, m["role"], m["content"], m["created_at"], m.get("sender_id")),
         )
@@ -213,7 +221,7 @@ async def test_runner_autoapprove_with_backlog_guard(ctx, stub_env, monkeypatch)
     # backlog: old evidence never auto-approves even with autoplan on
     old = _messages()
     for i, m in enumerate(old, 1):
-        m["created_at"] = f"2026-08-01T0{i}:00:00Z"
+        m["created_at"] = f"{_OLD_DAY}T0{i}:00:00Z"
     await _seed_messages(ctx.db, SK_GROUP, old)
     await DreamRunner(ctx).maybe_run(trigger="cli")
     row = await ctx.db.fetch_one("SELECT * FROM dream_plans WHERE id LIKE '%' AND source_run_id != ?", (plans[0]["source_run_id"],))
@@ -235,7 +243,7 @@ async def test_dedup_merge_on_reobservation(ctx, stub_env, monkeypatch):
     # identical, so candidates merge into the existing items instead of duplicating
     later = _messages()
     for i, m in enumerate(later, 1):
-        m["created_at"] = f"2026-08-16T1{i}:00:00Z"
+        m["created_at"] = f"{_FRESH_DAY}T1{i}:00:00Z"
         m["content"] = m["content"] + " again"
     await _seed_messages(ctx.db, SK, later)
     await DreamRunner(ctx).maybe_run(trigger="cli")
@@ -265,9 +273,9 @@ async def test_recently_terminal_suppression_and_reopen(ctx, stub_env):
         # same candidate again → suppressed (terminal within 14d, evidence not newer)
         later = _messages()
         for i, m in enumerate(later, 1):
-            m["created_at"] = f"2026-08-16T0{i}:00:05Z"
+            m["created_at"] = f"{_FRESH_DAY}T0{i}:00:05Z"
         await ctx.db.execute("DELETE FROM dream_session_review WHERE session_key = ?", (SK,))
-        await ctx.db.execute("DELETE FROM session_messages WHERE session_key = ?", (SK,))
+        await ctx.db.execute("DELETE FROM messages WHERE conversation_id = ?", (SK,))
         await _seed_messages(ctx.db, SK, later)
         result = await DreamRunner(ctx).maybe_run(trigger="cli")
         assert len(result["stats"]["suppressed"]) >= 1
@@ -292,9 +300,11 @@ async def test_prospective_engagement_guard_blocks_expiry(ctx, stub_env, monkeyp
            VALUES (?, 't', 'd', 'a', 'm', 'approved', 'auto', ?, ?, ?, 'dream-x', 'last week', ?, ?)""",
         (plan_id, now, now, json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
     )
-    # engagement: user replied after the announcement
+    # engagement: user replied after the announcement (strictly after announced_at,
+    # so the timestamp must be relative to now — a hardcoded date rots)
+    reply_at = (datetime.now(timezone.utc) + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     await _seed_messages(ctx.db, SK, [
-        {"created_at": "2026-08-16T12:00:00Z", "role": "user", "sender_id": "c1", "content": "yes saturday works"},
+        {"created_at": reply_at, "role": "user", "sender_id": "c1", "content": "yes saturday works"},
     ])
 
     prospective_payload = {"decisions": [{"item_type": "plan", "item_id": plan_id, "action": "expire", "reason": "due passed"}]}
@@ -357,7 +367,7 @@ async def test_announce_flush_batches_guards_and_records(ctx, stub_env):
 
     # recorded with synthetic + metadata marker; announced_at set
     msg = await ctx.db.fetch_one(
-        "SELECT * FROM session_messages WHERE session_key = ? AND metadata LIKE '%dream_announce%'", (SK,)
+        "SELECT * FROM messages WHERE conversation_id = ? AND metadata LIKE '%dream_announce%'", (SK,)
     )
     assert msg is not None and msg["synthetic"] == 1
     plans = await ctx.db.fetch_all("SELECT announced_at FROM dream_plans")
@@ -402,7 +412,7 @@ async def test_announce_daily_cap(ctx, stub_env):
     )
     for _ in range(ctx.settings.dream.announce_daily_cap_per_session):
         await ctx.db.execute(
-            "INSERT INTO session_messages (session_key, role, content, created_at, synthetic, metadata, dispatched) "
+            "INSERT INTO messages (conversation_id, role, content, created_at, synthetic, metadata, dispatched) "
             "VALUES (?, 'assistant', 'earlier announce', ?, 1, '{\"dream_announce\":[\"plan-old\"]}', 1)",
             (SK, iso_utc()),
         )
@@ -642,7 +652,8 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
 
 
 async def test_autoplan_is_session_scoped(ctx, stub_env):
-    """Autoplan lives on session_routes metadata: one chat on, others unaffected."""
+    """Autoplan lives on conversations.policy_json: one chat on, others unaffected."""
+    from bob_server.repositories.conversations import ConversationRepository
     from bob_server.services.dream import config as dream_config
 
     other = "wa:contact:whatsapp:dm:61400000000"
@@ -657,6 +668,11 @@ async def test_autoplan_is_session_scoped(ctx, stub_env):
     assert await dream_config.get_session_autoplan(ctx.db, third, True) is True
     assert await dream_config.get_session_autoplan(ctx.db, third, False) is False
 
+    # Unknown conversations are rejected.
+    repo = ConversationRepository(ctx.db)
+    assert await dream_config.set_session_autoplan(ctx.db, "wa:unknown:nope", True) is False
+
+    assert await dream_config.set_session_autoplan(ctx.db, other, True) is True
     on = [s["session_key"] for s in await dream_config.list_autoplan_sessions(ctx.db, enabled=True)]
     assert on == [other]
 
