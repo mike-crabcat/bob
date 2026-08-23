@@ -190,6 +190,46 @@ async def mark_voice_subagent_complete(db: Any, subagent_id: str, result_text: s
         logger.warning("Failed to settle goal for voice subagent %s", subagent_id[:8], exc_info=True)
 
 
+async def append_call_completed_event(
+    db: Any,
+    *,
+    external_id: str,
+    call_session_key: str,
+    origin_session_key: str,
+    status: str,
+    outcome: dict[str, Any] | None = None,
+    duration_seconds: float | None = None,
+) -> None:
+    """Voice as a binding (Phase VI item 5): record the call's outcome as a
+    ``call.completed`` event on the person's conversation, resolved through
+    the call binding (falls back to the origin conversation). Idempotent on
+    (source='voice', external_id)."""
+    try:
+        from bob_server.repositories.conversations import ConversationRepository
+        from bob_server.repositories.event_log import Event, EventLogRepository
+
+        repo = ConversationRepository(db)
+        conv = await repo.resolve(call_session_key) if call_session_key else None
+        if conv is None and origin_session_key:
+            conv = await repo.resolve(origin_session_key)
+        conversation_id = conv["id"] if conv else (origin_session_key or call_session_key)
+        await EventLogRepository(db).append(Event(
+            event_type="call.completed",
+            binding_key=call_session_key or origin_session_key,
+            conversation_id=conversation_id,
+            source="voice",
+            external_id=external_id,
+            payload={
+                "status": status,
+                "outcome": outcome,
+                "duration_seconds": duration_seconds,
+            },
+        ))
+    except Exception:
+        logger.warning("failed to append call.completed event for %s",
+                       external_id, exc_info=True)
+
+
 def hangup_twilio_call(settings: Any, call_sid: str) -> bool:
     """Terminate a Twilio call by SID (best-effort, synchronous Twilio REST call)."""
     try:
@@ -395,6 +435,7 @@ class VoiceDispatchService(BaseService):
             raise ValueError(f"contact not found: {contact_id}")
 
         await self._update_subagent_status(subagent_id, "running")
+        await self._bind_call_to_person(subagent_id, contact)
 
         settings = self._get_settings()
         instructions = build_outbound_instructions(contact["name"], task)
@@ -457,6 +498,28 @@ class VoiceDispatchService(BaseService):
             raise ValueError(result["error"])
 
         return {"call_id": result["call_id"], "call_sid": result["call_sid"]}
+
+    async def _bind_call_to_person(self, subagent_id: str, contact: dict[str, Any]) -> None:
+        """Voice as a binding (Phase VI item 5): the call's subagent session
+        key becomes a binding on the person's conversation, so transcripts
+        and outcomes land as events on the person, not on an orphan key."""
+        digits = re.sub(r"\D", "", contact.get("phone_number") or "")
+        if not digits:
+            return
+        row = await self.db.fetch_one(
+            "SELECT session_key FROM subagents WHERE id = ?", (subagent_id,))
+        if row is None:
+            return
+        try:
+            from bob_server.repositories.conversations import ConversationRepository
+            repo = ConversationRepository(self.db)
+            conv = await repo.ensure(f"agent:main:whatsapp:dm:{digits}")
+            await repo.bind(
+                row["session_key"], conv["id"],
+                channel="voice", address=contact.get("phone_number"))
+        except Exception:
+            logger.warning("failed to bind call %s to person conversation",
+                           subagent_id[:8], exc_info=True)
 
     async def _update_subagent_status(self, subagent_id: str, status: str) -> None:
         await self.db.execute(

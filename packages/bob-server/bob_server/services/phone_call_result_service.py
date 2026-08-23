@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -136,10 +137,43 @@ async def dispatch_call_result(
     )
 
     await _settle_call_goal(ctx, call_id, status, result_content)
+    await _append_call_event(ctx, call_id, origin_session_key, status)
     await wake_conversation(
         ctx, origin_session_key, result_content,
         call_category="call_result",
     )
+
+
+async def _append_call_event(
+    ctx: AppContext, call_id: str, origin_session_key: str, status: str,
+) -> None:
+    """Voice-as-binding: record the outcome as an event on the person's
+    conversation (resolved via the call's subagent binding)."""
+    try:
+        from bob_server.services.voice_dispatch_service import (
+            append_call_completed_event,
+        )
+        row = await ctx.db.fetch_one(
+            """SELECT p.subagent_id, p.duration_seconds, p.outcome, s.session_key
+               FROM phone_calls p LEFT JOIN subagents s ON s.id = p.subagent_id
+               WHERE p.id = ?""", (call_id,))
+        outcome = None
+        if row and row["outcome"]:
+            try:
+                outcome = json.loads(row["outcome"])
+            except (TypeError, ValueError):
+                outcome = {"raw": row["outcome"]}
+        await append_call_completed_event(
+            ctx.db,
+            external_id=call_id,
+            call_session_key=(row["session_key"] if row else None) or "",
+            origin_session_key=origin_session_key,
+            status=status,
+            outcome=outcome,
+            duration_seconds=row["duration_seconds"] if row else None,
+        )
+    except Exception:
+        logger.warning("failed to append call event for %s", call_id, exc_info=True)
 
 
 async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: str) -> None:

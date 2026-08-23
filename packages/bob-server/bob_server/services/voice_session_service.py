@@ -313,6 +313,24 @@ class VoiceSessionService(BaseService):
         if subagent_id:
             await mark_voice_subagent_complete(self.db, subagent_id, transcript)
 
+        # Voice-as-binding: record the outcome as an event on the person's
+        # conversation (resolved via the subagent call binding, else origin).
+        from bob_server.services.voice_dispatch_service import append_call_completed_event
+        call_key = ""
+        if subagent_id:
+            sub = await self.db.fetch_one(
+                "SELECT session_key FROM subagents WHERE id = ?", (subagent_id,))
+            call_key = sub["session_key"] if sub else ""
+        await append_call_completed_event(
+            self.db,
+            external_id=token,
+            call_session_key=call_key,
+            origin_session_key=origin,
+            status="completed",
+            outcome=outcome,
+            duration_seconds=duration_seconds,
+        )
+
         logger.info("Voice session %s completed (%.0fs)", token[:8], duration_seconds)
 
     async def _summarise(

@@ -87,6 +87,24 @@ class ConversationRepository:
             (session_key, session_key, _channel_of(session_key), now))
         return (await self.resolve(session_key))  # type: ignore[return-value]
 
+    async def bind(
+        self,
+        session_key: str,
+        conversation_id: str,
+        *,
+        channel: str,
+        kind: str = "thread",
+        address: str | None = None,
+    ) -> None:
+        """Attach an additional binding to an EXISTING conversation — e.g. a
+        voice call endpoint bound to the person's conversation (Phase VI
+        item 5). Idempotent; never creates a conversation."""
+        await self.db.execute(
+            """INSERT OR IGNORE INTO bindings
+               (session_key, conversation_id, channel, kind, address, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_key, conversation_id, channel, kind, address, _now_iso()))
+
     async def merge(
         self,
         source_conversation_ids: list[str],

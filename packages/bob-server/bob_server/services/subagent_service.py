@@ -154,8 +154,24 @@ class SubagentService(BaseService):
                 )
             return result
 
-        t = asyncio.create_task(self._run_subagent(subagent_id, task))
-        _running_tasks[subagent_id] = t
+        # Bob3 Phase VI item 5: the spawn is a durable effect — claude/local
+        # are executor kinds on the SpawnSubagent record. The executor starts
+        # the background run; the pump can re-deliver after a crash (the
+        # executor guards against re-spawning finished or running subagents).
+        from bob_server.services import effects as effects_svc
+        spawn = await effects_svc.emit_and_deliver(
+            self.ctx,
+            kind="subagent_spawn",
+            idempotency_key=f"subagent_spawn:{subagent_id}",
+            payload={"subagent_id": subagent_id, "task": task,
+                     "executor": agent_type,
+                     "parent_session_key": parent_session_key},
+        )
+        if not spawn.get("ok"):
+            await self._update_status(subagent_id, "failed",
+                                      error=str(spawn.get("error")))
+            return {"ok": False, "error": str(spawn.get("error")),
+                    "subagent_id": subagent_id, "session_key": session_key}
 
         logger.info("Subagent created: id=%s session=%s", short_id, session_key)
         return {
@@ -631,3 +647,31 @@ class SubagentService(BaseService):
             return json.loads(output)
         except json.JSONDecodeError:
             return {"result": output, "session_id": "", "cost_usd": 0}
+
+
+def _register_spawn_executor() -> None:
+    """SpawnSubagent effect executor (Bob3 Phase VI item 5): claude/local are
+    executor kinds on the durable spawn record. Starts the background run and
+    returns immediately; guards against re-spawning on pump re-delivery."""
+    from bob_server.services import effects as effects_svc
+
+    async def _exec_spawn(ctx, payload):
+        subagent_id = payload["subagent_id"]
+        row = await ctx.db.fetch_one(
+            "SELECT status FROM subagents WHERE id = ?", (subagent_id,))
+        if row is None:
+            raise RuntimeError(f"subagent {subagent_id} not found")
+        if row["status"] not in ("created", "running"):
+            return subagent_id  # already finished — idempotent re-delivery
+        existing = _running_tasks.get(subagent_id)
+        if existing is not None and not existing.done():
+            return subagent_id  # run already in flight
+        svc = SubagentService(ctx)
+        t = asyncio.create_task(svc._run_subagent(subagent_id, payload.get("task", "")))
+        _running_tasks[subagent_id] = t
+        return subagent_id
+
+    effects_svc.register_executor("subagent_spawn", _exec_spawn)
+
+
+_register_spawn_executor()
