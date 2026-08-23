@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SessionsRouteImport } from './routes/sessions'
+import { Route as GoalsRouteImport } from './routes/goals'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
 import { Route as SkillsIndexRouteImport } from './routes/skills/index'
@@ -29,6 +30,11 @@ import { Route as ConversationsSessionKeyCallsCallIdRouteImport } from './routes
 const SessionsRoute = SessionsRouteImport.update({
   id: '/sessions',
   path: '/sessions',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GoalsRoute = GoalsRouteImport.update({
+  id: '/goals',
+  path: '/goals',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -111,6 +117,7 @@ const ConversationsSessionKeyCallsCallIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/goals': typeof GoalsRoute
   '/sessions': typeof SessionsRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
@@ -129,6 +136,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/goals': typeof GoalsRoute
   '/sessions': typeof SessionsRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
@@ -147,6 +155,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/goals': typeof GoalsRoute
   '/sessions': typeof SessionsRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
@@ -167,6 +176,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/goals'
     | '/sessions'
     | '/contacts/$contactId'
     | '/conversations/$sessionKey'
@@ -185,6 +195,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/goals'
     | '/sessions'
     | '/contacts/$contactId'
     | '/skills/$delegationId'
@@ -202,6 +213,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/goals'
     | '/sessions'
     | '/contacts/$contactId'
     | '/conversations/$sessionKey'
@@ -221,6 +233,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  GoalsRoute: typeof GoalsRoute
   SessionsRoute: typeof SessionsRoute
   ContactsContactIdRoute: typeof ContactsContactIdRoute
   ConversationsSessionKeyRoute: typeof ConversationsSessionKeyRouteWithChildren
@@ -243,6 +256,13 @@ declare module '@tanstack/react-router' {
       path: '/sessions'
       fullPath: '/sessions'
       preLoaderRoute: typeof SessionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/goals': {
+      id: '/goals'
+      path: '/goals'
+      fullPath: '/goals'
+      preLoaderRoute: typeof GoalsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -372,6 +392,7 @@ const ConversationsSessionKeyRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  GoalsRoute: GoalsRoute,
   SessionsRoute: SessionsRoute,
   ContactsContactIdRoute: ContactsContactIdRoute,
   ConversationsSessionKeyRoute: ConversationsSessionKeyRouteWithChildren,

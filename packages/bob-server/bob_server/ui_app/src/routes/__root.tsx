@@ -14,6 +14,7 @@ const NAV_ITEMS = [
 ] as const;
 
 const OVERFLOW_ITEMS = [
+  { to: "/goals" as const, label: "Goals", icon: "target" },
   { to: "/skills" as const, label: "Skills", icon: "zap" },
   { to: "/phone" as const, label: "Phone", icon: "phone" },
   { to: "/persona" as const, label: "Persona", icon: "user" },
@@ -39,6 +40,8 @@ function NavIcon({ name, size = 18 }: { name: string; size?: number }) {
       return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
     case "moon":
       return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+    case "target":
+      return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>;
     default:
       return null;
   }
