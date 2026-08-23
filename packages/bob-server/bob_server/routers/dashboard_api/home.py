@@ -89,6 +89,9 @@ async def get_home(request: Request) -> dict[str, Any]:
                   COUNT(*) as count
                FROM llm_call_log
                WHERE created_at >= datetime('now', '-24 hours')
+                 AND NOT (status = 'failed' AND (
+                     error_message LIKE '%insufficient_quota%'
+                     OR error_message LIKE '%credit_balance_exhausted%'))
                GROUP BY interval_start, call_category
                ORDER BY interval_start"""
         )
@@ -171,6 +174,9 @@ async def get_home(request: Request) -> dict[str, Any]:
                       COUNT(*) as call_count
                FROM llm_call_log
                WHERE created_at >= datetime('now', '-24 hours')
+                 AND NOT (status = 'failed' AND (
+                     error_message LIKE '%insufficient_quota%'
+                     OR error_message LIKE '%credit_balance_exhausted%'))
                GROUP BY call_category, model
                ORDER BY call_category, model"""
         )
