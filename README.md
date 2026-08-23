@@ -16,80 +16,95 @@ You too can have him.
 
 ## Feature Areas
 
+### The Event Pipeline (Bob3 core)
+
+Everything Bob perceives and does flows through one durable pipeline. Every accepted stimulus — a WhatsApp message, an email, a phone call outcome, a wakeup — is appended once to an immutable `event_log`. An attention layer decides whether and when to engage: tier 0 heuristics handle the obvious cases, and a cheap tier-2 LLM probe handles the ambiguous ones (is this group message for Bob?). When attention fires, a `turn` claims the conversation's pending events under a durable lease, runs the LLM dispatch, and records every outbound action in an `effects` outbox before delivery — so replies survive crashes, retries are automatic, and dead effects are inspectable and requeueable from the dashboard. Conversations and bindings form the identity layer that channel-specific session keys map onto, with merge/unmerge provenance.
+
 ### WhatsApp Messaging
 
-Bob connects to WhatsApp through a Go companion service (the WhatsApp Bridge) that links to WhatsApp Web via the `whatsmeow` library. It handles both direct messages and group chats, with support for text, images, and documents. Messages flow through a persistent SQLite queue with guaranteed delivery and automatic retries. Contacts are auto-seeded from shared contact cards. Proactive outreach tools let Bob initiate conversations with trusted contacts. A pairing system supports both QR code and phone number methods.
-
-### Voice
-
-Realtime voice runs on the OpenAI Realtime API through one bridge (`realtime_bridge.py`) with pluggable audio sources: Twilio Media Streams for phone calls and raw browser PCM for voice-link sessions. The browser harness is free and instant, so prompts, voices, and tools can be iterated there before spending money on real calls. Calls get turn-ordered transcripts (persisted per turn), structured `report_success`/`report_failure` outcomes, time-aligned stereo recordings, barge-in handling, and callee-speaks-first phone etiquette. A legacy local STT/TTS pipeline (Faster Whisper + Omnivoice) still serves the push-to-talk language-practice frontend.
-
-### Phone Calls
-
-Phone integration uses Twilio Media Streams bridged to the OpenAI Realtime API for real-time bidirectional audio. Bob can place outbound calls to contacts (the LLM dispatches them via `create_subagent(agent_type="openai_voice", modality="phone")`) and handle inbound calls with automatic contact resolution from caller ID. When the agent's task is done it calls `end_call`, which terminates both the Realtime session and the Twilio leg. Browser voice-link calls (modality `voice_link`) run the same bridge without the telco leg and appear in the calls UI alongside phone calls. `get_call_status` tracks call progress.
+Bob connects to WhatsApp through a Go companion service (the WhatsApp Bridge) that links to WhatsApp Web via the `whatsmeow` library. It handles direct messages and group chats with text, images, and documents. Messages flow through a persistent queue with guaranteed delivery and automatic retries. Contacts are auto-seeded from shared contact cards; participants carry per-person trust levels. Slash commands (`/who`, `/autoplan`, `/patience`, ...) give operators in-chat control. A pairing system supports both QR code and phone number methods.
 
 ### Email
 
-Bob reads and sends email through AgentMail. A polling service checks inboxes for new messages, resolves contacts from sender addresses, and dispatches the LLM with email context and reply tools. The system supports multiple inboxes, thread management, attachment handling (downloaded from trusted senders), and trust-based handling policies. Replies are sent back through the AgentMail API.
+Bob reads and sends email through AgentMail. A polling service checks inboxes, threads messages, resolves contacts from sender addresses, and feeds the event pipeline with email context and reply tools. Multiple inboxes, attachment handling (downloaded from trusted senders), and trust-based handling policies are supported. All email SQL lives behind a single domain store.
 
-### Dispatch System
+### Voice and Phone
 
-Every agent interaction is tracked as a dispatch, whether it is a WhatsApp message response, an email reply, a voice conversation, or a phone call. Dispatches have their own lifecycle (active, completed, failed, timed_out, cancelled) with concurrency limits, stuck detection, and automatic tapping. This gives Bob a unified view of everything the agent is doing across all channels.
+Realtime voice runs on the OpenAI Realtime API through one bridge (`realtime_bridge.py`) with pluggable audio sources: Twilio Media Streams for phone calls and raw browser PCM for voice-link sessions. The browser harness is free and instant, so prompts, voices, and tools are iterated there before spending money on real calls. The LLM places calls via `create_subagent(agent_type="openai_voice", modality="phone"|"voice_link")`; outbound calls prewarm the OpenAI session while the phone rings so the callee never hears a half-configured agent. Calls get turn-ordered transcripts, structured `report_success`/`report_failure` outcomes, time-aligned stereo recordings, barge-in handling, and callee-speaks-first etiquette. Both modalities land in the same `phone_calls` table and calls UI.
 
-### Session Management
+### Memory
 
-Every conversation is a session, identified by a session key that encodes the channel and peer (e.g. `agent:main:whatsapp:direct:+61400111222`). Sessions have agendas (purpose and handling instructions), participants (with trust levels), and periodic summaries. Session routes map logical keys to physical channels for cross-session routing. The unified `session_messages` table stores all conversation history across voice, phone, email, and WhatsApp.
+Claim-centric long-term memory (v7): claims are the source of truth, entities are identity-only rows, and rendered views are generated from claims via per-type templates. A reconciliation loop extracts claims from conversation traffic per-session, dedupes and supersedes, raises open questions, and embeds entities for recall. Memory is injected into dispatches as rendered entity blocks, and `memory_correct` tools let the agent (or operator) fix it in place. See `docs/memory.md`.
 
-### Reflection
+### Dreams
 
-The reflection service lets users ask questions about any session's history. It builds a transcript from the session's messages and LLM call log, then dispatches an LLM call to analyze the conversation, trace tool invocations, explain agent decisions, and identify errors or missed opportunities. This is useful for debugging agent behavior and understanding what happened during an autonomous session.
+Idle-time reflection over recent sessions. Dream runs review traffic and propose *resolutions* (behaviour changes) and *plans* (concrete next steps), link them to sessions and entities, and synthesise a journal. Plans can auto-announce into their originating chat under per-session autoplan settings with daily caps. Approved output feeds back into future dispatches.
+
+### Goals, Wakeups and Outreach
+
+Goals hold durable intent with status transitions and deadlines; wakeups schedule future work (one-shot and recurring routines) that re-enters the event pipeline as first-class stimuli. Outreach goals let Bob initiate and drive conversations with trusted contacts toward an objective, reporting outcomes back to the originating session.
+
+### Persona
+
+Bob's identity, soul, and agent instructions are versioned `persona_records` rows — edit in the dashboard, activate any revision, roll back instantly. The active revision is assembled into every system prompt.
+
+### Skills and Subagents
+
+Skills are self-contained subprocess tools with their own dependencies and mapped API keys; a skill-developer subagent can write new ones from a user story, tracked as asynchronous delegations with cost accounting. Subagents (voice calls, isolated task sessions) run as child conversations with their own lifecycle and results dispatch.
+
+### Reflection and Evals
+
+The reflection service answers questions about any session's history: it builds a transcript from messages and the LLM call log, then traces tool invocations, explains decisions, and identifies errors. An eval harness replays recorded scenarios against the live prompt stack for regression checking.
 
 ### Dashboard
 
-A React-based web dashboard provides real-time monitoring and management. It shows active sessions across all channels, LLM call statistics and latency metrics, contact management, workspace file browsing, phone call recordings with transcripts, and active dispatch monitoring. A WebSocket connection provides live updates.
+A React SPA (Vite + TypeScript + Tailwind) served at `/dashboard`: conversations with merged decision timelines (attention verdicts, probe reasoning, turns, effects, goal transitions), ops status (effects outbox, dead-effect requeue, stuck-turn retry, quota gate), memory browser, dream runs and plans, goals and wakeups, persona editor, skills, calls with live transcripts and recordings, contacts, spend telemetry, and log tail. A WebSocket connection provides live updates.
 
-### Calendars and Events
+### Calendars, Notifications and Webhooks
 
-Calendars support color-coded entries with events, recurring schedules, and recipient tracking. Events link to contacts and sessions for cross-channel reminders and notifications.
-
-### Notifications and Webhooks
-
-Persisted notifications with acknowledgement, delivery state, and repeat throttling. Webhook delivery with retry tracking for external integrations. Cross-session routing for source and target session resolution.
+Color-coded calendars with events, recurring schedules, and recipient tracking, linked to contacts and sessions for cross-channel reminders. Persisted notifications with acknowledgement and repeat throttling. Webhook delivery with retry tracking for external integrations.
 
 ## System Architecture
 
 ```text
-                              +-----------------+
-                              |  Web Dashboard  |
-                              |  (React SPA)    |
-                              +--------+--------+
-                                       |
-                               HTTP/WS | :8420
-                                       |
-+----------+   +--------+   +----------+------------------+   +----------------+
-| WhatsApp |   | Email  |   |           Bob Server        |   |    Browser     |
-|  Bridge  |   | (Agent |   |           (FastAPI)         |   | voice sessions |
-|   (Go)   |   |  Mail) |   |                             |   |  + realtime    |
-|          |   |        |   |   Realtime Voice Bridge     |   |  test harness  |
-|          |   |        |   |   (realtime_bridge.py)      |   |                |
-+----+-----+   +----+---+   +------------+----------------+   +--------+-------+
-     |              |                    |       |                     |
-     | WS :8430     | Polling            | WSS   | WS (μ-law 8k)      | WS
-     |              |                    |       |                     | (PCM 24k)
-     |              |                    v       v                     |
-     |              |             +-----------+ +----------------+     |
-     |              |             |   OpenAI  | |    Twilio      |<----+
-     |              |             | Realtime  | | Media Streams  |
-     |              |             |    API    | |  (PSTN/Mobile) |
-     |              |             +-----------+ +----------------+
-     |              |
-     |              +------------------------>+---------------+
-     |                                       |    SQLite     |
-     +-------------------------------------->|   Database    |
-                                             +---------------+
++-----------+  +---------+  +--------------+  +----------+  +-----------+
+| WhatsApp  |  |  Email  |  | Phone/Voice  |  | Wakeups  |  | Operator  |
+| Bridge(Go)|  |(Agent   |  | (Twilio +    |  | Routines |  | Dashboard |
+| WS :8430  |  |  Mail)  |  |  OpenAI RT)  |  | Heartbeat|  |   CLI     |
++-----+-----+  +----+----+  +------+-------+  +----+-----+  +-----+-----+
+      |             |              |               |              |
+      v             v              v               v              |
++---------------------------------------------------------+      |
+|                     event_log (append-only)             |      |
++---------------------------+-----------------------------+      |
+                            v                                    |
++---------------------------------------------------------+      |
+|  attention: tier-0 heuristics -> tier-2 LLM probe       |      |
+|  (engage now / wait / skip, per conversation)           |      |
++---------------------------+-----------------------------+      |
+                            v                                    |
++---------------------------------------------------------+      |
+|  turn: leases pending events, assembles context         |      |
+|  (persona + memory + agenda + dream plans + goals),     |<-----+
+|  runs LLM dispatch with channel tools                   | HTTP/WS :8420
++------------+----------------------------+---------------+
+             |                            |
+             v                            v
++------------------------+   +---------------------------+
+|  effects outbox        |   |  memory reconciliation,   |
+|  (record then deliver, |   |  dreams, goals, wakeups,  |
+|   retry, dead-letter)  |   |  reflection, telemetry    |
++-----------+------------+   +-------------+-------------+
+            |                              |
+            v                              v
+   back out through the         +---------------------+
+   channel adapters             |  SQLite (~/data)    |
+   (WhatsApp, email,            |  repositories +     |
+    voice, webhooks)            |  domain stores      |
+                                +---------------------+
 ```
 
-All realtime voice — Twilio phone calls and browser voice-link sessions — flows through the same bridge to the OpenAI Realtime API. Dispatch, instruction building, and call placement live in `voice_dispatch_service.py`; call records (both modalities) land in the `phone_calls` table and surface in the dashboard's calls UI with live transcripts.
+One FastAPI process (`bob-server`, port 8420) owns the whole pipeline. All state lives in a single SQLite database behind a table-ownership rule enforced by tests: every table has exactly one writer (a repository under `repositories/` or a domain store like `dream/store.py`), with a short, documented list of cross-domain read seams. Background loops (heartbeat, email polling, dream runs, retention, reconciliation audits) run inside the same process. All realtime voice — Twilio phone calls and browser voice-link sessions — flows through the same Realtime bridge; call placement lives in `voice_dispatch_service.py`, and call records for both modalities land in `phone_calls`.
 
 ## Setup
 
