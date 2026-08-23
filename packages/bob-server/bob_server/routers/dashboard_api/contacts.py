@@ -146,13 +146,10 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
     # Find person entity: try contact_id claim first, then name-slug match
     entity_id: str | None = None
     hex8 = str(contact_id)[:8]
-    claim_row = await db.fetch_one(
-        "SELECT subject_id FROM memory_claims "
-        "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active' LIMIT 1",
-        (hex8,),
-    )
-    if claim_row:
-        entity_id = claim_row["subject_id"]
+    from bob_server.services.memory import admin as memory_admin
+    claim_entity = await memory_admin.entity_id_for_contact_hex(db, hex8)
+    if claim_entity:
+        entity_id = claim_entity
     else:
         # Fallback: derive slug from contact name and look up person-{slug}
         import re
@@ -202,13 +199,10 @@ async def get_contact_claims(request: Request, contact_id: str) -> Any:
     # Find person entity: try contact_id claim first, then name-slug match
     entity_id: str | None = None
     hex8 = str(contact_id)[:8]
-    claim_row = await db.fetch_one(
-        "SELECT subject_id FROM memory_claims "
-        "WHERE claim_type_key = 'contact_id' AND value = ? AND status = 'active' LIMIT 1",
-        (hex8,),
-    )
-    if claim_row:
-        entity_id = claim_row["subject_id"]
+    from bob_server.services.memory import admin as memory_admin
+    claim_entity = await memory_admin.entity_id_for_contact_hex(db, hex8)
+    if claim_entity:
+        entity_id = claim_entity
     else:
         import re
         name_row = await ContactRepository(db).get_any(contact_id)

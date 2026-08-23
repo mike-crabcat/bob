@@ -92,29 +92,14 @@ async def get_home(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entities'"
     )
     if entities_table:
-        e_total = await db.fetch_one(
-            "SELECT COUNT(*) AS c FROM memory_entities WHERE status = 'active'"
-        )
-        entity_count = (e_total["c"] if e_total else 0) or 0
+        from bob_server.services.memory import admin as memory_admin
+        entity_count = await memory_admin.active_entity_count(db)
 
         claims_table = await db.fetch_one(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_claims'"
         )
         if claims_table:
-            c_rows = await db.fetch_all(
-                """SELECT c.id, c.claim_type_key, c.subject_id, c.object_id, c.value,
-                          c.created_at,
-                          se.display_name AS subject_name,
-                          se.entity_type  AS subject_type,
-                          oe.display_name AS object_name,
-                          oe.entity_type  AS object_type
-                   FROM memory_claims c
-                   LEFT JOIN memory_entities se ON se.entity_id = c.subject_id
-                   LEFT JOIN memory_entities oe ON oe.entity_id = c.object_id
-                   WHERE c.status = 'active'
-                   ORDER BY c.created_at DESC
-                   LIMIT 10"""
-            )
+            c_rows = await memory_admin.recent_claims_with_names(db, limit=10)
             for row in c_rows:
                 recent_memory.append({
                     "id": row["id"],

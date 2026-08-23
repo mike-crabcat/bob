@@ -38,6 +38,14 @@ def new_item_id(item_type: str) -> str:
 class DreamStore(BaseService):
     """All SQL for the dream system. Writes only dream_* tables."""
 
+    @classmethod
+    def from_db(cls, db: "Database") -> "DreamStore":
+        """Read-only construction for callers that only hold a db handle."""
+        store = cls.__new__(cls)
+        store.ctx = None  # type: ignore[assignment]
+        store.db = db
+        return store
+
     # ------------------------------------------------------------------ runs
 
     async def create_run(self, *, trigger: str, window_start: str, window_end: str, model: str) -> str:

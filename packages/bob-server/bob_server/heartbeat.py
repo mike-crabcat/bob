@@ -356,26 +356,9 @@ class MemoryReconciliationTask:
         from bob_server.services.memory import MemoryService
         from bob_server.services.memory.reconciliation import filter_due_for_reconciliation
 
-        rows = await ctx.db.fetch_all(
-            """
-            SELECT entity_id, MAX(touched_at) AS last_touched FROM (
-                SELECT subject_id AS entity_id, created_at AS touched_at
-                FROM memory_claims
-                WHERE status = 'active'
-                  AND datetime(created_at) > datetime('now', '-24 hours')
-                UNION ALL
-                SELECT entity_id, created_at AS touched_at
-                FROM memory_entities
-                WHERE status = 'active'
-                  AND datetime(created_at) > datetime('now', '-24 hours')
-            )
-            GROUP BY entity_id
-            ORDER BY last_touched DESC
-            LIMIT ?
-            """,
-            (recon.daily_batch_max_entities,),
-        )
-        candidate_ids = [r["entity_id"] for r in rows] if rows else []
+        from bob_server.services.memory import admin as memory_admin
+        candidate_ids = await memory_admin.recently_touched_entity_ids(
+            ctx.db, limit=recon.daily_batch_max_entities)
         if not candidate_ids:
             _last_memory_reconcile = now
             return
