@@ -282,13 +282,9 @@ def make_outreach_reply_tools(
         requestor = strategy.get("requestor", "unknown")
 
         # Look up target contact name for context
-        target_contact = await db.fetch_one(
-            "SELECT c.name FROM bindings b "
-            "JOIN contacts c ON c.id = b.contact_id AND c.deleted_at IS NULL "
-            "WHERE b.session_key = ?",
-            (current_session_key,),
-        )
-        target_contact_name = target_contact["name"] if target_contact else "unknown"
+        from bob_server.repositories.conversations import ConversationRepository
+        target_contact_name = await ConversationRepository(db).contact_name_for(
+            current_session_key) or "unknown"
 
         result_content = (
             f"## Outreach Result\n"

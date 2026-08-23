@@ -32,10 +32,8 @@ class HistoryRepository:
         self.db = db
 
     async def _cid(self, session_key: str) -> str:
-        row = await self.db.fetch_one(
-            "SELECT conversation_id FROM bindings WHERE session_key = ?",
-            (session_key,))
-        return row["conversation_id"] if row else session_key
+        from bob_server.repositories.conversations import ConversationRepository
+        return await ConversationRepository(self.db).resolve_cid(session_key)
 
     async def recent_dialogue(
         self,

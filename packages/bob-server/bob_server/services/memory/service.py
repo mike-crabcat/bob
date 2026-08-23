@@ -908,10 +908,8 @@ class MemoryService(BaseService):
         """Load group member canonical contact IDs for a session."""
         if not source_id:
             return None
-        route = await self.db.fetch_one(
-            "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
-            (source_id,),
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(source_id)
         if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
         rows = await self.db.fetch_all(
@@ -1076,10 +1074,8 @@ class MemoryService(BaseService):
         """Look up the group entity ID for a bulletin's source session."""
         if not source_id:
             return None
-        route = await self.db.fetch_one(
-            "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
-            (source_id,),
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(source_id)
         if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
         row = await self.db.fetch_one(
@@ -1095,10 +1091,8 @@ class MemoryService(BaseService):
         bulletin_id: str,
     ) -> str | None:
         """Ensure a group entity exists for a group session and link the bulletin."""
-        route = await self.db.fetch_one(
-            "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
-            (session_key,),
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(session_key)
         if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
 

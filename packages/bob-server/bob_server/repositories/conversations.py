@@ -82,6 +82,83 @@ class ConversationRepository:
             "SELECT * FROM bindings WHERE conversation_id = ? ORDER BY created_at",
             (conversation_id,))
 
+    async def resolve_cid(self, session_key: str, txn: Any = None) -> str:
+        """Canonical conversation id for a session key (identity when unbound;
+        conversation ids are legacy session_keys 1:1 until merges)."""
+        row = await (txn or self.db).fetch_one(
+            "SELECT conversation_id FROM bindings WHERE session_key = ?",
+            (session_key,))
+        return row["conversation_id"] if row else session_key
+
+    async def active_binding(self, session_key: str) -> dict[str, Any] | None:
+        row = await self.db.fetch_one(
+            "SELECT channel, endpoint_kind, address, contact_id FROM bindings "
+            "WHERE session_key = ? AND is_active = 1",
+            (session_key,))
+        return dict(row) if row else None
+
+    async def bindings_for_many(
+        self, conversation_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        if not conversation_ids:
+            return []
+        marks = ",".join("?" * len(conversation_ids))
+        rows = await self.db.fetch_all(
+            f"""SELECT conversation_id, session_key, channel, kind, address,
+                       merged_from, merged_at
+                FROM bindings WHERE conversation_id IN ({marks})""",
+            tuple(conversation_ids))
+        return [dict(r) for r in rows]
+
+    async def named_sessions(self) -> list[dict[str, Any]]:
+        """Active bindings with a human display name: group sessions named by
+        the WhatsApp group, DM sessions by the bound contact."""
+        rows = await self.db.fetch_all(
+            """
+            SELECT b.session_key, wg.name AS display_name, 'group' AS kind, b.channel
+            FROM bindings b
+            JOIN whatsappgroups wg ON wg.whatsapp_jid = b.address AND wg.deleted_at IS NULL
+            WHERE b.is_active = 1 AND b.endpoint_kind = 'group'
+            UNION ALL
+            SELECT b.session_key, c.name AS display_name, 'dm' AS kind, b.channel
+            FROM bindings b
+            JOIN contacts c ON c.id = b.contact_id AND c.deleted_at IS NULL
+            WHERE b.is_active = 1 AND b.endpoint_kind = 'dm'
+            """)
+        return [dict(r) for r in rows] if rows else []
+
+    async def contact_name_for(self, session_key: str) -> str | None:
+        row = await self.db.fetch_one(
+            "SELECT c.name FROM bindings b "
+            "JOIN contacts c ON c.id = b.contact_id AND c.deleted_at IS NULL "
+            "WHERE b.session_key = ?",
+            (session_key,))
+        return row["name"] if row else None
+
+    async def dashboard_overview(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Conversation list rollup for the dashboard (cross-domain read-only)."""
+        rows = await self.db.fetch_all(
+            """SELECT c.id, c.kind, c.title, c.merged_into, c.updated_at,
+                      (SELECT COUNT(*) FROM bindings b WHERE b.conversation_id = c.id) AS binding_count,
+                      (SELECT MAX(t.created_at) FROM turns t WHERE t.conversation_id = c.id) AS last_turn_at,
+                      (SELECT replace(MAX(l.created_at), ' ', 'T') FROM llm_call_log l
+                       WHERE l.session_key = c.id) AS last_llm_at,
+                      (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.id) AS turn_count,
+                      (SELECT COUNT(*) FROM goals g WHERE g.conversation_id = c.id AND g.status = 'active') AS active_goals
+               FROM conversations c
+               ORDER BY COALESCE(NULLIF(MAX(COALESCE(last_turn_at, ''), COALESCE(last_llm_at, '')), ''), c.updated_at) DESC
+               LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def group_memory_entity_id(self, session_key: str) -> str | None:
+        """Memory entity id for a group session's bound WhatsApp group."""
+        row = await self.db.fetch_one(
+            "SELECT wg.memory_entity_id FROM whatsappgroups wg "
+            "JOIN bindings b ON b.address = wg.whatsapp_jid "
+            "WHERE b.session_key = ? AND wg.deleted_at IS NULL",
+            (session_key,))
+        return row["memory_entity_id"] if row and row["memory_entity_id"] else None
+
     async def route_for(self, session_key: str) -> dict[str, Any] | None:
         """THE routing resolver (Increment 4): everything the legacy
         session_routes read sites need, from the binding map. Returns

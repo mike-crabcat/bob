@@ -109,14 +109,10 @@ class ContextAssembler:
 
     async def group_memory_hint(self, session_key: str) -> str:
         """Recall hint for groups with an accumulated memory entity."""
-        group_row = await self.db.fetch_one(
-            "SELECT wg.memory_entity_id FROM whatsappgroups wg "
-            "JOIN bindings b ON b.address = wg.whatsapp_jid "
-            "WHERE b.session_key = ? AND wg.deleted_at IS NULL",
-            (session_key,))
-        if not (group_row and group_row["memory_entity_id"]):
+        from bob_server.repositories.conversations import ConversationRepository
+        eid = await ConversationRepository(self.db).group_memory_entity_id(session_key)
+        if not eid:
             return ""
-        eid = group_row["memory_entity_id"]
         return (
             "## Group Memory\n\n"
             f"This is a WhatsApp group with accumulated memory entity `{eid}`.\n"

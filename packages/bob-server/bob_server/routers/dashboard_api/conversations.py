@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from bob_server.repositories.conversations import ConversationRepository
 
 
 router = APIRouter()
@@ -30,10 +31,8 @@ async def _conversation_keys(db: Database, conversation_id: str) -> list[str]:
     """All session_keys bound to this conversation (incl. its own id, since
     conversation ids are legacy session_keys 1:1 today)."""
     keys = {conversation_id}
-    for row in await db.fetch_all(
-            "SELECT session_key FROM bindings WHERE conversation_id = ?",
-            (conversation_id,)):
-        keys.add(row["session_key"])
+    for b in await ConversationRepository(db).bindings_for(conversation_id):
+        keys.add(b["session_key"])
     return list(keys)
 
 
@@ -43,34 +42,18 @@ async def list_conversations(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    rows = await db.fetch_all(
-        """SELECT c.id, c.kind, c.title, c.merged_into, c.updated_at,
-                  (SELECT COUNT(*) FROM bindings b WHERE b.conversation_id = c.id) AS binding_count,
-                  (SELECT MAX(t.created_at) FROM turns t WHERE t.conversation_id = c.id) AS last_turn_at,
-                  (SELECT replace(MAX(l.created_at), ' ', 'T') FROM llm_call_log l
-                   WHERE l.session_key = c.id) AS last_llm_at,
-                  (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.id) AS turn_count,
-                  (SELECT COUNT(*) FROM goals g WHERE g.conversation_id = c.id AND g.status = 'active') AS active_goals
-           FROM conversations c
-           ORDER BY COALESCE(NULLIF(MAX(COALESCE(last_turn_at, ''), COALESCE(last_llm_at, '')), ''), c.updated_at) DESC
-           LIMIT 200""")
+    rows = await ConversationRepository(db).dashboard_overview(limit=200)
 
     conv_ids = [r["id"] for r in rows]
     bindings_by_conv: dict[str, list[dict[str, Any]]] = {}
-    if conv_ids:
-        marks = ",".join("?" * len(conv_ids))
-        for b in await db.fetch_all(
-                f"""SELECT conversation_id, session_key, channel, kind, address,
-                           merged_from, merged_at
-                    FROM bindings WHERE conversation_id IN ({marks})""",
-                tuple(conv_ids)):
-            bindings_by_conv.setdefault(b["conversation_id"], []).append({
-                "session_key": b["session_key"],
-                "channel": b["channel"],
-                "kind": b["kind"],
-                "address": b["address"],
-                "merged": bool(b["merged_from"]),
-            })
+    for b in await ConversationRepository(db).bindings_for_many(conv_ids):
+        bindings_by_conv.setdefault(b["conversation_id"], []).append({
+            "session_key": b["session_key"],
+            "channel": b["channel"],
+            "kind": b["kind"],
+            "address": b["address"],
+            "merged": bool(b["merged_from"]),
+        })
 
     conversations = []
     for r in rows:
@@ -155,11 +138,10 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
     # key-tail parsing kept as last-resort fallback for pre-route rows
     # (e.g. agent:main:whatsapp:group:<id> -> <id>@g.us).
     segments = {k.rsplit(":", 1)[-1] for k in keys} | set(keys)
-    for row in await db.fetch_all(
-            "SELECT address FROM bindings WHERE conversation_id = ? AND address IS NOT NULL",
-            (conversation_id,)):
-        segments.add(row["address"])
-        segments.add(str(row["address"]).split("@", 1)[0])
+    for b in await ConversationRepository(db).bindings_for(conversation_id):
+        if b["address"]:
+            segments.add(b["address"])
+            segments.add(str(b["address"]).split("@", 1)[0])
     effect_rows = await db.fetch_all(
         f"""SELECT id, kind, status, attempt, error, created_at,
                    COALESCE(json_extract(payload_json, '$.origin_session_key'),
@@ -232,11 +214,7 @@ async def get_bindings(request: Request, conversation_id: str) -> dict[str, Any]
             "merged_at": _norm_ts(r["merged_at"]),
             "created_at": _norm_ts(r["created_at"]),
         }
-        for r in await db.fetch_all(
-            """SELECT session_key, channel, kind, address, sensitivity,
-                      merged_from, merged_at, created_at
-               FROM bindings WHERE conversation_id = ?
-               ORDER BY created_at""", (conversation_id,))
+        for r in await ConversationRepository(db).bindings_for(conversation_id)
     ]
     return {"conversation": dict(conv) if conv else None, "bindings": bindings}
 
@@ -270,11 +248,7 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         "member_count": None,
         "email_participants": None,
     }
-    binding = await db.fetch_one(
-        "SELECT channel, endpoint_kind, address, contact_id FROM bindings "
-        "WHERE session_key = ? AND is_active = 1",
-        (session_key,),
-    )
+    binding = await ConversationRepository(db).active_binding(session_key)
     if binding:
         kind = binding["endpoint_kind"]
         address = binding["address"]
@@ -364,14 +338,15 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         })
 
     participants: list[dict[str, Any]] = []
+    cid = await ConversationRepository(db).resolve_cid(session_key)
     p_rows = await db.fetch_all(
         "SELECT sp.display_name, sp.identifier, sp.contact_id, sp.is_trusted, sp.last_active_at, "
         "COALESCE(c.name, sp.display_name, sp.identifier) as resolved_name "
         "FROM participants sp "
         "LEFT JOIN contacts c ON c.id = sp.contact_id AND c.deleted_at IS NULL "
-        "WHERE sp.conversation_id = COALESCE((SELECT conversation_id FROM bindings WHERE session_key = ?), ?) "
+        "WHERE sp.conversation_id = ? "
         "ORDER BY sp.last_active_at DESC",
-        (session_key, session_key),
+        (cid,),
     )
     for row in p_rows:
         participants.append({
@@ -383,9 +358,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         })
 
     agenda_row = await db.fetch_one(
-        "SELECT agenda FROM agendas WHERE conversation_id = "
-        "COALESCE((SELECT conversation_id FROM bindings WHERE session_key = ?), ?)",
-        (session_key, session_key),
+        "SELECT agenda FROM agendas WHERE conversation_id = ?",
+        (cid,),
     )
     current_agenda = agenda_row["agenda"] if agenda_row else ""
 

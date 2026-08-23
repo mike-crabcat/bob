@@ -79,10 +79,9 @@ class SessionService(BaseService):
         meta_json = json.dumps(metadata) if metadata else None
         # Canonical conversation id via bindings; the raw key is preserved as
         # binding_key (which endpoint the message rode).
-        cid_row = await (txn or self.db).fetch_one(
-            "SELECT conversation_id FROM bindings WHERE session_key = ?",
-            (session_key,))
-        conversation_id = cid_row["conversation_id"] if cid_row else session_key
+        from bob_server.repositories.conversations import ConversationRepository
+        conversation_id = await ConversationRepository(self.db).resolve_cid(
+            session_key, txn=txn)
         await (txn or self.db).execute(
             """INSERT INTO messages
                (id, conversation_id, binding_key, role, content, sender_id, channel, metadata,
