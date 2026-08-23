@@ -179,6 +179,17 @@ class GoalRepository:
                 ORDER BY created_at""", tuple(goal_ids))
         return [dict(r) for r in rows] if rows else []
 
+    async def recent_transitions(
+        self, conversation_id: str, *, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT gt.created_at, gt.from_status, gt.to_status, gt.note,
+                      g.id AS goal_id, g.objective
+               FROM goal_transitions gt JOIN goals g ON g.id = gt.goal_id
+               WHERE g.conversation_id = ?
+               ORDER BY gt.created_at DESC LIMIT ?""", (conversation_id, limit))
+        return [dict(r) for r in rows] if rows else []
+
     async def active_count(self) -> int:
         row = await self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM goals WHERE status = 'active'")

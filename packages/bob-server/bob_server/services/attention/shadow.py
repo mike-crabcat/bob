@@ -63,3 +63,17 @@ async def record_shadow_decision(
     except Exception:
         logger.warning("attention shadow recording failed for %s", session_key,
                        exc_info=True)
+
+
+async def recent_decisions(db, session_keys: list[str], *, limit: int = 100) -> list[dict]:
+    """Recent shadow decisions for a set of session keys (dashboard timeline)."""
+    if not session_keys:
+        return []
+    marks = ",".join("?" * len(session_keys))
+    rows = await db.fetch_all(
+        f"""SELECT decision, addressed, addressed_reason, source,
+                   proposed_window_ms, created_at
+            FROM attention_shadow WHERE session_key IN ({marks})
+            ORDER BY created_at DESC LIMIT ?""",
+        (*session_keys, limit))
+    return [dict(r) for r in rows] if rows else []

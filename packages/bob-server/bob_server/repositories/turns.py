@@ -138,6 +138,15 @@ class TurnRepository:
                ORDER BY started_at LIMIT ?""", (limit,))
         return [dict(r) for r in rows] if rows else []
 
+    async def recent_for_conversation(
+        self, conversation_id: str, *, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, status, attempt, created_at, started_at, completed_at, error
+               FROM turns WHERE conversation_id = ?
+               ORDER BY created_at DESC LIMIT ?""", (conversation_id, limit))
+        return [dict(r) for r in rows] if rows else []
+
     async def stuck_check(self, turn_id: str) -> dict[str, Any] | None:
         row = await self.db.fetch_one(
             """SELECT id, conversation_id, status,

@@ -86,6 +86,18 @@ class ParticipantRepository:
             f"SELECT * FROM participants WHERE conversation_id = {CID} AND identifier = ?",
             (session_key, session_key, identifier))
 
+    async def with_contact_names(self, conversation_id: str) -> list[dict[str, Any]]:
+        """Participants joined to live contact names (dashboard detail view)."""
+        rows = await self.db.fetch_all(
+            "SELECT sp.display_name, sp.identifier, sp.contact_id, sp.is_trusted, sp.last_active_at, "
+            "COALESCE(c.name, sp.display_name, sp.identifier) as resolved_name "
+            "FROM participants sp "
+            "LEFT JOIN contacts c ON c.id = sp.contact_id AND c.deleted_at IS NULL "
+            "WHERE sp.conversation_id = ? "
+            "ORDER BY sp.last_active_at DESC",
+            (conversation_id,))
+        return [dict(r) for r in rows] if rows else []
+
     async def conversations_for_contact(self, contact_id: str) -> list[str]:
         rows = await self.db.fetch_all(
             "SELECT DISTINCT conversation_id FROM participants WHERE contact_id = ?",

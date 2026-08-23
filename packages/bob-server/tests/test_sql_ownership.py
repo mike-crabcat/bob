@@ -80,18 +80,6 @@ WRITE_ALLOWLIST: set[tuple[str, str]] = set()
 # Documented cross-domain READ seams. Each group below is a deliberate
 # exception; anything new must be justified here or ported to a repository.
 READ_ALLOWLIST = {
-    # Conversation detail page: a purpose-built multi-domain read model that
-    # stitches one conversation's timeline together. Porting each fragment to
-    # its repository would scatter one view across nine modules for no gain.
-    ("agendas", "routers/dashboard_api/conversations.py"),
-    ("attention_shadow", "routers/dashboard_api/conversations.py"),
-    ("contacts", "routers/dashboard_api/conversations.py"),
-    ("conversations", "routers/dashboard_api/conversations.py"),
-    ("effects", "routers/dashboard_api/conversations.py"),
-    ("goal_transitions", "routers/dashboard_api/conversations.py"),
-    ("goals", "routers/dashboard_api/conversations.py"),
-    ("participants", "routers/dashboard_api/conversations.py"),
-    ("turns", "routers/dashboard_api/conversations.py"),
     # Operator debug CLI: read-only forensic queries across the event
     # pipeline. Not part of the serving path.
     ("attention_shadow", "cli/replay_cmds.py"),

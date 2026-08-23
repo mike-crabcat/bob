@@ -79,15 +79,11 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         return {"error": "unauthorized"}
     db = _db(request)
     keys = await _conversation_keys(db, conversation_id)
-    marks = ",".join("?" * len(keys))
     items: list[dict[str, Any]] = []
 
     # 1. Attention decisions (tier-1 shadow rows; space-format timestamps)
-    for r in await db.fetch_all(
-            f"""SELECT decision, addressed, addressed_reason, source,
-                       proposed_window_ms, created_at
-                FROM attention_shadow WHERE session_key IN ({marks})
-                ORDER BY created_at DESC LIMIT 100""", tuple(keys)):
+    from bob_server.services.attention import shadow as attention_shadow
+    for r in await attention_shadow.recent_decisions(db, list(keys), limit=100):
         items.append({
             "type": "attention",
             "at": _norm_ts(r["created_at"]),
@@ -117,10 +113,8 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         })
 
     # 3. Turns
-    for r in await db.fetch_all(
-            """SELECT id, status, attempt, created_at, started_at, completed_at, error
-               FROM turns WHERE conversation_id = ?
-               ORDER BY created_at DESC LIMIT 100""", (conversation_id,)):
+    from bob_server.repositories.turns import TurnRepository
+    for r in await TurnRepository(db).recent_for_conversation(conversation_id, limit=100):
         items.append({
             "type": "turn",
             "at": _norm_ts(r["created_at"]),
@@ -139,18 +133,8 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         if b["address"]:
             segments.add(b["address"])
             segments.add(str(b["address"]).split("@", 1)[0])
-    effect_rows = await db.fetch_all(
-        f"""SELECT id, kind, status, attempt, error, created_at,
-                   COALESCE(json_extract(payload_json, '$.origin_session_key'),
-                            json_extract(payload_json, '$.chat_id'),
-                            json_extract(payload_json, '$.to'),
-                            json_extract(payload_json, '$.session_key'), '') AS target,
-                   substr(payload_json, 1, 200) AS payload_preview
-            FROM effects
-            WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?)
-               OR turn_id = '' OR turn_id IS NULL
-            ORDER BY created_at DESC LIMIT 500""",
-        (conversation_id,))
+    from bob_server.repositories.effects import EffectRepository
+    effect_rows = await EffectRepository(db).timeline_candidates(conversation_id, limit=500)
     matched = 0
     for r in effect_rows:
         target = str(r["target"] or "")
@@ -172,12 +156,8 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         })
 
     # 5. Goal transitions
-    for r in await db.fetch_all(
-            """SELECT gt.created_at, gt.from_status, gt.to_status, gt.note,
-                      g.id AS goal_id, g.objective
-               FROM goal_transitions gt JOIN goals g ON g.id = gt.goal_id
-               WHERE g.conversation_id = ?
-               ORDER BY gt.created_at DESC LIMIT 50""", (conversation_id,)):
+    from bob_server.repositories.goals import GoalRepository
+    for r in await GoalRepository(db).recent_transitions(conversation_id, limit=50):
         items.append({
             "type": "goal",
             "at": _norm_ts(r["created_at"]),
@@ -197,9 +177,7 @@ async def get_bindings(request: Request, conversation_id: str) -> dict[str, Any]
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    conv = await db.fetch_one(
-        "SELECT id, kind, title, merged_into FROM conversations WHERE id = ?",
-        (conversation_id,))
+    conv = await ConversationRepository(db).get(conversation_id)
     bindings = [
         {
             "session_key": r["session_key"],
@@ -272,10 +250,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
                 ]
 
         elif kind == "dm" and binding["contact_id"]:
-            contact = await db.fetch_one(
-                "SELECT name FROM contacts WHERE id = ? AND deleted_at IS NULL",
-                (binding["contact_id"],),
-            )
+            from bob_server.repositories.contacts import ContactRepository
+            contact = await ContactRepository(db).get(binding["contact_id"])
             if contact:
                 session_context["display_name"] = contact["name"]
 
@@ -316,15 +292,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
 
     participants: list[dict[str, Any]] = []
     cid = await ConversationRepository(db).resolve_cid(session_key)
-    p_rows = await db.fetch_all(
-        "SELECT sp.display_name, sp.identifier, sp.contact_id, sp.is_trusted, sp.last_active_at, "
-        "COALESCE(c.name, sp.display_name, sp.identifier) as resolved_name "
-        "FROM participants sp "
-        "LEFT JOIN contacts c ON c.id = sp.contact_id AND c.deleted_at IS NULL "
-        "WHERE sp.conversation_id = ? "
-        "ORDER BY sp.last_active_at DESC",
-        (cid,),
-    )
+    from bob_server.repositories.participants import ParticipantRepository
+    p_rows = await ParticipantRepository(db).with_contact_names(cid)
     for row in p_rows:
         participants.append({
             "display_name": row["resolved_name"],
@@ -334,11 +303,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
             "last_active": row["last_active_at"],
         })
 
-    agenda_row = await db.fetch_one(
-        "SELECT agenda FROM agendas WHERE conversation_id = ?",
-        (cid,),
-    )
-    current_agenda = agenda_row["agenda"] if agenda_row else ""
+    from bob_server.repositories.participants import AgendaRepository
+    current_agenda = (await AgendaRepository(db).get(cid)) or ""
 
     messages: list[dict[str, Any]] = []
     from bob_server.repositories.history import HistoryRepository

@@ -132,6 +132,25 @@ class EffectRepository:
             (effect_id,))
         return bool(changed)
 
+    async def timeline_candidates(
+        self, conversation_id: str, *, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Effects for a conversation's turns plus unattributed effects; the
+        caller filters unattributed rows by payload target (dashboard timeline)."""
+        rows = await self.db.fetch_all(
+            """SELECT id, kind, status, attempt, error, created_at,
+                      COALESCE(json_extract(payload_json, '$.origin_session_key'),
+                               json_extract(payload_json, '$.chat_id'),
+                               json_extract(payload_json, '$.to'),
+                               json_extract(payload_json, '$.session_key'), '') AS target,
+                      substr(payload_json, 1, 200) AS payload_preview
+               FROM effects
+               WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?)
+                  OR turn_id = '' OR turn_id IS NULL
+               ORDER BY created_at DESC LIMIT ?""",
+            (conversation_id, limit))
+        return [dict(r) for r in rows] if rows else []
+
     async def get(self, effect_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one("SELECT * FROM effects WHERE id = ?", (effect_id,))
 
