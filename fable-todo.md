@@ -64,3 +64,22 @@ Deliberately deferred from increment 4: reworking contacts, phone, and skills
 pages to link into `/conversations/*` natively (they still link/label by
 legacy session concepts where applicable). Do this opportunistically when
 touching those pages.
+
+## 6. Fork subagents: spawn with parent conversation context (M)
+
+Subagents start cold today — a fresh `subagent:{parent}:{shortid}` session
+whose only context is the `task` string, so Bob must hand-summarize relevant
+history into every spawn (lossy, easy to forget). Two options on existing
+seams:
+
+1. **Push**: `create_subagent(include_history=True)` renders the parent's
+   recent dialogue (reuse the memory silent-turn renderer: role-structured,
+   sender names, media capped to text stubs) into the subagent session ahead
+   of the task message. Best default for `local` (conversational fork
+   semantics; cap ~50 messages).
+2. **Pull**: a `read_parent_history` tool bound to `parent_session_key` so
+   the subagent fetches only what it needs. Cheaper on long conversations;
+   offer to both `local` and `claude` types.
+
+Script/voice types don't need it. Mind token cost — this reintroduces big
+replayed contexts, so the inline-media cap must apply to any rendered history.
