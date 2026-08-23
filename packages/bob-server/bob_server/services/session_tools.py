@@ -63,15 +63,15 @@ def make_session_tools(
         # Build name index: UNION of group sessions and DM sessions
         rows = await db.fetch_all(
             """
-            SELECT sr.session_key, wg.name AS display_name, 'group' AS kind, sr.channel
-            FROM session_routes sr
-            JOIN whatsappgroups wg ON wg.whatsapp_jid = sr.chat_id AND wg.deleted_at IS NULL
-            WHERE sr.deleted_at IS NULL AND sr.is_active = 1 AND sr.kind = 'group'
+            SELECT b.session_key, wg.name AS display_name, 'group' AS kind, b.channel
+            FROM bindings b
+            JOIN whatsappgroups wg ON wg.whatsapp_jid = b.address AND wg.deleted_at IS NULL
+            WHERE b.is_active = 1 AND b.endpoint_kind = 'group'
             UNION ALL
-            SELECT sr.session_key, c.name AS display_name, 'dm' AS kind, sr.channel
-            FROM session_routes sr
-            JOIN contacts c ON c.id = sr.contact_id AND c.deleted_at IS NULL
-            WHERE sr.deleted_at IS NULL AND sr.is_active = 1 AND sr.kind = 'dm'
+            SELECT b.session_key, c.name AS display_name, 'dm' AS kind, b.channel
+            FROM bindings b
+            JOIN contacts c ON c.id = b.contact_id AND c.deleted_at IS NULL
+            WHERE b.is_active = 1 AND b.endpoint_kind = 'dm'
             """
         )
 

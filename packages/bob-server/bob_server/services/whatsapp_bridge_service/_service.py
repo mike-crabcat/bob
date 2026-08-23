@@ -354,14 +354,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if not text:
                     continue
                 try:
-                    route = await self.db.fetch_one(
-                        "SELECT chat_id FROM session_routes "
-                        "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-                        (session_key,),
-                    )
-                    if not route or not route["chat_id"]:
+                    from bob_server.repositories.conversations import (
+                        ConversationRepository, wa_send_jid)
+                    route = await ConversationRepository(self.db).route_for(session_key)
+                    jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
+                    if not jid:
                         continue
-                    await self.send_message(route["chat_id"], text)
+                    await self.send_message(jid, text)
                 except Exception:
                     logger.exception("failed to forward verbose notice for %s", session_key)
         except asyncio.CancelledError:
@@ -1042,12 +1041,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         an undispatched user message, then this runs a turn through the full
         inbound pipeline (attention coordinator, turn claims, effect sends).
         """
-        route = await self.db.fetch_one(
-            """SELECT chat_id, contact_id FROM session_routes
-               WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1""",
-            (session_key,),
-        )
-        if not route or not route["chat_id"]:
+        from bob_server.repositories.conversations import (
+            ConversationRepository, wa_send_jid)
+        route = await ConversationRepository(self.db).route_for(session_key)
+        jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
+        if not jid:
             raise RuntimeError(f"no active route for session {session_key}")
         chat_kind = "group" if ":group:" in session_key else "dm"
         contact_id = route["contact_id"]
@@ -1059,7 +1057,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         spec = await self._build_inbound_dispatch_spec(
             session_key=session_key,
-            chat_id=route["chat_id"],
+            chat_id=jid,
             chat_kind=chat_kind,
             contact_id=contact_id,
             is_trusted=is_trusted,

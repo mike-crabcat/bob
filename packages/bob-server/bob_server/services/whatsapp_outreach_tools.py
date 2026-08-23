@@ -92,10 +92,8 @@ def make_whatsapp_outreach_tools(
 
         # Derive requestor name from current session context
         requestor_name = "the agent"
-        current_route = await db.fetch_one(
-            "SELECT contact_id FROM session_routes WHERE session_key = ?",
-            (current_session_key,),
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        current_route = await ConversationRepository(db).route_for(current_session_key)
         if current_route and current_route.get("contact_id"):
             from bob_server.repositories.contacts import ContactRepository
             requestor = await ContactRepository(db).get(current_route["contact_id"])
@@ -301,9 +299,9 @@ def make_outreach_reply_tools(
 
         # Look up target contact name for context
         target_contact = await db.fetch_one(
-            "SELECT c.name FROM session_routes sr "
-            "JOIN contacts c ON c.id = sr.contact_id AND c.deleted_at IS NULL "
-            "WHERE sr.session_key = ?",
+            "SELECT c.name FROM bindings b "
+            "JOIN contacts c ON c.id = b.contact_id AND c.deleted_at IS NULL "
+            "WHERE b.session_key = ?",
             (current_session_key,),
         )
         target_contact_name = target_contact["name"] if target_contact else "unknown"

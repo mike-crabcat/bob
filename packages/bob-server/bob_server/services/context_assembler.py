@@ -68,15 +68,14 @@ class ContextAssembler:
         return "\n".join(lines)
 
     async def _group_participants_prompt(self, session_key: str) -> str:
-        route = await self.db.fetch_one(
-            "SELECT chat_id FROM session_routes WHERE session_key = ?",
-            (session_key,))
-        if not (route and route["chat_id"]):
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(session_key)
+        if not (route and route["address"]):
             return ""
         group = await self.db.fetch_one(
             "SELECT id, name, member_count FROM whatsappgroups "
             "WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["chat_id"],))
+            (route["address"],))
         if not group:
             return ""
         members = await self.db.fetch_all(
@@ -114,8 +113,8 @@ class ContextAssembler:
         """Recall hint for groups with an accumulated memory entity."""
         group_row = await self.db.fetch_one(
             "SELECT wg.memory_entity_id FROM whatsappgroups wg "
-            "JOIN session_routes sr ON sr.chat_id = wg.whatsapp_jid "
-            "WHERE sr.session_key = ? AND wg.deleted_at IS NULL",
+            "JOIN bindings b ON b.address = wg.whatsapp_jid "
+            "WHERE b.session_key = ? AND wg.deleted_at IS NULL",
             (session_key,))
         if not (group_row and group_row["memory_entity_id"]):
             return ""

@@ -70,6 +70,37 @@ class SessionRouteService(BaseService):
     def settings(self) -> Settings:
         return self._get_settings()
 
+    async def _mirror_binding(self, route_id: str) -> None:
+        """Increment 4 dual-write: keep the binding row in step with the
+        route so route_for() can replace every session_routes read site."""
+        try:
+            row = await self.db.fetch_one(
+                "SELECT * FROM session_routes WHERE id = ?", (route_id,))
+            if row is None:
+                return
+            from bob_server.repositories.conversations import ConversationRepository
+
+            repo = ConversationRepository(self.db)
+            kind = row["kind"]
+            address = row["chat_id"]
+            if not address and row["contact_id"]:
+                c = await self.db.fetch_one(
+                    "SELECT phone_number, email FROM contacts WHERE id = ?",
+                    (row["contact_id"],))
+                if c:
+                    address = c["phone_number"] or c["email"]
+            await repo.ensure(row["session_key"], address=address, endpoint_kind=kind)
+            await self.db.execute(
+                """UPDATE bindings SET
+                       contact_id = COALESCE(?, contact_id),
+                       is_active = ?
+                   WHERE session_key = ?""",
+                (row["contact_id"],
+                 1 if (row["is_active"] and row["deleted_at"] is None) else 0,
+                 row["session_key"]))
+        except Exception:
+            self.logger.warning("binding mirror failed for route %s", route_id, exc_info=True)
+
     async def create_route(self, payload: SessionRouteCreate) -> SessionRouteResponse:
         now = utcnow().isoformat()
         await self._validate_payload(payload.channel, payload.kind, payload.chat_id, payload.contact_id)
@@ -97,6 +128,7 @@ class SessionRouteService(BaseService):
                     existing["id"],
                 ),
             )
+            await self._mirror_binding(existing["id"])
             return await self.get_route(existing["id"])
 
         route_id = str(uuid4())
@@ -119,6 +151,7 @@ class SessionRouteService(BaseService):
                 now,
             ),
         )
+        await self._mirror_binding(route_id)
         return await self.get_route(route_id)
 
     async def list_routes(
@@ -176,6 +209,7 @@ class SessionRouteService(BaseService):
             f"UPDATE session_routes SET {assignments} WHERE id = ? AND deleted_at IS NULL",
             tuple(values.values()) + (route_id,),
         )
+        await self._mirror_binding(route_id)
         return await self.get_route(route_id)
 
     async def delete_route(self, route_id: str) -> None:
@@ -185,6 +219,7 @@ class SessionRouteService(BaseService):
             "UPDATE session_routes SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
             (now, now, route_id),
         )
+        await self._mirror_binding(route_id)
 
     async def resolve_registered_route(self, channel: str, session_key: str) -> ResolvedSessionRoute | None:
         row = await self.db.fetch_one(

@@ -261,11 +261,9 @@ class GroupEventsMixin:
         if not settings.openai.enabled:
             return
 
-        # Determine trust from session route
-        route = await self.db.fetch_one(
-            "SELECT contact_id FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
+        # Determine trust from the binding
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(self.db).route_for(session_key)
         is_trusted = False
         if route and route["contact_id"]:
             trusted = await self._contacts().is_trusted(route["contact_id"])

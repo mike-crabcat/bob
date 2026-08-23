@@ -19,17 +19,15 @@ def make_group_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
     async def _participants() -> str:
         """List all current participants in this group with their names, admin status, and contact info."""
-        # Resolve the group from session_key via session_routes.chat_id -> whatsappgroups.whatsapp_jid
-        route = await db.fetch_one(
-            "SELECT chat_id FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
-        if not route or not route["chat_id"]:
+        # Resolve the group from session_key via bindings.address -> whatsappgroups.whatsapp_jid
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(db).route_for(session_key)
+        if not route or not route["address"]:
             return "Not in a group session."
 
         group = await db.fetch_one(
             "SELECT id, name, member_count FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["chat_id"],),
+            (route["address"],),
         )
         if not group:
             return "Group not found."

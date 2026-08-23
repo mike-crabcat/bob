@@ -48,6 +48,16 @@ async def seeded(ctx):
         "INSERT INTO session_routes (id, channel, session_key, kind, contact_id, created_at, updated_at) "
         "VALUES ('sr-dm', 'whatsapp', ?, 'dm', 'c2', ?, ?)", (DM_KEY, NOW, NOW))
 
+    # find_session reads bindings (Increment 4) — seed the mirrored rows the
+    # route service dual-write would produce.
+    from bob_server.repositories.conversations import ConversationRepository
+    repo = ConversationRepository(ctx.db)
+    await repo.ensure(GROUP_KEY, address="111@g.us", endpoint_kind="group")
+    await repo.ensure(OTHER_GROUP_KEY, address="222@g.us", endpoint_kind="group")
+    await repo.ensure(DM_KEY, address="+61400000001", endpoint_kind="dm")
+    await ctx.db.execute(
+        "UPDATE bindings SET contact_id = 'c2' WHERE session_key = ?", (DM_KEY,))
+
     session_svc = SessionService(ctx)
     await session_svc.add_message(GROUP_KEY, "user", "Lunch Sunday?", channel="whatsapp")
     await session_svc.add_message(

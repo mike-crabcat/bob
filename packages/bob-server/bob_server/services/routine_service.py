@@ -243,10 +243,8 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=ctx.db)
 
         # Resolve session trust level for correct tool set
-        route = await ctx.db.fetch_one(
-            "SELECT channel, kind, contact_id FROM session_routes WHERE session_key = ?",
-            (session_key,),
-        )
+        from bob_server.repositories.conversations import ConversationRepository
+        route = await ConversationRepository(ctx.db).route_for(session_key)
         is_trusted = False
         contact_id = route["contact_id"] if route else None
         if route and contact_id:

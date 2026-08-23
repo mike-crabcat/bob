@@ -532,18 +532,9 @@ class MemoryService(BaseService):
         if not new_entity_rows and not new_claim_rows:
             return
 
-        route = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes "
-            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route or not route["metadata"]:
-            return
-        try:
-            meta = json.loads(route["metadata"])
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not meta.get("memory_verbose"):
+        from bob_server.repositories.conversations import ConversationRepository
+        policy = await ConversationRepository(self.db).get_policy(session_key)
+        if not policy.get("memory_verbose"):
             return
 
         # Compose the human-readable notice.
@@ -926,17 +917,17 @@ class MemoryService(BaseService):
         if not source_id:
             return None
         route = await self.db.fetch_one(
-            "SELECT chat_id, kind FROM session_routes WHERE session_key = ?",
+            "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
             (source_id,),
         )
-        if not route or route["kind"] != "group" or not route["chat_id"]:
+        if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
         rows = await self.db.fetch_all(
             "SELECT gm.contact_id FROM whatsappgroup_members gm "
             "JOIN contacts c ON c.id = gm.contact_id "
             "WHERE gm.group_id = (SELECT id FROM whatsappgroups WHERE whatsapp_jid = ?) "
             "AND gm.left_at IS NULL",
-            (route["chat_id"],),
+            (route["address"],),
         )
         return [f"contact-{str(r['contact_id'])[:8]}" for r in rows]
 
@@ -1094,14 +1085,14 @@ class MemoryService(BaseService):
         if not source_id:
             return None
         route = await self.db.fetch_one(
-            "SELECT chat_id, kind FROM session_routes WHERE session_key = ?",
+            "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
             (source_id,),
         )
-        if not route or route["kind"] != "group" or not route["chat_id"]:
+        if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
         row = await self.db.fetch_one(
             "SELECT memory_entity_id FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["chat_id"],),
+            (route["address"],),
         )
         return row["memory_entity_id"] if row and row["memory_entity_id"] else None
 
@@ -1113,13 +1104,13 @@ class MemoryService(BaseService):
     ) -> str | None:
         """Ensure a group entity exists for a group session and link the bulletin."""
         route = await self.db.fetch_one(
-            "SELECT chat_id, kind FROM session_routes WHERE session_key = ?",
+            "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
             (session_key,),
         )
-        if not route or route["kind"] != "group" or not route["chat_id"]:
+        if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
 
-        chat_id = route["chat_id"]
+        chat_id = route["address"]
 
         group_row = await self.db.fetch_one(
             "SELECT id, name, description, memory_entity_id, member_count "

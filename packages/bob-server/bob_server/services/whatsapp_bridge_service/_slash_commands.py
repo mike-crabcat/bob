@@ -107,17 +107,11 @@ class SlashCommandsMixin:
             await self.send_message(chat_id, "Usage: /verbose on|off|status")
             return
 
-        route = await self.db.fetch_one(
-            "SELECT id, metadata FROM session_routes "
-            "WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route:
-            await self.send_message(chat_id, "No session route found")
-            return
-
-        meta = json.loads(route["metadata"]) if route["metadata"] else {}
-        current = bool(meta.get("memory_verbose", False))
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        policy = await repo.get_policy(session_key)
+        current = bool(policy.get("memory_verbose", False))
 
         if arg == "status" or arg == "":
             state = "ON" if current else "OFF"
@@ -130,12 +124,8 @@ class SlashCommandsMixin:
             await self.send_message(chat_id, f"verbose already {state}")
             return
 
-        meta["memory_verbose"] = enabled
-        await self.db.execute(
-            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(meta), utcnow().isoformat(), route["id"]),
-        )
-        logger.info("verbose %s for session %s (route %s)", arg, session_key, route["id"])
+        await repo.set_policy(session_key, {"memory_verbose": enabled})
+        logger.info("verbose %s for conversation %s", arg, session_key)
         await self.send_message(chat_id, f"verbose {'ON' if enabled else 'OFF'}")
 
     async def _cmd_autoplan(self, args: str, session_key: str, chat_id: str) -> None:

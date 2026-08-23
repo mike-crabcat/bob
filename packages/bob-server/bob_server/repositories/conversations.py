@@ -34,6 +34,17 @@ def _kind_of(session_key: str) -> str:
     return "internal"
 
 
+def wa_send_jid(address: str | None) -> str | None:
+    """WhatsApp send target from a binding address: JIDs pass through
+    (groups, legacy DM chat_ids); phone numbers become @s.whatsapp.net."""
+    if not address:
+        return None
+    if "@" in address:
+        return address
+    digits = "".join(ch for ch in address if ch.isdigit())
+    return f"{digits}@s.whatsapp.net" if digits else None
+
+
 def _channel_of(session_key: str) -> str:
     if ":whatsapp:" in session_key:
         return "whatsapp"
@@ -70,6 +81,18 @@ class ConversationRepository:
         return await self.db.fetch_all(
             "SELECT * FROM bindings WHERE conversation_id = ? ORDER BY created_at",
             (conversation_id,))
+
+    async def route_for(self, session_key: str) -> dict[str, Any] | None:
+        """THE routing resolver (Increment 4): everything the legacy
+        session_routes read sites need, from the binding map. Returns
+        {conversation_id, channel, endpoint_kind, address, contact_id,
+        is_active} or None for unknown keys."""
+        row = await self.db.fetch_one(
+            """SELECT conversation_id, channel, endpoint_kind, address,
+                      contact_id, is_active
+               FROM bindings WHERE session_key = ?""",
+            (session_key,))
+        return dict(row) if row else None
 
     async def get_policy(self, session_key: str) -> dict[str, Any]:
         """The conversation's policy flags (patience_*, dream_autoplan, …),

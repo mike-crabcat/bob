@@ -269,3 +269,31 @@ async def test_ensure_stores_and_backfills_address_endpoint_kind(ctx, db):
         "SELECT address, endpoint_kind FROM bindings WHERE session_key = ?",
         ("voice:call:abc",))
     assert row["address"] == "+61400000042" and row["endpoint_kind"] == "call"
+
+
+async def test_route_crud_dual_writes_bindings(ctx, db):
+    """Increment 4: route CRUD mirrors into bindings so route_for() answers
+    everything the legacy session_routes read sites asked."""
+    from bob_server.models import SessionRouteCreate, SessionRouteKind
+    from bob_server.services.session_route_service import SessionRouteService
+
+    now = "2026-08-17T09:00:00+00:00"
+    await db.execute(
+        "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
+        "VALUES ('11111111-1111-1111-1111-111111111111', 'Trev', '+61431000000', ?, ?)", (now, now))
+
+    svc = SessionRouteService(ctx)
+    key = "agent:main:whatsapp:dm:61431000000"
+    route = await svc.create_route(SessionRouteCreate(
+        channel="whatsapp", session_key=key, kind=SessionRouteKind.DM,
+        contact_id="11111111-1111-1111-1111-111111111111"))
+
+    repo = ConversationRepository(db)
+    b = await repo.route_for(key)
+    assert b is not None
+    assert b["contact_id"] == "11111111-1111-1111-1111-111111111111" and b["is_active"] == 1
+    assert b["endpoint_kind"] == "dm" and b["address"] == "+61431000000"
+
+    await svc.delete_route(str(route.id))
+    b = await repo.route_for(key)
+    assert b["is_active"] == 0
