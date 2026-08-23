@@ -243,7 +243,7 @@ function SessionDetailPage() {
 
   const { data: detail } = useQuery<SessionDetail>({
     queryKey: ["session-detail", sessionKey],
-    queryFn: () => fetchAPI<SessionDetail>(`/sessions/${encodeURIComponent(sessionKey)}`),
+    queryFn: () => fetchAPI<SessionDetail>(`/conversations/${encodeURIComponent(sessionKey)}/detail`),
   });
 
   const liveRunning = useRef<Map<string, CallItem>>(new Map());
@@ -321,7 +321,7 @@ function SessionDetailPage() {
   const reflectMutation = useMutation({
     mutationFn: (query: string) =>
       postAPI<{ response_text: string }>(
-        `/sessions/${encodeURIComponent(sessionKey)}/reflect`,
+        `/conversations/${encodeURIComponent(sessionKey)}/reflect`,
         { query },
       ),
     onSuccess: () => {
@@ -334,7 +334,7 @@ function SessionDetailPage() {
   const agendaMutation = useMutation({
     mutationFn: (agenda: string) =>
       putAPI<{ ok: boolean }>(
-        `/sessions/${encodeURIComponent(sessionKey)}/agenda`,
+        `/conversations/${encodeURIComponent(sessionKey)}/agenda`,
         { agenda },
       ),
     onSuccess: () => {

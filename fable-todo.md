@@ -83,3 +83,9 @@ seams:
 
 Script/voice types don't need it. Mind token cost — this reintroduces big
 replayed contexts, so the inline-media cap must apply to any rendered history.
+
+7. **Fold voice_sessions into phone_calls.** voice_sessions (browser voice-link
+   tokens) is live but duplicates phone-call lifecycle state;
+   voice_session_service already mirrors rows into phone_calls for the UI.
+   Eventually make phone_calls the single store and drop voice_sessions.
+   (Deferred from session-model cleanup Increment 5.)

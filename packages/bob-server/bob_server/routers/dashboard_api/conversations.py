@@ -253,3 +253,213 @@ async def post_unmerge(request: Request, session_key: str) -> dict[str, Any]:
         return {"ok": False, "error": "binding not merged or not found"}
     logger.info("dashboard: unmerged binding %s -> %s", session_key, restored)
     return {"ok": True, "conversation_id": restored}
+
+
+@router.get("/api/conversations/{session_key:path}/detail")
+async def get_conversation_detail(request: Request, session_key: str) -> dict[str, Any]:
+    """Session/conversation detail for the SPA (ported from the retired
+    sessions.py router; endpoint lookup reads bindings, not session_routes)."""
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+
+    session_context: dict[str, Any] = {
+        "kind": None,
+        "display_name": None,
+        "description": None,
+        "member_count": None,
+        "email_participants": None,
+    }
+    binding = await db.fetch_one(
+        "SELECT channel, endpoint_kind, address, contact_id FROM bindings "
+        "WHERE session_key = ? AND is_active = 1",
+        (session_key,),
+    )
+    if binding:
+        kind = binding["endpoint_kind"]
+        address = binding["address"]
+        session_context["kind"] = kind
+
+        if kind == "group" and address:
+            group = await db.fetch_one(
+                "SELECT name, description, member_count FROM whatsappgroups "
+                "WHERE whatsapp_jid = ? AND deleted_at IS NULL",
+                (address,),
+            )
+            if group:
+                session_context["display_name"] = group["name"]
+                session_context["description"] = group["description"]
+                session_context["member_count"] = group["member_count"]
+
+        elif kind == "thread" and address:
+            thread = await db.fetch_one(
+                "SELECT subject FROM email_threads "
+                "WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
+                (address,),
+            )
+            if thread:
+                session_context["display_name"] = thread["subject"]
+                email_parts = await db.fetch_all(
+                    "SELECT DISTINCT sender_email, sender_name FROM email_messages em "
+                    "INNER JOIN email_threads et ON et.id = em.thread_id "
+                    "WHERE et.agentmail_thread_id = ? ORDER BY em.message_timestamp ASC",
+                    (address,),
+                )
+                session_context["email_participants"] = [
+                    {"email": p["sender_email"], "name": p["sender_name"]}
+                    for p in email_parts
+                ]
+
+        elif kind == "dm" and binding["contact_id"]:
+            contact = await db.fetch_one(
+                "SELECT name FROM contacts WHERE id = ? AND deleted_at IS NULL",
+                (binding["contact_id"],),
+            )
+            if contact:
+                session_context["display_name"] = contact["name"]
+
+    calls: list[dict[str, Any]] = []
+    rows = await db.fetch_all(
+        """SELECT l.id, l.created_at, l.call_category, l.status, l.latency_seconds,
+                  l.ttft_seconds, l.total_tokens, l.prompt_tokens, l.completion_tokens,
+                  l.tool_blocks_json, l.user_message, l.response_text,
+                  l.error_message, l.contact_id, l.model,
+                  c.name as contact_name
+           FROM llm_call_log l
+           LEFT JOIN contacts c ON c.id = l.contact_id AND c.deleted_at IS NULL
+           WHERE l.session_key = ?
+           ORDER BY l.created_at DESC
+           LIMIT 100""",
+        (session_key,),
+    )
+    for row in rows:
+        is_reflection = row.get("call_category") == "reflection"
+        tool_count = 0
+        trace_raw = row.get("tool_blocks_json")
+        if trace_raw:
+            try:
+                tool_count = sum(
+                    1 for it in json.loads(trace_raw)
+                    if isinstance(it, dict) and it.get("type") == "function_call"
+                )
+            except (json.JSONDecodeError, TypeError):
+                pass
+        calls.append({
+            "id": row["id"],
+            "created_at": _utc(row["created_at"]),
+            "call_category": row.get("call_category", ""),
+            "status": row["status"],
+            "latency_seconds": row.get("latency_seconds"),
+            "ttft_seconds": row.get("ttft_seconds"),
+            "total_tokens": row.get("total_tokens"),
+            "prompt_tokens": row.get("prompt_tokens"),
+            "completion_tokens": row.get("completion_tokens"),
+            "tool_count": tool_count,
+            "model": row.get("model", ""),
+            "user_message": (row.get("user_message") or "") if is_reflection else (row.get("user_message") or "")[:300],
+            "response_preview": (row.get("response_text") or "") if is_reflection else (row.get("response_text") or "")[:300],
+            "error_message": row.get("error_message"),
+            "contact_id": row.get("contact_id"),
+            "contact_name": row.get("contact_name"),
+        })
+
+    participants: list[dict[str, Any]] = []
+    p_rows = await db.fetch_all(
+        "SELECT sp.display_name, sp.identifier, sp.contact_id, sp.is_trusted, sp.last_active_at, "
+        "COALESCE(c.name, sp.display_name, sp.identifier) as resolved_name "
+        "FROM session_participants sp "
+        "LEFT JOIN contacts c ON c.id = sp.contact_id AND c.deleted_at IS NULL "
+        "WHERE sp.session_key = ? ORDER BY sp.last_active_at DESC",
+        (session_key,),
+    )
+    for row in p_rows:
+        participants.append({
+            "display_name": row["resolved_name"],
+            "identifier": row["identifier"],
+            "contact_id": row["contact_id"],
+            "is_trusted": bool(row.get("is_trusted", 0)),
+            "last_active": row["last_active_at"],
+        })
+
+    agenda_row = await db.fetch_one(
+        "SELECT agenda FROM session_agendas WHERE session_key = ?", (session_key,)
+    )
+    current_agenda = agenda_row["agenda"] if agenda_row else ""
+
+    messages: list[dict[str, Any]] = []
+    m_rows = await db.fetch_all(
+        "SELECT sm.id, sm.role, sm.content, sm.channel, sm.sender_id, sm.created_at, "
+        "COALESCE(c.name, sp.display_name) as sender_name "
+        "FROM session_messages sm "
+        "LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL "
+        "LEFT JOIN session_participants sp ON sp.contact_id = sm.sender_id AND sp.session_key = sm.session_key "
+        "WHERE sm.rowid IN ("
+        "  SELECT rowid FROM session_messages"
+        "  WHERE session_key = ? ORDER BY created_at DESC LIMIT 200"
+        ") ORDER BY sm.created_at ASC",
+        (session_key,),
+    )
+    for row in m_rows:
+        messages.append({
+            "id": row["id"],
+            "role": row["role"],
+            "content": row["content"],
+            "channel": row["channel"],
+            "sender_id": row["sender_id"],
+            "sender_name": row.get("sender_name"),
+            "created_at": _utc(row["created_at"]),
+        })
+
+    return {
+        "session_key": session_key,
+        "channel": _parse_channel(session_key),
+        "session_context": session_context,
+        "calls": calls,
+        "messages": messages,
+        "participants": participants,
+        "summaries": [],
+        "current_agenda": current_agenda,
+        "stats": {
+            "total_calls": len(calls),
+            "completed": sum(1 for c in calls if c["status"] == "completed"),
+            "failed": sum(1 for c in calls if c["status"] == "failed"),
+        },
+    }
+
+
+@router.put("/api/conversations/{session_key:path}/agenda")
+async def put_conversation_agenda(request: Request, session_key: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    agenda = (body.get("agenda") or "").strip()
+    db = _db(request)
+    now = _utc_now()
+    await db.execute(
+        """INSERT INTO session_agendas (session_key, agenda, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(session_key) DO UPDATE SET agenda = excluded.agenda, updated_at = excluded.updated_at""",
+        (session_key, agenda, now),
+    )
+    return {"ok": True}
+
+
+@router.post("/api/conversations/{session_key:path}/reflect")
+async def post_conversation_reflect(request: Request, session_key: str) -> dict[str, Any]:
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    if not query:
+        return {"error": "query required"}
+
+    from bob_server.context import AppContext
+    from bob_server.services.reflection_service import ReflectionService
+
+    ctx = AppContext(db=_db(request), settings=request.app.state.settings)
+    service = ReflectionService(ctx)
+    try:
+        result = await service.reflect(session_key, query)
+        return result
+    except Exception as exc:
+        logger.error("Reflection failed for session=%s: %s", session_key, exc)
+        return {"error": "reflection failed", "detail": str(exc)}
