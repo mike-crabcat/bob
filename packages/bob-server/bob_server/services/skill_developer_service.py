@@ -296,6 +296,24 @@ class SkillDeveloperService(BaseService):
         await self._update_status(delegation_id, "rejected", error=reason)
         return {"ok": True, "delegation_id": delegation_id, "status": "rejected"}
 
+    async def list_delegations(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, session_key, user_story, plan, status,
+                      files_created_json, result_summary, cost_usd,
+                      error_message, created_at, updated_at
+               FROM skill_delegations
+               ORDER BY created_at DESC LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def get_delegation(self, delegation_id: str) -> dict[str, Any] | None:
+        row = await self.db.fetch_one(
+            """SELECT id, session_key, user_story, plan, status,
+                      files_created_json, result_summary, cost_usd,
+                      error_message, created_at, updated_at
+               FROM skill_delegations WHERE id = ?""",
+            (delegation_id,))
+        return dict(row) if row else None
+
     async def get_status(self, delegation_id: str) -> dict[str, Any]:
         """Get delegation status."""
         row = await self.db.fetch_one(

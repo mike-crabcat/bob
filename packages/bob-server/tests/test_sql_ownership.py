@@ -74,54 +74,38 @@ PREFIX_OWNERS: dict[str, list[str]] = {
 
 IGNORED_TABLES = {"sqlite_sequence", "schema_migrations"}
 
-WRITE_ALLOWLIST = {
-    ("effects", "routers/dashboard_api/ops.py"),
-    ("event_log", "heartbeat.py"),
-    ("persona_records", "routers/dashboard_api/persona.py"),
-    ("persona_records", "routers/persona.py"),
-    ("voice_sessions", "services/subagent_service.py"),
-}
+# All writes go through the owning repository/domain store. Keep this empty.
+WRITE_ALLOWLIST: set[tuple[str, str]] = set()
+
+# Documented cross-domain READ seams. Each group below is a deliberate
+# exception; anything new must be justified here or ported to a repository.
 READ_ALLOWLIST = {
+    # Conversation detail page: a purpose-built multi-domain read model that
+    # stitches one conversation's timeline together. Porting each fragment to
+    # its repository would scatter one view across nine modules for no gain.
     ("agendas", "routers/dashboard_api/conversations.py"),
-    ("attention_shadow", "cli/replay_cmds.py"),
-    ("attention_shadow", "heartbeat.py"),
     ("attention_shadow", "routers/dashboard_api/conversations.py"),
-    ("calendars", "routers/context.py"),
     ("contacts", "routers/dashboard_api/conversations.py"),
+    ("conversations", "routers/dashboard_api/conversations.py"),
+    ("effects", "routers/dashboard_api/conversations.py"),
+    ("goal_transitions", "routers/dashboard_api/conversations.py"),
+    ("goals", "routers/dashboard_api/conversations.py"),
+    ("participants", "routers/dashboard_api/conversations.py"),
+    ("turns", "routers/dashboard_api/conversations.py"),
+    # Operator debug CLI: read-only forensic queries across the event
+    # pipeline. Not part of the serving path.
+    ("attention_shadow", "cli/replay_cmds.py"),
+    ("effects", "cli/replay_cmds.py"),
+    ("event_log", "cli/replay_cmds.py"),
+    ("turns", "cli/replay_cmds.py"),
+    ("eval_runs", "cli/eval_cmds.py"),
+    # heartbeat: daily attention-shadow agreement telemetry (Phase III soak).
+    ("attention_shadow", "heartbeat.py"),
     # email_store is a domain store (not under repositories/) — its thread
     # search joins contacts for display names, a sanctioned read.
     ("contacts", "services/email_store.py"),
-    ("conversations", "routers/dashboard_api/conversations.py"),
+    # dream config resolves a session's conversation row for autoplan routing.
     ("conversations", "services/dream/config.py"),
-    ("dream_item_links", "services/whatsapp_bridge_service/_slash_commands.py"),
-    ("dream_plans", "routers/dashboard_api/dreams.py"),
-    ("dream_plans", "services/whatsapp_bridge_service/_slash_commands.py"),
-    ("dream_resolutions", "routers/dashboard_api/dreams.py"),
-    ("effects", "cli/replay_cmds.py"),
-    ("effects", "routers/dashboard_api/conversations.py"),
-    ("effects", "routers/dashboard_api/ops.py"),
-    ("eval_runs", "cli/eval_cmds.py"),
-    ("event_log", "cli/replay_cmds.py"),
-    ("event_log", "heartbeat.py"),
-    ("events", "routers/context.py"),
-    ("goal_transitions", "routers/dashboard_api/conversations.py"),
-    ("goal_transitions", "routers/dashboard_api/goals.py"),
-    ("goals", "routers/dashboard_api/conversations.py"),
-    ("goals", "routers/dashboard_api/goals.py"),
-    ("goals", "routers/dashboard_api/ops.py"),
-    ("goals", "services/context_assembler.py"),
-    ("goals", "services/whatsapp_bridge_service/_service.py"),
-    ("goals", "services/whatsapp_outreach_tools.py"),
-    ("participants", "routers/dashboard_api/conversations.py"),
-    ("persona_records", "routers/dashboard_api/persona.py"),
-    ("persona_records", "routers/persona.py"),
-    ("persona_records", "services/whatsapp_bridge_service/_slash_commands.py"),
-    ("skill_delegations", "routers/dashboard_api/skills.py"),
-    ("turns", "cli/replay_cmds.py"),
-    ("turns", "routers/dashboard_api/conversations.py"),
-    ("turns", "routers/dashboard_api/ops.py"),
-    ("wakeups", "routers/dashboard_api/goals.py"),
-    ("wakeups", "routers/dashboard_api/ops.py"),
 }
 
 

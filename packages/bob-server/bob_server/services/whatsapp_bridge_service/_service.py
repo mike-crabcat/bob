@@ -864,11 +864,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             tools.extend(make_voice_outreach_tools(self.ctx, self, session_key))
 
         # Outreach reply tool for active outreach targets (goal-backed).
-        active_outreach = await self.db.fetch_one(
-            "SELECT id FROM goals WHERE conversation_id = ? AND kind = 'outreach' "
-            "AND status = 'active' LIMIT 1",
-            (session_key,),
-        )
+        from bob_server.repositories.goals import GoalRepository
+        active_outreach = await GoalRepository(self.db).active_outreach(session_key)
         if active_outreach:
             from bob_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
             tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))

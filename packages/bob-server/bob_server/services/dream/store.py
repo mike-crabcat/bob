@@ -38,14 +38,6 @@ def new_item_id(item_type: str) -> str:
 class DreamStore(BaseService):
     """All SQL for the dream system. Writes only dream_* tables."""
 
-    @classmethod
-    def from_db(cls, db: "Database") -> "DreamStore":
-        """Read-only construction for callers that only hold a db handle."""
-        store = cls.__new__(cls)
-        store.ctx = None  # type: ignore[assignment]
-        store.db = db
-        return store
-
     # ------------------------------------------------------------------ runs
 
     async def create_run(self, *, trigger: str, window_start: str, window_end: str, model: str) -> str:
@@ -414,6 +406,34 @@ class DreamStore(BaseService):
             if row:
                 results.append(dict(row) | {"item_type": r["item_type"]})
         return results
+
+    async def plan_status_counts(self) -> dict[str, int]:
+        rows = await self.db.fetch_all(
+            "SELECT status, COUNT(*) AS n FROM dream_plans GROUP BY status")
+        return {r["status"]: r["n"] for r in rows} if rows else {}
+
+    async def resolution_status_counts(self) -> dict[str, int]:
+        rows = await self.db.fetch_all(
+            "SELECT status, COUNT(*) AS n FROM dream_resolutions GROUP BY status")
+        return {r["status"]: r["n"] for r in rows} if rows else {}
+
+    async def get_resolution(self, resolution_id: str) -> dict | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM dream_resolutions WHERE id = ?", (resolution_id,))
+        return dict(row) if row else None
+
+    async def autoplan_counters(self, session_key: str) -> dict:
+        """Draft/pending/announced plan counts for one session's linked plans."""
+        row = await self.db.fetch_one(
+            """SELECT
+                 SUM(CASE WHEN p.status = 'draft' THEN 1 ELSE 0 END) AS drafts,
+                 SUM(CASE WHEN p.status = 'approved' AND p.announced_at IS NULL THEN 1 ELSE 0 END) AS pending,
+                 SUM(CASE WHEN p.announced_at IS NOT NULL THEN 1 ELSE 0 END) AS announced
+               FROM dream_plans p
+               JOIN dream_item_links l ON l.item_type = 'plan' AND l.item_id = p.id
+               WHERE l.session_key = ?""",
+            (session_key,))
+        return dict(row) if row else {}
 
     # ------------------------------------------------------------ embeddings
 

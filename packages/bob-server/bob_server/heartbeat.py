@@ -12,6 +12,7 @@ from typing import Protocol, runtime_checkable
 from bob_server.context import AppContext
 from bob_server.database import Database
 from bob_server.repositories.contacts import ContactRepository
+from bob_server.repositories.event_log import EventLogRepository
 from bob_server.repositories.history import HistoryRepository
 
 
@@ -257,17 +258,12 @@ class EventLogReconciliationTask:
             ("whatsapp", _wa_count),
             ("email", _email_count),
         ):
-            first = await ctx.db.fetch_one(
-                "SELECT MIN(recorded_at) AS t FROM event_log WHERE source = ?", (source,))
-            baseline = (first or {}).get("t")
+            baseline = await EventLogRepository(ctx.db).first_recorded_at(source)
             if not baseline:
                 continue  # no events yet for this source; nothing to reconcile
             window_start = max(since, baseline)
             legacy_n = await count_fn(window_start)
-            events = await ctx.db.fetch_one(
-                "SELECT COUNT(*) AS n FROM event_log WHERE source = ? AND recorded_at >= ?",
-                (source, window_start))
-            events_n = (events or {}).get("n", 0) or 0
+            events_n = await EventLogRepository(ctx.db).count_since(source, window_start)
             if legacy_n != events_n:
                 logger.warning(
                     "event_log reconciliation [%s]: legacy=%d events=%d since %s",
@@ -549,14 +545,9 @@ class DeletionPropagationTask:
 
         deleted_ids = await ContactRepository(ctx.db).deleted_ids()
         redacted = 0
+        repo = EventLogRepository(ctx.db)
         for contact_id in deleted_ids:
-            redacted += await ctx.db.execute(
-                """UPDATE event_log
-                   SET payload_json = json_object('redacted', 'contact_deleted')
-                   WHERE json_extract(payload_json, '$.contact_id') = ?
-                     AND json_extract(payload_json, '$.redacted') IS NULL""",
-                (contact_id,),
-            )
+            redacted += await repo.redact_contact_payloads(contact_id)
         if redacted:
             logger.info("deletion propagation redacted %d event payload(s)", redacted)
 

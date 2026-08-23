@@ -32,8 +32,8 @@ async def get_dream_stats(request: Request) -> dict[str, Any]:
 
     store = DreamStore(_ctx(request))
     settings = _ctx(request).settings.dream
-    plan_rows = await db.fetch_all("SELECT status, COUNT(*) AS n FROM dream_plans GROUP BY status")
-    res_rows = await db.fetch_all("SELECT status, COUNT(*) AS n FROM dream_resolutions GROUP BY status")
+    plan_counts = await store.plan_status_counts()
+    res_counts = await store.resolution_status_counts()
     runs = await store.list_runs(1)
     autoplan_sessions = await dream_config.list_autoplan_sessions(db, enabled=True)
     return {
@@ -46,8 +46,8 @@ async def get_dream_stats(request: Request) -> dict[str, Any]:
             "new_items_per_type": settings.max_new_items_per_type,
             "announce_daily_cap_per_session": settings.announce_daily_cap_per_session,
         },
-        "plans_by_status": {r["status"]: r["n"] for r in plan_rows or []},
-        "resolutions_by_status": {r["status"]: r["n"] for r in res_rows or []},
+        "plans_by_status": plan_counts,
+        "resolutions_by_status": res_counts,
         "last_run": runs[0] if runs else None,
     }
 
@@ -232,4 +232,5 @@ async def list_dream_announcements(request: Request) -> dict[str, Any]:
 
 
 async def db_get_resolution(db: Any, resolution_id: str) -> Any:
-    return await db.fetch_one("SELECT * FROM dream_resolutions WHERE id = ?", (resolution_id,))
+    from bob_server.services.dream import DreamStore
+    return await DreamStore.from_db(db).get_resolution(resolution_id)

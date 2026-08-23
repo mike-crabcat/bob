@@ -10,6 +10,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from bob_server.repositories.goals import GoalRepository
+from bob_server.repositories.wakeups import WakeupRepository
 
 
 router = APIRouter()
@@ -35,22 +37,13 @@ async def list_goals(request: Request) -> dict[str, Any]:
             "created_at": _utc(r["created_at"]),
             "updated_at": _utc(r["updated_at"]),
         }
-        for r in await db.fetch_all(
-            """SELECT id, conversation_id, origin_conversation_id, kind, objective,
-                      progress, result, status, deadline, created_at, updated_at
-               FROM goals
-               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC
-               LIMIT 100""")
+        for r in await GoalRepository(db).list_recent(limit=100)
     ]
 
     transitions_by_goal: dict[str, list[dict[str, Any]]] = {}
     goal_ids = [g["id"] for g in goals]
     if goal_ids:
-        marks = ",".join("?" * len(goal_ids))
-        for t in await db.fetch_all(
-                f"""SELECT goal_id, from_status, to_status, note, created_at
-                    FROM goal_transitions WHERE goal_id IN ({marks})
-                    ORDER BY created_at""", tuple(goal_ids)):
+        for t in await GoalRepository(db).transitions_for(goal_ids):
             transitions_by_goal.setdefault(t["goal_id"], []).append({
                 "from_status": t["from_status"],
                 "to_status": t["to_status"],
@@ -80,13 +73,7 @@ async def list_wakeups(request: Request) -> dict[str, Any]:
             "payload": (r["payload_json"] or "")[:300],
             "created_at": _utc(r["created_at"]),
         }
-        for r in await db.fetch_all(
-            """SELECT id, conversation_id, goal_id, kind, not_before, recurrence,
-                      tz, status, payload_json, created_at
-               FROM wakeups
-               WHERE status = 'scheduled'
-               ORDER BY not_before
-               LIMIT 100""")
+        for r in await WakeupRepository(db).list_all_scheduled(limit=100)
     ]
     recent = [
         {
@@ -97,10 +84,7 @@ async def list_wakeups(request: Request) -> dict[str, Any]:
             "recurrence": r["recurrence"],
             "status": r["status"],
         }
-        for r in await db.fetch_all(
-            """SELECT id, conversation_id, kind, not_before, recurrence, status
-               FROM wakeups WHERE status != 'scheduled'
-               ORDER BY not_before DESC LIMIT 30""")
+        for r in await WakeupRepository(db).recent_settled(limit=30)
     ]
     return {"scheduled": wakeups, "recent": recent}
 

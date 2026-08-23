@@ -105,6 +105,20 @@ class EventLogRepository:
                ORDER BY e.id LIMIT ?""",
             (conversation_id, after_id, limit))
 
+    async def first_recorded_at(self, source: str) -> str | None:
+        row = await self.db.fetch_one(
+            "SELECT MIN(recorded_at) AS t FROM event_log WHERE source = ?", (source,))
+        return row["t"] if row else None
+
+    async def redact_contact_payloads(self, contact_id: str) -> int:
+        """Deletion propagation: blank payloads that referenced a deleted contact."""
+        return await self.db.execute(
+            """UPDATE event_log
+               SET payload_json = json_object('redacted', 'contact_deleted')
+               WHERE json_extract(payload_json, '$.contact_id') = ?
+                 AND json_extract(payload_json, '$.redacted') IS NULL""",
+            (contact_id,))
+
     async def count_since(self, source: str, since_recorded_at: str) -> int:
         row = await self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM event_log WHERE source = ? AND recorded_at >= ?",

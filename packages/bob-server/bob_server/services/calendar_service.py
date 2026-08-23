@@ -115,6 +115,25 @@ class CalendarService(BaseService):
         rows = await self.db.fetch_all(query, tuple(params))
         return [EventResponse.model_validate(row) for row in rows]
 
+    async def upcoming_context_events(
+        self, *, start_iso: str, end_iso: str | None = None, limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Lightweight upcoming-events rows for the context summary endpoints."""
+        q = (
+            "SELECT e.id, e.title, e.start_time, e.end_time, e.timezone, e.status, e.venue, e.calendar_id "
+            "FROM events AS e "
+            "INNER JOIN calendars AS c ON c.id = e.calendar_id "
+            "WHERE e.deleted_at IS NULL AND c.deleted_at IS NULL AND e.start_time >= ?"
+        )
+        params: list[Any] = [start_iso]
+        if end_iso is not None:
+            q += " AND e.start_time <= ?"
+            params.append(end_iso)
+        q += " ORDER BY e.start_time ASC LIMIT ?"
+        params.append(limit)
+        rows = await self.db.fetch_all(q, tuple(params))
+        return [dict(r) for r in rows] if rows else []
+
     async def get_event(self, event_id: str) -> EventResponse:
         row = await self._get_event_row(event_id)
         return EventResponse.model_validate(row)

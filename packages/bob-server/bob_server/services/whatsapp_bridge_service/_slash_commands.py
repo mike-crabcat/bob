@@ -86,9 +86,8 @@ class SlashCommandsMixin:
 
     async def _cmd_who(self, chat_id: str) -> None:
         """Reply with the active persona revision and creation timestamp."""
-        row = await self.db.fetch_one(
-            "SELECT revision, created_at FROM persona_records WHERE is_active = 1"
-        )
+        from bob_server.services import persona as persona_service
+        row = await persona_service.active_record(self.db)
         if row is None:
             await self.send_message(chat_id, "no active persona — using built-in defaults")
             return
@@ -154,17 +153,8 @@ class SlashCommandsMixin:
         current = await dream_config.get_session_autoplan(
             self.db, session_key, self.ctx.settings.dream.auto_approve_plans
         )
-        counters = await self.db.fetch_one(
-            """SELECT
-                 SUM(CASE WHEN p.status = 'draft' THEN 1 ELSE 0 END) AS drafts,
-                 SUM(CASE WHEN p.status = 'approved' AND p.announced_at IS NULL THEN 1 ELSE 0 END) AS pending,
-                 SUM(CASE WHEN p.announced_at IS NOT NULL THEN 1 ELSE 0 END) AS announced
-               FROM dream_plans p
-               JOIN dream_item_links l ON l.item_type = 'plan' AND l.item_id = p.id
-               WHERE l.session_key = ?""",
-            (session_key,),
-        )
-        c = counters or {}
+        from bob_server.services.dream import DreamStore
+        c = await DreamStore.from_db(self.db).autoplan_counters(session_key)
         counts = f"({c.get('drafts') or 0} draft, {c.get('pending') or 0} awaiting announce, {c.get('announced') or 0} announced)"
         if arg == "on":
             await self.send_message(

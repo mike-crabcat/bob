@@ -160,6 +160,47 @@ class GoalRepository:
     async def cancel(self, goal_id: str, *, note: str | None = None) -> bool:
         return await self.transition(goal_id, to_status="cancelled", note=note)
 
+    async def list_recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, conversation_id, origin_conversation_id, kind, objective,
+                      progress, result, status, deadline, created_at, updated_at
+               FROM goals
+               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC
+               LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def transitions_for(self, goal_ids: list[str]) -> list[dict[str, Any]]:
+        if not goal_ids:
+            return []
+        marks = ",".join("?" * len(goal_ids))
+        rows = await self.db.fetch_all(
+            f"""SELECT goal_id, from_status, to_status, note, created_at
+                FROM goal_transitions WHERE goal_id IN ({marks})
+                ORDER BY created_at""", tuple(goal_ids))
+        return [dict(r) for r in rows] if rows else []
+
+    async def active_count(self) -> int:
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM goals WHERE status = 'active'")
+        return int(row["n"]) if row else 0
+
+    async def overdue(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, objective, kind, deadline, conversation_id FROM goals
+               WHERE status = 'active' AND deadline IS NOT NULL
+                 AND deadline < strftime('%Y-%m-%dT%H:%M:%S', 'now')
+               ORDER BY deadline LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def active_outreach(self, conversation_id: str) -> dict[str, Any] | None:
+        """Latest active outreach goal held by a conversation."""
+        row = await self.db.fetch_one(
+            "SELECT id, objective, origin_conversation_id, strategy_json FROM goals "
+            "WHERE conversation_id = ? AND kind = 'outreach' AND status = 'active' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (conversation_id,))
+        return dict(row) if row else None
+
     async def transitions(self, goal_id: str) -> list[dict[str, Any]]:
         return await self.db.fetch_all(
             "SELECT * FROM goal_transitions WHERE goal_id = ? ORDER BY created_at",

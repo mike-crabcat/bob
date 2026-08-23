@@ -356,6 +356,13 @@ class VoiceSessionService(BaseService):
             logger.warning("Voice summary failed (%s); using truncated transcript", e)
             return transcript[:300]
 
+    async def expire_for_subagent(self, subagent_id: str, now_iso: str) -> None:
+        """Expire any pending/active browser sessions owned by a subagent."""
+        await self.db.execute(
+            "UPDATE voice_sessions SET status = 'expired', completed_at = ? "
+            "WHERE subagent_id = ? AND status IN ('pending', 'active')",
+            (now_iso, subagent_id))
+
     async def _set_status(self, token: str, status: str) -> None:
         await self.db.execute(
             "UPDATE voice_sessions SET status=? WHERE id=?", (status, token),

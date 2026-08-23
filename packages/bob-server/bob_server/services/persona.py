@@ -200,6 +200,50 @@ _DEFAULTS = {
 }
 
 
+async def active_record(db: Any) -> dict[str, Any] | None:
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE is_active = 1")
+    return dict(row) if row else None
+
+
+async def list_records(db: Any) -> list[dict[str, Any]]:
+    rows = await db.fetch_all("SELECT * FROM persona_records ORDER BY revision DESC")
+    return [dict(r) for r in rows] if rows else []
+
+
+async def max_revision(db: Any) -> int:
+    row = await db.fetch_one("SELECT MAX(revision) as max_rev FROM persona_records")
+    return (row["max_rev"] if row else 0) or 0
+
+
+async def record_by_id(db: Any, record_id: str) -> dict[str, Any] | None:
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE id = ?", (record_id,))
+    return dict(row) if row else None
+
+
+async def record_by_revision(db: Any, revision: int) -> dict[str, Any] | None:
+    row = await db.fetch_one("SELECT * FROM persona_records WHERE revision = ?", (revision,))
+    return dict(row) if row else None
+
+
+async def insert_active_record(
+    db: Any, *, record_id: str, revision: int, soul: str | None,
+    identity: str | None, agents: str | None, user_content: str | None,
+    config_json: str,
+) -> None:
+    """Deactivate the current record and insert a new active revision."""
+    await db.execute("UPDATE persona_records SET is_active = 0 WHERE is_active = 1")
+    await db.execute(
+        """INSERT INTO persona_records (id, revision, soul, identity, agents, user_content, config, is_active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))""",
+        (record_id, revision, soul, identity, agents, user_content, config_json))
+
+
+async def activate_revision(db: Any, revision: int) -> None:
+    await db.execute("UPDATE persona_records SET is_active = 0 WHERE is_active = 1")
+    await db.execute(
+        "UPDATE persona_records SET is_active = 1 WHERE revision = ?", (revision,))
+
+
 def _render_from_record(row: Any) -> str:
     """Render persona from a persona_records row."""
     config = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]

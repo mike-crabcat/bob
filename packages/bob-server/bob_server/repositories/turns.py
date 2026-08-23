@@ -127,6 +127,26 @@ class TurnRepository:
             (_iso(_utcnow() + timedelta(seconds=lease_seconds)), turn_id))
         return n > 0
 
+    async def stuck(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Turns still 'running' with an expired lease — a crash or hang."""
+        rows = await self.db.fetch_all(
+            """SELECT id, conversation_id, attempt, started_at, lease_expires_at
+               FROM turns
+               WHERE status = 'running'
+                 AND lease_expires_at IS NOT NULL
+                 AND lease_expires_at < strftime('%Y-%m-%dT%H:%M:%f', 'now')
+               ORDER BY started_at LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def stuck_check(self, turn_id: str) -> dict[str, Any] | None:
+        row = await self.db.fetch_one(
+            """SELECT id, conversation_id, status,
+                  (status IN ('pending','running')
+                   AND lease_expires_at IS NOT NULL
+                   AND lease_expires_at < strftime('%Y-%m-%dT%H:%M:%f', 'now')) AS stuck
+               FROM turns WHERE id = ?""", (turn_id,))
+        return dict(row) if row else None
+
     async def get(self, turn_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one("SELECT * FROM turns WHERE id = ?", (turn_id,))
 

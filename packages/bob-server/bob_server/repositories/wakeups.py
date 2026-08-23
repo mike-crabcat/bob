@@ -96,6 +96,34 @@ class WakeupRepository:
                     claimed.append(wakeup)
         return claimed
 
+    async def list_all_scheduled(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, conversation_id, goal_id, kind, not_before, recurrence,
+                      tz, status, payload_json, created_at
+               FROM wakeups
+               WHERE status = 'scheduled'
+               ORDER BY not_before
+               LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def recent_settled(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, conversation_id, kind, not_before, recurrence, status
+               FROM wakeups WHERE status != 'scheduled'
+               ORDER BY not_before DESC LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def scheduled_count(self) -> int:
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM wakeups WHERE status = 'scheduled'")
+        return int(row["n"]) if row else 0
+
+    async def next_scheduled(self) -> dict[str, Any] | None:
+        row = await self.db.fetch_one(
+            """SELECT not_before, kind FROM wakeups WHERE status = 'scheduled'
+               ORDER BY not_before LIMIT 1""")
+        return dict(row) if row else None
+
     async def list_scheduled(self, conversation_id: str) -> list[dict[str, Any]]:
         return await self.db.fetch_all(
             "SELECT * FROM wakeups WHERE conversation_id = ? AND status = 'scheduled' "

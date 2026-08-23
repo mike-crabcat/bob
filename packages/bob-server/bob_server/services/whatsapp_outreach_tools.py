@@ -263,12 +263,8 @@ def make_outreach_reply_tools(
         db = ctx.db
 
         # The active outreach goal held by this conversation IS the state.
-        goal = await db.fetch_one(
-            "SELECT id, objective, origin_conversation_id, strategy_json FROM goals "
-            "WHERE conversation_id = ? AND kind = 'outreach' AND status = 'active' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (current_session_key,),
-        )
+        from bob_server.repositories.goals import GoalRepository
+        goal = await GoalRepository(db).active_outreach(current_session_key)
         if not goal or not goal["origin_conversation_id"]:
             return json.dumps({"ok": False, "error": "No active outreach to report"})
 

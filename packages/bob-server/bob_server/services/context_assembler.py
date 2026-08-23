@@ -118,11 +118,8 @@ class ContextAssembler:
 
     async def outreach_prompt(self, session_key: str) -> str:
         """Active-outreach block from the conversation's outreach goal."""
-        goal = await self.db.fetch_one(
-            "SELECT objective, strategy_json FROM goals "
-            "WHERE conversation_id = ? AND kind = 'outreach' AND status = 'active' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (session_key,))
+        from bob_server.repositories.goals import GoalRepository
+        goal = await GoalRepository(self.db).active_outreach(session_key)
         if not goal:
             return ""
         try:

@@ -101,6 +101,37 @@ class EffectRepository:
                 (error[:2000], _iso(_utcnow() + timedelta(seconds=backoff)), effect_id))
             return "pending"
 
+    async def status_counts(self) -> dict[str, int]:
+        rows = await self.db.fetch_all(
+            "SELECT status, COUNT(*) AS n FROM effects GROUP BY status")
+        return {r["status"]: r["n"] for r in rows} if rows else {}
+
+    async def dead(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            """SELECT id, kind, attempt, error, payload_json, created_at
+               FROM effects WHERE status = 'dead'
+               ORDER BY created_at DESC LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def requeue_dead(self, effect_id: str) -> bool:
+        """Operator action: put a dead effect back in the queue."""
+        changed = await self.db.execute(
+            """UPDATE effects
+               SET status = 'pending', attempt = 0,
+                   available_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+               WHERE id = ? AND status = 'dead'""",
+            (effect_id,))
+        return bool(changed)
+
+    async def discard_dead(self, effect_id: str) -> bool:
+        changed = await self.db.execute(
+            """UPDATE effects
+               SET status = 'discarded',
+                   error = COALESCE(error, '') || ' [discarded by operator]'
+               WHERE id = ? AND status = 'dead'""",
+            (effect_id,))
+        return bool(changed)
+
     async def get(self, effect_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one("SELECT * FROM effects WHERE id = ?", (effect_id,))
 

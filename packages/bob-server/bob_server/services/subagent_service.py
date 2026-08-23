@@ -385,10 +385,9 @@ class SubagentService(BaseService):
 
             try:
                 now_iso = utcnow().isoformat()
-                await self.db.execute(
-                    "UPDATE voice_sessions SET status = 'expired', completed_at = ? WHERE subagent_id = ? AND status IN ('pending', 'active')",
-                    (now_iso, subagent_id),
-                )
+                from bob_server.services.voice_session_service import VoiceSessionService
+                await VoiceSessionService.from_db(self.db).expire_for_subagent(
+                    subagent_id, now_iso)
                 # Keep the phone_calls mirror row in sync (calls UI).
                 from bob_server.repositories.phone_calls import PhoneCallRepository
                 await PhoneCallRepository(self.db).cancel_voice_links_for_subagent(
