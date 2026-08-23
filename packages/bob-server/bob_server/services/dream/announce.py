@@ -172,5 +172,6 @@ class AnnounceService(BaseService):
             message,
             channel="whatsapp",
             synthetic=True,
+            provenance="dream_announcement",
             metadata={"dream_announce": [p["id"] for p in plans]},
         )

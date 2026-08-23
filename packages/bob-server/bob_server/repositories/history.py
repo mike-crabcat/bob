@@ -16,6 +16,14 @@ from typing import Any
 
 _DIALOGUE_ROLES = "('user', 'assistant')"
 
+# Internal bookkeeping rows excluded from replayed context by default.
+# wake_nudge and routine provenance ARE replayed — they are the actual
+# conversational stimulus for their turns.
+_INTERNAL_FILTER = (
+    " AND (provenance IS NULL OR provenance NOT IN "
+    "('extraction_marker', 'dream_announcement')) "
+)
+
 
 class HistoryRepository:
     def __init__(self, db: Any):
@@ -29,12 +37,16 @@ class HistoryRepository:
         since_hours: float | None = None,
         dispatched_only: bool = False,
         pending_only: bool = False,
+        include_internal: bool = False,
     ) -> list[dict]:
         """Last N user/assistant rows, oldest-first (full columns).
 
         The newest-N-then-chronological shape used by prompt assembly and
         memory extraction: LIMIT applies to the newest end, output is ASC.
+        Internal bookkeeping rows (extraction markers, dream announcements)
+        are excluded unless ``include_internal`` is set.
         """
+        internal = "" if include_internal else _INTERNAL_FILTER
         since_clause = ""
         params: list[Any] = [session_key, session_key]
         if since_hours is not None:
@@ -50,7 +62,7 @@ class HistoryRepository:
             f"WHERE session_key = ? AND role IN {_DIALOGUE_ROLES} "
             f"AND rowid IN (SELECT rowid FROM session_messages "
             f"WHERE session_key = ? AND role IN {_DIALOGUE_ROLES} "
-            f"{since_clause} ORDER BY created_at DESC LIMIT ?) "
+            f"{internal}{since_clause} ORDER BY created_at DESC LIMIT ?) "
             f"ORDER BY created_at ASC",
             tuple(params),
         )
@@ -71,19 +83,23 @@ class HistoryRepository:
 
     async def messages(
         self, session_key: str, *, limit: int = 50, roles: list[str] | None = None,
+        include_internal: bool = True,
     ) -> list[dict]:
         """Oldest-first slice (LIMIT applies to the OLDEST end — legacy
-        SessionService.get_messages semantics, preserved as-is)."""
+        SessionService.get_messages semantics, preserved as-is). Defaults to
+        including internal rows: existing callers are ops/inspection surfaces
+        (dashboard, reflection) that want the full record."""
+        internal = "" if include_internal else _INTERNAL_FILTER
         if roles:
             placeholders = ",".join("?" for _ in roles)
             return await self.db.fetch_all(
                 f"SELECT * FROM session_messages "
-                f"WHERE session_key = ? AND role IN ({placeholders}) "
+                f"WHERE session_key = ? AND role IN ({placeholders}) {internal}"
                 f"ORDER BY created_at ASC LIMIT ?",
                 (session_key, *roles, limit))
         return await self.db.fetch_all(
-            "SELECT * FROM session_messages "
-            "WHERE session_key = ? ORDER BY created_at ASC LIMIT ?",
+            f"SELECT * FROM session_messages "
+            f"WHERE session_key = ? {internal}ORDER BY created_at ASC LIMIT ?",
             (session_key, limit))
 
     async def messages_since(
@@ -94,10 +110,13 @@ class HistoryRepository:
         lookback_days: int | None = None,
         role: str | None = None,
         limit: int = 50,
+        include_internal: bool = False,
     ) -> list[dict]:
         """Chronological messages after a cursor timestamp or within a lookback."""
         where = "session_key = ?"
         params: list[Any] = [session_key]
+        if not include_internal:
+            where += _INTERNAL_FILTER
         if role:
             where += " AND role = ?"
             params.append(role)

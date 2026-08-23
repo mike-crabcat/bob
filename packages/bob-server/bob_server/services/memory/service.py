@@ -474,6 +474,7 @@ class MemoryService(BaseService):
                 session_key, "assistant", content,
                 dispatch_id=dispatch_id,
                 synthetic=True,
+                provenance="extraction_marker",
                 message_id=turn_message_id,
                 metadata={"memory_extraction_turn": True, "trigger": trigger,
                           **({"hint": hint} if hint else {})},

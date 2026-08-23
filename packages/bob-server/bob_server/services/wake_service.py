@@ -76,6 +76,7 @@ async def wake_conversation(
     await SessionService(ctx).add_message(
         session_key, "user", content,
         channel=channel, metadata=metadata, dispatched=0,
+        provenance="wake_nudge",
     )
 
     if channel == "whatsapp":

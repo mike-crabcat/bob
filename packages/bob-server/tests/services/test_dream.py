@@ -18,6 +18,13 @@ from bob_server.services.dream.models import Evidence, PlanCandidate, Resolution
 SK = "wa:contact:whatsapp:dm:61412345678"
 SK_GROUP = "wa:group:whatsapp:group:1203634"
 
+# Dynamic days so tests don't rot as real time crosses the 7-day
+# backlog_evidence_days(7) / lookback(14d) boundaries. _OLD_DAY sits inside
+# the 14-day lookback (so the backlog session IS reviewed) but past the 7-day
+# backlog guard (so it must never auto-approve).
+_FRESH_DAY = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+_OLD_DAY = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
+
 REVIEW_PAYLOAD = {
     "resolutions": [
         {
@@ -52,7 +59,7 @@ REVIEW_PAYLOAD = {
 
 def _messages(n: int = 6) -> list[dict]:
     return [
-        {"created_at": f"2026-08-16T0{i}:00:00Z", "role": "user" if i % 2 else "assistant",
+        {"created_at": f"{_FRESH_DAY}T0{i}:00:00Z", "role": "user" if i % 2 else "assistant",
          "sender_id": "c1", "content": "what time does the flight leave" if i == 2
          else ("we should catch up soon" if i == 4 else f"msg {i}")}
         for i in range(1, n + 1)
@@ -214,7 +221,7 @@ async def test_runner_autoapprove_with_backlog_guard(ctx, stub_env, monkeypatch)
     # backlog: old evidence never auto-approves even with autoplan on
     old = _messages()
     for i, m in enumerate(old, 1):
-        m["created_at"] = f"2026-08-01T0{i}:00:00Z"
+        m["created_at"] = f"{_OLD_DAY}T0{i}:00:00Z"
     await _seed_messages(ctx.db, SK_GROUP, old)
     await DreamRunner(ctx).maybe_run(trigger="cli")
     row = await ctx.db.fetch_one("SELECT * FROM dream_plans WHERE id LIKE '%' AND source_run_id != ?", (plans[0]["source_run_id"],))
@@ -236,7 +243,7 @@ async def test_dedup_merge_on_reobservation(ctx, stub_env, monkeypatch):
     # identical, so candidates merge into the existing items instead of duplicating
     later = _messages()
     for i, m in enumerate(later, 1):
-        m["created_at"] = f"2026-08-16T1{i}:00:00Z"
+        m["created_at"] = f"{_FRESH_DAY}T1{i}:00:00Z"
         m["content"] = m["content"] + " again"
     await _seed_messages(ctx.db, SK, later)
     await DreamRunner(ctx).maybe_run(trigger="cli")
@@ -266,7 +273,7 @@ async def test_recently_terminal_suppression_and_reopen(ctx, stub_env):
         # same candidate again → suppressed (terminal within 14d, evidence not newer)
         later = _messages()
         for i, m in enumerate(later, 1):
-            m["created_at"] = f"2026-08-16T0{i}:00:05Z"
+            m["created_at"] = f"{_FRESH_DAY}T0{i}:00:05Z"
         await ctx.db.execute("DELETE FROM dream_session_review WHERE session_key = ?", (SK,))
         await ctx.db.execute("DELETE FROM session_messages WHERE session_key = ?", (SK,))
         await _seed_messages(ctx.db, SK, later)

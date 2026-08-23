@@ -40,6 +40,7 @@ class SessionService(BaseService):
         dispatched: int = 1,
         dispatch_id: str | None = None,
         synthetic: bool | None = None,
+        provenance: str | None = None,
         message_id: str | None = None,
         txn: Any | None = None,
     ) -> str:
@@ -79,10 +80,10 @@ class SessionService(BaseService):
         await (txn or self.db).execute(
             """INSERT INTO session_messages
                (id, session_key, role, content, sender_id, channel, metadata,
-                dispatched, synthetic, tool_summary, tool_blocks_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                dispatched, synthetic, provenance, tool_summary, tool_blocks_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (msg_id, session_key, role, content, sender_id, channel, meta_json,
-             dispatched, 1 if synthetic else 0, tool_summary, tool_blocks_json),
+             dispatched, 1 if synthetic else 0, provenance, tool_summary, tool_blocks_json),
         )
         return msg_id
 

@@ -237,7 +237,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         prompt = f"{_format_routine_now(routine)}\n\n{prompt}"
 
         session_svc = SessionService(ctx)
-        await session_svc.add_message(session_key, "user", prompt, channel="routine")
+        await session_svc.add_message(session_key, "user", prompt, channel="routine", provenance="routine")
 
         settings = ctx.settings
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=ctx.db)
@@ -297,7 +297,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
             dispatch_id=dispatch_id,
         )
 
-        await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id)
+        await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id, provenance="routine")
 
         await RoutineService(ctx).mark_run(routine["id"])
 
