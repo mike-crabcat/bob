@@ -24,6 +24,7 @@ def _content_char_len(content: Any) -> int:
 
 from bob_server.services.tools import Tool
 
+from bob_server.services import quota_gate
 from bob_server.services.base import BaseService
 from bob_server.services.openai_service import OpenAIService, StreamResult
 
@@ -366,6 +367,7 @@ class LLMDispatchService(BaseService):
         contact_id: str | None = None,
     ) -> str:
         """Non-streaming chat completion with automatic logging."""
+        quota_gate.check()
         resolved_model = self._resolve_model(model)
         service = self._get_service()
 
@@ -407,6 +409,7 @@ class LLMDispatchService(BaseService):
                 contact_id=contact_id,
             )
 
+            quota_gate.record_success()
             logger.info(
                 "LLM dispatch: model=%s category=%s latency=%.2fs "
                 "input_chars=%d output_chars=%d tokens=%s",
@@ -424,6 +427,7 @@ class LLMDispatchService(BaseService):
 
         except Exception as exc:
             elapsed = time.monotonic() - t0
+            quota_gate.record_failure(exc)
             logger.error("LLM dispatch failed: model=%s error=%s", resolved_model, exc)
             await _record_log(
                 self.db,
@@ -465,6 +469,7 @@ class LLMDispatchService(BaseService):
         contact_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion with automatic logging."""
+        quota_gate.check()
         resolved_model = self._resolve_model(model)
         service = self._get_service()
 
@@ -515,6 +520,7 @@ class LLMDispatchService(BaseService):
                 contact_id=contact_id,
             )
 
+            quota_gate.record_success()
             logger.info(
                 "LLM dispatch stream: model=%s category=%s latency=%.2fs ttft=%.2fs "
                 "input_chars=%d output_chars=%d tokens=%s",
@@ -532,6 +538,7 @@ class LLMDispatchService(BaseService):
 
         except Exception as exc:
             elapsed = time.monotonic() - t0
+            quota_gate.record_failure(exc)
             logger.error("LLM dispatch stream failed: model=%s error=%s", resolved_model, exc)
             await _record_log(
                 self.db,
@@ -579,6 +586,7 @@ class LLMDispatchService(BaseService):
         The caller provides a list of Tool objects (created via @tool decorator)
         and this method handles the multi-turn tool call loop automatically.
         """
+        quota_gate.check()
         resolved_model = self._resolve_model(model)
         service = self._get_service()
 
@@ -649,6 +657,7 @@ class LLMDispatchService(BaseService):
                 tool_blocks_json=_serialize_trace_items(trace),
             )
 
+            quota_gate.record_success()
             logger.info(
                 "LLM dispatch tools: model=%s category=%s latency=%.2fs "
                 "tools=%d output_chars=%d tokens=%s",
@@ -667,6 +676,7 @@ class LLMDispatchService(BaseService):
             elapsed = time.monotonic() - t0
             is_cancel = isinstance(exc, asyncio.CancelledError)
             if not is_cancel:
+                quota_gate.record_failure(exc)
                 logger.error("LLM dispatch tools failed: model=%s error=%s", resolved_model, exc)
             if dispatch_id:
                 _dispatch_tool_trace.pop(dispatch_id, None)
@@ -703,6 +713,7 @@ class LLMDispatchService(BaseService):
         Handles the tool loop non-streamingly (tool calls need full responses),
         then streams the final text response for real-time TTS/consumption.
         """
+        quota_gate.check()
         resolved_model = self._resolve_model(model)
         service = self._get_service()
 
@@ -779,6 +790,7 @@ class LLMDispatchService(BaseService):
                 status="completed",
                 tool_blocks_json=_serialize_trace_items(trace),
             )
+            quota_gate.record_success()
             await self._publish_call(
                 status="completed", session_key=session_key,
                 call_category=call_category, model=resolved_model,
@@ -790,6 +802,7 @@ class LLMDispatchService(BaseService):
         except BaseException as exc:
             is_cancel = isinstance(exc, asyncio.CancelledError)
             if not is_cancel:
+                quota_gate.record_failure(exc)
                 logger.error("LLM dispatch stream+tools failed: model=%s error=%s", resolved_model, exc)
             if dispatch_id:
                 _dispatch_tool_trace.pop(dispatch_id, None)
