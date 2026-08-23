@@ -89,3 +89,11 @@ replayed contexts, so the inline-media cap must apply to any rendered history.
    voice_session_service already mirrors rows into phone_calls for the UI.
    Eventually make phone_calls the single store and drop voice_sessions.
    (Deferred from session-model cleanup Increment 5.)
+
+8. **Truncate oversized embedding inputs.** `memory/embedding.py:embed_batch`
+   occasionally 400s: "maximum input length is 8192 tokens" — one oversized
+   memory-entity render fails the whole batch (seen in prod logs 2026-08-23,
+   surfaced during the dead-code cleanup deploy; pre-existing). Fix: clamp
+   each input to the model limit (rough char budget or tiktoken) before the
+   API call, and log which entity was clamped so the oversized render can be
+   investigated.
