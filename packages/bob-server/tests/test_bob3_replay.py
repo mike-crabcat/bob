@@ -103,15 +103,15 @@ async def replay_episode(
     for _ in range(100):
         await asyncio.sleep(0.03)
         pending = await ctx.db.fetch_one(
-            "SELECT COUNT(*) AS n FROM session_messages "
+            "SELECT COUNT(*) AS n FROM messages "
             "WHERE role = 'user' AND dispatched = 0")
         if pending["n"] == 0 and not coord_mod.AttentionCoordinator._dispatching:
             break
 
     assistant = await ctx.db.fetch_all(
-        "SELECT content FROM session_messages WHERE role = 'assistant' ORDER BY id")
+        "SELECT content FROM messages WHERE role = 'assistant' ORDER BY id")
     unclaimed = await ctx.db.fetch_one(
-        "SELECT COUNT(*) AS n FROM session_messages WHERE role='user' AND dispatched = 0")
+        "SELECT COUNT(*) AS n FROM messages WHERE role='user' AND dispatched = 0")
     decisions = await ctx.db.fetch_all(
         "SELECT decision FROM attention_shadow ORDER BY id")
     return {

@@ -84,7 +84,7 @@ async def test_addressed_arrival_shrinks_group_window(ctx):
 
 async def test_probe_stand_down_flushes_without_dispatch(ctx, db):
     await db.execute(
-        "INSERT INTO session_messages (id, session_key, role, content, dispatched) "
+        "INSERT INTO messages (id, conversation_id, role, content, dispatched) "
         "VALUES ('m1', ?, 'user', 'blah', 0)", (SESSION,))
     dispatch = AsyncMock()
     with patch("bob_server.services.attention.tier2.probe_actionability",
@@ -94,7 +94,7 @@ async def test_probe_stand_down_flushes_without_dispatch(ctx, db):
             probe_enabled=True)
         await _drain()
     dispatch.assert_not_awaited()
-    row = await db.fetch_one("SELECT dispatched FROM session_messages WHERE id = 'm1'")
+    row = await db.fetch_one("SELECT dispatched FROM messages WHERE id = 'm1'")
     assert row["dispatched"] == 1, "STAND_DOWN claims messages without the main LLM"
 
 

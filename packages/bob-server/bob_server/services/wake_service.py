@@ -142,9 +142,11 @@ async def _generic_wake_dispatch(
                 dispatch_id=dispatch_id,
             )
             await ctx.db.execute(
-                "UPDATE session_messages SET dispatched = 1 "
-                "WHERE session_key = ? AND role = 'user' AND dispatched = 0",
-                (session_key,),
+                "UPDATE messages SET dispatched = 1 "
+                "WHERE conversation_id = COALESCE("
+                "  (SELECT conversation_id FROM bindings WHERE session_key = ?), ?) "
+                "AND role = 'user' AND dispatched = 0",
+                (session_key, session_key),
             )
             if result.strip():
                 await SessionService(ctx).add_message(

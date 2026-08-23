@@ -13,9 +13,9 @@ A few conventions apply across the whole schema. They are stated once here so th
 - `agent:main:email:thread:<agentmail_thread_id>` — an email thread
 - `subagent:<parent_session_key>:<short_id>` — a subagent's own session (see `services/subagent_service.py`)
 
-The key is the join column in `session_messages`, `bindings` (one per session key), `session_agendas`, `session_participants`, `routines`, `skill_delegations`, `llm_call_log`, `email_threads`, `phone_calls.origin_session_key`, and `subagents` (both `session_key` and `parent_session_key`). The Bob3 event layer carries it twice: `event_log.binding_key` (immutable channel address at ingestion) and `event_log.conversation_id`. Since the Phase VI backfill (migration `430`), `conversations.id` equals the legacy session_key 1:1, and `bindings` maps every session key onto its conversation — key parsing is being replaced by binding lookups, but the string shape above is still what you'll see in the data.
+The key is the join column in `bindings` (one per session key), `routines`, `skill_delegations`, `llm_call_log`, `email_threads`, `phone_calls.origin_session_key`, and `subagents` (both `session_key` and `parent_session_key`). The Bob3 event layer carries it twice: `event_log.binding_key` (immutable channel address at ingestion) and `event_log.conversation_id`. Since the Phase VI backfill (migration `430`), `conversations.id` equals the legacy session_key 1:1, and `bindings` maps every session key onto its conversation — key parsing is being replaced by binding lookups, but the string shape above is still what you'll see in the data.
 
-**JSON metadata columns.** Many tables carry a `metadata` (or `*_json`) column holding a JSON object for channel-specific data that does not earn its own top-level column — WhatsApp `chat_id` and media pointers, email header ids, effect payloads, evidence lists. This is deliberate: it keeps the core schema stable while each channel stashes what it needs. Treat these columns as read-mostly context, not as join targets. The notable exception is `memory_claims.source_messages`, which is a JSON array of `session_messages.id` values used as provenance.
+**JSON metadata columns.** Many tables carry a `metadata` (or `*_json`) column holding a JSON object for channel-specific data that does not earn its own top-level column — WhatsApp `chat_id` and media pointers, email header ids, effect payloads, evidence lists. This is deliberate: it keeps the core schema stable while each channel stashes what it needs. Treat these columns as read-mostly context, not as join targets. The notable exception is `memory_claims.source_messages`, which is a JSON array of `messages.id` values used as provenance.
 
 **Soft delete vs hard delete.** Most tables hard-delete: rows actually go away (`DELETE FROM phone_calls` in `CallCleanupTask`, `SessionService.delete_session`). The soft-delete tables set `deleted_at` instead — `contacts`, `projects`, `tasks`, `calendars`, `events`, `email_inboxes`, `email_threads`, `webhook_configs`, `whatsappgroups` — so history that references them still renders (a deleted contact's messages still show a name). Reads in these tables filter `deleted_at IS NULL` by convention. Separately, several tables never delete at all on purpose: `event_log` is append-only forever (deletions propagate as payload tombstones via `DeletionPropagationTask`), and `llm_call_log` keeps rows forever but redacts heavy payloads after 30 days (`LlmLogRetentionTask`). Where a table has an `is_active` or `status` flag, the flag — not row presence — is the source of truth for "is this still relevant".
 
@@ -156,20 +156,29 @@ erDiagram
 
 ## Sessions and Messaging
 
-The session layer keys all channel traffic. Every inbound or outbound message — WhatsApp, email, voice transcript, subagent turn — lands in `session_messages` keyed by a session key; `bindings` (see Conversations above) resolves that key to a physical destination via `ConversationRepository.route_for`.
+The session layer keys all channel traffic. Every inbound or outbound message — WhatsApp, email, voice transcript, subagent turn — lands in `messages` keyed by `conversation_id`; `bindings` (see Conversations above) resolves a session key to a physical destination via `ConversationRepository.route_for`.
+
+**Glossary — three identifiers, three jobs:**
+
+- **`conversation_id`** — the durable identity of a conversation (`conversations.id`). What history, participants, agendas, memories and turns hang off. Since migration `430` it equals the legacy session key 1:1; when bindings merge, several keys map onto one surviving conversation_id.
+- **`binding_key`** (a.k.a. legacy *session key*) — the immutable channel ingress name a message actually arrived on (`agent:main:whatsapp:dm:<phone>`, …). Preserved verbatim on `messages.binding_key` and `event_log.binding_key` so provenance survives merges. Resolved to a conversation via `bindings.session_key → bindings.conversation_id`.
+- **`address`** — the physical send target on a binding (`bindings.address`: a JID, email address, or phone number) plus `endpoint_kind`. What `route_for` returns for outbound delivery.
 
 ```mermaid
 erDiagram
     contacts ||--o{ bindings : "dm target (contact_id)"
-    contacts ||--o{ session_participants : "trusted in"
+    contacts ||--o{ participants : "trusted in"
     whatsappgroups ||--o{ whatsappgroup_members : "has"
     contacts ||--o{ whatsappgroup_members : "joins"
     whatsappgroups ||--o{ bindings : "address = whatsapp_jid (soft FK)"
-    bindings ||--o{ session_messages : "routes"
+    conversations ||--o{ messages : "history"
+    conversations ||--o{ participants : "roster"
+    conversations ||--o| agendas : "standing instructions"
 
-    session_messages {
+    messages {
         uuid id PK
-        text session_key FK
+        text conversation_id FK
+        text binding_key "ingress endpoint (provenance)"
         text role "user | assistant | system | tool"
         text content
         text sender_id
@@ -178,12 +187,12 @@ erDiagram
         int synthetic "memory-echo provenance"
         text tool_blocks_json
     }
-    session_agendas {
-        text session_key PK
+    agendas {
+        text conversation_id PK
         text agenda "system-prompt extension"
     }
-    session_participants {
-        text session_key PK
+    participants {
+        text conversation_id PK
         text identifier PK "WhatsApp JID"
         text display_name
         uuid contact_id FK
@@ -209,13 +218,13 @@ erDiagram
     }
 ```
 
-**`session_messages`** — The source of truth for conversation history across all channels; the memory pipeline, prompt assembly, dreams, reflection and the dashboard all read it. `dispatched` is a claim flag: inbound user messages are stored undispatched at ingress (so a crash before dispatch is recovered by the startup sweep), then claimed by a dispatch and marked dispatched — LLM quota failure restores them. `synthetic` marks assistant messages that are echoes of existing memory rather than new ground truth, and `tool_summary`/`tool_blocks_json` persist the dispatch's tool-call trace for replay in later prompts. *How it gets written:* `SessionService.add_message` (services/session_service.py) is the only writer; `HistoryRepository` (repositories/history.py) is the single read seam. `DELETE FROM session_messages WHERE session_key = ?` is the session-clearing path.
+**`messages`** (renamed from `session_messages`, migration `457`) — The source of truth for conversation history across all channels; the memory pipeline, prompt assembly, dreams, reflection and the dashboard all read it. Keyed by `conversation_id`, with `binding_key` preserving the exact ingress endpoint the message rode (mirrors `event_log.binding_key`). `dispatched` is a claim flag: inbound user messages are stored undispatched at ingress (so a crash before dispatch is recovered by the startup sweep), then claimed by a dispatch and marked dispatched — LLM quota failure restores them. `synthetic` marks assistant messages that are echoes of existing memory rather than new ground truth, and `tool_summary`/`tool_blocks_json` persist the dispatch's tool-call trace for replay in later prompts. *How it gets written:* `SessionService.add_message` (services/session_service.py) is the only writer; `HistoryRepository` (repositories/history.py) is the single read seam. `DELETE FROM messages WHERE conversation_id = ?` is the session-clearing path.
 
 **Routing** — `session_routes` was dropped (migration `455`); its job — "reply on session X: where does X physically live?" — moved onto `bindings` (`address`, `endpoint_kind`, `contact_id`, `is_active`). `ConversationRepository.route_for` is the resolver, and channel ingress (WhatsApp bridge, email poller, phone/voice) calls `ConversationRepository.register_endpoint` on first contact. Per-session config that used to hide in route metadata lives in `conversations.policy_json`.
 
-**`session_agendas`** — Optional per-session system-prompt extension (one row per session key, the whole agenda in one text blob). The WhatsApp bridge and email poller seed a default agenda on session creation — the untrusted-sender caution text for unknown contacts, a custom one when the contact sets an agenda — and prompt assembly layers it in. Written by `SessionAgendaService`.
+**`agendas`** (renamed from `session_agendas`, migration `456`) — Optional per-conversation system-prompt extension (one row per conversation, the whole agenda in one text blob). The WhatsApp bridge and email poller seed a default agenda on session creation — the untrusted-sender caution text for unknown contacts, a custom one when the contact sets an agenda — and prompt assembly layers it in. Written by `SessionAgendaService` via `AgendaRepository`.
 
-**`session_participants`** — Who is in a group session: identifier (WhatsApp JID), display name, optional contact link, trust flag, last-active time. Drives the participant list injected into group-chat prompts and mention resolution. Written by the WhatsApp bridge on every group message and group sync.
+**`participants`** (renamed from `session_participants`, migration `456`) — Who is in a conversation: identifier (WhatsApp JID), display name, optional contact link, trust flag, last-active time. FK to `conversations` and `contacts`; written via `ParticipantRepository`. Drives the participant list injected into group-chat prompts and mention resolution. Written by the WhatsApp bridge on every group message and group sync.
 
 **`whatsappgroups` / `whatsappgroup_members`** — Channel-specific group registry: JID, name, member count, and the group's memory entity (`memory_entity_id`, set when `ensure_group_entity` creates the corresponding `group-*` memory entity). Members carry admin flags and join/leave times. Written by the bridge's group-sync and member-change handlers (`services/whatsapp_bridge_service/_group_events.py`). Note the known wrinkle documented in [docs/session-mess.md](./session-mess.md): the join to `bindings` is by convention (`address = whatsapp_jid`), not a real FK.
 
@@ -228,7 +237,7 @@ erDiagram
 ```mermaid
 erDiagram
     contacts ||--o{ bindings : "dm routes"
-    contacts ||--o{ session_participants : "identified as"
+    contacts ||--o{ participants : "identified as"
     contacts ||--o{ whatsappgroup_members : "membership"
     contacts ||--o{ email_threads : "owns"
     contacts ||--o{ subagents : "contact_id"
@@ -252,7 +261,7 @@ erDiagram
 
 ## Dispatches and LLM telemetry
 
-A "dispatch" is one tracked unit of agent work: one WhatsApp reply, one email response, one voice turn. The tracking substrate has moved twice — the original `dispatches` table is frozen, and today a dispatch is identified by an in-memory `dispatch_id` that threads `llm_call_log` rows and `session_messages` metadata, with durable turn tracking in `turns` (see the Bob3 core domain above).
+A "dispatch" is one tracked unit of agent work: one WhatsApp reply, one email response, one voice turn. The tracking substrate has moved twice — the original `dispatches` table is frozen, and today a dispatch is identified by an in-memory `dispatch_id` that threads `llm_call_log` rows and `messages` metadata, with durable turn tracking in `turns` (see the Bob3 core domain above).
 
 ```mermaid
 erDiagram
@@ -291,7 +300,7 @@ erDiagram
 
 ### Subagents
 
-**`subagents`** — One row per spawned subagent: a Claude Code CLI worker or an `openai_voice` worker. The subagent runs under its own session key (`subagent:<parent_session_key>:<short_id>`), so its turns land in `session_messages` like any other session; `parent_session_key` links it back to the conversation that spawned it; `agent_type`/`modality` record what kind of worker it is (modality aliases are normalised defensively — the LLM invents enum values); `contact_id` records who the work concerns (used by voice outreach); `status`/`result`/`cost_usd` track completion. Spawning runs as a `subagent_spawn` effect, and a subagent id is what `goals.external_ref` and `phone_calls.subagent_id` point at. *How it gets written:* `services/subagent_service.py` on `create_subagent`; completion marks the row and wakes the parent session with the result via the wake path.
+**`subagents`** — One row per spawned subagent: a Claude Code CLI worker or an `openai_voice` worker. The subagent runs under its own session key (`subagent:<parent_session_key>:<short_id>`), so its turns land in `messages` like any other session; `parent_session_key` links it back to the conversation that spawned it; `agent_type`/`modality` record what kind of worker it is (modality aliases are normalised defensively — the LLM invents enum values); `contact_id` records who the work concerns (used by voice outreach); `status`/`result`/`cost_usd` track completion. Spawning runs as a `subagent_spawn` effect, and a subagent id is what `goals.external_ref` and `phone_calls.subagent_id` point at. *How it gets written:* `services/subagent_service.py` on `create_subagent`; completion marks the row and wakes the parent session with the result via the wake path.
 
 ---
 
@@ -343,7 +352,7 @@ erDiagram
 
 **`voice_sessions`** — Source of truth for browser voice-link calls. The id *is* the token in the join URL — a capability: anyone holding the link can join as Bob until the session completes. `origin_session_key` is normally the contact's DM (so the transcript lands in the relationship's memory), with `report_back_session_key` dispatching the summary to a second session (e.g. the group that asked for the reach-out). Untapped links expire after 24 hours (`VoiceSessionService.LINK_TTL_HOURS = 24`, mirrored to the `phone_calls` row as `canceled`); completion flows through `VoiceSessionService.complete`.
 
-**`phone_call_exchanges`** — Legacy per-turn rows with STT/LLM/TTS latency breakdowns from the retired local STT→LLM→TTS pipeline. No longer written; read only for pre-Realtime call history, pruned alongside their call. Same status for `voice_session_messages`, `voice_current_lesson` and `voice_lesson_progress` — remnants of the removed language-practice frontend (`/voice/ws`), kept for data preservation only.
+**`phone_call_exchanges`** — Legacy per-turn rows with STT/LLM/TTS latency breakdowns from the retired local STT→LLM→TTS pipeline. No longer written; read only for pre-Realtime call history, pruned alongside their call. Same status for `voice_current_lesson` and `voice_lesson_progress` — remnants of the removed language-practice frontend (`/voice/ws`), kept for data preservation only (`voice_session_messages` was archived into `messages` with `provenance='legacy_voice'` and dropped in migration `454`).
 
 ---
 
@@ -483,7 +492,7 @@ erDiagram
         text visibility "private | contact | group | channel | public"
         text scope "JSON channel scoping"
         text superseded_by "JSON claim ids"
-        text source_messages "JSON session_messages ids"
+        text source_messages "JSON messages ids"
     }
     memory_aliases {
         text alias PK
@@ -526,7 +535,7 @@ erDiagram
 
 **`memory_claim_types`** — The registry of claim types (seeded by migration `317`): which entity types each applies to, a description and an example. Extraction and reconciliation both consult it; `contact_id` claims are the cross-reference into the contacts table (indexed on `(claim_type_key, value, status)` for the contact→entity lookup).
 
-**`memory_claims`** — Atomic typed facts — the heart of the system. A claim points *at* an entity (`object_id`) or holds a literal (`value`), never both (enforced by CHECK). `status` models the full claim lifecycle (superseded/retracted/disputed/...); `superseded_by` chains replacements; `visibility` + `scope` control which channels a claim renders in; `source_messages` preserves provenance back to `session_messages` ids. *How it gets written:* live writes from the agent's memory tools, and background extraction — `SessionIdleSummaryTask` (heartbeat) finds sessions idle past the threshold and runs silent-turn extraction, leaving a `memory_extraction_turns` cursor behind.
+**`memory_claims`** — Atomic typed facts — the heart of the system. A claim points *at* an entity (`object_id`) or holds a literal (`value`), never both (enforced by CHECK). `status` models the full claim lifecycle (superseded/retracted/disputed/...); `superseded_by` chains replacements; `visibility` + `scope` control which channels a claim renders in; `source_messages` preserves provenance back to `messages` ids. *How it gets written:* live writes from the agent's memory tools, and background extraction — `SessionIdleSummaryTask` (heartbeat) finds sessions idle past the threshold and runs silent-turn extraction, leaving a `memory_extraction_turns` cursor behind.
 
 **`memory_aliases`** — Name variants mapped to canonical entities, powering `recall` by name. Maintained by the index service on entity write.
 

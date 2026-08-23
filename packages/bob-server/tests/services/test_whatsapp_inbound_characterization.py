@@ -156,13 +156,13 @@ def _group_payload(sender_phone: str, text: str, msg_id: str = "wamid-g1") -> di
 
 async def _user_messages(db, like: str) -> list:
     return await db.fetch_all(
-        "SELECT * FROM session_messages WHERE session_key LIKE ? AND role='user' "
+        "SELECT * FROM messages WHERE conversation_id LIKE ? AND role='user' "
         "ORDER BY id", (like,))
 
 
 async def _assistant_messages(db, like: str) -> list:
     return await db.fetch_all(
-        "SELECT * FROM session_messages WHERE session_key LIKE ? AND role='assistant' "
+        "SELECT * FROM messages WHERE conversation_id LIKE ? AND role='assistant' "
         "ORDER BY id", (like,))
 
 
@@ -219,7 +219,7 @@ async def test_user_message_stored_undispatched_before_llm_runs(
 
     async def behaviour(messages, tools):
         rows = await ctx.db.fetch_all(
-            "SELECT dispatched FROM session_messages WHERE role='user'")
+            "SELECT dispatched FROM messages WHERE role='user'")
         seen_at_dispatch["rows"] = rows
         return ""
     _stub_llm(monkeypatch, behaviour)

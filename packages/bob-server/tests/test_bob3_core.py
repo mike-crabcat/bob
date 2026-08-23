@@ -101,12 +101,12 @@ async def test_append_composes_with_source_write_transactionally(db):
     with pytest.raises(RuntimeError):
         async with db.transaction() as txn:
             await txn.execute(
-                "INSERT INTO session_messages (session_key, role, content, created_at) "
+                "INSERT INTO messages (conversation_id, role, content, created_at) "
                 "VALUES (?, 'user', 'hi', datetime('now'))", (CONV,))
             await repo.append(_event("wamid-atomic"), txn=txn)
             raise RuntimeError("crash before commit")
     assert await db.fetch_all("SELECT id FROM event_log") == []
-    assert await db.fetch_all("SELECT id FROM session_messages") == []
+    assert await db.fetch_all("SELECT id FROM messages") == []
 
 
 async def test_event_ids_are_time_ordered(db):

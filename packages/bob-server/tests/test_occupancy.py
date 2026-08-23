@@ -130,7 +130,7 @@ async def test_wa_ingress_queues_during_live_call(
     assert submitted == []  # queued, not dispatched
     assert occupancy._live[key]["deferred"] is True
     stored = await ctx.db.fetch_all(
-        "SELECT dispatched FROM session_messages WHERE session_key = ? AND role='user'", (key,))
+        "SELECT dispatched FROM messages WHERE conversation_id = ? AND role='user'", (key,))
     assert stored and stored[-1]["dispatched"] == 0  # drains post-call
 
     await svc._handle_incoming_message(_dm_payload("+61400000042", "URGENT hang up now", "wamid-occ-2"))

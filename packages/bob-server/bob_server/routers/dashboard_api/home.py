@@ -22,7 +22,7 @@ async def get_home(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_call_log'"
     )
     msgs_exists_home = await db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_messages'"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
     )
     if log_exists:
         rows = await db.fetch_all(
@@ -52,12 +52,11 @@ async def get_home(request: Request) -> dict[str, Any]:
     if msgs_exists_home:
         seen = {s["session_key"] for s in active_sessions}
         msg_rows = await db.fetch_all(
-            """SELECT session_key,
+            """SELECT conversation_id AS session_key,
                       COUNT(*) as msg_count,
                       MAX(created_at) || 'Z' as last_activity
-               FROM session_messages
-               WHERE session_key IS NOT NULL
-               GROUP BY session_key
+               FROM messages
+               GROUP BY conversation_id
                ORDER BY last_activity DESC
                LIMIT 50"""
         )

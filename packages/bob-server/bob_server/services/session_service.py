@@ -77,22 +77,30 @@ class SessionService(BaseService):
                 synthetic = False
         msg_id = message_id or str(uuid4())
         meta_json = json.dumps(metadata) if metadata else None
+        # Canonical conversation id via bindings; the raw key is preserved as
+        # binding_key (which endpoint the message rode).
+        cid_row = await (txn or self.db).fetch_one(
+            "SELECT conversation_id FROM bindings WHERE session_key = ?",
+            (session_key,))
+        conversation_id = cid_row["conversation_id"] if cid_row else session_key
         await (txn or self.db).execute(
-            """INSERT INTO session_messages
-               (id, session_key, role, content, sender_id, channel, metadata,
+            """INSERT INTO messages
+               (id, conversation_id, binding_key, role, content, sender_id, channel, metadata,
                 dispatched, synthetic, provenance, tool_summary, tool_blocks_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, session_key, role, content, sender_id, channel, meta_json,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, conversation_id, session_key, role, content, sender_id, channel, meta_json,
              dispatched, 1 if synthetic else 0, provenance, tool_summary, tool_blocks_json),
         )
         return msg_id
 
     async def mark_dispatched(self, session_key: str) -> int:
         """Mark all undispatched user messages as dispatched. Returns count marked."""
+        from bob_server.repositories.history import HistoryRepository
+        cid = await HistoryRepository(self.db)._cid(session_key)
         count = await self.db.execute(
-            "UPDATE session_messages SET dispatched = 1 "
-            "WHERE session_key = ? AND dispatched = 0 AND role = 'user'",
-            (session_key,),
+            "UPDATE messages SET dispatched = 1 "
+            "WHERE conversation_id = ? AND dispatched = 0 AND role = 'user'",
+            (cid,),
         )
         return count
 
@@ -110,10 +118,11 @@ class SessionService(BaseService):
         return [self._row_to_message(r) for r in rows]
 
     async def delete_session(self, session_key: str) -> None:
-        """Delete all messages for a session."""
+        """Delete all messages for a session (conversation-wide)."""
+        from bob_server.repositories.history import HistoryRepository
         await self.db.execute(
-            "DELETE FROM session_messages WHERE session_key = ?",
-            (session_key,),
+            "DELETE FROM messages WHERE conversation_id = ?",
+            (await HistoryRepository(self.db)._cid(session_key),),
         )
 
     def _row_to_message(self, row: Any) -> SessionMessage:

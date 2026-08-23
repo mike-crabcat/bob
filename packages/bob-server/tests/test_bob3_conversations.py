@@ -134,7 +134,7 @@ async def test_inbound_on_merged_binding_lands_in_survivor(
         ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
     """Phase VI item 3 exit fixture: after merging B into A, a new inbound
     message on B's channel binding must key ALL downstream state under A —
-    session_messages, event conversation_id — while the event's binding_key
+    messages, event conversation_id — while the event's binding_key
     preserves the original channel address."""
     from tests.services.test_whatsapp_inbound_characterization import (
         _dm_payload,
@@ -164,7 +164,7 @@ async def test_inbound_on_merged_binding_lands_in_survivor(
     await svc._handle_incoming_message(_dm_payload("+61400000002", "hello from B", "wamid-merged-1"))
 
     msgs = await ctx.db.fetch_all(
-        "SELECT session_key FROM session_messages WHERE role='user' AND content LIKE '%hello from B%'")
+        "SELECT conversation_id AS session_key FROM messages WHERE role='user' AND content LIKE '%hello from B%'")
     assert msgs and all(m["session_key"] == key_a for m in msgs), \
         "merged binding's messages must key under the survivor conversation"
 

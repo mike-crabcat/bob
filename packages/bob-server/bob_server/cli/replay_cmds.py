@@ -98,7 +98,7 @@ async def _export_episode(
         for i, ev in enumerate(events, 1):
             payload = json.loads(ev["payload_json"] or "{}")
             sm = await db.fetch_one(
-                "SELECT content FROM session_messages WHERE id = ?",
+                "SELECT content FROM messages WHERE id = ?",
                 (payload.get("session_message_id"),))
             sender = payload.get("sender_name") or ""
             text = _redact_text(sm["content"] if sm else "")
@@ -137,10 +137,12 @@ async def _export_episode(
                  AND e.created_at >= ?""",
             (session_key, window[0]))
         reply = await db.fetch_one(
-            """SELECT content FROM session_messages
-               WHERE session_key = ? AND role = 'assistant' AND created_at >= ?
+            """SELECT content FROM messages
+               WHERE conversation_id = COALESCE(
+                   (SELECT conversation_id FROM bindings WHERE session_key = ?), ?)
+                 AND role = 'assistant' AND created_at >= ?
                ORDER BY created_at LIMIT 1""",
-            (session_key, window[0]))
+            (session_key, session_key, window[0]))
 
         episode = {
             "name": name,
@@ -194,10 +196,12 @@ async def _export_probe_candidates(limit: int, out: Path | None) -> None:
         cases = []
         for r in rows:
             msgs = await db.fetch_all(
-                """SELECT role, content FROM session_messages
-                   WHERE session_key = ? AND created_at <= ?
+                """SELECT role, content FROM messages
+                   WHERE conversation_id = COALESCE(
+                       (SELECT conversation_id FROM bindings WHERE session_key = ?), ?)
+                     AND created_at <= ?
                    ORDER BY created_at DESC LIMIT 6""",
-                (r["session_key"], r["created_at"]))
+                (r["session_key"], r["session_key"], r["created_at"]))
             lines = []
             for m in reversed(msgs):
                 who = "Bot" if m["role"] == "assistant" else "User"

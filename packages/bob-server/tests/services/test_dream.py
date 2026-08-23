@@ -89,7 +89,7 @@ async def _seed_run_row(db) -> None:
 async def _seed_messages(db, session_key: str, messages: list[dict]) -> None:
     for m in messages:
         await db.execute(
-            "INSERT INTO session_messages (session_key, role, content, created_at, sender_id, dispatched) "
+            "INSERT INTO messages (conversation_id, role, content, created_at, sender_id, dispatched) "
             "VALUES (?, ?, ?, ?, ?, 1)",
             (session_key, m["role"], m["content"], m["created_at"], m.get("sender_id")),
         )
@@ -275,7 +275,7 @@ async def test_recently_terminal_suppression_and_reopen(ctx, stub_env):
         for i, m in enumerate(later, 1):
             m["created_at"] = f"{_FRESH_DAY}T0{i}:00:05Z"
         await ctx.db.execute("DELETE FROM dream_session_review WHERE session_key = ?", (SK,))
-        await ctx.db.execute("DELETE FROM session_messages WHERE session_key = ?", (SK,))
+        await ctx.db.execute("DELETE FROM messages WHERE conversation_id = ?", (SK,))
         await _seed_messages(ctx.db, SK, later)
         result = await DreamRunner(ctx).maybe_run(trigger="cli")
         assert len(result["stats"]["suppressed"]) >= 1
@@ -367,7 +367,7 @@ async def test_announce_flush_batches_guards_and_records(ctx, stub_env):
 
     # recorded with synthetic + metadata marker; announced_at set
     msg = await ctx.db.fetch_one(
-        "SELECT * FROM session_messages WHERE session_key = ? AND metadata LIKE '%dream_announce%'", (SK,)
+        "SELECT * FROM messages WHERE conversation_id = ? AND metadata LIKE '%dream_announce%'", (SK,)
     )
     assert msg is not None and msg["synthetic"] == 1
     plans = await ctx.db.fetch_all("SELECT announced_at FROM dream_plans")
@@ -412,7 +412,7 @@ async def test_announce_daily_cap(ctx, stub_env):
     )
     for _ in range(ctx.settings.dream.announce_daily_cap_per_session):
         await ctx.db.execute(
-            "INSERT INTO session_messages (session_key, role, content, created_at, synthetic, metadata, dispatched) "
+            "INSERT INTO messages (conversation_id, role, content, created_at, synthetic, metadata, dispatched) "
             "VALUES (?, 'assistant', 'earlier announce', ?, 1, '{\"dream_announce\":[\"plan-old\"]}', 1)",
             (SK, iso_utc()),
         )

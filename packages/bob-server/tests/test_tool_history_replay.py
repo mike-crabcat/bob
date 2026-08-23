@@ -237,7 +237,7 @@ async def test_replay_handles_rows_without_trace(ctx, db):
     session_key = "test:replay:legacy"
     # Insert a legacy assistant row directly with no trace columns set.
     await db.execute(
-        "INSERT INTO session_messages (id, session_key, role, content) "
+        "INSERT INTO messages (id, conversation_id, role, content) "
         "VALUES (?, ?, 'assistant', 'legacy reply')",
         ("legacy-1", session_key),
     )
@@ -278,9 +278,9 @@ async def test_replay_inlines_only_recent_media(ctx, db, tmp_path):
     # Spread created_at so chronological order is deterministic (production
     # rows never share one second the way this test loop does).
     await db.execute(
-        "UPDATE session_messages SET created_at = "
+        "UPDATE messages SET created_at = "
         "datetime('now', '-1 hour', '+' || rowid || ' seconds') "
-        "WHERE session_key = ?",
+        "WHERE conversation_id = ?",
         (session_key,))
 
     messages = await build_chat_messages(session_key=session_key, db=db)

@@ -970,7 +970,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         Returns the number of sessions re-armed."""
         rows = await self.db.fetch_all(
-            """SELECT DISTINCT sm.session_key FROM session_messages sm
+            """SELECT DISTINCT sm.conversation_id AS session_key FROM messages sm
                WHERE sm.role = 'user' AND sm.dispatched = 0
                  AND sm.channel = 'whatsapp'""",
         )

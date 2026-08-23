@@ -194,7 +194,7 @@ async def test_duplicate_message_id_does_not_create_duplicate_rows_or_dispatch_a
     async def fake_dispatch(thread, message, inbox, **kwargs):
         calls.append((thread, message, kwargs))
         await db.execute(
-            """INSERT INTO session_messages (id, session_key, role, content, channel, dispatched)
+            """INSERT INTO messages (id, conversation_id, role, content, channel, dispatched)
                VALUES (?, ?, 'user', 'already dispatched', 'email', 1)""",
             (str(uuid.uuid4()), thread["session_key"]),
         )
@@ -210,7 +210,7 @@ async def test_duplicate_message_id_does_not_create_duplicate_rows_or_dispatch_a
     assert len(tasks) == 1
     assert len(calls) == 1
     assert await _count(db, "email_messages") == 1
-    assert await _count(db, "session_messages") == 1
+    assert await _count(db, "messages") == 1
     thread = await db.fetch_one("SELECT * FROM email_threads WHERE agentmail_thread_id = ?", ("thread-1",))
     assert thread["message_count"] == 1
 
@@ -254,7 +254,7 @@ async def test_no_reply_text_is_not_sent_but_is_recorded_as_assistant_history(ct
     thread = result["thread"]
 
     rows = await db.fetch_all(
-        "SELECT role, content, dispatched FROM session_messages WHERE session_key = ? ORDER BY role DESC",
+        "SELECT role, content, dispatched FROM messages WHERE conversation_id = ? ORDER BY role DESC",
         (thread["session_key"],),
     )
     assert [(r["role"], r["content"], r["dispatched"]) for r in rows] == [
@@ -272,7 +272,7 @@ async def test_assistant_history_is_written_after_successful_email_reply_send(ct
 
     async def fake_send_reply(self, **kwargs):
         assistant_counts_seen_during_send.append(
-            await _count(db, "session_messages WHERE role = 'assistant'")
+            await _count(db, "messages WHERE role = 'assistant'")
         )
 
     async def fake_chat_with_tools(self, messages, tools, **kwargs):
@@ -296,7 +296,7 @@ async def test_assistant_history_is_written_after_successful_email_reply_send(ct
 
     assert assistant_counts_seen_during_send == [0]
     assistant = await db.fetch_one(
-        "SELECT content FROM session_messages WHERE session_key = ? AND role = 'assistant'",
+        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'",
         (thread["session_key"],),
     )
     assert assistant["content"] == "Model text\n\nDelivered body"
@@ -329,7 +329,7 @@ async def test_failed_email_reply_is_not_marked_sent_but_error_text_is_recorded(
     await tasks[0]
 
     assistant = await db.fetch_one(
-        "SELECT content FROM session_messages WHERE session_key = ? AND role = 'assistant'",
+        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'",
         (thread["session_key"],),
     )
     assert assistant["content"] == "Error sending reply: smtp boom"
@@ -354,7 +354,7 @@ async def test_quota_like_llm_failure_has_no_email_retry_restoration(ctx, db, mo
         await tasks[0]
 
     rows = await db.fetch_all(
-        "SELECT role, content, dispatched FROM session_messages WHERE session_key = ? ORDER BY created_at",
+        "SELECT role, content, dispatched FROM messages WHERE conversation_id = ? ORDER BY created_at",
         (thread["session_key"],),
     )
     assert [(r["role"], r["dispatched"]) for r in rows] == [("user", 1)]

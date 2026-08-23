@@ -59,9 +59,9 @@ async def test_whatsapp_accepted_dm_appends_event_with_message_id_dedup_key(
     assert ev["event_type"] == "message.received"
     assert ev["external_id"] == "wamid-ing-1"
     stored = await db.fetch_one(
-        "SELECT * FROM session_messages WHERE role='user' AND channel='whatsapp'")
-    assert ev["binding_key"] == stored["session_key"]
-    assert ev["conversation_id"] == stored["session_key"]
+        "SELECT * FROM messages WHERE role='user' AND channel='whatsapp'")
+    assert ev["binding_key"] == stored["binding_key"]
+    assert ev["conversation_id"] == stored["conversation_id"]
 
 
 async def test_whatsapp_replay_dedups_event_log_but_still_double_stores_legacy(
@@ -80,7 +80,7 @@ async def test_whatsapp_replay_dedups_event_log_but_still_double_stores_legacy(
 
     # Legacy store keeps its characterized no-dedup behaviour...
     users = await db.fetch_all(
-        "SELECT * FROM session_messages WHERE role='user' AND channel='whatsapp'")
+        "SELECT * FROM messages WHERE role='user' AND channel='whatsapp'")
     assert len(users) == 2
     # ...but the durable inbox accepts once.
     assert len(await _events(db, "whatsapp")) == 1
@@ -196,7 +196,7 @@ async def test_reconciliation_task_skips_sources_with_no_events_and_runs_clean(c
         event_type="message.received", binding_key="k", conversation_id="k",
         source="whatsapp", external_id="wamid-recon-1"))
     await db.execute(
-        """INSERT INTO session_messages (id, session_key, role, content, channel)
+        """INSERT INTO messages (id, conversation_id, role, content, channel)
            VALUES (?, 'k', 'user', 'hi', 'whatsapp')""",
         (str(uuid.uuid4()),))
     hb._last_event_log_reconcile = None

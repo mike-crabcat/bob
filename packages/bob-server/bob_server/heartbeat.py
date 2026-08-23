@@ -127,22 +127,22 @@ class SessionIdleSummaryTask:
         rows = await db.fetch_all(
             """
             SELECT
-                sm.session_key,
+                sm.conversation_id AS session_key,
                 MAX(sm.created_at) AS last_message_at,
                 COALESCE(
                     (SELECT MAX(ran_at) FROM memory_extraction_turns
-                     WHERE session_key = sm.session_key),
+                     WHERE session_key = sm.conversation_id),
                     '1970-01-01'
                 ) AS active_from,
                 COUNT(*) AS message_count
-            FROM session_messages sm
-            WHERE sm.session_key NOT LIKE 'subagent:%'
+            FROM messages sm
+            WHERE sm.conversation_id NOT LIKE 'subagent:%'
               AND datetime(sm.created_at) > datetime(COALESCE(
                 (SELECT MAX(ran_at) FROM memory_extraction_turns
-                 WHERE session_key = sm.session_key),
+                 WHERE session_key = sm.conversation_id),
                 '1970-01-01'
               ))
-            GROUP BY sm.session_key
+            GROUP BY sm.conversation_id
             HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
             """,
             (idle_threshold_minutes,),
@@ -282,7 +282,7 @@ class EventLogReconciliationTask:
         since = (now - timedelta(hours=24)).isoformat()
         for source, legacy_sql in (
             ("whatsapp",
-             """SELECT COUNT(*) AS n FROM session_messages
+             """SELECT COUNT(*) AS n FROM messages
                 WHERE role = 'user' AND channel = 'whatsapp' AND created_at >= ?"""),
             ("email",
              """SELECT COUNT(*) AS n FROM email_messages m
@@ -345,12 +345,14 @@ class AttentionShadowAgreementTask:
             if decision not in stats:
                 continue
             replied = await ctx.db.fetch_one(
-                """SELECT 1 AS x FROM session_messages
-                   WHERE session_key = ? AND role = 'assistant'
+                """SELECT 1 AS x FROM messages
+                   WHERE conversation_id = COALESCE(
+                       (SELECT conversation_id FROM bindings WHERE session_key = ?), ?)
+                     AND role = 'assistant'
                      AND datetime(created_at) > datetime(?)
                      AND datetime(created_at) <= datetime(?, ?)
                    LIMIT 1""",
-                (r["session_key"], r["created_at"], r["created_at"],
+                (r["session_key"], r["session_key"], r["created_at"], r["created_at"],
                  f"+{self._reply_window_minutes} minutes"))
             live_acted = replied is not None
             agree = (decision == "ACT") == live_acted
@@ -640,7 +642,7 @@ class GrowthMonitoringTask:
         page_size = await ctx.db.fetch_one("PRAGMA page_size")
         size_mb = (list(page_count.values())[0] * list(page_size.values())[0]) / (1024 * 1024)
         counts = {}
-        for table in ("event_log", "session_messages", "llm_call_log",
+        for table in ("event_log", "messages", "llm_call_log",
                       "effects", "turns", "goals"):
             row = await ctx.db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
             counts[table] = row["n"]

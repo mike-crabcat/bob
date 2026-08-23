@@ -87,7 +87,7 @@ async def get_status(request: Request) -> dict[str, Any]:
 
     # Undispatched inbound (last 48h; older rows are pre-Bob3 relics).
     undispatched = await db.fetch_one(
-        """SELECT COUNT(*) AS n FROM session_messages
+        """SELECT COUNT(*) AS n FROM messages
            WHERE role = 'user' AND dispatched = 0
              AND created_at >= datetime('now', '-48 hours')""")
 
@@ -150,7 +150,7 @@ async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
     # DispatchRunner refuses to run with nothing pending — restore the zombie
     # turn's claimed messages first so the retry has something to claim.
     restored = await db.execute(
-        """UPDATE session_messages SET dispatched = 0
+        """UPDATE messages SET dispatched = 0
            WHERE role = 'user' AND id IN (
              SELECT json_extract(e.payload_json, '$.session_message_id')
              FROM turn_events te JOIN event_log e ON e.id = te.event_id
