@@ -62,25 +62,17 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
     contact_id: str | None = None
     is_trusted = False
     contact_name: str | None = None
-    contact = await db.fetch_one(
-        "SELECT id, is_trusted, name FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
-        (phone_number,),
-    )
+    from bob_server.repositories.contacts import ContactRepository
+    contacts_repo = ContactRepository(db)
+    contact = await contacts_repo.get_by_phone(phone_number)
     if contact:
         contact_id = contact["id"]
         is_trusted = bool(contact.get("is_trusted", 0))
         contact_name = contact.get("name")
     else:
         # Auto-seed an untrusted contact
-        from uuid import uuid4 as _uuid4
-        new_id = str(_uuid4())
-        now_iso = utcnow().isoformat()
-        await db.execute(
-            """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
-               VALUES (?, ?, ?, 0, ?, ?)""",
-            (new_id, phone_number, phone_number, now_iso, now_iso),
-        )
-        contact_id = new_id
+        contact_id = await contacts_repo.create(
+            name=phone_number, phone_number=phone_number, is_trusted=0)
 
     # Resolve agenda
     from bob_server.context import AppContext

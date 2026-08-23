@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 
 from bob_server.context import AppContext
 from bob_server.database import Database
+from bob_server.repositories.contacts import ContactRepository
 from bob_server.repositories.history import HistoryRepository
 
 
@@ -581,16 +582,15 @@ class DeletionPropagationTask:
             return
         _last_deletion_propagation = now
 
-        deleted = await ctx.db.fetch_all(
-            "SELECT id FROM contacts WHERE deleted_at IS NOT NULL")
+        deleted_ids = await ContactRepository(ctx.db).deleted_ids()
         redacted = 0
-        for row in deleted:
+        for contact_id in deleted_ids:
             redacted += await ctx.db.execute(
                 """UPDATE event_log
                    SET payload_json = json_object('redacted', 'contact_deleted')
                    WHERE json_extract(payload_json, '$.contact_id') = ?
                      AND json_extract(payload_json, '$.redacted') IS NULL""",
-                (row["id"],),
+                (contact_id,),
             )
         if redacted:
             logger.info("deletion propagation redacted %d event payload(s)", redacted)
