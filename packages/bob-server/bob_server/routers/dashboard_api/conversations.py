@@ -390,20 +390,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
     current_agenda = agenda_row["agenda"] if agenda_row else ""
 
     messages: list[dict[str, Any]] = []
-    m_rows = await db.fetch_all(
-        "SELECT sm.id, sm.role, sm.content, sm.channel, sm.sender_id, sm.created_at, "
-        "COALESCE(c.name, sp.display_name) as sender_name "
-        "FROM messages sm "
-        "LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL "
-        "LEFT JOIN participants sp ON sp.contact_id = sm.sender_id "
-        "AND sp.conversation_id = sm.conversation_id "
-        "WHERE sm.rowid IN ("
-        "  SELECT rowid FROM messages"
-        "  WHERE conversation_id = COALESCE((SELECT conversation_id FROM bindings WHERE session_key = ?), ?)"
-        "  ORDER BY created_at DESC LIMIT 200"
-        ") ORDER BY sm.created_at ASC",
-        (session_key, session_key),
-    )
+    from bob_server.repositories.history import HistoryRepository
+    m_rows = await HistoryRepository(db).detail_messages(session_key, limit=200)
     for row in m_rows:
         messages.append({
             "id": row["id"],

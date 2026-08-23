@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 
 from bob_server.context import AppContext
 from bob_server.database import Database
+from bob_server.repositories.history import HistoryRepository
 
 
 logger = logging.getLogger(__name__)
@@ -124,30 +125,9 @@ class SessionIdleSummaryTask:
         self, db: Database, idle_threshold_minutes: float
     ) -> list[dict]:
         """Find sessions with messages newer than the last silent extraction turn."""
-        rows = await db.fetch_all(
-            """
-            SELECT
-                sm.conversation_id AS session_key,
-                MAX(sm.created_at) AS last_message_at,
-                COALESCE(
-                    (SELECT MAX(ran_at) FROM memory_extraction_turns
-                     WHERE session_key = sm.conversation_id),
-                    '1970-01-01'
-                ) AS active_from,
-                COUNT(*) AS message_count
-            FROM messages sm
-            WHERE sm.conversation_id NOT LIKE 'subagent:%'
-              AND datetime(sm.created_at) > datetime(COALESCE(
-                (SELECT MAX(ran_at) FROM memory_extraction_turns
-                 WHERE session_key = sm.conversation_id),
-                '1970-01-01'
-              ))
-            GROUP BY sm.conversation_id
-            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
-            """,
-            (idle_threshold_minutes,),
-        )
-        return [dict(r) for r in rows] if rows else []
+        rows = await HistoryRepository(db).extraction_candidates(
+            idle_threshold_minutes=idle_threshold_minutes)
+        return rows
 
     async def run(self, ctx: AppContext) -> None:
         from bob_server.services.memory import MemoryService
@@ -276,14 +256,21 @@ class EventLogReconciliationTask:
         _last_event_log_reconcile = now
 
         since = (now - timedelta(hours=24)).isoformat()
-        for source, legacy_sql in (
-            ("whatsapp",
-             """SELECT COUNT(*) AS n FROM messages
-                WHERE role = 'user' AND channel = 'whatsapp' AND created_at >= ?"""),
-            ("email",
-             """SELECT COUNT(*) AS n FROM email_messages m
-                JOIN email_inboxes i ON i.id = m.inbox_id
-                WHERE m.created_at >= ? AND m.sender_email != i.email_address"""),
+        async def _wa_count(since_iso: str) -> int:
+            return await HistoryRepository(ctx.db).count_since(
+                role="user", channel="whatsapp", since_iso=since_iso)
+
+        async def _email_count(since_iso: str) -> int:
+            row = await ctx.db.fetch_one(
+                """SELECT COUNT(*) AS n FROM email_messages m
+                   JOIN email_inboxes i ON i.id = m.inbox_id
+                   WHERE m.created_at >= ? AND m.sender_email != i.email_address""",
+                (since_iso,))
+            return (row or {}).get("n", 0) or 0
+
+        for source, count_fn in (
+            ("whatsapp", _wa_count),
+            ("email", _email_count),
         ):
             first = await ctx.db.fetch_one(
                 "SELECT MIN(recorded_at) AS t FROM event_log WHERE source = ?", (source,))
@@ -291,11 +278,10 @@ class EventLogReconciliationTask:
             if not baseline:
                 continue  # no events yet for this source; nothing to reconcile
             window_start = max(since, baseline)
-            legacy = await ctx.db.fetch_one(legacy_sql, (window_start,))
+            legacy_n = await count_fn(window_start)
             events = await ctx.db.fetch_one(
                 "SELECT COUNT(*) AS n FROM event_log WHERE source = ? AND recorded_at >= ?",
                 (source, window_start))
-            legacy_n = (legacy or {}).get("n", 0) or 0
             events_n = (events or {}).get("n", 0) or 0
             if legacy_n != events_n:
                 logger.warning(
@@ -340,17 +326,10 @@ class AttentionShadowAgreementTask:
             decision = r["decision"]
             if decision not in stats:
                 continue
-            replied = await ctx.db.fetch_one(
-                """SELECT 1 AS x FROM messages
-                   WHERE conversation_id = COALESCE(
-                       (SELECT conversation_id FROM bindings WHERE session_key = ?), ?)
-                     AND role = 'assistant'
-                     AND datetime(created_at) > datetime(?)
-                     AND datetime(created_at) <= datetime(?, ?)
-                   LIMIT 1""",
-                (r["session_key"], r["session_key"], r["created_at"], r["created_at"],
-                 f"+{self._reply_window_minutes} minutes"))
-            live_acted = replied is not None
+            replied = await HistoryRepository(ctx.db).assistant_replied_between(
+                r["session_key"], r["created_at"],
+                window_minutes=self._reply_window_minutes)
+            live_acted = replied
             agree = (decision == "ACT") == live_acted
             stats[decision]["total"] += 1
             if agree:

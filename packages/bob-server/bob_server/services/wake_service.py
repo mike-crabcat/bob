@@ -141,13 +141,8 @@ async def _generic_wake_dispatch(
                 session_key=session_key,
                 dispatch_id=dispatch_id,
             )
-            await ctx.db.execute(
-                "UPDATE messages SET dispatched = 1 "
-                "WHERE conversation_id = COALESCE("
-                "  (SELECT conversation_id FROM bindings WHERE session_key = ?), ?) "
-                "AND role = 'user' AND dispatched = 0",
-                (session_key, session_key),
-            )
+            from bob_server.services.session_service import SessionService
+            await SessionService(ctx).mark_dispatched(session_key)
             if result.strip():
                 await SessionService(ctx).add_message(
                     session_key, "assistant", result, dispatch_id=dispatch_id)

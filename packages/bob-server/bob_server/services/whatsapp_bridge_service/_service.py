@@ -969,14 +969,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         kill -9 during an armed attention window loses zero messages.
 
         Returns the number of sessions re-armed."""
-        rows = await self.db.fetch_all(
-            """SELECT DISTINCT sm.conversation_id AS session_key FROM messages sm
-               WHERE sm.role = 'user' AND sm.dispatched = 0
-                 AND sm.channel = 'whatsapp'""",
-        )
+        rows = await HistoryRepository(self.db).undispatched_conversations(
+            channel="whatsapp")
         resumed = 0
-        for row in rows:
-            session_key = row["session_key"]
+        for session_key in rows:
             try:
                 await self.wake_session(session_key)
                 resumed += 1

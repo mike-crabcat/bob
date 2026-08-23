@@ -12,6 +12,7 @@ mechanical redaction can't judge semantic sensitivity.
 from __future__ import annotations
 
 from bob_server.cli._helpers import *  # noqa: F403,F405
+from bob_server.repositories.history import HistoryRepository
 
 
 app = typer.Typer(help="Replay corpus tooling (episode export + redaction)")
@@ -95,13 +96,12 @@ async def _export_episode(
 
         messages = []
         window = (events[0]["occurred_at"], events[-1]["occurred_at"])
+        history = HistoryRepository(db)
         for i, ev in enumerate(events, 1):
             payload = json.loads(ev["payload_json"] or "{}")
-            sm = await db.fetch_one(
-                "SELECT content FROM messages WHERE id = ?",
-                (payload.get("session_message_id"),))
+            content = await history.content_by_id(payload.get("session_message_id"))
             sender = payload.get("sender_name") or ""
-            text = _redact_text(sm["content"] if sm else "")
+            text = _redact_text(content or "")
             if sender:
                 fake_name(sender)  # register mapping for the report
             digits = ""
@@ -136,19 +136,14 @@ async def _export_episode(
                WHERE t.conversation_id = ? AND e.kind LIKE '%send%'
                  AND e.created_at >= ?""",
             (session_key, window[0]))
-        reply = await db.fetch_one(
-            """SELECT content FROM messages
-               WHERE conversation_id = COALESCE(
-                   (SELECT conversation_id FROM bindings WHERE session_key = ?), ?)
-                 AND role = 'assistant' AND created_at >= ?
-               ORDER BY created_at LIMIT 1""",
-            (session_key, session_key, window[0]))
+        reply_content = await HistoryRepository(db).first_assistant_after(
+            session_key, window[0])
 
         episode = {
             "name": name,
             "description": f"REDACTED production episode from {session_key} "
                            f"({window[0]} .. {window[1]}) — REVIEW BEFORE COMMIT.",
-            "llm_reply": _redact_text(reply["content"]) if reply else "",
+            "llm_reply": _redact_text(reply_content) if reply_content else "",
             "messages": messages,
             "expect": {
                 "turns": turns["n"] if turns else 0,
@@ -194,16 +189,12 @@ async def _export_probe_candidates(limit: int, out: Path | None) -> None:
                WHERE chat_kind = 'group' AND addressed = 0
                ORDER BY id DESC LIMIT ?""", (limit,))
         cases = []
+        history = HistoryRepository(db)
         for r in rows:
-            msgs = await db.fetch_all(
-                """SELECT role, content FROM messages
-                   WHERE conversation_id = COALESCE(
-                       (SELECT conversation_id FROM bindings WHERE session_key = ?), ?)
-                     AND created_at <= ?
-                   ORDER BY created_at DESC LIMIT 6""",
-                (r["session_key"], r["session_key"], r["created_at"]))
+            msgs = await history.window_before(
+                r["session_key"], r["created_at"], limit=6)
             lines = []
-            for m in reversed(msgs):
+            for m in msgs:
                 who = "Bot" if m["role"] == "assistant" else "User"
                 lines.append(f"{who}: {_redact_text(m['content'] or '')}")
             cases.append({

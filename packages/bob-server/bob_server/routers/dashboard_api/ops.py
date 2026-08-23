@@ -86,10 +86,8 @@ async def get_status(request: Request) -> dict[str, Any]:
     ]
 
     # Undispatched inbound (last 48h; older rows are pre-Bob3 relics).
-    undispatched = await db.fetch_one(
-        """SELECT COUNT(*) AS n FROM messages
-           WHERE role = 'user' AND dispatched = 0
-             AND created_at >= datetime('now', '-48 hours')""")
+    from bob_server.repositories.history import HistoryRepository
+    undispatched_n = await HistoryRepository(db).undispatched_count(hours=48)
 
     size_row = await db.fetch_one(
         "SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()")
@@ -114,7 +112,7 @@ async def get_status(request: Request) -> dict[str, Any]:
             } if next_wakeup else None,
         },
         "stuck_turns": stuck_turns,
-        "undispatched_48h": (undispatched or {}).get("n", 0) or 0,
+        "undispatched_48h": undispatched_n,
         "db_bytes": (size_row or {}).get("bytes", 0) or 0,
     }
 
@@ -149,14 +147,8 @@ async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
     # The killed dispatch already marked its user messages dispatched=1, and
     # DispatchRunner refuses to run with nothing pending — restore the zombie
     # turn's claimed messages first so the retry has something to claim.
-    restored = await db.execute(
-        """UPDATE messages SET dispatched = 0
-           WHERE role = 'user' AND id IN (
-             SELECT json_extract(e.payload_json, '$.session_message_id')
-             FROM turn_events te JOIN event_log e ON e.id = te.event_id
-             WHERE te.turn_id = ?
-               AND json_extract(e.payload_json, '$.session_message_id') IS NOT NULL)""",
-        (turn_id,))
+    from bob_server.repositories.history import HistoryRepository
+    restored = await HistoryRepository(db).restore_messages_for_turn(turn_id)
     try:
         await bridge.wake_session(conversation_id)
     except Exception as exc:

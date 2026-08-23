@@ -190,3 +190,183 @@ class HistoryRepository:
         await self.db.execute(
             f"UPDATE messages SET dispatched = 0 WHERE id IN ({placeholders})",
             tuple(message_ids))
+
+    async def restore_messages_for_turn(self, turn_id: str) -> int:
+        """Restore dispatch claims held by a (zombie) turn so a retry has
+        something to claim. Joins turn_events/event_log read-only to find
+        the message ids the turn's events reference."""
+        return await self.db.execute(
+            """UPDATE messages SET dispatched = 0
+               WHERE role = 'user' AND id IN (
+                 SELECT json_extract(e.payload_json, '$.session_message_id')
+                 FROM turn_events te JOIN event_log e ON e.id = te.event_id
+                 WHERE te.turn_id = ?
+                   AND json_extract(e.payload_json, '$.session_message_id') IS NOT NULL)""",
+            (turn_id,))
+
+    async def count_since(self, *, role: str, channel: str, since_iso: str) -> int:
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM messages "
+            "WHERE role = ? AND channel = ? AND created_at >= ?",
+            (role, channel, since_iso))
+        return int(row["n"]) if row else 0
+
+    async def undispatched_count(self, *, hours: int = 48) -> int:
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM messages "
+            "WHERE role = 'user' AND dispatched = 0 "
+            f"AND created_at >= datetime('now', '-{int(hours)} hours')")
+        return int(row["n"]) if row else 0
+
+    async def undispatched_conversations(self, *, channel: str) -> list[str]:
+        """Conversations holding stored-but-unclaimed user messages (crash recovery)."""
+        rows = await self.db.fetch_all(
+            "SELECT DISTINCT conversation_id FROM messages "
+            "WHERE role = 'user' AND dispatched = 0 AND channel = ?",
+            (channel,))
+        return [r["conversation_id"] for r in rows]
+
+    # ----------------------------------------------------- one-off lookups
+
+    async def content_by_id(self, message_id: str | None) -> str | None:
+        if not message_id:
+            return None
+        row = await self.db.fetch_one(
+            "SELECT content FROM messages WHERE id = ?", (message_id,))
+        return row["content"] if row else None
+
+    async def first_assistant_after(self, session_key: str, since_iso: str) -> str | None:
+        row = await self.db.fetch_one(
+            "SELECT content FROM messages "
+            "WHERE conversation_id = ? AND role = 'assistant' AND created_at >= ? "
+            "ORDER BY created_at LIMIT 1",
+            (await self._cid(session_key), since_iso))
+        return row["content"] if row else None
+
+    async def window_before(
+        self, session_key: str, before_iso: str, *, limit: int = 6,
+    ) -> list[dict]:
+        """The last N messages at-or-before a timestamp, oldest-first."""
+        rows = await self.db.fetch_all(
+            "SELECT role, content FROM messages "
+            "WHERE conversation_id = ? AND created_at <= ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (await self._cid(session_key), before_iso, limit))
+        return [dict(r) for r in reversed(rows or [])]
+
+    async def assistant_replied_between(
+        self, session_key: str, after_iso: str, *, window_minutes: int,
+    ) -> bool:
+        row = await self.db.fetch_one(
+            """SELECT 1 AS x FROM messages
+               WHERE conversation_id = ?
+                 AND role = 'assistant'
+                 AND datetime(created_at) > datetime(?)
+                 AND datetime(created_at) <= datetime(?, ?)
+               LIMIT 1""",
+            (await self._cid(session_key), after_iso, after_iso,
+             f"+{window_minutes} minutes"))
+        return row is not None
+
+    # -------------------------------------------- cross-conversation rollups
+    # These read other domains' cursor tables (memory_extraction_turns,
+    # dream_session_review) read-only — sanctioned for repositories.
+
+    async def activity_rollup(self, *, limit: int = 50) -> list[dict]:
+        rows = await self.db.fetch_all(
+            """SELECT conversation_id AS session_key,
+                      COUNT(*) as msg_count,
+                      MAX(created_at) || 'Z' as last_activity
+               FROM messages
+               GROUP BY conversation_id
+               ORDER BY last_activity DESC
+               LIMIT ?""", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def extraction_candidates(self, *, idle_threshold_minutes: float) -> list[dict]:
+        """Conversations with messages newer than their last silent memory
+        extraction, idle past the threshold (heartbeat idle-summary seam)."""
+        rows = await self.db.fetch_all(
+            """
+            SELECT
+                sm.conversation_id AS session_key,
+                MAX(sm.created_at) AS last_message_at,
+                COALESCE(
+                    (SELECT MAX(ran_at) FROM memory_extraction_turns
+                     WHERE session_key = sm.conversation_id),
+                    '1970-01-01'
+                ) AS active_from,
+                COUNT(*) AS message_count
+            FROM messages sm
+            WHERE sm.conversation_id NOT LIKE 'subagent:%'
+              AND datetime(sm.created_at) > datetime(COALESCE(
+                (SELECT MAX(ran_at) FROM memory_extraction_turns
+                 WHERE session_key = sm.conversation_id),
+                '1970-01-01'
+              ))
+            GROUP BY sm.conversation_id
+            HAVING datetime(MAX(sm.created_at)) < datetime('now', '-' || ? || ' minutes')
+            """,
+            (idle_threshold_minutes,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def review_candidates(
+        self, *, min_new_messages: int, max_sessions: int, first_run_lookback_days: int,
+    ) -> list[dict]:
+        """Conversations with messages after their dream-review cursor
+        (dream idle-review seam)."""
+        rows = await self.db.fetch_all(
+            """
+            SELECT
+                sm.conversation_id AS session_key,
+                MAX(sm.created_at) AS newest_message_at,
+                COUNT(*) AS new_messages,
+                COALESCE(dsr.last_reviewed_message_at, '') AS cursor_at
+            FROM messages sm
+            LEFT JOIN dream_session_review dsr ON dsr.session_key = sm.conversation_id
+            WHERE sm.conversation_id NOT LIKE 'subagent:%'
+              AND datetime(sm.created_at) > datetime(COALESCE(dsr.last_reviewed_message_at, '1970-01-01'))
+              AND (
+                dsr.session_key IS NOT NULL
+                OR datetime(sm.created_at) > datetime('now', ?)
+              )
+            GROUP BY sm.conversation_id
+            HAVING COUNT(*) >= ?
+            ORDER BY newest_message_at DESC
+            LIMIT ?
+            """,
+            (f"-{first_run_lookback_days} days", min_new_messages, max_sessions))
+        return [dict(r) for r in rows] if rows else []
+
+    async def assistant_metadata_count_today(self, session_key: str, *, metadata_like: str) -> int:
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM messages "
+            "WHERE conversation_id = ? AND role = 'assistant' "
+            "AND metadata LIKE ? AND date(created_at) = date('now')",
+            (await self._cid(session_key), metadata_like))
+        return int(row["n"]) if row else 0
+
+    async def recent_assistant_with_metadata(self, *, metadata_like: str, limit: int) -> list[dict]:
+        rows = await self.db.fetch_all(
+            "SELECT conversation_id AS session_key, content, created_at FROM messages "
+            "WHERE role = 'assistant' AND metadata LIKE ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (metadata_like, limit))
+        return [dict(r) for r in rows] if rows else []
+
+    async def detail_messages(self, session_key: str, *, limit: int = 200) -> list[dict]:
+        """Dashboard detail view: newest N with resolved sender names
+        (contacts, falling back to the participant roster), oldest-first."""
+        rows = await self.db.fetch_all(
+            "SELECT sm.id, sm.role, sm.content, sm.channel, sm.sender_id, sm.created_at, "
+            "COALESCE(c.name, sp.display_name) as sender_name "
+            "FROM messages sm "
+            "LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL "
+            "LEFT JOIN participants sp ON sp.contact_id = sm.sender_id "
+            "AND sp.conversation_id = sm.conversation_id "
+            "WHERE sm.rowid IN ("
+            "  SELECT rowid FROM messages WHERE conversation_id = ?"
+            "  ORDER BY created_at DESC LIMIT ?"
+            ") ORDER BY sm.created_at ASC",
+            (await self._cid(session_key), limit))
+        return [dict(r) for r in rows] if rows else []

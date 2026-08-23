@@ -132,29 +132,11 @@ class DreamStore(BaseService):
         queue months of history; once a cursor exists, any messages after it
         count (they're leftovers the dream owes a review).
         """
-        rows = await self.db.fetch_all(
-            """
-            SELECT
-                sm.conversation_id AS session_key,
-                MAX(sm.created_at) AS newest_message_at,
-                COUNT(*) AS new_messages,
-                COALESCE(dsr.last_reviewed_message_at, '') AS cursor_at
-            FROM messages sm
-            LEFT JOIN dream_session_review dsr ON dsr.session_key = sm.conversation_id
-            WHERE sm.conversation_id NOT LIKE 'subagent:%'
-              AND datetime(sm.created_at) > datetime(COALESCE(dsr.last_reviewed_message_at, '1970-01-01'))
-              AND (
-                dsr.session_key IS NOT NULL
-                OR datetime(sm.created_at) > datetime('now', ?)
-              )
-            GROUP BY sm.conversation_id
-            HAVING COUNT(*) >= ?
-            ORDER BY newest_message_at DESC
-            LIMIT ?
-            """,
-            (f"-{first_run_lookback_days} days", min_new_messages, max_sessions),
-        )
-        return [dict(r) for r in rows] if rows else []
+        from bob_server.repositories.history import HistoryRepository
+        return await HistoryRepository(self.db).review_candidates(
+            min_new_messages=min_new_messages,
+            max_sessions=max_sessions,
+            first_run_lookback_days=first_run_lookback_days)
 
     async def fetch_session_window(
         self, session_key: str, cursor_at: str | None, *, lookback_days: int, limit: int
@@ -543,14 +525,9 @@ class DreamStore(BaseService):
 
     async def announcements_today(self, session_key: str) -> int:
         """Announcement messages recorded in this session today (daily cap)."""
-        row = await self.db.fetch_one(
-            "SELECT COUNT(*) AS n FROM messages "
-            "WHERE conversation_id = COALESCE((SELECT conversation_id FROM bindings WHERE session_key = ?), ?) "
-            "AND role = 'assistant' "
-            "AND metadata LIKE '%dream_announce%' AND date(created_at) = date('now')",
-            (session_key, session_key),
-        )
-        return int(row["n"]) if row else 0
+        from bob_server.repositories.history import HistoryRepository
+        return await HistoryRepository(self.db).assistant_metadata_count_today(
+            session_key, metadata_like="%dream_announce%")
 
     async def user_messages_since(self, session_key: str, since_iso: str) -> list[dict]:
         """Engagement check: user messages in a session after a timestamp."""
@@ -561,13 +538,9 @@ class DreamStore(BaseService):
 
     async def announce_history(self, limit: int = 30) -> list[dict]:
         """Recent announcement records, newest first (Controls tab)."""
-        rows = await self.db.fetch_all(
-            "SELECT conversation_id AS session_key, content, created_at FROM messages "
-            "WHERE role = 'assistant' AND metadata LIKE '%dream_announce%' "
-            "ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
-        return [dict(r) for r in rows] if rows else []
+        from bob_server.repositories.history import HistoryRepository
+        return await HistoryRepository(self.db).recent_assistant_with_metadata(
+            metadata_like="%dream_announce%", limit=limit)
 
 
 ACTIVE_PLAN_FILTER = list(PLAN_ACTIVE_STATUSES)

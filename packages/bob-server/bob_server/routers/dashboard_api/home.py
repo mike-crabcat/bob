@@ -51,15 +51,8 @@ async def get_home(request: Request) -> dict[str, Any]:
             })
     if msgs_exists_home:
         seen = {s["session_key"] for s in active_sessions}
-        msg_rows = await db.fetch_all(
-            """SELECT conversation_id AS session_key,
-                      COUNT(*) as msg_count,
-                      MAX(created_at) || 'Z' as last_activity
-               FROM messages
-               GROUP BY conversation_id
-               ORDER BY last_activity DESC
-               LIMIT 50"""
-        )
+        from bob_server.repositories.history import HistoryRepository
+        msg_rows = await HistoryRepository(db).activity_rollup(limit=50)
         for row in msg_rows:
             key = row["session_key"]
             if key not in seen:
