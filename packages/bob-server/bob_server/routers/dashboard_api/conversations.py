@@ -47,10 +47,12 @@ async def list_conversations(request: Request) -> dict[str, Any]:
         """SELECT c.id, c.kind, c.title, c.merged_into, c.updated_at,
                   (SELECT COUNT(*) FROM bindings b WHERE b.conversation_id = c.id) AS binding_count,
                   (SELECT MAX(t.created_at) FROM turns t WHERE t.conversation_id = c.id) AS last_turn_at,
+                  (SELECT replace(MAX(l.created_at), ' ', 'T') FROM llm_call_log l
+                   WHERE l.session_key = c.id) AS last_llm_at,
                   (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.id) AS turn_count,
                   (SELECT COUNT(*) FROM goals g WHERE g.conversation_id = c.id AND g.status = 'active') AS active_goals
            FROM conversations c
-           ORDER BY COALESCE(last_turn_at, c.updated_at) DESC
+           ORDER BY COALESCE(NULLIF(MAX(COALESCE(last_turn_at, ''), COALESCE(last_llm_at, '')), ''), c.updated_at) DESC
            LIMIT 200""")
 
     conv_ids = [r["id"] for r in rows]
@@ -82,7 +84,8 @@ async def list_conversations(request: Request) -> dict[str, Any]:
             "bindings": bindings_by_conv.get(r["id"], []),
             "turn_count": r["turn_count"],
             "active_goals": r["active_goals"],
-            "last_activity": _norm_ts(r["last_turn_at"] or r["updated_at"]),
+            "last_activity": _norm_ts(
+                max(r["last_turn_at"] or "", r["last_llm_at"] or "") or r["updated_at"]),
         })
     return {"conversations": conversations}
 

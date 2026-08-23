@@ -29,6 +29,8 @@ def _kind_of(session_key: str) -> str:
         return "group"
     if ":dm:" in session_key:
         return "dm"
+    if ":thread:" in session_key:
+        return "thread"
     return "internal"
 
 
