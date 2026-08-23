@@ -14,6 +14,10 @@ from typing import Any
 
 from bob_server.services.memory.claim_types import ENTITY_TYPES
 
+# Only the N most recent media attachments are base64-inlined into replayed
+# history; older ones are text stubs (path only) to keep prompt size bounded.
+MAX_INLINE_MEDIA = 3
+
 logger = logging.getLogger(__name__)
 
 
@@ -310,6 +314,28 @@ async def build_chat_messages(
                 if seen >= 3:
                     break
 
+        # Indices of the most recent user rows with media attachments — only
+        # these get base64-inlined images/frames. Older media rows replay as
+        # text stubs with the file path (re-viewable via tools), otherwise
+        # every past photo is re-billed on every turn for max_history turns.
+        inline_media_indices: set[int] = set()
+        media_seen = 0
+        for i in range(len(rows) - 1, -1, -1):
+            if rows[i]["role"] != "user":
+                continue
+            raw = rows[i].get("metadata")
+            if not raw:
+                continue
+            try:
+                m = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if m.get("image_path") or m.get("video_path"):
+                inline_media_indices.add(i)
+                media_seen += 1
+                if media_seen >= MAX_INLINE_MEDIA:
+                    break
+
         for i, row in enumerate(rows):
             if not row["content"]:
                 continue
@@ -336,7 +362,6 @@ async def build_chat_messages(
             is_gif = bool(meta.get("is_gif"))
 
             if video_path and row["role"] == "user" and os.path.isfile(video_path):
-                frame_path = _extract_video_frame(video_path)
                 text_prefix = ""
                 if is_group and row["sender_id"]:
                     name = sender_names.get(row["sender_id"])
@@ -344,6 +369,10 @@ async def build_chat_messages(
                         text_prefix = f"[{name}] "
                 attachment_note = "[GIF attached]" if is_gif else "[Video attached]"
                 text_content = text_prefix + (content if content and content not in ("[GIF]", "[Video]") else attachment_note)
+                if i not in inline_media_indices:
+                    messages.append({"role": "user", "content": f"{text_content} (file at {video_path})"})
+                    continue
+                frame_path = _extract_video_frame(video_path)
                 if frame_path and os.path.isfile(frame_path):
                     with open(frame_path, "rb") as f:
                         frame_data = base64.b64encode(f.read()).decode()
@@ -364,6 +393,12 @@ async def build_chat_messages(
                     name = sender_names.get(row["sender_id"])
                     if name:
                         text_prefix = f"[{name}] "
+                if i not in inline_media_indices:
+                    messages.append({
+                        "role": "user",
+                        "content": f"{text_prefix}{content} (image file at {image_path} — view it with a tool if needed)",
+                    })
+                    continue
                 with open(image_path, "rb") as f:
                     image_data = base64.b64encode(f.read()).decode()
                 messages.append({
