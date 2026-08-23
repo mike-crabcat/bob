@@ -175,10 +175,9 @@ class CallCleanupTask:
         max_age_days = settings.phone.call_recording_max_age_days
         cutoff = (now - timedelta(days=max_age_days)).isoformat()
 
-        old_calls = await ctx.db.fetch_all(
-            "SELECT id, recording_path FROM phone_calls WHERE completed_at < ?",
-            (cutoff,),
-        )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        calls_repo = PhoneCallRepository(ctx.db)
+        old_calls = await calls_repo.completed_before(cutoff)
         if not old_calls:
             _last_call_cleanup = now
             return
@@ -188,10 +187,7 @@ class CallCleanupTask:
                 audio_path = settings.data_dir / "calls" / call["recording_path"]
                 if audio_path.exists():
                     audio_path.unlink()
-            await ctx.db.execute(
-                "DELETE FROM phone_calls WHERE id = ?",
-                (call["id"],),
-            )
+            await calls_repo.delete(call["id"])
 
         _last_call_cleanup = now
         logger.info("Cleaned up %d old phone call(s)", len(old_calls))

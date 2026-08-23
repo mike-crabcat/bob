@@ -15,13 +15,8 @@ async def get_subagents(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    rows = await db.fetch_all(
-        """SELECT id, parent_session_key, session_key, task, status,
-                  result, error_message, agent_type, cost_usd,
-                  created_at, updated_at
-           FROM subagents
-           ORDER BY created_at DESC LIMIT 50"""
-    )
+    from bob_server.repositories.subagents import SubagentRepository
+    rows = await SubagentRepository(db).recent(limit=50)
     subagents: list[dict[str, Any]] = []
     for row in rows:
         subagents.append({
@@ -45,13 +40,8 @@ async def get_subagent_detail(request: Request, subagent_id: str) -> dict[str, A
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    row = await db.fetch_one(
-        """SELECT id, parent_session_key, session_key, task, status,
-                  result, error_message, agent_type, claude_session_id, cost_usd,
-                  created_at, updated_at
-           FROM subagents WHERE id = ?""",
-        (subagent_id,),
-    )
+    from bob_server.repositories.subagents import SubagentRepository
+    row = await SubagentRepository(db).get(subagent_id)
     if not row:
         return {"error": "not found"}
     return {

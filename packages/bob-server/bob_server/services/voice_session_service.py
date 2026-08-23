@@ -81,13 +81,10 @@ class VoiceSessionService(BaseService):
                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
             (token, origin_session_key, voice, goal, report_back_session_key, subagent_id, now),
         )
-        await self.db.execute(
-            """INSERT INTO phone_calls
-               (id, call_sid, phone_number, direction, status, agenda, engine,
-                subagent_id, origin_session_key, started_at)
-               VALUES (?, '', ?, 'voice_link', 'ringing', ?, 'openai_realtime', ?, ?, datetime('now'))""",
-            (token, phone_number, goal, subagent_id, origin_session_key),
-        )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        await PhoneCallRepository(self.db).insert_voice_link(
+            token=token, phone_number=phone_number, goal=goal,
+            subagent_id=subagent_id, origin_session_key=origin_session_key)
         base = self._get_settings().resolved_public_url
         url = f"{base}/voice/session.html?id={token}"
         logger.info(
@@ -119,23 +116,17 @@ class VoiceSessionService(BaseService):
             "UPDATE voice_sessions SET status='completed', completed_at=? WHERE status='active'",
             (now,),
         )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        calls_repo = PhoneCallRepository(self.db)
         if count:
-            await self.db.execute(
-                """UPDATE phone_calls
-                   SET status='completed', completed_at=datetime('now')
-                   WHERE direction='voice_link' AND status='active'""",
-            )
+            await calls_repo.complete_stale_voice_links()
         expired = await self.db.execute(
             "UPDATE voice_sessions SET status='expired', completed_at=? "
             "WHERE status='pending' AND created_at < datetime('now', ?)",
             (now, f"-{self.LINK_TTL_HOURS} hours"),
         )
         if expired:
-            await self.db.execute(
-                "UPDATE phone_calls SET status='canceled', completed_at=datetime('now') "
-                "WHERE direction='voice_link' AND status='ringing' AND started_at < datetime('now', ?)",
-                (f"-{self.LINK_TTL_HOURS} hours",),
-            )
+            await calls_repo.expire_stale_voice_links(self.LINK_TTL_HOURS)
         total = count + expired
         if total:
             logger.info("Cleaned up %d stale voice sessions (%d expired links)", total, expired)
@@ -165,10 +156,8 @@ class VoiceSessionService(BaseService):
                 "UPDATE voice_sessions SET status='active', activated_at=? WHERE id=?",
                 (now, token),
             )
-            await self.db.execute(
-                "UPDATE phone_calls SET status='active' WHERE id = ? AND direction='voice_link'",
-                (token,),
-            )
+            from bob_server.repositories.phone_calls import PhoneCallRepository
+            await PhoneCallRepository(self.db).activate_voice_link(token)
         return row
 
     async def persist_transcript(self, token: str, transcript: str) -> None:
@@ -182,10 +171,8 @@ class VoiceSessionService(BaseService):
                 "UPDATE voice_sessions SET transcript = ? WHERE id = ?",
                 (transcript, token),
             )
-            await self.db.execute(
-                "UPDATE phone_calls SET transcript = ? WHERE id = ? AND direction='voice_link'",
-                (transcript, token),
-            )
+            from bob_server.repositories.phone_calls import PhoneCallRepository
+            await PhoneCallRepository(self.db).set_voice_link_transcript(token, transcript)
         except Exception:
             logger.warning("Failed to persist partial voice transcript", exc_info=True)
 
@@ -275,13 +262,10 @@ class VoiceSessionService(BaseService):
             (transcript, duration_seconds,
              _json.dumps(outcome) if outcome else None, now, token),
         )
-        await self.db.execute(
-            """UPDATE phone_calls
-               SET status='completed', transcript=?, duration_seconds=?, outcome=?, completed_at=datetime('now')
-               WHERE id=? AND direction='voice_link'""",
-            (transcript, duration_seconds,
-             _json.dumps(outcome) if outcome else None, token),
-        )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        await PhoneCallRepository(self.db).complete_voice_link(
+            token, transcript=transcript, duration_seconds=duration_seconds,
+            outcome_json=_json.dumps(outcome) if outcome else None)
 
         # Summarise, then hand to the standard thread-result dispatch so Bob relays it.
         summary = await self._summarise(transcript, duration_seconds, outcome)
@@ -318,9 +302,8 @@ class VoiceSessionService(BaseService):
         from bob_server.services.voice_dispatch_service import append_call_completed_event
         call_key = ""
         if subagent_id:
-            sub = await self.db.fetch_one(
-                "SELECT session_key FROM subagents WHERE id = ?", (subagent_id,))
-            call_key = sub["session_key"] if sub else ""
+            from bob_server.repositories.subagents import SubagentRepository
+            call_key = await SubagentRepository(self.db).session_key_of(subagent_id) or ""
         await append_call_completed_event(
             self.db,
             external_id=token,

@@ -58,6 +58,10 @@ def _get_lock(subagent_id: str) -> asyncio.Lock:
 class SubagentService(BaseService):
     """Manages async subagent lifecycle — create, run, message, check, list, kill."""
 
+    def _repo(self):
+        from bob_server.repositories.subagents import SubagentRepository
+        return SubagentRepository(self.db)
+
     async def create_subagent(
         self,
         task: str,
@@ -94,14 +98,11 @@ class SubagentService(BaseService):
         session_key = f"subagent:{parent_session_key}:{short_id}"
         now = utcnow().isoformat()
 
-        await self.db.execute(
-            """INSERT INTO subagents
-               (id, parent_session_key, session_key, task, status, agent_type, persona, model,
-                contact_id, modality, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?)""",
-            (subagent_id, parent_session_key, session_key, task, agent_type,
-             int(persona), model, contact_id, modality, now, now),
-        )
+        await self._repo().insert(
+            subagent_id=subagent_id, parent_session_key=parent_session_key,
+            session_key=session_key, task=task, agent_type=agent_type,
+            persona=int(persona), model=model, contact_id=contact_id,
+            modality=modality, now_iso=now)
 
         # Bob3 Phase V: a subagent is a goal held on behalf of the parent
         # conversation. Completion settles the goal and wakes the parent.
@@ -206,10 +207,7 @@ class SubagentService(BaseService):
         short_id = subagent_id[:8]
         await self._update_status(subagent_id, "running")
 
-        row = await self.db.fetch_one(
-            "SELECT agent_type, persona, session_key, model FROM subagents WHERE id = ?",
-            (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         agent_type = row["agent_type"] if row else "claude"
         session_key = row["session_key"] if row else ""
         persona = bool(row["persona"]) if row else False
@@ -254,13 +252,9 @@ class SubagentService(BaseService):
         cost = result.get("cost_usd", 0)
 
         now = utcnow().isoformat()
-        await self.db.execute(
-            """UPDATE subagents
-               SET status = 'waiting_for_parent', result = ?,
-                   claude_session_id = ?, cost_usd = ?, updated_at = ?
-               WHERE id = ?""",
-            (result_text, claude_session_id, cost, now, subagent_id),
-        )
+        await self._repo().store_result(
+            subagent_id, result=result_text, claude_session_id=claude_session_id,
+            cost_usd=cost, now_iso=now)
 
         # Store assistant message in subagent session
         # (user message already stored before execution for local, or stored here for claude)
@@ -280,9 +274,7 @@ class SubagentService(BaseService):
         _running_tasks.pop(subagent_id, None)
 
     async def message_subagent(self, subagent_id: str, message: str) -> dict[str, Any]:
-        row = await self.db.fetch_one(
-            "SELECT * FROM subagents WHERE id = ?", (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
         if row["agent_type"] == "openai_voice":
@@ -331,13 +323,9 @@ class SubagentService(BaseService):
             total_cost = (row["cost_usd"] or 0) + cost
 
             now = utcnow().isoformat()
-            await self.db.execute(
-                """UPDATE subagents
-                   SET status = 'waiting_for_parent', result = ?,
-                       claude_session_id = ?, cost_usd = ?, updated_at = ?
-                   WHERE id = ?""",
-                (result_text, claude_session_id, total_cost, now, subagent_id),
-            )
+            await self._repo().store_result(
+                subagent_id, result=result_text, claude_session_id=claude_session_id,
+                cost_usd=total_cost, now_iso=now)
 
             # Store messages in subagent session
             if agent_type != "local":
@@ -351,10 +339,7 @@ class SubagentService(BaseService):
             return {"ok": True, "result": result_text, "subagent_id": subagent_id}
 
     async def check_subagent(self, subagent_id: str) -> dict[str, Any]:
-        row = await self.db.fetch_one(
-            "SELECT id, status, result, error_message, cost_usd, task, created_at FROM subagents WHERE id = ?",
-            (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
         return {
@@ -369,16 +354,8 @@ class SubagentService(BaseService):
         }
 
     async def list_subagents(self, parent_session_key: str, status: str = "") -> list[dict[str, Any]]:
-        query = (
-            "SELECT id, status, substr(task, 1, 100) as task_preview, cost_usd, created_at "
-            "FROM subagents WHERE parent_session_key = ?"
-        )
-        params: list[str] = [parent_session_key]
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        query += " ORDER BY created_at DESC LIMIT 20"
-        rows = await self.db.fetch_all(query, tuple(params))
+        rows = await self._repo().list_for_parent(
+            parent_session_key, status=status, limit=20)
         return [
             {
                 "id": row["id"],
@@ -391,9 +368,7 @@ class SubagentService(BaseService):
         ]
 
     async def kill_subagent(self, subagent_id: str) -> dict[str, Any]:
-        row = await self.db.fetch_one(
-            "SELECT status, agent_type FROM subagents WHERE id = ?", (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
 
@@ -415,17 +390,14 @@ class SubagentService(BaseService):
                     (now_iso, subagent_id),
                 )
                 # Keep the phone_calls mirror row in sync (calls UI).
-                await self.db.execute(
-                    "UPDATE phone_calls SET status = 'canceled', completed_at = ? WHERE subagent_id = ? AND direction = 'voice_link' AND status IN ('ringing', 'active')",
-                    (now_iso, subagent_id),
-                )
+                from bob_server.repositories.phone_calls import PhoneCallRepository
+                await PhoneCallRepository(self.db).cancel_voice_links_for_subagent(
+                    subagent_id, now_iso)
             except Exception:
                 logger.warning("Failed to expire voice_session for killed subagent %s", subagent_id[:8], exc_info=True)
 
-            call = await self.db.fetch_one(
-                "SELECT call_sid, status FROM phone_calls WHERE subagent_id = ? ORDER BY started_at DESC LIMIT 1",
-                (subagent_id,),
-            )
+            from bob_server.repositories.phone_calls import PhoneCallRepository
+            call = await PhoneCallRepository(self.db).latest_for_subagent(subagent_id)
             if call and call["status"] in ("active", "ringing"):
                 if hangup_twilio_call(self._get_settings(), call["call_sid"]):
                     logger.info("Hung up phone call %s for killed subagent %s", call["call_sid"], subagent_id[:8])
@@ -451,11 +423,7 @@ class SubagentService(BaseService):
         for minutes-to-hours while the contact hasn't picked up yet.
         """
         now = utcnow().isoformat()
-        count = await self.db.execute(
-            "UPDATE subagents SET status = 'failed', error_message = 'Server restarted', updated_at = ? "
-            "WHERE status IN ('created', 'running') AND agent_type != 'openai_voice'",
-            (now,),
-        )
+        count = await self._repo().fail_stale(now)
         if count:
             logger.info("Cleaned up %d stale subagents", count)
         return count
@@ -471,10 +439,7 @@ class SubagentService(BaseService):
         origin conversation with the result — on any channel. Follow-up
         results (goal already settled) wake the parent directly.
         """
-        row = await self.db.fetch_one(
-            "SELECT parent_session_key, agent_type FROM subagents WHERE id = ?",
-            (subagent_id,),
-        )
+        row = await self._repo().get(subagent_id)
         if not row:
             return
         parent_session_key = row["parent_session_key"]
@@ -536,16 +501,7 @@ class SubagentService(BaseService):
         error: str | None = None,
     ) -> None:
         now = utcnow().isoformat()
-        if error:
-            await self.db.execute(
-                "UPDATE subagents SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
-                (status, error, now, subagent_id),
-            )
-        else:
-            await self.db.execute(
-                "UPDATE subagents SET status = ?, updated_at = ? WHERE id = ?",
-                (status, now, subagent_id),
-            )
+        await self._repo().set_status(subagent_id, status, now, error=error)
         await self._publish_event(subagent_id, status)
 
     async def _publish_event(self, subagent_id: str, status: str) -> None:
@@ -719,11 +675,11 @@ def _register_spawn_executor() -> None:
 
     async def _exec_spawn(ctx, payload):
         subagent_id = payload["subagent_id"]
-        row = await ctx.db.fetch_one(
-            "SELECT status FROM subagents WHERE id = ?", (subagent_id,))
-        if row is None:
+        from bob_server.repositories.subagents import SubagentRepository
+        sub_status = await SubagentRepository(ctx.db).status_of(subagent_id)
+        if sub_status is None:
             raise RuntimeError(f"subagent {subagent_id} not found")
-        if row["status"] not in ("created", "running"):
+        if sub_status not in ("created", "running"):
             return subagent_id  # already finished — idempotent re-delivery
         existing = _running_tasks.get(subagent_id)
         if existing is not None and not existing.done():

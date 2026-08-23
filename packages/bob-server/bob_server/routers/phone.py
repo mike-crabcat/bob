@@ -91,11 +91,9 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
         session_key, endpoint_kind="call", contact_id=str(contact_id))
 
     # Insert DB record
-    await db.execute(
-        """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, agenda, started_at)
-           VALUES (?, ?, ?, 'inbound', 'ringing', ?, datetime('now'))""",
-        (call_id, call_sid, phone_number, agenda),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    await PhoneCallRepository(db).insert_inbound(
+        call_id=call_id, call_sid=call_sid, phone_number=phone_number, agenda=agenda)
 
     # Store for the media_stream handler — inbound calls are realtime too.
     call_agendas[call_sid] = {
@@ -179,16 +177,12 @@ async def _maybe_dispatch_call_result(
     concurrent callers (previously an in-memory set).
     """
     # Look up the call record to get origin_session_key and call_id
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    calls_repo = PhoneCallRepository(db)
     if call_sid:
-        call_row = await db.fetch_one(
-            "SELECT id, origin_session_key, agenda FROM phone_calls WHERE call_sid = ?",
-            (call_sid,),
-        )
+        call_row = await calls_repo.get_by_sid(call_sid)
     elif call_id_override:
-        call_row = await db.fetch_one(
-            "SELECT id, origin_session_key, agenda FROM phone_calls WHERE id = ?",
-            (call_id_override,),
-        )
+        call_row = await calls_repo.get(call_id_override)
     else:
         return
 
@@ -196,11 +190,7 @@ async def _maybe_dispatch_call_result(
         return
 
     call_id = call_row["id"]
-    claimed = await db.execute(
-        "UPDATE phone_calls SET result_dispatched_at = datetime('now') WHERE id = ? AND result_dispatched_at IS NULL",
-        (call_id,),
-    )
-    if not claimed:
+    if not await calls_repo.claim_result_dispatch(call_id):
         return
 
     origin_session_key = call_row["origin_session_key"]
@@ -239,9 +229,8 @@ async def _append_call_status_event(db: Any, call_sid: str, call_status: str, ca
     try:
         from bob_server.repositories import Event, EventLogRepository
 
-        row = await db.fetch_one(
-            "SELECT phone_number, direction FROM phone_calls WHERE call_sid = ?",
-            (call_sid,))
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        row = await PhoneCallRepository(db).get_by_sid(call_sid)
         phone = (row or {}).get("phone_number") or "unknown"
         binding = f"agent:main:phone:dm:{phone.lstrip('+')}"
         await EventLogRepository(db).append(Event(
@@ -274,27 +263,18 @@ async def call_status(request: Request) -> dict:
     await _append_call_status_event(db, call_sid, call_status, call_duration)
 
     # Persist status to DB
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    calls_repo = PhoneCallRepository(db)
     if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
-        if call_duration:
-            await db.execute(
-                """UPDATE phone_calls
-                   SET status = ?, completed_at = datetime('now'), duration_seconds = ?
-                   WHERE call_sid = ?""",
-                (call_status, int(call_duration), call_sid),
-            )
-        else:
-            await db.execute(
-                """UPDATE phone_calls
-                   SET status = ?, completed_at = datetime('now')
-                   WHERE call_sid = ?""",
-                (call_status, call_sid),
-            )
+        await calls_repo.complete_by_sid(
+            call_sid, call_status,
+            duration_seconds=int(call_duration) if call_duration else None)
         # Clean up cached call data
         call_agendas.pop(call_sid, None)
 
         # And any prewarmed session the media stream never claimed
         # (no-answer/busy/failed — the stream never arrives).
-        row = await db.fetch_one("SELECT id FROM phone_calls WHERE call_sid = ?", (call_sid,))
+        row = await calls_repo.get_by_sid(call_sid)
         if row is not None:
             from bob_server.services import realtime_prewarm
             await realtime_prewarm.discard(row["id"])
@@ -308,15 +288,9 @@ async def call_status(request: Request) -> dict:
             call_status=call_status,
         )
     elif call_status == "ringing":
-        await db.execute(
-            "UPDATE phone_calls SET status = 'ringing' WHERE call_sid = ?",
-            (call_sid,),
-        )
+        await calls_repo.set_status_by_sid(call_sid, "ringing")
     elif call_status == "in-progress":
-        await db.execute(
-            "UPDATE phone_calls SET status = 'active' WHERE call_sid = ?",
-            (call_sid,),
-        )
+        await calls_repo.set_status_by_sid(call_sid, "active")
 
     return {"ok": True}
 
@@ -325,14 +299,8 @@ async def call_status(request: Request) -> dict:
 async def list_calls(request: Request) -> dict:
     """List recent phone calls."""
     db = request.app.state.db
-    calls = await db.fetch_all(
-        """SELECT id, call_sid, phone_number, direction, status, agenda,
-                  exchange_count, duration_seconds, recording_path,
-                  started_at, completed_at
-           FROM phone_calls
-           ORDER BY started_at DESC
-           LIMIT 50""",
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    calls = await PhoneCallRepository(db).recent(limit=50)
     return {"calls": [dict(c) for c in calls]}
 
 
@@ -342,24 +310,20 @@ async def get_call(call_id: str, request: Request) -> dict:
     db = request.app.state.db
 
     # Support lookup by call_sid or internal id
-    call = await db.fetch_one(
-        "SELECT * FROM phone_calls WHERE id = ? OR call_sid = ?",
-        (call_id, call_id),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    call = await PhoneCallRepository(db).get(call_id)
     if not call:
         return {"error": "Call not found"}
 
-    return {"call": dict(call), "exchanges": []}
+    return {"call": call, "exchanges": []}
 
 
 @router.post("/calls/{call_id}/hangup")
 async def hangup_call(call_id: str, request: Request) -> dict:
     """Hang up an active or ringing phone call via Twilio."""
     db = request.app.state.db
-    call = await db.fetch_one(
-        "SELECT call_sid, status FROM phone_calls WHERE id = ? OR call_sid = ?",
-        (call_id, call_id),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    call = await PhoneCallRepository(db).get(call_id)
     if not call:
         return {"error": "Call not found"}
     if call["status"] not in ("active", "ringing"):
@@ -497,10 +461,8 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
             speak_first=speak_first,
         )
 
-    await db.execute(
-        "UPDATE phone_calls SET stream_sid = ?, status = 'active' WHERE id = ?",
-        (stream_sid, call_id),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    await PhoneCallRepository(db).attach_stream(call_id, stream_sid)
     if event_bus:
         await event_bus.publish("phone.call.active", {"call_id": call_id})
 
@@ -582,14 +544,11 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
             logger.warning("Failed to finalize realtime recording", exc_info=True)
 
         try:
-            await db.execute(
-                """UPDATE phone_calls
-                   SET status = 'completed', completed_at = datetime('now'),
-                       transcript = ?, recording_path = ?, duration_seconds = ?, outcome = ?
-                   WHERE id = ?""",
-                (transcript, rec_path, duration,
-                 json.dumps(outcome) if outcome else None, call_id),
-            )
+            from bob_server.repositories.phone_calls import PhoneCallRepository
+            await PhoneCallRepository(db).finalize(
+                call_id, transcript=transcript, recording_path=rec_path,
+                duration_seconds=duration,
+                outcome_json=json.dumps(outcome) if outcome else None)
             if event_bus:
                 await event_bus.publish("phone.call.completed", {"call_id": call_id})
         except Exception:

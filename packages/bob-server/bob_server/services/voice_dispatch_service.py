@@ -176,12 +176,8 @@ async def mark_voice_subagent_complete(db: Any, subagent_id: str, result_text: s
     except Exception:
         logger.warning("occupancy release failed for %s", subagent_id[:8], exc_info=True)
     try:
-        await db.execute(
-            """UPDATE subagents
-               SET status = 'completed', result = ?, updated_at = datetime('now')
-               WHERE id = ?""",
-            (result_text[:4000], subagent_id),
-        )
+        from bob_server.repositories.subagents import SubagentRepository
+        await SubagentRepository(db).complete_voice(subagent_id, result_text[:4000])
     except Exception:
         logger.warning("Failed to mark voice subagent %s completed", subagent_id[:8], exc_info=True)
     # Bob3 Phase V: settle the linked goal. No wake here — the voice/call
@@ -252,10 +248,8 @@ def hangup_twilio_call(settings: Any, call_sid: str) -> bool:
 async def persist_call_transcript(db: Any, call_id: str, transcript: str) -> None:
     """Persist a partial phone-call transcript after a turn boundary (best-effort)."""
     try:
-        await db.execute(
-            "UPDATE phone_calls SET transcript = ? WHERE id = ?",
-            (transcript, call_id),
-        )
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        await PhoneCallRepository(db).set_transcript(call_id, transcript)
     except Exception:
         logger.warning("Failed to persist partial phone transcript", exc_info=True)
 
@@ -269,10 +263,8 @@ async def load_call_meta(db: Any, call_sid: str) -> dict | None:
     cached = call_agendas.get(call_sid)
     if cached is not None:
         return cached
-    row = await db.fetch_one(
-        "SELECT id, phone_number, direction, agenda, engine, realtime_meta FROM phone_calls WHERE call_sid = ?",
-        (call_sid,),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    row = await PhoneCallRepository(db).get_by_sid(call_sid)
     if row is None:
         return None
     try:
@@ -389,14 +381,11 @@ async def initiate_outbound_call(
         "realtime_meta": meta,
     }
 
-    await db.execute(
-        """INSERT INTO phone_calls
-           (id, call_sid, phone_number, direction, status, agenda, engine,
-            realtime_meta, subagent_id, origin_session_key, started_at)
-           VALUES (?, ?, ?, 'outbound', 'ringing', ?, ?, ?, ?, ?, datetime('now'))""",
-        (call_id, sid, to_number, agenda, engine,
-         json.dumps(meta), subagent_id, origin_session_key),
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    await PhoneCallRepository(db).insert_outbound(
+        call_id=call_id, call_sid=sid, phone_number=to_number, agenda=agenda,
+        engine=engine, realtime_meta_json=json.dumps(meta),
+        subagent_id=subagent_id, origin_session_key=origin_session_key)
 
     logger.info("Initiated call %s to %s (engine=%s)", sid, to_number, engine)
 
@@ -521,16 +510,16 @@ class VoiceDispatchService(BaseService):
         digits = re.sub(r"\D", "", contact.get("phone_number") or "")
         if not digits:
             return None
-        row = await self.db.fetch_one(
-            "SELECT session_key FROM subagents WHERE id = ?", (subagent_id,))
-        if row is None:
+        from bob_server.repositories.subagents import SubagentRepository
+        call_session_key = await SubagentRepository(self.db).session_key_of(subagent_id)
+        if call_session_key is None:
             return None
         try:
             from bob_server.repositories.conversations import ConversationRepository
             repo = ConversationRepository(self.db)
             conv = await repo.ensure(f"agent:main:whatsapp:dm:{digits}")
             await repo.bind(
-                row["session_key"], conv["id"],
+                call_session_key, conv["id"],
                 channel="voice", address=contact.get("phone_number"),
                 endpoint_kind="call")
             return conv["id"]
@@ -540,7 +529,6 @@ class VoiceDispatchService(BaseService):
             return None
 
     async def _update_subagent_status(self, subagent_id: str, status: str) -> None:
-        await self.db.execute(
-            "UPDATE subagents SET status = ?, updated_at = ? WHERE id = ?",
-            (status, utcnow().isoformat(), subagent_id),
-        )
+        from bob_server.repositories.subagents import SubagentRepository
+        await SubagentRepository(self.db).set_status(
+            subagent_id, status, utcnow().isoformat())

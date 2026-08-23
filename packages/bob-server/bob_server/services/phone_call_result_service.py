@@ -24,9 +24,8 @@ async def generate_call_summary(
     """
     db = ctx.db
 
-    call_row = await db.fetch_one(
-        "SELECT engine, transcript, outcome FROM phone_calls WHERE id = ?", (call_id,)
-    )
+    from bob_server.repositories.phone_calls import PhoneCallRepository
+    call_row = await PhoneCallRepository(db).get(call_id)
     engine = (call_row["engine"] if call_row else None) or "default"
 
     if engine == "openai_realtime":
@@ -128,10 +127,8 @@ async def _append_call_event(
         from bob_server.services.voice_dispatch_service import (
             append_call_completed_event,
         )
-        row = await ctx.db.fetch_one(
-            """SELECT p.subagent_id, p.duration_seconds, p.outcome, s.session_key
-               FROM phone_calls p LEFT JOIN subagents s ON s.id = p.subagent_id
-               WHERE p.id = ?""", (call_id,))
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        row = await PhoneCallRepository(ctx.db).outcome_with_call_session(call_id)
         outcome = None
         if row and row["outcome"]:
             try:
@@ -155,8 +152,8 @@ async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: 
     """Settle the goal linked to this call's subagent, if any (wake handled
     by the caller)."""
     try:
-        row = await ctx.db.fetch_one(
-            "SELECT subagent_id FROM phone_calls WHERE id = ?", (call_id,))
+        from bob_server.repositories.phone_calls import PhoneCallRepository
+        row = await PhoneCallRepository(ctx.db).get(call_id)
         subagent_id = row["subagent_id"] if row else None
         if not subagent_id:
             return
