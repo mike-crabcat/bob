@@ -5,6 +5,7 @@ import { useMemo, useRef, useState } from "react";
 import { fetchAPI, postAPI, putAPI } from "@/lib/api";
 import { RichText } from "@/components/shared/rich-text";
 import { useWSEvents } from "@/hooks/use-live-data";
+import { DecisionTimeline, BindingsCard } from "@/components/conversations/decision-timeline";
 
 interface SessionContext {
   kind: "group" | "dm" | "thread" | null;
@@ -140,7 +141,7 @@ function ChatBubble({ msg, isGroup }: { msg: MessageItem; isGroup: boolean }) {
 function CollapsedCallCard({ call, sessionKey }: { call: CallItem; sessionKey: string }) {
   return (
     <Link
-      to="/sessions/$sessionKey/calls/$callId"
+      to="/conversations/$sessionKey/calls/$callId"
       params={{ sessionKey, callId: call.id }}
       className="block mx-4 my-1 bg-surface/50 border border-border/50 px-2.5 py-1.5 hover:bg-surface transition-colors"
     >
@@ -205,7 +206,7 @@ function ReflectionCard({ call, sessionKey }: { call: CallItem; sessionKey: stri
         </span>
         {call.latency_seconds != null && <span>{call.latency_seconds.toFixed(1)}s</span>}
         <Link
-          to="/sessions/$sessionKey/calls/$callId"
+          to="/conversations/$sessionKey/calls/$callId"
           params={{ sessionKey, callId: call.id }}
           className="text-muted hover:text-accent ml-auto"
           onClick={(e) => e.stopPropagation()}
@@ -355,7 +356,7 @@ function SessionDetailPage() {
     <div className="flex flex-col gap-3 p-3">
       {/* Header */}
       <div>
-        <Link to="/sessions" className="text-xs text-accent hover:underline">&larr; sessions</Link>
+        <Link to="/conversations" className="text-xs text-accent hover:underline">&larr; conversations</Link>
         <h1 className="text-sm font-medium mt-1 break-all">{displayName}</h1>
         {ctx?.display_name && ctx.display_name !== mergedDetail.session_key && (
           <div className="text-[10px] text-muted/50 break-all">{mergedDetail.session_key}</div>
@@ -369,6 +370,9 @@ function SessionDetailPage() {
           {mergedDetail.stats.failed > 0 && <span className="text-error">{mergedDetail.stats.failed} failed</span>}
         </div>
       </div>
+
+      <BindingsCard conversationId={sessionKey} />
+      <DecisionTimeline conversationId={sessionKey} />
 
       {mergedDetail.participants.length > 0 && (
         <section>
@@ -525,4 +529,4 @@ function SessionDetailPage() {
   );
 }
 
-export const Route = createFileRoute("/sessions/$sessionKey/")({ component: SessionDetailPage });
+export const Route = createFileRoute("/conversations/$sessionKey/")({ component: SessionDetailPage });

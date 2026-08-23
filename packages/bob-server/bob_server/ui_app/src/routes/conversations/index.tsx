@@ -3,18 +3,29 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { fetchAPI } from "@/lib/api";
 
-interface SessionItem {
+interface BindingChip {
   session_key: string;
   channel: string;
-  call_count: number;
-  completed: number;
-  failed: number;
-  avg_latency: number;
+  kind: string;
+  address: string | null;
+  merged: boolean;
+}
+
+interface ConversationItem {
+  id: string;
+  kind: string;
+  title: string | null;
+  merged_into: string | null;
+  channel: string;
+  binding_count: number;
+  bindings: BindingChip[];
+  turn_count: number;
+  active_goals: number;
   last_activity: string;
 }
 
-interface SessionsSnapshot {
-  sessions: SessionItem[];
+interface ConversationsSnapshot {
+  conversations: ConversationItem[];
 }
 
 const CHANNEL_COLORS: Record<string, string> = {
@@ -50,17 +61,18 @@ function ChannelDot({ channel }: { channel: string }) {
   return <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${colors[channel] ?? "bg-muted"}`} />;
 }
 
-function SessionsPage() {
+function ConversationsPage() {
   const [filter, setFilter] = useState<string>("all");
 
-  const { data } = useQuery<SessionsSnapshot>({
-    queryKey: ["sessions"],
-    queryFn: () => fetchAPI<SessionsSnapshot>("/sessions"),
+  const { data } = useQuery<ConversationsSnapshot>({
+    queryKey: ["conversations"],
+    queryFn: () => fetchAPI<ConversationsSnapshot>("/conversations"),
   });
 
-  const sessions = data?.sessions ?? [];
-  const filtered = filter === "all" ? sessions : sessions.filter((s) => s.channel === filter);
-  const channels = ["all", ...Array.from(new Set(sessions.map((s) => s.channel)))];
+  const conversations = data?.conversations ?? [];
+  const filtered =
+    filter === "all" ? conversations : conversations.filter((c) => c.channel === filter);
+  const channels = ["all", ...Array.from(new Set(conversations.map((c) => c.channel)))];
 
   return (
     <div className="flex flex-col h-full">
@@ -80,29 +92,42 @@ function SessionsPage() {
 
       <div className="flex-1 overflow-y-auto">
         {filtered.length === 0 ? (
-          <div className="p-4 text-muted text-center text-xs">no sessions</div>
+          <div className="p-4 text-muted text-center text-xs">no conversations</div>
         ) : (
-          filtered.map((s) => (
+          filtered.map((c) => (
             <Link
-              key={s.session_key}
-              to="/sessions/$sessionKey"
-              params={{ sessionKey: s.session_key }}
+              key={c.id}
+              to="/conversations/$sessionKey"
+              params={{ sessionKey: c.id }}
               className="flex items-center gap-2 px-3 py-2 border-b border-border hover:bg-surface transition-colors"
             >
               <div className="flex flex-col items-start gap-0.5 min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <ChannelDot channel={s.channel} />
-                  <span className={`text-[10px] uppercase ${CHANNEL_COLORS[s.channel] ?? "text-muted"}`}>
-                    {s.channel}
+                <div className="flex items-center gap-1.5 min-w-0 w-full">
+                  <ChannelDot channel={c.channel} />
+                  <span className={`text-[10px] uppercase ${CHANNEL_COLORS[c.channel] ?? "text-muted"}`}>
+                    {c.channel}
                   </span>
-                  <span className="text-text truncate text-xs">{s.session_key}</span>
+                  <span className="text-text truncate text-xs">{c.title || c.id}</span>
+                  {c.binding_count > 1 && (
+                    <span className="text-[9px] px-1 border border-accent/60 text-accent shrink-0">
+                      ×{c.binding_count}
+                    </span>
+                  )}
+                  {c.bindings.some((b) => b.merged) && (
+                    <span className="text-[9px] px-1 border border-yellow-500/60 text-yellow-400 shrink-0">
+                      merged
+                    </span>
+                  )}
                 </div>
                 <div className="text-[10px] text-muted">
-                  {s.call_count} calls · {s.failed} failed · avg {s.avg_latency}s
+                  {c.kind} · {c.turn_count} turns
+                  {c.active_goals > 0 && ` · ${c.active_goals} goals`}
+                  {c.binding_count > 1 &&
+                    ` · ${Array.from(new Set(c.bindings.map((b) => b.channel))).join("+")}`}
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
-                <RelativeTime iso={s.last_activity} />
+                <RelativeTime iso={c.last_activity} />
                 <span className="text-muted text-xs">&rsaquo;</span>
               </div>
             </Link>
@@ -113,4 +138,4 @@ function SessionsPage() {
   );
 }
 
-export const Route = createFileRoute("/sessions/")({ component: SessionsPage });
+export const Route = createFileRoute("/conversations/")({ component: ConversationsPage });

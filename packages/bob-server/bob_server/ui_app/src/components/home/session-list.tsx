@@ -40,7 +40,7 @@ export function SessionList({ sessions }: Props) {
         return (
           <Link
             key={s.session_key}
-            to="/sessions/$sessionKey"
+            to="/conversations/$sessionKey"
             params={{ sessionKey: s.session_key }}
             className="flex items-center gap-2 px-2 py-1.5 hover:bg-border transition-colors"
           >

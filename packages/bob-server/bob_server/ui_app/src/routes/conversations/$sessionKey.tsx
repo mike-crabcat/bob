@@ -4,4 +4,4 @@ function SessionLayout() {
   return <Outlet />;
 }
 
-export const Route = createFileRoute("/sessions/$sessionKey")({ component: SessionLayout });
+export const Route = createFileRoute("/conversations/$sessionKey")({ component: SessionLayout });

@@ -7,7 +7,7 @@ import { fetchAPI } from "@/lib/api";
 
 const NAV_ITEMS = [
   { to: "/" as const, label: "Home", icon: "home" },
-  { to: "/sessions" as const, label: "Sessions", icon: "chat" },
+  { to: "/conversations" as const, label: "Convos", icon: "chat" },
   { to: "/contacts" as const, label: "Contacts", icon: "user" },
   { to: "/memory" as const, label: "Memory", icon: "search" },
   { to: "/workspace" as const, label: "Workspace", icon: "folder" },

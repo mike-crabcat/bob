@@ -171,7 +171,7 @@ function CallDetailPage() {
   if ("error" in call) {
     return (
       <div className="flex flex-col gap-3 p-3">
-        <Link to="/sessions/$sessionKey" params={{ sessionKey }} className="text-xs text-accent hover:underline">
+        <Link to="/conversations/$sessionKey" params={{ sessionKey }} className="text-xs text-accent hover:underline">
           &larr; session
         </Link>
         <div className="text-xs text-error text-center">call not found</div>
@@ -190,7 +190,7 @@ function CallDetailPage() {
   return (
     <div className="flex flex-col gap-3 p-3">
       <div>
-        <Link to="/sessions/$sessionKey" params={{ sessionKey }} className="text-xs text-accent hover:underline">
+        <Link to="/conversations/$sessionKey" params={{ sessionKey }} className="text-xs text-accent hover:underline">
           &larr; session
         </Link>
         <div className="flex items-center gap-2 mt-1 text-[10px] text-muted flex-wrap">
@@ -300,4 +300,4 @@ function CallDetailPage() {
   );
 }
 
-export const Route = createFileRoute("/sessions/$sessionKey/calls/$callId")({ component: CallDetailPage });
+export const Route = createFileRoute("/conversations/$sessionKey/calls/$callId")({ component: CallDetailPage });
