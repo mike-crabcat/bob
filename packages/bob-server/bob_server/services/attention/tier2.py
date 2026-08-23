@@ -102,9 +102,12 @@ async def probe_decide(
             session_key=session_key,
         )
     except Exception:
-        logger.warning("tier2: LLM call failed for %s, defaulting ACT",
+        # Fail closed-ish: WAIT defers the decision to the extension window
+        # (one re-probe) rather than replying exactly when the LLM is flaky.
+        # If the extension is already spent, the coordinator forces ACT.
+        logger.warning("tier2: LLM call failed for %s, defaulting WAIT",
                        session_key, exc_info=True)
-        return "ACT"
+        return "WAIT"
 
     try:
         parsed = json.loads(result.strip())

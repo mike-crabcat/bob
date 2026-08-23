@@ -197,6 +197,21 @@ class AttentionCoordinator:
                         dispatch_fn: Callable[[], Awaitable[Any]], *,
                         probe_enabled: bool, probe_model: str,
                         bot_name: str) -> None:
+        # Fire-and-forget task (ensure_future in _arm) — never let exceptions
+        # escape or they surface as "Task exception was never retrieved".
+        try:
+            await self._on_close_inner(
+                session_key, dispatch_fn, probe_enabled=probe_enabled,
+                probe_model=probe_model, bot_name=bot_name)
+        except Exception:
+            logger.error("attention: window-close dispatch failed for %s "
+                         "(messages stay pending for the next stimulus)",
+                         session_key, exc_info=True)
+
+    async def _on_close_inner(self, session_key: str,
+                              dispatch_fn: Callable[[], Awaitable[Any]], *,
+                              probe_enabled: bool, probe_model: str,
+                              bot_name: str) -> None:
         w = self._windows.get(session_key)
         if w is None or session_key in self._dispatching:
             return
