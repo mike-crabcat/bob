@@ -212,6 +212,16 @@ class EmailDeliveryService(BaseService):
             ])
 
             session_key = thread["session_key"]
+            # Canonicalize like inbound ingress (Bob3 Phase VI item 3): ensure
+            # the conversation + binding exist for outbound-initiated threads
+            # so they appear in conversation-centric views and merge correctly.
+            try:
+                from bob_server.repositories.conversations import ConversationRepository
+                conversation = await ConversationRepository(self.db).ensure(
+                    session_key, title=subject)
+                session_key = conversation["id"]
+            except Exception:
+                logger.warning("conversation ensure failed for %s", session_key, exc_info=True)
             logger.info("Dispatching send to LLM session=%s new_thread=%s", session_key, is_new_thread)
 
             workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)

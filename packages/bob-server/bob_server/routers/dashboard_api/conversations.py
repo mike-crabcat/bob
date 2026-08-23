@@ -154,7 +154,8 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
     segments = {k.rsplit(":", 1)[-1] for k in keys} | set(keys)
     effect_rows = await db.fetch_all(
         f"""SELECT id, kind, status, attempt, error, created_at,
-                   COALESCE(json_extract(payload_json, '$.chat_id'),
+                   COALESCE(json_extract(payload_json, '$.origin_session_key'),
+                            json_extract(payload_json, '$.chat_id'),
                             json_extract(payload_json, '$.to'),
                             json_extract(payload_json, '$.session_key'), '') AS target,
                    substr(payload_json, 1, 200) AS payload_preview
