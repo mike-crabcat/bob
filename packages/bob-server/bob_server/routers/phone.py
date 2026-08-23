@@ -357,16 +357,7 @@ async def get_call(call_id: str, request: Request) -> dict:
     if not call:
         return {"error": "Call not found"}
 
-    exchanges = await db.fetch_all(
-        """SELECT exchange_index, user_transcript, assistant_transcript,
-                  stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
-                  started_at, created_at
-           FROM phone_call_exchanges
-           WHERE call_id = ?
-           ORDER BY exchange_index""",
-        (call["id"],),
-    )
-    return {"call": dict(call), "exchanges": [dict(e) for e in exchanges]}
+    return {"call": dict(call), "exchanges": []}
 
 
 @router.post("/calls/{call_id}/hangup")

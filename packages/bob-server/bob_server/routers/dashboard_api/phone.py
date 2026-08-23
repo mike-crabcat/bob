@@ -67,15 +67,7 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
     )
     if not call:
         return {"error": "Call not found"}
-    exchanges = await db.fetch_all(
-        """SELECT exchange_index, user_transcript, assistant_transcript,
-                  stt_ms, llm_total_ms, tts_first_chunk_ms, e2e_ms,
-                  started_at, created_at
-           FROM phone_call_exchanges
-           WHERE call_id = ?
-           ORDER BY exchange_index""",
-        (call["id"],),
-    )
+    exchanges: list = []
     return {
         "call": {
             "id": call["id"],

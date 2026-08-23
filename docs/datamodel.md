@@ -17,7 +17,7 @@ The key is the join column in `bindings` (one per session key), `routines`, `ski
 
 **JSON metadata columns.** Many tables carry a `metadata` (or `*_json`) column holding a JSON object for channel-specific data that does not earn its own top-level column — WhatsApp `chat_id` and media pointers, email header ids, effect payloads, evidence lists. This is deliberate: it keeps the core schema stable while each channel stashes what it needs. Treat these columns as read-mostly context, not as join targets. The notable exception is `memory_claims.source_messages`, which is a JSON array of `messages.id` values used as provenance.
 
-**Soft delete vs hard delete.** Most tables hard-delete: rows actually go away (`DELETE FROM phone_calls` in `CallCleanupTask`, `SessionService.delete_session`). The soft-delete tables set `deleted_at` instead — `contacts`, `projects`, `tasks`, `calendars`, `events`, `email_inboxes`, `email_threads`, `webhook_configs`, `whatsappgroups` — so history that references them still renders (a deleted contact's messages still show a name). Reads in these tables filter `deleted_at IS NULL` by convention. Separately, several tables never delete at all on purpose: `event_log` is append-only forever (deletions propagate as payload tombstones via `DeletionPropagationTask`), and `llm_call_log` keeps rows forever but redacts heavy payloads after 30 days (`LlmLogRetentionTask`). Where a table has an `is_active` or `status` flag, the flag — not row presence — is the source of truth for "is this still relevant".
+**Soft delete vs hard delete.** Most tables hard-delete: rows actually go away (`DELETE FROM phone_calls` in `CallCleanupTask`, `SessionService.delete_session`). The soft-delete tables set `deleted_at` instead — `contacts`, `calendars`, `events`, `email_inboxes`, `email_threads`, `webhook_configs`, `whatsappgroups` — so history that references them still renders (a deleted contact's messages still show a name). Reads in these tables filter `deleted_at IS NULL` by convention. Separately, several tables never delete at all on purpose: `event_log` is append-only forever (deletions propagate as payload tombstones via `DeletionPropagationTask`), and `llm_call_log` keeps rows forever but redacts heavy payloads after 30 days (`LlmLogRetentionTask`). Where a table has an `is_active` or `status` flag, the flag — not row presence — is the source of truth for "is this still relevant".
 
 ---
 
@@ -32,7 +32,6 @@ erDiagram
     conversations ||--o{ turns : "runs"
     conversations ||--o{ wakeups : "schedules"
     conversations ||--o{ goals : "works"
-    conversations ||--o{ subscriptions : "subscribes"
     conversations ||--o{ conversations : "merged_into (self-ref)"
     turns ||--o{ turn_events : "claims"
     turn_events }o--|| event_log : "consumes"
@@ -111,13 +110,6 @@ erDiagram
         text to_status
         int version
     }
-    subscriptions {
-        text id PK
-        text pattern_json
-        text conversation_id FK
-        text goal_id FK
-        text status "active | expired | cancelled"
-    }
     routines {
         text id PK
         text session_key "conversation_id today"
@@ -146,7 +138,7 @@ erDiagram
 
 **`bindings`** — Maps a channel session key onto a conversation. `kind` distinguishes `identity` bindings (a person's stable address) from `thread` bindings (a channel-specific thread). Merge moves bindings onto the survivor conversation and records `merged_from`/`merged_at` so unmerge can return pre-merge events to their original conversation. This is the seam replacing session-key parsing for outbound routing (`services/wake_service.py: conversation_channel`).
 
-**`subscriptions`** — Structural trigger patterns for ambient stimuli (exact-match `pattern_json`). Defined by migration `400` and reserved for a later phase; currently no service writes it.
+*(`subscriptions`, the reserved ambient-stimuli trigger table from migration `400`, was never wired and was dropped in migration `458`.)*
 
 **`routines`** — Definition store for scheduled per-session prompts: name (unique per session), cron `schedule`, `prompt`, timezone and validity window. Firing rides the unified `wakeups` pump since migration `440`; the old `RoutineSchedulerTask` is gone.
 
@@ -261,22 +253,12 @@ erDiagram
 
 ## Dispatches and LLM telemetry
 
-A "dispatch" is one tracked unit of agent work: one WhatsApp reply, one email response, one voice turn. The tracking substrate has moved twice — the original `dispatches` table is frozen, and today a dispatch is identified by an in-memory `dispatch_id` that threads `llm_call_log` rows and `messages` metadata, with durable turn tracking in `turns` (see the Bob3 core domain above).
+A "dispatch" is one tracked unit of agent work: one WhatsApp reply, one email response, one voice turn. The tracking substrate has moved twice — the original `dispatches` table was frozen and then dropped (migration `458`), and today a dispatch is identified by an in-memory `dispatch_id` that threads `llm_call_log` rows and `messages` metadata, with durable turn tracking in `turns` (see the Bob3 core domain above).
 
 ```mermaid
 erDiagram
-    bindings ||--o{ dispatches : "executes (legacy, frozen)"
     bindings ||--o{ llm_call_log : "session_key"
 
-    dispatches {
-        uuid id PK
-        text session_key
-        text notification_id FK "legacy notifications"
-        text status "active | completed | failed | timed_out | cancelled"
-        int tap_count
-        int max_auto_taps
-        real duration_seconds
-    }
     llm_call_log {
         uuid id PK
         text provider
@@ -296,8 +278,6 @@ erDiagram
 
 **`llm_call_log`** — One row per LLM call, whatever subsystem made it. This is what backs the dashboard's latency/token/cost charts and the home-screen activity rankings; `call_category` slices by pipeline (`whatsapp_incoming`, `email_incoming`, `memory_claim_extraction`, `dream_synthesis`, `attention_probe`, …). Rows live forever but are payload-redacted after 30 days (`LlmLogRetentionTask` strips prompts/messages/responses/tool blocks, keeping metrics) — telemetry once grew to 2.4 GB of a 2.5 GB database, which is why. `LLMCallStalenessTask` sweeps calls stuck `running` for 30 minutes to `failed`. *How it gets written:* `LLMDispatchService` (services/llm_dispatch.py) on every call.
 
-**`dispatches`** — Legacy lifecycle tracker for agent dispatches (status machine, tapping, duration). Written until 2026-05; no service writes it today and the dashboard no longer reads it. Retained for history — its role is covered by `turns` (execution) plus `llm_call_log` (cost/latency).
-
 ### Subagents
 
 **`subagents`** — One row per spawned subagent: a Claude Code CLI worker or an `openai_voice` worker. The subagent runs under its own session key (`subagent:<parent_session_key>:<short_id>`), so its turns land in `messages` like any other session; `parent_session_key` links it back to the conversation that spawned it; `agent_type`/`modality` record what kind of worker it is (modality aliases are normalised defensively — the LLM invents enum values); `contact_id` records who the work concerns (used by voice outreach); `status`/`result`/`cost_usd` track completion. Spawning runs as a `subagent_spawn` effect, and a subagent id is what `goals.external_ref` and `phone_calls.subagent_id` point at. *How it gets written:* `services/subagent_service.py` on `create_subagent`; completion marks the row and wakes the parent session with the result via the wake path.
@@ -313,7 +293,6 @@ erDiagram
     subagents ||--o{ phone_calls : "dispatches (subagent_id)"
     subagents ||--o{ voice_sessions : "dispatches (subagent_id)"
     voice_sessions ||--|| phone_calls : "mirrors into (same id)"
-    phone_calls ||--o{ phone_call_exchanges : "legacy turns"
 
     phone_calls {
         uuid id PK
@@ -339,20 +318,13 @@ erDiagram
         text outcome
         text subagent_id FK
     }
-    phone_call_exchanges {
-        int id PK
-        uuid call_id FK "legacy pre-Realtime history"
-        int stt_ms
-        int llm_total_ms
-        int tts_first_chunk_ms
-    }
 ```
 
-**`phone_calls`** — One row per call, any modality. `realtime_meta` carries the dispatch configuration (instructions, voice, max duration, `subagent_id`) durably so the Twilio media-stream handler can recover the call from the DB after a restart between dial and answer; the in-process `call_agendas` cache is a hot-path copy only. `transcript` is turn-ordered (`Agent:` / `User:` lines) and written at every turn boundary, so it is readable mid-call and survives a bridge crash. `outcome` holds the structured `report_success` / `report_failure` tool result as JSON. `result_dispatched_at` is an atomic claim-by-UPDATE guard so the summary dispatches to `origin_session_key` exactly once, across restarts and concurrent callers. *How it gets written:* `services/voice_dispatch_service.py` is the single owner of placement (outbound Twilio rows), `routers/phone.py` creates inbound rows and owns the media-stream lifecycle, `VoiceSessionService` writes the voice-link mirror rows. *Retention:* `CallCleanupTask` deletes calls (and their recordings, and their `phone_call_exchanges`) completed more than `phone.call_recording_max_age_days` ago. Call summaries relay to their session via `services/phone_call_result_service.py` on the wake path.
+**`phone_calls`** — One row per call, any modality. `realtime_meta` carries the dispatch configuration (instructions, voice, max duration, `subagent_id`) durably so the Twilio media-stream handler can recover the call from the DB after a restart between dial and answer; the in-process `call_agendas` cache is a hot-path copy only. `transcript` is turn-ordered (`Agent:` / `User:` lines) and written at every turn boundary, so it is readable mid-call and survives a bridge crash. `outcome` holds the structured `report_success` / `report_failure` tool result as JSON. `result_dispatched_at` is an atomic claim-by-UPDATE guard so the summary dispatches to `origin_session_key` exactly once, across restarts and concurrent callers. *How it gets written:* `services/voice_dispatch_service.py` is the single owner of placement (outbound Twilio rows), `routers/phone.py` creates inbound rows and owns the media-stream lifecycle, `VoiceSessionService` writes the voice-link mirror rows. *Retention:* `CallCleanupTask` deletes calls (and their recordings) completed more than `phone.call_recording_max_age_days` ago. Call summaries relay to their session via `services/phone_call_result_service.py` on the wake path.
 
 **`voice_sessions`** — Source of truth for browser voice-link calls. The id *is* the token in the join URL — a capability: anyone holding the link can join as Bob until the session completes. `origin_session_key` is normally the contact's DM (so the transcript lands in the relationship's memory), with `report_back_session_key` dispatching the summary to a second session (e.g. the group that asked for the reach-out). Untapped links expire after 24 hours (`VoiceSessionService.LINK_TTL_HOURS = 24`, mirrored to the `phone_calls` row as `canceled`); completion flows through `VoiceSessionService.complete`.
 
-**`phone_call_exchanges`** — Legacy per-turn rows with STT/LLM/TTS latency breakdowns from the retired local STT→LLM→TTS pipeline. No longer written; read only for pre-Realtime call history, pruned alongside their call. Same status for `voice_current_lesson` and `voice_lesson_progress` — remnants of the removed language-practice frontend (`/voice/ws`), kept for data preservation only (`voice_session_messages` was archived into `messages` with `provenance='legacy_voice'` and dropped in migration `454`).
+*(The empty legacy tables `phone_call_exchanges`, `voice_current_lesson` and `voice_lesson_progress` — remnants of the retired local STT→TTS pipeline and language-practice frontend — were dropped in migration `458`; `voice_session_messages` was archived into `messages` with `provenance='legacy_voice'` in migration `454`.)*
 
 ---
 
@@ -405,7 +377,7 @@ erDiagram
 
 **`email_messages`** — Raw envelope plus body of every message, inbound and outbound (sent messages are persisted with label `sent` so a thread's history is complete). Attachments are JSON; downloads from trusted senders are persisted into the workspace, executables and code files are blocklisted at the source. *How it gets written:* `EmailPollingService` (services/email_polling_service.py) — polled every heartbeat and fully reconciled every 10th cycle by `EmailSyncTask` — and `EmailDeliveryService` for sent messages.
 
-**`email_threads`** — The bridge between an email thread and the session model: one AgentMail thread maps to one `session_key` (`agent:main:email:thread:<agentmail_thread_id>`), optionally identified with a contact. Without this every reply would start a fresh context. `agenda` holds a custom handling agenda for the thread (seeded on first message, else the default email agenda), and `origin_session_key` routes results to a second session when the thread was started from one (cleared after dispatch so later replies stay in-thread). Thread rows are canonicalized at send as well as at ingest — outbound-first threads get their row before the first reply is sent. `project_id` is a legacy FK into the frozen projects domain.
+**`email_threads`** — The bridge between an email thread and the session model: one AgentMail thread maps to one `session_key` (`agent:main:email:thread:<agentmail_thread_id>`), optionally identified with a contact. Without this every reply would start a fresh context. `agenda` holds a custom handling agenda for the thread (seeded on first message, else the default email agenda), and `origin_session_key` routes results to a second session when the thread was started from one (cleared after dispatch so later replies stay in-thread). Thread rows are canonicalized at send as well as at ingest — outbound-first threads get their row before the first reply is sent.
 
 ---
 
@@ -632,9 +604,9 @@ erDiagram
 
 ---
 
-## Notifications and Webhooks
+## Webhooks
 
-Outbound delivery: notifications are the "tell the user something" queue, webhooks the "tell an external system something" channel. Both are currently in a legacy state — their event sources are the frozen projects/tasks domain.
+Outbound delivery to external systems. The event vocabulary targets the dropped projects/tasks domain, so no deliveries are produced today; the API surface (`routers/webhooks.py`, `cli/webhooks.py`) remains wired.
 
 ```mermaid
 erDiagram
@@ -659,21 +631,11 @@ erDiagram
         int attempt_count
         text next_retry_at
     }
-    notifications {
-        uuid id PK
-        text entity_type "task | project | event"
-        text notification_type "needs_input | task_result | ..."
-        text status "pending | acknowledged | resolved"
-        text delivery_status "pending | sending | delivered | failed"
-        int sequence_number
-    }
 ```
 
 **`webhook_configs`** — Registered outbound webhooks. `events` lists the event types a hook cares about; `secret` is the HMAC key sent in the delivery header. CRUD via `routers/webhooks.py` and `cli/webhooks.py`; soft-deleted.
 
 **`webhook_deliveries`** — Individual delivery attempts with retry tracking and exponential backoff (`next_retry_at`). The delivery loop (`services/webhook_service.py`) exists, but its event vocabulary (`task.completed`, `project.blocked`, …) targets the frozen task/project domain, so no deliveries are being produced today.
-
-**`notifications`** — Legacy user-facing notification queue with per-channel delivery state and sequencing, tied to the task/project/event entity types. Frozen with the projects domain (last write 2026-05); no active writer.
 
 ---
 
@@ -690,23 +652,15 @@ Skill *definitions* live on disk under `~/workspace/skills/<name>/` (`skill.md` 
 Tables that exist for operational visibility or configuration rather than feature state:
 
 - **`schema_migrations`** — Which migration filenames have been applied (`name` PK, `applied_at`). Owned exclusively by `Database.apply_migrations()`; the runner tolerates "duplicate column" errors so re-running idempotent migrations on partially-migrated databases does not brick startup.
-- **`persona_records`** — Versioned persona source (soul, identity, agents, user content, config) with a monotonically unique `revision` and exactly one `is_active` row; prompt assembly reads the active record. Written via `routers/persona.py`. **`persona_config`** is a small key/value override table alongside it.
+- **`persona_records`** — Versioned persona source (soul, identity, agents, user content, config) with a monotonically unique `revision` and exactly one `is_active` row; prompt assembly reads the active record. Written via `routers/persona.py`.
 - **`location_history`** — Periodic device pings from Home Assistant (lat/long, zone, battery) appended by `LocationFetchTask` on the heartbeat; feeds trip/daylog journaling. Append-only telemetry.
 - **`eval_runs` / `eval_case_results`** — Output of the eval harness (`evals/runner.py`, driven by the CLI eval commands): per-case pass/fail, judge score, structural checks, and the exact input messages for reproducibility.
-- **`harness_logs`** — Legacy prompt/response log from the pre-unification harness; frozen (last write 2026-05), superseded by `llm_call_log`.
-- **`prompt_history`** — Legacy prompt audit trail for the projects pipeline; frozen with that domain.
 
 ---
 
-## Legacy: projects, tasks and planning
+## Dropped legacy domains
 
-The first-generation self-executing-project domain. All of it stopped being written around May 2026 when work moved to conversations/goals; the tables are retained for history and are safe to ignore when adding features. Do not build on them, and do not expect FKs into them (e.g. `email_threads.project_id`) to be populated.
-
-- **`projects`** — Specs, state machine (`planning|active|paused|closed`), blocked-reason fields, subagent linkage.
-- **`tasks`** — Work items with planning state, retries, recurrence, submission OTPs; self-referencing `parent_id`.
-- **`plans` / `task_steps` / `task_history` / `task_files`** — Versioned task plans, step tracking, audit trail, artifact files.
-- **`project_specs` / `project_sources` / `project_journal_entries` / `project_insights` / `project_health_checks`** — Spec versioning, cross-project source links, journals, learned insights, health scoring.
-- **`approvals`** — Operator approval gate for plans, strategy refinements, task creation and task input.
+The first-generation self-executing-project domain (`projects`, `tasks`, `plans`, `task_steps`, `task_history`, `task_files`, `project_*`, `approvals`, `notifications`, `subscriptions`, `dispatches`) stopped being written around May 2026 and was dropped in migration `458`, along with the orphaned `prompt_history`, `harness_logs`, `persona_config` and the empty voice/phone remnants (`voice_current_lesson`, `voice_lesson_progress`, `phone_call_exchanges`). All rows are archived in `~/data/archive/bob-legacy-tables-2026-08-23.sql`.
 
 ---
 

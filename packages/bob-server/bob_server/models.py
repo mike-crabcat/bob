@@ -408,7 +408,6 @@ class EmailThreadResponse(BobModel, EntityRef):
     agentmail_thread_id: str
     subject: str | None = None
     contact_id: UUID | None = None
-    project_id: UUID | None = None
     session_key: str
     agenda: str | None = None
     message_count: int = 0

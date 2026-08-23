@@ -208,10 +208,6 @@ class CallCleanupTask:
                 if audio_path.exists():
                     audio_path.unlink()
             await ctx.db.execute(
-                "DELETE FROM phone_call_exchanges WHERE call_id = ?",
-                (call["id"],),
-            )
-            await ctx.db.execute(
                 "DELETE FROM phone_calls WHERE id = ?",
                 (call["id"],),
             )

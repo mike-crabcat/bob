@@ -50,7 +50,6 @@ def _row_to_thread(row: dict[str, Any]) -> EmailThreadResponse:
         agentmail_thread_id=row["agentmail_thread_id"],
         subject=row.get("subject"),
         contact_id=UUID(row["contact_id"]) if row.get("contact_id") else None,
-        project_id=UUID(row["project_id"]) if row.get("project_id") else None,
         session_key=row["session_key"],
         agenda=row.get("agenda"),
         message_count=int(row.get("message_count") or 0),

@@ -10,8 +10,6 @@ from bob_server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
-_MAX_EXCHANGES = 20
-
 
 async def generate_call_summary(
     ctx: AppContext,
@@ -21,9 +19,8 @@ async def generate_call_summary(
 ) -> str:
     """Generate a summary of a phone call from its transcript.
 
-    For default-pipeline calls, summarises the per-exchange rows in
-    ``phone_call_exchanges``. For OpenAI Realtime calls, summarises the
-    assistant-side transcript captured by the bridge (``phone_calls.transcript``).
+    Summarises the assistant-side transcript captured by the OpenAI Realtime
+    bridge (``phone_calls.transcript``) plus any structured outcome.
     """
     db = ctx.db
 
@@ -54,31 +51,9 @@ async def generate_call_summary(
             blocks.append(f"Transcript:\n{transcript}")
         return await _summarize_transcript(ctx, agenda, "\n\n".join(blocks))
 
-    exchanges = await db.fetch_all(
-        """SELECT user_transcript, assistant_transcript
-           FROM phone_call_exchanges
-           WHERE call_id = ?
-           ORDER BY exchange_index""",
-        (call_id,),
-    )
-
-    if not exchanges:
-        return f"Call {status} before connecting. No conversation took place."
-
-    # Cap to last N exchanges
-    if len(exchanges) > _MAX_EXCHANGES:
-        exchanges = exchanges[-_MAX_EXCHANGES:]
-
-    transcript_lines = []
-    for ex in exchanges:
-        user_text = (ex["user_transcript"] or "").strip()
-        assistant_text = (ex["assistant_transcript"] or "").strip()
-        if user_text:
-            transcript_lines.append(f"Caller: {user_text}")
-        if assistant_text:
-            transcript_lines.append(f"Agent: {assistant_text}")
-
-    return await _summarize_transcript(ctx, agenda, "\n".join(transcript_lines))
+    # Legacy default-pipeline calls (phone_call_exchanges was dropped): no
+    # per-exchange transcript exists, so all we can report is the status.
+    return f"Call {status}. No transcript available."
 
 
 async def _summarize_transcript(ctx: AppContext, agenda: str, transcript: str) -> str:
