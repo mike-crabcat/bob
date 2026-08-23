@@ -1,0 +1,56 @@
+{
+  "description": "Golden labels for the Tier 2 attention probe (group chatter actionability). Context strings mirror what _build_context produces. Curate with `bob replay export-probe-candidates`; score with `bob replay probe-matrix`.",
+  "bot_name": "Bob",
+  "cases": [
+    {
+      "name": "banter_reaction",
+      "context": "Recent group messages:\nPerson A: lol\nPerson B: haha yeah that was wild",
+      "label": "STAND_DOWN"
+    },
+    {
+      "name": "addressed_to_other_person",
+      "context": "Recent group messages:\nPerson A: hey Sarah what time are you getting here?",
+      "label": "STAND_DOWN"
+    },
+    {
+      "name": "emoji_only",
+      "context": "Recent group messages:\nPerson A: \ud83d\ude02\ud83d\ude02",
+      "label": "STAND_DOWN"
+    },
+    {
+      "name": "direct_group_question",
+      "context": "Recent group messages:\nPerson A: does anyone know how to reset the router?",
+      "label": "ACT"
+    },
+    {
+      "name": "followup_to_bob_thread",
+      "context": "Recent group messages:\nBob: I've booked the court for 7pm Thursday.\nPerson A: can you make it 8 instead?",
+      "label": "ACT"
+    },
+    {
+      "name": "unanswered_question_to_bob",
+      "context": "Recent group messages:\nPerson A: Bob can you check the weather for Saturday\nPerson B: also bring snacks everyone",
+      "label": "ACT"
+    },
+    {
+      "name": "third_party_names_as_topics",
+      "context": "Recent group messages:\nPerson A: Audrey and Mabel both like swimming, can we find a pool session this weekend?",
+      "label": "ACT"
+    },
+    {
+      "name": "mid_thought_fragment",
+      "context": "Recent group messages:\nPerson A: so what I was thinking is\nPerson A: hang on",
+      "label": "WAIT"
+    },
+    {
+      "name": "active_multiparty_thread",
+      "context": "Recent group messages:\nPerson A: pizza or thai tonight?\nPerson B: thai\nPerson C: wait didn't we do thai last week\nPerson B: did we?",
+      "label": "WAIT"
+    },
+    {
+      "name": "factual_query_general",
+      "context": "Recent group messages:\nPerson A: what's the capital of Mongolia? no googling",
+      "label": "ACT"
+    }
+  ]
+}

@@ -72,6 +72,22 @@ async def probe_actionability(
                        session_key, exc_info=True)
         return "ACT"
 
+    return await probe_decide(ctx, context_text, bot_name=bot_name, model=model,
+                              session_key=session_key)
+
+
+async def probe_decide(
+    ctx: Any,
+    context_text: str,
+    *,
+    bot_name: str = "Bob",
+    model: str = "gpt-5.6-luna",
+    session_key: str = "",
+) -> str:
+    """Run the Tier 2 probe on an already-built context. Shared by the live
+    path (probe_actionability) and the offline confusion-matrix eval
+    (``bob replay probe-matrix``) so both score the exact same prompt,
+    parameters, and parsing."""
     try:
         from bob_server.services.llm_dispatch import LLMDispatchService
 
