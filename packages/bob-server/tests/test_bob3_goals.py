@@ -239,3 +239,24 @@ async def test_subagent_failure_fails_goal(ctx, db, monkeypatch):
     assert goal["status"] == "failed"
     wake.assert_awaited_once()
     assert wake.await_args.args[1] == "agent:main:email:dm:a"
+
+
+async def test_outreach_state_lives_on_goal(ctx, db):
+    """Increment 3: the outreach prompt and reply-tool gate read the active
+    outreach goal, not route metadata; settling clears them."""
+    from bob_server.services.context_assembler import ContextAssembler
+    from bob_server.services.goal_service import create_goal, settle_goal
+
+    target = "agent:main:whatsapp:dm:61400000099"
+    goal = await create_goal(
+        ctx, conversation_id=target, objective="ask about the BBQ",
+        origin_conversation_id="agent:main:whatsapp:dm:61400000001",
+        kind="outreach",
+        strategy={"requestor": "Mike", "message": "hey, BBQ sat?"})
+
+    prompt = await ContextAssembler(ctx).outreach_prompt(target)
+    assert "Active Outreach Request" in prompt
+    assert "Mike" in prompt and "ask about the BBQ" in prompt and "BBQ sat?" in prompt
+
+    await settle_goal(ctx, goal["id"], status="completed", result="done")
+    assert await ContextAssembler(ctx).outreach_prompt(target) == ""

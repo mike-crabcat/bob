@@ -787,18 +787,26 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # detection + Tier 1 windows decide WHEN this dispatch runs; Tier 2
         # (probe_enabled) decides WHETHER an unaddressed group batch runs.
         # Route metadata keeps the legacy flag names for operator continuity.
+        # Policy lives on the conversation (Increment 3); route metadata is a
+        # one-deploy read fallback for rows the 452 backfill missed.
         probe_enabled = False
-        route_row = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if route_row and route_row["metadata"]:
-            try:
-                route_meta = json.loads(route_row["metadata"])
-                probe_enabled = bool(route_meta.get("patience_enabled")) and bool(
-                    route_meta.get("patience_relevance_gating"))
-            except (json.JSONDecodeError, TypeError):
-                pass
+        from bob_server.repositories.conversations import ConversationRepository
+        policy = await ConversationRepository(self.db).get_policy(session_key)
+        if "patience_enabled" in policy or "patience_relevance_gating" in policy:
+            probe_enabled = bool(policy.get("patience_enabled")) and bool(
+                policy.get("patience_relevance_gating"))
+        else:
+            route_row = await self.db.fetch_one(
+                "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
+                (session_key,),
+            )
+            if route_row and route_row["metadata"]:
+                try:
+                    route_meta = json.loads(route_row["metadata"])
+                    probe_enabled = bool(route_meta.get("patience_enabled")) and bool(
+                        route_meta.get("patience_relevance_gating"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         from bob_server.services.attention import AttentionCoordinator
 
@@ -904,19 +912,15 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.voice_outreach_tools import make_voice_outreach_tools
             tools.extend(make_voice_outreach_tools(self.ctx, self, session_key))
 
-        # Outreach reply tool for active outreach targets
-        route = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
+        # Outreach reply tool for active outreach targets (goal-backed).
+        active_outreach = await self.db.fetch_one(
+            "SELECT id FROM goals WHERE conversation_id = ? AND kind = 'outreach' "
+            "AND status = 'active' LIMIT 1",
             (session_key,),
         )
-        if route and route["metadata"]:
-            try:
-                meta = json.loads(route["metadata"])
-            except (json.JSONDecodeError, TypeError):
-                meta = {}
-            if "outreach_initiated_from" in meta:
-                from bob_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
-                tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))
+        if active_outreach:
+            from bob_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
+            tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))
 
         message_was_sent = [False]
         sent_texts: list[str] = []

@@ -1,10 +1,11 @@
 """Runtime dream configuration.
 
-Autoplan is SESSION-SCOPED: the per-session flag lives in session_routes.metadata
-(same idiom as /patience and /verbose), settable from the chat itself via
+Autoplan is CONVERSATION-SCOPED: the flag lives in conversations.policy_json
+(same idiom as /patience and /relevance), settable from the chat itself via
 /autoplan, the CLI, or the dashboard without a restart. The env setting
-(BOB_DREAM_AUTO_APPROVE_PLANS) is only the boot default for sessions with no
-explicit flag.
+(BOB_DREAM_AUTO_APPROVE_PLANS) is only the boot default for conversations
+with no explicit flag. Route metadata is a one-deploy read fallback for rows
+the 452 backfill missed.
 """
 
 from __future__ import annotations
@@ -21,7 +22,14 @@ ROUTE_META_KEY = "dream_autoplan"
 
 
 async def get_session_autoplan(db: Database, session_key: str, boot_default: bool = False) -> bool:
-    """Auto-approve state for one session; falls back to the boot default."""
+    """Auto-approve state for one conversation; falls back to the boot default."""
+    from bob_server.repositories.conversations import ConversationRepository
+
+    policy = await ConversationRepository(db).get_policy(session_key)
+    flag = policy.get(ROUTE_META_KEY)
+    if flag is not None:
+        return bool(flag)
+    # Legacy fallback (drop next deploy): route metadata.
     row = await db.fetch_one(
         "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
         (session_key,),
@@ -37,38 +45,18 @@ async def get_session_autoplan(db: Database, session_key: str, boot_default: boo
 
 
 async def set_session_autoplan(db: Database, session_key: str, enabled: bool) -> bool:
-    """Set the per-session flag. Returns False when no active route exists."""
-    row = await db.fetch_one(
-        "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-        (session_key,),
-    )
-    if not row:
-        return False
-    try:
-        meta = json.loads(row["metadata"]) if row["metadata"] else {}
-    except (ValueError, TypeError):
-        meta = {}
-    meta[ROUTE_META_KEY] = bool(enabled)
-    await db.execute(
-        "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-        (json.dumps(meta), iso_utc(), row["id"]),
-    )
-    return True
+    """Set the per-conversation flag. Returns False for unknown conversations."""
+    from bob_server.repositories.conversations import ConversationRepository
+
+    return await ConversationRepository(db).set_policy(
+        session_key, {ROUTE_META_KEY: bool(enabled)})
 
 
 async def list_autoplan_sessions(db: Database, *, enabled: bool = True) -> list[dict]:
-    """Sessions with an explicit autoplan flag, for status displays."""
+    """Conversations with an explicit autoplan flag, for status displays."""
     rows = await db.fetch_all(
-        "SELECT session_key, metadata FROM session_routes "
-        "WHERE deleted_at IS NULL AND is_active = 1 AND metadata LIKE ?",
-        (f"%{ROUTE_META_KEY}%",),
+        "SELECT id FROM conversations "
+        "WHERE json_extract(policy_json, '$.' || ?) = ?",
+        (ROUTE_META_KEY, 1 if enabled else 0),
     )
-    out = []
-    for r in rows or []:
-        try:
-            meta = json.loads(r["metadata"] or "{}")
-        except (ValueError, TypeError):
-            continue
-        if meta.get(ROUTE_META_KEY) is enabled:
-            out.append({"session_key": r["session_key"], "autoplan": meta[ROUTE_META_KEY]})
-    return out
+    return [{"session_key": r["id"], "autoplan": enabled} for r in rows or []]

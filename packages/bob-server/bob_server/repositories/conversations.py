@@ -71,6 +71,33 @@ class ConversationRepository:
             "SELECT * FROM bindings WHERE conversation_id = ? ORDER BY created_at",
             (conversation_id,))
 
+    async def get_policy(self, session_key: str) -> dict[str, Any]:
+        """The conversation's policy flags (patience_*, dream_autoplan, …),
+        resolved through the binding map. {} when unset/unknown."""
+        import json as _json
+        conv = await self.resolve(session_key) or await self.get(session_key)
+        if not conv or not conv.get("policy_json"):
+            return {}
+        try:
+            policy = _json.loads(conv["policy_json"])
+        except (ValueError, TypeError):
+            return {}
+        return policy if isinstance(policy, dict) else {}
+
+    async def set_policy(self, session_key: str, updates: dict[str, Any]) -> bool:
+        """Merge flag updates into the conversation's policy_json. Returns
+        False when the session_key resolves to no conversation."""
+        import json as _json
+        conv = await self.resolve(session_key) or await self.get(session_key)
+        if not conv:
+            return False
+        policy = await self.get_policy(conv["id"])
+        policy.update(updates)
+        await self.db.execute(
+            "UPDATE conversations SET policy_json = ?, updated_at = ? WHERE id = ?",
+            (_json.dumps(policy), _now_iso(), conv["id"]))
+        return True
+
     async def ensure(
         self,
         session_key: str,

@@ -102,9 +102,10 @@ def make_whatsapp_outreach_tools(
             if requestor:
                 requestor_name = requestor["name"]
 
-        # Bob3 Phase V: outreach is a goal held by the target conversation on
-        # behalf of the requesting one. A 24h deadline wakeup resurfaces
-        # unanswered outreach in the origin conversation.
+        # Bob3 Phase V + Increment 3: outreach state lives ON the goal
+        # (strategy carries requestor/message for the target-side prompt).
+        # A 24h deadline wakeup resurfaces unanswered outreach in the origin
+        # conversation.
         goal_id = None
         try:
             from datetime import datetime, timedelta, timezone
@@ -117,21 +118,14 @@ def make_whatsapp_outreach_tools(
                 objective=objective,
                 origin_conversation_id=current_session_key,
                 kind="outreach",
+                strategy={"requestor": requestor_name, "message": message},
                 deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
             )
             goal_id = goal["id"]
         except Exception:
             logger.warning("failed to create outreach goal", exc_info=True)
 
-        # Create or update session route with outreach metadata
-        outreach_meta = {
-            "outreach_initiated_from": current_session_key,
-            "outreach_objective": objective,
-            "outreach_requestor": requestor_name,
-            "outreach_message": message,
-        }
-        if goal_id:
-            outreach_meta["outreach_goal_id"] = goal_id
+        # Ensure a route exists for the target DM (no outreach state on it).
         route_service = SessionRouteService(ctx)
         try:
             await route_service.create_route(SessionRouteCreate(
@@ -139,25 +133,9 @@ def make_whatsapp_outreach_tools(
                 session_key=target_session_key,
                 kind=SessionRouteKind.DM,
                 contact_id=contact["id"],
-                metadata=outreach_meta,
             ))
         except ConflictError:
-            # Route exists — update metadata with outreach info
-            existing = await db.fetch_one(
-                "SELECT metadata FROM session_routes WHERE session_key = ?",
-                (target_session_key,),
-            )
-            meta = {}
-            if existing and existing["metadata"]:
-                try:
-                    meta = json.loads(existing["metadata"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            meta.update(outreach_meta)
-            await db.execute(
-                "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
-                (json.dumps(meta), target_session_key),
-            )
+            pass
 
         # Store the outreach message in target session history as assistant (bob sent it)
         session_service = SessionService(ctx)
@@ -302,22 +280,24 @@ def make_outreach_reply_tools(
 
         db = ctx.db
 
-        # Find originating session and outreach metadata from route
-        route = await db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
+        # The active outreach goal held by this conversation IS the state.
+        goal = await db.fetch_one(
+            "SELECT id, objective, origin_conversation_id, strategy_json FROM goals "
+            "WHERE conversation_id = ? AND kind = 'outreach' AND status = 'active' "
+            "ORDER BY created_at DESC LIMIT 1",
             (current_session_key,),
         )
-        if not route or not route["metadata"]:
+        if not goal or not goal["origin_conversation_id"]:
             return json.dumps({"ok": False, "error": "No active outreach to report"})
 
-        meta = json.loads(route["metadata"])
-        origin_session_key = meta.get("outreach_initiated_from")
-        if not origin_session_key:
-            return json.dumps({"ok": False, "error": "No active outreach to report"})
-
-        objective = meta.get("outreach_objective", "unknown")
-        requestor = meta.get("outreach_requestor", "unknown")
-        goal_id = meta.get("outreach_goal_id")
+        origin_session_key = goal["origin_conversation_id"]
+        objective = goal["objective"] or "unknown"
+        goal_id = goal["id"]
+        try:
+            strategy = json.loads(goal["strategy_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            strategy = {}
+        requestor = strategy.get("requestor", "unknown")
 
         # Look up target contact name for context
         target_contact = await db.fetch_one(
@@ -327,15 +307,6 @@ def make_outreach_reply_tools(
             (current_session_key,),
         )
         target_contact_name = target_contact["name"] if target_contact else "unknown"
-
-        # Clear outreach metadata from route
-        for key in ("outreach_initiated_from", "outreach_objective",
-                    "outreach_requestor", "outreach_message", "outreach_goal_id"):
-            meta.pop(key, None)
-        await db.execute(
-            "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
-            (json.dumps(meta) if meta else None, current_session_key),
-        )
 
         result_content = (
             f"## Outreach Result\n"

@@ -132,24 +132,24 @@ class ContextAssembler:
             self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled)
 
     async def outreach_prompt(self, session_key: str) -> str:
-        """Active-outreach block from session_routes metadata (WhatsApp)."""
-        route = await self.db.fetch_one(
-            "SELECT metadata FROM session_routes WHERE session_key = ?",
+        """Active-outreach block from the conversation's outreach goal."""
+        goal = await self.db.fetch_one(
+            "SELECT objective, strategy_json FROM goals "
+            "WHERE conversation_id = ? AND kind = 'outreach' AND status = 'active' "
+            "ORDER BY created_at DESC LIMIT 1",
             (session_key,))
-        if not (route and route["metadata"]):
+        if not goal:
             return ""
         try:
-            route_meta = json.loads(route["metadata"])
+            strategy = json.loads(goal["strategy_json"] or "{}")
         except (json.JSONDecodeError, TypeError):
-            route_meta = {}
-        if "outreach_initiated_from" not in route_meta:
-            return ""
+            strategy = {}
         return (
             "## Active Outreach Request\n"
             "You proactively sent a message to this contact.\n"
-            f"- Requested by: {route_meta.get('outreach_requestor', 'unknown')}\n"
-            f"- Objective: {route_meta.get('outreach_objective', 'unknown')}\n"
-            f"- Your initial message: \"{route_meta.get('outreach_message', '')}\"\n\n"
+            f"- Requested by: {strategy.get('requestor', 'unknown')}\n"
+            f"- Objective: {goal['objective'] or 'unknown'}\n"
+            f"- Your initial message: \"{strategy.get('message', '')}\"\n\n"
             "Your goal is to achieve the objective through this conversation. "
             "When you have the information needed, call the finish_outreach tool to relay the result back."
         )

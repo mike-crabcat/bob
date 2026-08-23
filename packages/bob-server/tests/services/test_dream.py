@@ -652,13 +652,16 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
 
 
 async def test_autoplan_is_session_scoped(ctx, stub_env):
-    """Autoplan lives on session_routes metadata: one chat on, others unaffected."""
+    """Autoplan lives on conversations.policy_json (route metadata is a
+    legacy read fallback): one chat on, others unaffected."""
+    from bob_server.repositories.conversations import ConversationRepository
     from bob_server.services.dream import config as dream_config
 
     other = "wa:contact:whatsapp:dm:61400000000"
     await _seed_route(ctx.db, SK, autoplan=False)
     await _seed_route(ctx.db, other, autoplan=True)
 
+    # Legacy fallback: flags still on route metadata are honoured.
     assert await dream_config.get_session_autoplan(ctx.db, SK, False) is False
     assert await dream_config.get_session_autoplan(ctx.db, other, False) is True
     # unset falls back to the boot default
@@ -667,6 +670,14 @@ async def test_autoplan_is_session_scoped(ctx, stub_env):
     assert await dream_config.get_session_autoplan(ctx.db, third, True) is True
     assert await dream_config.get_session_autoplan(ctx.db, third, False) is False
 
+    # Policy is the source of truth: set writes policy_json and wins over
+    # the route flag; unknown conversations are rejected.
+    repo = ConversationRepository(ctx.db)
+    await repo.ensure(SK)
+    await repo.ensure(other)
+    assert await dream_config.set_session_autoplan(ctx.db, "wa:unknown:nope", True) is False
+
+    assert await dream_config.set_session_autoplan(ctx.db, other, True) is True
     on = [s["session_key"] for s in await dream_config.list_autoplan_sessions(ctx.db, enabled=True)]
     assert on == [other]
 

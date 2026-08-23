@@ -50,21 +50,11 @@ class SlashCommandsMixin:
             return
 
         enabled = arg == "on"
-        route = await self.db.fetch_one(
-            "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route:
-            await self.send_message(chat_id, "No session route found")
-            return
-
-        meta = json.loads(route["metadata"]) if route["metadata"] else {}
-        meta["patience_enabled"] = enabled
-        await self.db.execute(
-            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(meta), utcnow().isoformat(), route["id"]),
-        )
-        logger.info("patience %s for session %s (route %s)", arg, session_key, route["id"])
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        await repo.set_policy(session_key, {"patience_enabled": enabled})
+        logger.info("patience %s for conversation %s", arg, session_key)
 
         status = "enabled — waiting for silence before responding" if enabled else "disabled — responding immediately"
         await self.send_message(chat_id, f"Patience {status}")
@@ -82,22 +72,13 @@ class SlashCommandsMixin:
             return
 
         enabled = arg == "on"
-        route = await self.db.fetch_one(
-            "SELECT id, metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-            (session_key,),
-        )
-        if not route:
-            await self.send_message(chat_id, "No session route found")
-            return
-
-        meta = json.loads(route["metadata"]) if route["metadata"] else {}
-        patience_on = bool(meta.get("patience_enabled", False))
-        meta["patience_relevance_gating"] = enabled
-        await self.db.execute(
-            "UPDATE session_routes SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(meta), utcnow().isoformat(), route["id"]),
-        )
-        logger.info("relevance %s for session %s (route %s)", arg, session_key, route["id"])
+        from bob_server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        policy = await repo.get_policy(session_key)
+        patience_on = bool(policy.get("patience_enabled", False))
+        await repo.set_policy(session_key, {"patience_relevance_gating": enabled})
+        logger.info("relevance %s for conversation %s", arg, session_key)
 
         note = "" if patience_on else " (note: /patience is currently OFF — enable that first)"
         status = "enabled — patience LLM may skip dispatch entirely" if enabled else "disabled — patience LLM only decides timing"
