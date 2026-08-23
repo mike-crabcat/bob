@@ -24,11 +24,11 @@ async def get_status(request: Request) -> dict[str, Any]:
 
     from bob_server.services import quota_gate
 
-    from bob_server.repositories.effects import EffectsRepository
+    from bob_server.repositories.effects import EffectRepository
     from bob_server.repositories.turns import TurnRepository
     from bob_server.repositories.goals import GoalRepository
     from bob_server.repositories.wakeups import WakeupRepository
-    effect_counts = await EffectsRepository(db).status_counts()
+    effect_counts = await EffectRepository(db).status_counts()
 
     dead_effects = [
         {
@@ -39,7 +39,7 @@ async def get_status(request: Request) -> dict[str, Any]:
             "payload_preview": (r["payload_json"] or "")[:200],
             "created_at": _utc(r["created_at"]),
         }
-        for r in await EffectsRepository(db).dead(limit=20)
+        for r in await EffectRepository(db).dead(limit=20)
     ]
 
     goal_repo = GoalRepository(db)
@@ -146,8 +146,8 @@ async def retry_effect(effect_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.effects import EffectsRepository
-    changed = await EffectsRepository(db).requeue_dead(effect_id)
+    from bob_server.repositories.effects import EffectRepository
+    changed = await EffectRepository(db).requeue_dead(effect_id)
     if not changed:
         return {"ok": False, "error": "effect not found or not dead"}
     logger.info("dashboard: dead effect %s requeued by operator", effect_id)
@@ -159,8 +159,8 @@ async def discard_effect(effect_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.effects import EffectsRepository
-    changed = await EffectsRepository(db).discard_dead(effect_id)
+    from bob_server.repositories.effects import EffectRepository
+    changed = await EffectRepository(db).discard_dead(effect_id)
     if not changed:
         return {"ok": False, "error": "effect not found or not dead"}
     logger.info("dashboard: dead effect %s discarded by operator", effect_id)
