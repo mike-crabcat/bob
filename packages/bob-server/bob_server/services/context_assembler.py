@@ -70,20 +70,12 @@ class ContextAssembler:
         route = await ConversationRepository(self.db).route_for(session_key)
         if not (route and route["address"]):
             return ""
-        group = await self.db.fetch_one(
-            "SELECT id, name, member_count FROM whatsappgroups "
-            "WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["address"],))
+        from bob_server.repositories.groups import GroupRepository
+        groups = GroupRepository(self.db)
+        group = await groups.get_by_jid(route["address"])
         if not group:
             return ""
-        members = await self.db.fetch_all(
-            """SELECT gm.display_name, gm.is_admin, gm.is_super_admin,
-                      c.name as contact_name, c.is_trusted
-               FROM whatsappgroup_members gm
-               JOIN contacts c ON c.id = gm.contact_id AND c.deleted_at IS NULL
-               WHERE gm.group_id = ? AND gm.left_at IS NULL
-               ORDER BY gm.is_super_admin DESC, gm.is_admin DESC, gm.display_name ASC""",
-            (group["id"],))
+        members = await groups.members_with_contacts(group["id"])
         if not members:
             return ""
         lines = [f"## Participants ({len(members)} members in {group['name'] or 'group'})"]

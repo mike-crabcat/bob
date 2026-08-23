@@ -49,14 +49,8 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         return {"id": None}
 
     sessions: list[dict[str, Any]] = []
-    session_rows = await db.fetch_all(
-        """SELECT sp.conversation_id AS session_key, sp.last_active_at,
-                  (SELECT COUNT(*) FROM llm_call_log l WHERE l.session_key = sp.conversation_id) as call_count
-           FROM participants sp
-           WHERE sp.contact_id = ?
-           ORDER BY sp.last_active_at DESC""",
-        (contact_id,),
-    )
+    from bob_server.repositories.participants import ParticipantRepository
+    session_rows = await ParticipantRepository(db).contact_session_rollup(contact_id)
     for row in session_rows:
         sessions.append({
             "session_key": row["session_key"],
@@ -70,14 +64,8 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         "SELECT name FROM sqlite_master WHERE type='table' AND name='whatsappgroup_members'"
     )
     if groups_table:
-        group_rows = await db.fetch_all(
-            """SELECT g.name, g.whatsapp_jid, gm.is_admin, gm.joined_at
-               FROM whatsappgroup_members gm
-               JOIN whatsappgroups g ON g.id = gm.group_id
-               WHERE gm.contact_id = ? AND gm.left_at IS NULL AND g.deleted_at IS NULL
-               ORDER BY g.name""",
-            (contact_id,),
-        )
+        from bob_server.repositories.groups import GroupRepository
+        group_rows = await GroupRepository(db).groups_for_contact(contact_id)
         for row in group_rows:
             groups.append({
                 "name": row["name"],

@@ -220,16 +220,8 @@ class LlmLogRetentionTask:
         _last_llm_log_redaction = now
 
         cutoff = (now - timedelta(days=self.payload_max_age_days)).isoformat()
-        redacted = await ctx.db.execute(
-            """UPDATE llm_call_log
-               SET system_prompt = '', user_message = '', messages_json = NULL,
-                   response_text = '', tools_json = NULL, tool_blocks_json = NULL
-               WHERE created_at < ?
-                 AND (length(system_prompt) > 0 OR length(user_message) > 0
-                      OR messages_json IS NOT NULL OR length(response_text) > 0
-                      OR tools_json IS NOT NULL OR tool_blocks_json IS NOT NULL)""",
-            (cutoff,),
-        )
+        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        redacted = await LlmCallLogRepository(ctx.db).redact_payloads_before(cutoff)
         if redacted:
             logger.info("Redacted payloads from %d llm_call_log row(s)", redacted)
 
@@ -427,11 +419,9 @@ class LLMCallStalenessTask:
     STALE_MINUTES = 30
 
     async def run(self, ctx: AppContext) -> None:
-        count = await ctx.db.execute(
-            "UPDATE llm_call_log SET status = 'failed', error_message = 'Stale running call — timed out' "
-            "WHERE status = 'running' AND created_at < datetime('now', ?)",
-            (f'-{self.STALE_MINUTES} minutes',),
-        )
+        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        count = await LlmCallLogRepository(ctx.db).fail_stale_running(
+            stale_minutes=self.STALE_MINUTES)
         if count:
             logger.warning("Marked %d stale LLM call(s) as failed", count)
 

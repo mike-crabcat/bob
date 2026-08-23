@@ -99,11 +99,8 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         })
 
     # 2. Tier-2 probe reasoning (llm_call_log; space-format timestamps)
-    for r in await db.fetch_all(
-            f"""SELECT created_at, response_text, status, latency_seconds
-                FROM llm_call_log
-                WHERE call_category = 'attention_probe' AND session_key IN ({marks})
-                ORDER BY created_at DESC LIMIT 50""", tuple(keys)):
+    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    for r in await LlmCallLogRepository(db).probe_decisions(list(keys), limit=50):
         decision, reason = None, None
         try:
             parsed = json.loads(r["response_text"] or "")
@@ -255,11 +252,8 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         session_context["kind"] = kind
 
         if kind == "group" and address:
-            group = await db.fetch_one(
-                "SELECT name, description, member_count FROM whatsappgroups "
-                "WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-                (address,),
-            )
+            from bob_server.repositories.groups import GroupRepository
+            group = await GroupRepository(db).get_by_jid(address)
             if group:
                 session_context["display_name"] = group["name"]
                 session_context["description"] = group["description"]
@@ -293,19 +287,9 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
                 session_context["display_name"] = contact["name"]
 
     calls: list[dict[str, Any]] = []
-    rows = await db.fetch_all(
-        """SELECT l.id, l.created_at, l.call_category, l.status, l.latency_seconds,
-                  l.ttft_seconds, l.total_tokens, l.prompt_tokens, l.completion_tokens,
-                  l.tool_blocks_json, l.user_message, l.response_text,
-                  l.error_message, l.contact_id, l.model,
-                  c.name as contact_name
-           FROM llm_call_log l
-           LEFT JOIN contacts c ON c.id = l.contact_id AND c.deleted_at IS NULL
-           WHERE l.session_key = ?
-           ORDER BY l.created_at DESC
-           LIMIT 100""",
-        (session_key,),
-    )
+    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    rows = await LlmCallLogRepository(db).session_calls_with_contact(
+        session_key, limit=100)
     for row in rows:
         is_reflection = row.get("call_category") == "reflection"
         tool_count = 0

@@ -912,14 +912,9 @@ class MemoryService(BaseService):
         route = await ConversationRepository(self.db).route_for(source_id)
         if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
-        rows = await self.db.fetch_all(
-            "SELECT gm.contact_id FROM whatsappgroup_members gm "
-            "JOIN contacts c ON c.id = gm.contact_id "
-            "WHERE gm.group_id = (SELECT id FROM whatsappgroups WHERE whatsapp_jid = ?) "
-            "AND gm.left_at IS NULL",
-            (route["address"],),
-        )
-        return [f"contact-{str(r['contact_id'])[:8]}" for r in rows]
+        from bob_server.repositories.groups import GroupRepository
+        ids = await GroupRepository(self.db).member_contact_ids(route["address"])
+        return [f"contact-{cid[:8]}" for cid in map(str, ids)]
 
     @staticmethod
     def _format_group_members(directory: Any, member_ids: list[str]) -> str:
@@ -1078,11 +1073,8 @@ class MemoryService(BaseService):
         route = await ConversationRepository(self.db).route_for(source_id)
         if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
-        row = await self.db.fetch_one(
-            "SELECT memory_entity_id FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["address"],),
-        )
-        return row["memory_entity_id"] if row and row["memory_entity_id"] else None
+        from bob_server.repositories.groups import GroupRepository
+        return await GroupRepository(self.db).memory_entity_id(route["address"])
 
     async def ensure_group_entity(
         self,
@@ -1098,11 +1090,9 @@ class MemoryService(BaseService):
 
         chat_id = route["address"]
 
-        group_row = await self.db.fetch_one(
-            "SELECT id, name, description, memory_entity_id, member_count "
-            "FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (chat_id,),
-        )
+        from bob_server.repositories.groups import GroupRepository
+        groups = GroupRepository(self.db)
+        group_row = await groups.get_by_jid(chat_id)
         if not group_row:
             return None
 
@@ -1125,10 +1115,7 @@ class MemoryService(BaseService):
             await self.write_entity(workspace_dir, entity)
             existing_entity_id = entity_id
 
-            await self.db.execute(
-                "UPDATE whatsappgroups SET memory_entity_id = ? WHERE id = ?",
-                (entity_id, group_row["id"]),
-            )
+            await groups.set_memory_entity(group_row["id"], entity_id)
 
         await self.db.execute(
             "INSERT OR IGNORE INTO memory_entity_bulletins (entity_id, bulletin_id) VALUES (?, ?)",

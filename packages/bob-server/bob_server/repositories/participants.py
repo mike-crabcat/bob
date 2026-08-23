@@ -92,6 +92,17 @@ class ParticipantRepository:
             (contact_id,))
         return [r["conversation_id"] for r in rows]
 
+    async def contact_session_rollup(self, contact_id: str) -> list[dict[str, Any]]:
+        """A contact's conversations with LLM-call counts, most recent first."""
+        rows = await self.db.fetch_all(
+            """SELECT sp.conversation_id AS session_key, sp.last_active_at,
+                      (SELECT COUNT(*) FROM llm_call_log l WHERE l.session_key = sp.conversation_id) as call_count
+               FROM participants sp
+               WHERE sp.contact_id = ?
+               ORDER BY sp.last_active_at DESC""",
+            (contact_id,))
+        return [dict(r) for r in rows] if rows else []
+
 
 class AgendaRepository:
     def __init__(self, db: Database) -> None:

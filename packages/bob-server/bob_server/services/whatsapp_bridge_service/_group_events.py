@@ -41,23 +41,11 @@ class GroupEventsMixin:
         now_iso = utcnow().isoformat()
 
         # Upsert group
-        existing_group = await self.db.fetch_one(
-            "SELECT id FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (group_jid,),
-        )
-        if existing_group:
-            group_id = existing_group["id"]
-            await self.db.execute(
-                "UPDATE whatsappgroups SET name = ?, description = ?, member_count = ?, updated_at = ? WHERE id = ?",
-                (group_name, description, len(participants), now_iso, group_id),
-            )
-        else:
-            group_id = str(uuid4())
-            await self.db.execute(
-                """INSERT INTO whatsappgroups (id, whatsapp_jid, name, description, member_count, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (group_id, group_jid, group_name, description, len(participants), now_iso, now_iso),
-            )
+        from bob_server.repositories.groups import GroupRepository
+        groups = GroupRepository(self.db)
+        group_id = await groups.upsert_group(
+            group_jid, name=group_name, description=description,
+            member_count=len(participants), now_iso=now_iso)
 
         # Process each participant
         seen_contact_ids: set[str] = set()
@@ -72,25 +60,12 @@ class GroupEventsMixin:
             seen_contact_ids.add(contact_id)
 
             # Upsert group member
-            await self.db.execute(
-                """INSERT INTO whatsappgroup_members (id, group_id, contact_id, is_admin, is_super_admin, display_name, joined_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(group_id, contact_id) DO UPDATE SET
-                       is_admin = excluded.is_admin,
-                       is_super_admin = excluded.is_super_admin,
-                       display_name = excluded.display_name,
-                       left_at = NULL,
-                       updated_at = excluded.updated_at""",
-                (str(uuid4()), group_id, contact_id, is_admin, is_super_admin, display_name, now_iso, now_iso, now_iso),
-            )
+            await groups.upsert_member(
+                group_id, contact_id, display_name=display_name, now_iso=now_iso,
+                is_admin=is_admin, is_super_admin=is_super_admin)
 
         # Mark departed members
-        if seen_contact_ids:
-            placeholders = ",".join("?" for _ in seen_contact_ids)
-            await self.db.execute(
-                f"UPDATE whatsappgroup_members SET left_at = ?, updated_at = ? WHERE group_id = ? AND left_at IS NULL AND contact_id NOT IN ({placeholders})",
-                (now_iso, now_iso, group_id, *seen_contact_ids),
-            )
+        await groups.mark_departed_except(group_id, seen_contact_ids, now_iso)
 
         # Upsert all participants
         agent_id = "main"
@@ -131,19 +106,9 @@ class GroupEventsMixin:
         now_iso = utcnow().isoformat()
 
         # Resolve or create group
-        group = await self.db.fetch_one(
-            "SELECT id, name FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (group_jid,),
-        )
-        if not group:
-            group_id = str(uuid4())
-            await self.db.execute(
-                """INSERT INTO whatsappgroups (id, whatsapp_jid, name, member_count, created_at, updated_at)
-                   VALUES (?, ?, ?, 0, ?, ?)""",
-                (group_id, group_jid, group_name, now_iso, now_iso),
-            )
-        else:
-            group_id = group["id"]
+        from bob_server.repositories.groups import GroupRepository
+        groups = GroupRepository(self.db)
+        group_id = await groups.ensure_group(group_jid, group_name, now_iso)
 
         agent_id = "main"
         key_part = group_jid.split("@")[0] if "@" in group_jid else group_jid
@@ -162,16 +127,8 @@ class GroupEventsMixin:
             join_names.append(display_name or phone_number)
 
             # Upsert group member (re-join if previously left)
-            await self.db.execute(
-                """INSERT INTO whatsappgroup_members (id, group_id, contact_id, display_name, joined_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(group_id, contact_id) DO UPDATE SET
-                       left_at = NULL,
-                       joined_at = excluded.joined_at,
-                       display_name = COALESCE(excluded.display_name, whatsappgroup_members.display_name),
-                       updated_at = excluded.updated_at""",
-                (str(uuid4()), group_id, contact_id, display_name, now_iso, now_iso, now_iso),
-            )
+            await groups.upsert_member(
+                group_id, contact_id, display_name=display_name, now_iso=now_iso)
 
             # Upsert session participant
             contact = await self._contacts().get_by_phone(phone_number)
@@ -189,23 +146,12 @@ class GroupEventsMixin:
             existing_contact = await self._contacts().get_by_phone(phone_number)
             if existing_contact:
                 leave_names.append(existing_contact["name"] or phone_number)
-                await self.db.execute(
-                    "UPDATE whatsappgroup_members SET left_at = ?, updated_at = ? WHERE group_id = ? AND contact_id = ? AND left_at IS NULL",
-                    (now_iso, now_iso, group_id, existing_contact["id"]),
-                )
+                await groups.mark_left(group_id, existing_contact["id"], now_iso)
             else:
                 leave_names.append(phone_number)
 
         # Update member count
-        count_row = await self.db.fetch_one(
-            "SELECT COUNT(*) as cnt FROM whatsappgroup_members WHERE group_id = ? AND left_at IS NULL",
-            (group_id,),
-        )
-        member_count = count_row["cnt"] if count_row else 0
-        await self.db.execute(
-            "UPDATE whatsappgroups SET member_count = ?, updated_at = ? WHERE id = ?",
-            (member_count, now_iso, group_id),
-        )
+        member_count = await groups.refresh_member_count(group_id, now_iso)
 
         # Build notification text
         notification_parts = []

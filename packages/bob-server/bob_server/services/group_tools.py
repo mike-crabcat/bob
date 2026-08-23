@@ -25,22 +25,13 @@ def make_group_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         if not route or not route["address"]:
             return "Not in a group session."
 
-        group = await db.fetch_one(
-            "SELECT id, name, member_count FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
-            (route["address"],),
-        )
+        from bob_server.repositories.groups import GroupRepository
+        groups = GroupRepository(db)
+        group = await groups.get_by_jid(route["address"])
         if not group:
             return "Group not found."
 
-        rows = await db.fetch_all(
-            """SELECT gm.display_name, gm.is_admin, gm.is_super_admin,
-                      c.name as contact_name, c.phone_number, c.is_trusted
-               FROM whatsappgroup_members gm
-               JOIN contacts c ON c.id = gm.contact_id AND c.deleted_at IS NULL
-               WHERE gm.group_id = ? AND gm.left_at IS NULL
-               ORDER BY gm.is_super_admin DESC, gm.is_admin DESC, gm.display_name ASC""",
-            (group["id"],),
-        )
+        rows = await groups.members_with_contacts(group["id"])
 
         lines = [f"Group: {group['name']} ({len(rows)} members)"]
         for r in rows:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from bob_server.repositories.llm_call_log import LlmCallLogRepository
 
 
 router = APIRouter()
@@ -25,19 +26,7 @@ async def get_home(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
     )
     if log_exists:
-        rows = await db.fetch_all(
-            """SELECT session_key,
-                      COUNT(*) as call_count,
-                      MAX(created_at) || 'Z' as last_activity,
-                      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
-                      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
-                      ROUND(AVG(CASE WHEN latency_seconds IS NOT NULL THEN latency_seconds END), 2) as avg_latency
-               FROM llm_call_log
-               WHERE session_key IS NOT NULL
-               GROUP BY session_key
-               ORDER BY last_activity DESC
-               LIMIT 50"""
-        )
+        rows = await LlmCallLogRepository(db).activity_rollup(limit=50)
         for row in rows:
             key = row["session_key"]
             active_sessions.append({
@@ -72,21 +61,7 @@ async def get_home(request: Request) -> dict[str, Any]:
     chart_buckets: list[dict[str, Any]] = []
     chart_categories: list[str] = []
     if log_exists:
-        chart_rows = await db.fetch_all(
-            """SELECT
-                  strftime('%Y-%m-%dT%H:%M',
-                      datetime(strftime('%s', created_at) - strftime('%s', created_at) % 900, 'unixepoch')
-                  ) as interval_start,
-                  call_category,
-                  COUNT(*) as count
-               FROM llm_call_log
-               WHERE created_at >= datetime('now', '-24 hours')
-                 AND NOT (status = 'failed' AND (
-                     error_message LIKE '%insufficient_quota%'
-                     OR error_message LIKE '%credit_balance_exhausted%'))
-               GROUP BY interval_start, call_category
-               ORDER BY interval_start"""
-        )
+        chart_rows = await LlmCallLogRepository(db).category_chart_24h()
         bucket_map: dict[str, dict[str, int]] = {}
         categories: set[str] = set()
         for row in chart_rows:
@@ -158,20 +133,7 @@ async def get_home(request: Request) -> dict[str, Any]:
     cost_by_category: list[dict[str, Any]] = []
     total_cost_24h = 0.0
     if log_exists:
-        cost_rows = await db.fetch_all(
-            """SELECT call_category, model,
-                      SUM(COALESCE(prompt_tokens, 0)) as total_prompt_tokens,
-                      SUM(COALESCE(completion_tokens, 0)) as total_completion_tokens,
-                      SUM(COALESCE(cached_tokens, 0)) as total_cached_tokens,
-                      COUNT(*) as call_count
-               FROM llm_call_log
-               WHERE created_at >= datetime('now', '-24 hours')
-                 AND NOT (status = 'failed' AND (
-                     error_message LIKE '%insufficient_quota%'
-                     OR error_message LIKE '%credit_balance_exhausted%'))
-               GROUP BY call_category, model
-               ORDER BY call_category, model"""
-        )
+        cost_rows = await LlmCallLogRepository(db).cost_rollup_24h()
         # Pricing per 1M tokens (input, output). Cached input is billed at 10%
         # of the input rate (OpenAI's 90% prompt-cache discount).
         _PRICING: dict[str, tuple[float, float]] = {

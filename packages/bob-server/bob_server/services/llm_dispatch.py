@@ -219,49 +219,20 @@ async def _record_log(
     If log_id is provided and a row with that id exists, UPDATE it.
     Otherwise INSERT a new row.
     """
+    from bob_server.repositories.llm_call_log import LlmCallLogRepository
     try:
-        if log_id is not None:
-            existing = await db.fetch_one(
-                "SELECT id FROM llm_call_log WHERE id = ?", (log_id,),
-            )
-            if existing:
-                await db.execute(
-                    """UPDATE llm_call_log SET
-                       response_text=?, latency_seconds=?, ttft_seconds=?,
-                       prompt_tokens=?, completion_tokens=?, total_tokens=?, cached_tokens=?,
-                       status=?, error_message=?, messages_json=COALESCE(?, messages_json),
-                       tool_blocks_json=COALESCE(?, tool_blocks_json)
-                       WHERE id = ?""",
-                    (
-                        response_text, latency_seconds, ttft_seconds,
-                        prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                        status, error_message, messages_json,
-                        tool_blocks_json,
-                        log_id,
-                    ),
-                )
-                return log_id
-
-        row_id = log_id or str(uuid4())
-        await db.execute(
-            """INSERT INTO llm_call_log
-               (id, provider, model, call_category, session_key,
-                system_prompt, user_message, messages_json, tools_json,
-                response_text, latency_seconds, ttft_seconds,
-                prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                status, error_message, project_id, task_id, dispatch_id, contact_id,
-                tool_blocks_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                row_id, provider, model, call_category, session_key,
-                system_prompt, user_message, messages_json, tools_json,
-                response_text, latency_seconds, ttft_seconds,
-                prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                status, error_message, project_id, task_id, dispatch_id, contact_id,
-                tool_blocks_json,
-            ),
-        )
-        return row_id
+        return await LlmCallLogRepository(db).upsert(
+            log_id=log_id, provider=provider, model=model,
+            call_category=call_category, session_key=session_key,
+            system_prompt=system_prompt, user_message=user_message,
+            messages_json=messages_json, tools_json=tools_json,
+            response_text=response_text, latency_seconds=latency_seconds,
+            ttft_seconds=ttft_seconds, prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens, total_tokens=total_tokens,
+            cached_tokens=cached_tokens, status=status,
+            error_message=error_message, project_id=project_id,
+            task_id=task_id, dispatch_id=dispatch_id, contact_id=contact_id,
+            tool_blocks_json=tool_blocks_json)
     except Exception:
         logger.warning("Failed to record LLM call log", exc_info=True)
         return log_id or str(uuid4())
