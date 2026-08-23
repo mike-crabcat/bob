@@ -54,21 +54,11 @@ class EmailDeliveryService(BaseService):
         Falls back to sending a new threaded message if no existing message found.
         """
         # Look up the latest message in this thread to get its agentmail_message_id
-        latest = await self.db.fetch_one(
-            """
-            SELECT em.agentmail_message_id, em.inbox_id
-            FROM email_messages em
-            WHERE em.thread_id = ?
-            ORDER BY em.message_timestamp DESC
-            LIMIT 1
-            """,
-            (thread_id,),
-        )
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(self.db)
+        latest = await store.latest_in_thread(thread_id)
 
-        inbox = await self.db.fetch_one(
-            "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL",
-            (inbox_id,),
-        )
+        inbox = await store.get_inbox(inbox_id)
         if inbox is None:
             raise ValueError(f"Inbox {inbox_id} not found")
 
@@ -131,10 +121,8 @@ class EmailDeliveryService(BaseService):
 
         Returns the AgentMail response dict.
         """
-        inbox = await self.db.fetch_one(
-            "SELECT * FROM email_inboxes WHERE id = ? AND deleted_at IS NULL AND is_active = 1",
-            (inbox_id,),
-        )
+        from bob_server.services.email_store import EmailStore
+        inbox = await EmailStore(self.db).get_inbox(inbox_id, active_only=True)
         if inbox is None:
             raise ValueError(f"Inbox {inbox_id} not found or inactive")
 
@@ -282,48 +270,30 @@ class EmailDeliveryService(BaseService):
         now = utcnow()
         message_id = str(uuid4())
 
-        await self.db.execute(
-            """
-            INSERT INTO email_messages (
-                id, inbox_id, agentmail_message_id, thread_id,
-                subject, sender_email, sender_name,
-                to_addresses, cc_addresses,
-                text_body, html_body, preview, labels,
-                has_attachments, in_reply_to,
-                message_timestamp, processed_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                message_id,
-                inbox["id"],
-                agentmail_message_id,
-                agentmail_thread_id,
-                subject,
-                inbox["email_address"],
-                inbox.get("display_name"),
-                json_dumps(to_addresses or []),
-                json_dumps(cc_addresses or []),
-                text,
-                html,
-                text[:200] if text else None,
-                json_dumps(["sent"]),
-                1 if has_attachments else 0,
-                None,
-                now.isoformat(),
-                now.isoformat(),
-                now.isoformat(),
-            ),
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(self.db)
+        await store.insert_message(
+            message_id=message_id,
+            inbox_id=inbox["id"],
+            agentmail_message_id=agentmail_message_id,
+            thread_id=agentmail_thread_id,
+            subject=subject,
+            sender_email=inbox["email_address"],
+            sender_name=inbox.get("display_name"),
+            to_addresses_json=json_dumps(to_addresses or []),
+            cc_addresses_json=json_dumps(cc_addresses or []),
+            text_body=text,
+            html_body=html,
+            preview=text[:200] if text else None,
+            labels_json=json_dumps(["sent"]),
+            has_attachments=has_attachments,
+            in_reply_to=None,
+            message_timestamp=now.isoformat(),
+            now_iso=now.isoformat(),
         )
 
         # Update thread message count
-        await self.db.execute(
-            """
-            UPDATE email_threads
-            SET message_count = message_count + 1, last_message_at = ?, updated_at = ?
-            WHERE agentmail_thread_id = ? AND deleted_at IS NULL
-            """,
-            (now.isoformat(), now.isoformat(), agentmail_thread_id),
-        )
+        await store.bump_thread_stats_by_agentmail(agentmail_thread_id, now.isoformat())
 
         logger.info(
             "Persisted sent message %s in thread %s",

@@ -260,19 +260,12 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
                 session_context["member_count"] = group["member_count"]
 
         elif kind == "thread" and address:
-            thread = await db.fetch_one(
-                "SELECT subject FROM email_threads "
-                "WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
-                (address,),
-            )
+            from bob_server.services.email_store import EmailStore
+            _estore = EmailStore(db)
+            thread = await _estore.thread_by_agentmail_any(address)
             if thread:
                 session_context["display_name"] = thread["subject"]
-                email_parts = await db.fetch_all(
-                    "SELECT DISTINCT sender_email, sender_name FROM email_messages em "
-                    "INNER JOIN email_threads et ON et.id = em.thread_id "
-                    "WHERE et.agentmail_thread_id = ? ORDER BY em.message_timestamp ASC",
-                    (address,),
-                )
+                email_parts = await _estore.thread_participants(address)
                 session_context["email_participants"] = [
                     {"email": p["sender_email"], "name": p["sender_name"]}
                     for p in email_parts

@@ -216,12 +216,9 @@ class SessionAgendaService(BaseService):
 
     async def _migrate_email_agenda(self, session_key: str) -> str | None:
         """Check if email_threads has an agenda for this session and migrate it."""
-        thread = await self.db.fetch_one(
-            "SELECT agenda FROM email_threads WHERE session_key = ? AND agenda IS NOT NULL AND agenda != '' AND deleted_at IS NULL LIMIT 1",
-            (session_key,),
-        )
-        if thread and thread["agenda"]:
-            agenda = thread["agenda"]
+        from bob_server.services.email_store import EmailStore
+        agenda = await EmailStore(self.db).agenda_for_session(session_key)
+        if agenda:
             await self.set_agenda(session_key, agenda)
             logger.info("Migrated email agenda for session %s", session_key)
             return agenda

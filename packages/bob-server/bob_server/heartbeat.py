@@ -250,12 +250,8 @@ class EventLogReconciliationTask:
                 role="user", channel="whatsapp", since_iso=since_iso)
 
         async def _email_count(since_iso: str) -> int:
-            row = await ctx.db.fetch_one(
-                """SELECT COUNT(*) AS n FROM email_messages m
-                   JOIN email_inboxes i ON i.id = m.inbox_id
-                   WHERE m.created_at >= ? AND m.sender_email != i.email_address""",
-                (since_iso,))
-            return (row or {}).get("n", 0) or 0
+            from bob_server.services.email_store import EmailStore
+            return await EmailStore(ctx.db).inbound_count_since(since_iso)
 
         for source, count_fn in (
             ("whatsapp", _wa_count),

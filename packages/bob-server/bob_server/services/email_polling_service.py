@@ -127,20 +127,13 @@ async def resolve_or_create_email_thread(
 
     Returns ``(thread_row, is_new_thread)``.
     """
-    existing = await db.fetch_one(
-        """
-        SELECT * FROM email_threads
-        WHERE inbox_id = ? AND agentmail_thread_id = ? AND deleted_at IS NULL
-        """,
-        (inbox["id"], agentmail_thread_id),
-    )
+    from bob_server.services.email_store import EmailStore
+    store = EmailStore(db)
+    existing = await store.thread_by_agentmail(inbox["id"], agentmail_thread_id)
     if existing is not None:
         # If we have an origin_session_key and the existing row doesn't, update it
         if origin_session_key and not existing.get("origin_session_key"):
-            await db.execute(
-                "UPDATE email_threads SET origin_session_key = ? WHERE id = ?",
-                (origin_session_key, existing["id"]),
-            )
+            await store.set_thread_origin(existing["id"], origin_session_key)
         return existing, False
 
     session_key = await _canonical_session_key(db, _build_session_key(agentmail_thread_id))
@@ -153,33 +146,13 @@ async def resolve_or_create_email_thread(
         session_key, endpoint_kind="thread", address=agentmail_thread_id)
 
     thread_id = str(uuid4())
-    await db.execute(
-        """
-        INSERT INTO email_threads (
-            id, inbox_id, agentmail_thread_id, subject,
-            contact_id, session_key, agenda, origin_session_key,
-            message_count, last_message_at, is_active,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?)
-        """,
-        (
-            thread_id,
-            inbox["id"],
-            agentmail_thread_id,
-            subject,
-            contact_id,
-            session_key,
-            agenda,
-            origin_session_key,
-            now_iso,
-            now_iso,
-            now_iso,
-        ),
-    )
-    row = await db.fetch_one(
-        "SELECT * FROM email_threads WHERE id = ?",
-        (thread_id,),
-    )
+    await store.insert_thread(
+        thread_id=thread_id, inbox_id=inbox["id"],
+        agentmail_thread_id=agentmail_thread_id, subject=subject,
+        contact_id=contact_id, session_key=session_key, agenda=agenda,
+        origin_session_key=origin_session_key,
+        last_message_at=now_iso, now_iso=now_iso)
+    row = await store.get_thread(thread_id)
     return row, True
 
 
@@ -216,9 +189,8 @@ class EmailPollingService(BaseService):
         if not settings.agentmail.enabled:
             return 0
 
-        inboxes = await self.db.fetch_all(
-            "SELECT * FROM email_inboxes WHERE deleted_at IS NULL AND is_active = 1"
-        )
+        from bob_server.services.email_store import EmailStore
+        inboxes = await EmailStore(self.db).active_inboxes()
         if not inboxes:
             return 0
 
@@ -238,11 +210,10 @@ class EmailPollingService(BaseService):
         Args:
             inbox: Database row dict or agentmail_inbox_id string.
         """
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(self.db)
         if isinstance(inbox, str):
-            row = await self.db.fetch_one(
-                "SELECT * FROM email_inboxes WHERE agentmail_inbox_id = ? AND deleted_at IS NULL",
-                (inbox,),
-            )
+            row = await store.inbox_by_agentmail_id(inbox)
             if row is None:
                 return 0
             inbox = row
@@ -285,10 +256,7 @@ class EmailPollingService(BaseService):
             page_token = next_token
 
         # Update last_polled_at
-        await self.db.execute(
-            "UPDATE email_inboxes SET last_polled_at = ?, updated_at = ? WHERE id = ?",
-            (now.isoformat(), now.isoformat(), inbox_id),
-        )
+        await store.mark_polled(inbox_id, now.isoformat())
         return count
 
     async def process_incoming_message(
@@ -309,10 +277,9 @@ class EmailPollingService(BaseService):
             return False
 
         # Dedup check
-        existing = await self.db.fetch_one(
-            "SELECT id, thread_id FROM email_messages WHERE agentmail_message_id = ?",
-            (agentmail_message_id,),
-        )
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(self.db)
+        existing = await store.message_by_agentmail_id(agentmail_message_id)
         if existing is not None:
             # Already processed — mark as read in AgentMail if needed
             if not backfill:
@@ -327,20 +294,14 @@ class EmailPollingService(BaseService):
 
                 # Re-dispatch if this message was backfilled but never reached the LLM
                 thread_id = existing["thread_id"]
-                session_key_row = await self.db.fetch_one(
-                    "SELECT session_key FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
-                    (thread_id,),
-                )
+                session_key_row = await store.thread_by_agentmail_any(thread_id)
                 if session_key_row:
                     from bob_server.repositories.history import HistoryRepository
                     has_history = await HistoryRepository(self.db).has_any(
                         session_key_row["session_key"])
                     if not has_history:
                         logger.info("Re-dispatching undelivered message %s for thread %s", agentmail_message_id[:30], thread_id[:8])
-                        thread_row = await self.db.fetch_one(
-                            "SELECT * FROM email_threads WHERE agentmail_thread_id = ? AND deleted_at IS NULL",
-                            (thread_id,),
-                        )
+                        thread_row = await store.thread_by_agentmail_any(thread_id)
                         if thread_row:
                             asyncio.create_task(self._dispatch_email_safe(
                                 thread_row, message, inbox,
@@ -362,37 +323,25 @@ class EmailPollingService(BaseService):
         session_key_for_event = await _canonical_session_key(self.db, binding_key_for_event)
         message_id = str(uuid4())
         async with self.db.transaction() as txn:
-            await txn.execute(
-                """
-                INSERT INTO email_messages (
-                    id, inbox_id, agentmail_message_id, thread_id,
-                    subject, sender_email, sender_name,
-                    to_addresses, cc_addresses,
-                    text_body, html_body, preview, labels,
-                    has_attachments, in_reply_to,
-                    message_timestamp, processed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message_id,
-                    inbox["id"],
-                    agentmail_message_id,
-                    thread_id,
-                    message.get("subject"),
-                    sender_email,
-                    sender_name or None,
-                    json_dumps(message.get("to", [])),
-                    json_dumps(message.get("cc", [])),
-                    message.get("extracted_text") or message.get("text", ""),
-                    message.get("extracted_html") or message.get("html"),
-                    message.get("preview"),
-                    json_dumps(message.get("labels", [])),
-                    1 if message.get("attachments") else 0,
-                    message.get("in_reply_to"),
-                    message.get("timestamp") or message.get("created_at", now.isoformat()),
-                    now.isoformat(),
-                    now.isoformat(),
-                ),
+            await store.insert_message(
+                message_id=message_id,
+                inbox_id=inbox["id"],
+                agentmail_message_id=agentmail_message_id,
+                thread_id=thread_id,
+                subject=message.get("subject"),
+                sender_email=sender_email,
+                sender_name=sender_name or None,
+                to_addresses_json=json_dumps(message.get("to", [])),
+                cc_addresses_json=json_dumps(message.get("cc", [])),
+                text_body=message.get("extracted_text") or message.get("text", ""),
+                html_body=message.get("extracted_html") or message.get("html"),
+                preview=message.get("preview"),
+                labels_json=json_dumps(message.get("labels", [])),
+                has_attachments=bool(message.get("attachments")),
+                in_reply_to=message.get("in_reply_to"),
+                message_timestamp=message.get("timestamp") or message.get("created_at", now.isoformat()),
+                now_iso=now.isoformat(),
+                txn=txn,
             )
             await EventLogRepository(self.db).append(Event(
                 event_type="message.received",
@@ -432,10 +381,7 @@ class EmailPollingService(BaseService):
                     "filename": att.get("filename", ""),
                     "content_type": att.get("content_type", "application/octet-stream"),
                 })
-            await self.db.execute(
-                "UPDATE email_messages SET attachments_json = ? WHERE id = ?",
-                (json_dumps(raw_meta), message_id),
-            )
+            await store.set_attachments_json(message_id, json_dumps(raw_meta))
             # Auto-download all attachments into the workspace; exec/code files
             # are filtered inside _download_attachments.
             saved_attachments = await self._download_attachments(
@@ -449,10 +395,7 @@ class EmailPollingService(BaseService):
                         entry["downloaded"] = True
                         entry["path"] = saved["path"]
                         entry["size"] = saved["size"]
-                await self.db.execute(
-                    "UPDATE email_messages SET attachments_json = ? WHERE id = ?",
-                    (json_dumps(raw_meta), message_id),
-                )
+                await store.set_attachments_json(message_id, json_dumps(raw_meta))
 
         # Mark message read in AgentMail (skip for backfill — already read)
         if not backfill:
@@ -470,14 +413,7 @@ class EmailPollingService(BaseService):
                 )
 
         # Update thread message count
-        await self.db.execute(
-            """
-            UPDATE email_threads
-            SET message_count = message_count + 1, last_message_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (now.isoformat(), now.isoformat(), thread["id"]),
-        )
+        await store.bump_thread_stats(thread["id"], now.isoformat())
 
         # Dispatch to LLM (skip for backfill — historical messages)
         if not backfill:
@@ -637,14 +573,9 @@ class EmailPollingService(BaseService):
 
         # 2. Prior outgoing email context — only on the first incoming reply
         if is_new_thread:
-            prior_outgoing = await self.db.fetch_one(
-                """
-                SELECT text_body, subject FROM email_messages
-                WHERE thread_id = ? AND sender_email = ? AND id != ?
-                ORDER BY message_timestamp ASC LIMIT 1
-                """,
-                (thread["agentmail_thread_id"], inbox["email_address"], ""),
-            )
+            from bob_server.services.email_store import EmailStore
+            prior_outgoing = await EmailStore(self.db).first_from_sender(
+                thread["agentmail_thread_id"], inbox["email_address"])
             if prior_outgoing and prior_outgoing["text_body"]:
                 prompt_parts += [
                     "## Your Previous Email (for context)",
@@ -867,9 +798,8 @@ class EmailPollingService(BaseService):
         if not settings.agentmail.enabled:
             return 0
 
-        inboxes = await self.db.fetch_all(
-            "SELECT * FROM email_inboxes WHERE deleted_at IS NULL AND is_active = 1"
-        )
+        from bob_server.services.email_store import EmailStore
+        inboxes = await EmailStore(self.db).active_inboxes()
         if not inboxes:
             return 0
 
@@ -888,11 +818,10 @@ class EmailPollingService(BaseService):
         Unlike poll_inbox, this fetches all messages (not just unread),
         skips mark-read and LLM dispatch, and fixes thread message counts.
         """
+        from bob_server.services.email_store import EmailStore
+        store = EmailStore(self.db)
         if isinstance(inbox, str):
-            row = await self.db.fetch_one(
-                "SELECT * FROM email_inboxes WHERE agentmail_inbox_id = ? AND deleted_at IS NULL",
-                (inbox,),
-            )
+            row = await store.inbox_by_agentmail_id(inbox)
             if row is None:
                 return 0
             inbox = row
@@ -939,19 +868,5 @@ class EmailPollingService(BaseService):
 
     async def _recount_thread_messages(self, inbox_id: str) -> None:
         """Fix thread message counts by recounting actual persisted messages."""
-        await self.db.execute(
-            """
-            UPDATE email_threads
-            SET message_count = (
-                SELECT COUNT(*) FROM email_messages em
-                WHERE em.thread_id = email_threads.agentmail_thread_id
-            ),
-            last_message_at = (
-                SELECT MAX(em.message_timestamp) FROM email_messages em
-                WHERE em.thread_id = email_threads.agentmail_thread_id
-            ),
-            updated_at = ?
-            WHERE inbox_id = ? AND deleted_at IS NULL
-            """,
-            (utcnow().isoformat(), inbox_id),
-        )
+        from bob_server.services.email_store import EmailStore
+        await EmailStore(self.db).recount_inbox_threads(inbox_id, utcnow().isoformat())
