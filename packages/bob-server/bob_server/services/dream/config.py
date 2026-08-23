@@ -10,7 +10,6 @@ the 452 backfill missed.
 
 from __future__ import annotations
 
-import json
 import logging
 
 from bob_server.database import Database
@@ -29,18 +28,6 @@ async def get_session_autoplan(db: Database, session_key: str, boot_default: boo
     flag = policy.get(ROUTE_META_KEY)
     if flag is not None:
         return bool(flag)
-    # Legacy fallback (drop next deploy): route metadata.
-    row = await db.fetch_one(
-        "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-        (session_key,),
-    )
-    if row and row["metadata"]:
-        try:
-            meta = json.loads(row["metadata"])
-        except (ValueError, TypeError):
-            meta = {}
-        if isinstance(meta, dict) and isinstance(meta.get(ROUTE_META_KEY), bool):
-            return meta[ROUTE_META_KEY]
     return boot_default
 
 

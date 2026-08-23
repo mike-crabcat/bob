@@ -409,19 +409,6 @@ class SessionRouteResponse(SessionRouteFields, EntityRef, SoftDeleteFields):
     updated_at: datetime
 
 
-class ResolvedSessionRoute(BobModel):
-    channel: Literal["whatsapp", "email", "phone"] | None = None
-    kind: SessionRouteKind | None = None
-    to: str | None = None
-    session_key: str | None = None
-    chat_id: str | None = None
-    contact_id: UUID | None = None
-    contact_name: str | None = None
-    phone_number: str | None = None
-    route_source: str | None = None
-    metadata: MetadataDict = Field(default_factory=dict)
-
-
 # ---------------------------------------------------------------------------
 # Email relay models
 # ---------------------------------------------------------------------------

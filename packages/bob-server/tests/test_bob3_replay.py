@@ -75,7 +75,7 @@ async def replay_episode(
         monkeypatch.setattr(
             "bob_server.services.attention.tier2.probe_actionability",
             AsyncMock(return_value=episode["probe_decision"]))
-        # Probe path requires route metadata gating; enable per session below.
+        # Probe path is gated by conversation policy; enable per session below.
 
     await _seed_contact(ctx.db, "+614000000010")
     svc = _make_service(ctx, tmp_path)
@@ -90,13 +90,14 @@ async def replay_episode(
             session_keys.add("agent:main:whatsapp:group:120363000000000001")
         await svc._handle_incoming_message(payload)
         if "probe_decision" in episode:
-            # Enable the Tier 2 probe on the session route (route exists after
-            # the first message).
+            # Enable the Tier 2 probe via conversation policy (conversation
+            # exists after the first message).
+            from bob_server.repositories.conversations import ConversationRepository
+            repo = ConversationRepository(ctx.db)
             for sk in session_keys:
-                await ctx.db.execute(
-                    "UPDATE session_routes SET metadata = ? WHERE session_key = ?",
-                    (json.dumps({"patience_enabled": True,
-                                 "patience_relevance_gating": True}), sk))
+                await repo.ensure(sk)
+                await repo.set_policy(sk, {"patience_enabled": True,
+                                           "patience_relevance_gating": True})
 
     # Let attention windows close and dispatches drain.
     for _ in range(100):

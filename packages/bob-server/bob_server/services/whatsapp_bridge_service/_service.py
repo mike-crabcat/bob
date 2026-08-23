@@ -786,26 +786,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # detection + Tier 1 windows decide WHEN this dispatch runs; Tier 2
         # (probe_enabled) decides WHETHER an unaddressed group batch runs.
         # Route metadata keeps the legacy flag names for operator continuity.
-        # Policy lives on the conversation (Increment 3); route metadata is a
-        # one-deploy read fallback for rows the 452 backfill missed.
-        probe_enabled = False
+        # Policy lives on the conversation (Increment 3).
         from bob_server.repositories.conversations import ConversationRepository
         policy = await ConversationRepository(self.db).get_policy(session_key)
-        if "patience_enabled" in policy or "patience_relevance_gating" in policy:
-            probe_enabled = bool(policy.get("patience_enabled")) and bool(
-                policy.get("patience_relevance_gating"))
-        else:
-            route_row = await self.db.fetch_one(
-                "SELECT metadata FROM session_routes WHERE session_key = ? AND deleted_at IS NULL AND is_active = 1",
-                (session_key,),
-            )
-            if route_row and route_row["metadata"]:
-                try:
-                    route_meta = json.loads(route_row["metadata"])
-                    probe_enabled = bool(route_meta.get("patience_enabled")) and bool(
-                        route_meta.get("patience_relevance_gating"))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        probe_enabled = bool(policy.get("patience_enabled")) and bool(
+            policy.get("patience_relevance_gating"))
 
         from bob_server.services.attention import AttentionCoordinator
 
