@@ -9,6 +9,10 @@ from __future__ import annotations
 import pytest
 
 from bob_server.repositories.conversations import ConversationRepository
+from tests.services.test_whatsapp_inbound_characterization import (  # noqa: F401
+    immediate_patience,
+    stub_memory,
+)
 
 
 async def test_backfill_created_conversations_for_existing_sessions(ctx, db):
@@ -121,3 +125,104 @@ async def test_premerge_events_follow_binding_on_unmerge(ctx, db):
     row = await db.fetch_one(
         "SELECT * FROM event_log WHERE external_id = 'pre-merge-1'")
     assert row["conversation_id"] == em["id"], "pre-merge event still owned by original"
+
+
+# ---------------------------------------------------- ingress canonicalization
+
+
+async def test_inbound_on_merged_binding_lands_in_survivor(
+        ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
+    """Phase VI item 3 exit fixture: after merging B into A, a new inbound
+    message on B's channel binding must key ALL downstream state under A —
+    session_messages, event conversation_id — while the event's binding_key
+    preserves the original channel address."""
+    from tests.services.test_whatsapp_inbound_characterization import (
+        _dm_payload,
+        _make_service,
+        _seed_contact,
+        _stub_llm,
+        _stub_workspace,
+    )
+
+    _stub_workspace(monkeypatch)
+
+    async def behaviour(messages, tools):
+        return ""
+    _stub_llm(monkeypatch, behaviour)
+
+    await _seed_contact(ctx.db, "+61400000001", trusted=1)
+    await _seed_contact(ctx.db, "+61400000002", trusted=1)
+    key_a = "agent:main:whatsapp:dm:61400000001"
+    key_b = "agent:main:whatsapp:dm:61400000002"
+
+    repo = ConversationRepository(ctx.db)
+    await repo.ensure(key_a)
+    await repo.ensure(key_b)
+    await repo.merge([key_b], key_a, note="same person")
+
+    svc = _make_service(ctx, tmp_path)
+    await svc._handle_incoming_message(_dm_payload("+61400000002", "hello from B", "wamid-merged-1"))
+
+    msgs = await ctx.db.fetch_all(
+        "SELECT session_key FROM session_messages WHERE role='user' AND content LIKE '%hello from B%'")
+    assert msgs and all(m["session_key"] == key_a for m in msgs), \
+        "merged binding's messages must key under the survivor conversation"
+
+    ev = await ctx.db.fetch_one(
+        "SELECT binding_key, conversation_id FROM event_log WHERE external_id = 'wamid-merged-1'")
+    assert ev is not None
+    assert ev["conversation_id"] == key_a
+    assert ev["binding_key"] == key_b, "binding_key preserves the channel address"
+
+
+async def test_inbound_on_unmerged_binding_unchanged(
+        ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
+    """1:1 case (all production traffic today): canonical id == session_key,
+    behaviour identical to pre-canonicalization."""
+    from tests.services.test_whatsapp_inbound_characterization import (
+        _dm_payload,
+        _make_service,
+        _seed_contact,
+        _stub_llm,
+        _stub_workspace,
+    )
+
+    _stub_workspace(monkeypatch)
+
+    async def behaviour(messages, tools):
+        return ""
+    _stub_llm(monkeypatch, behaviour)
+
+    await _seed_contact(ctx.db, "+61400000003", trusted=1)
+    key = "agent:main:whatsapp:dm:61400000003"
+
+    svc = _make_service(ctx, tmp_path)
+    await svc._handle_incoming_message(_dm_payload("+61400000003", "plain hello", "wamid-plain-1"))
+
+    ev = await ctx.db.fetch_one(
+        "SELECT binding_key, conversation_id FROM event_log WHERE external_id = 'wamid-plain-1'")
+    assert ev["binding_key"] == key and ev["conversation_id"] == key
+
+
+async def test_wake_channel_resolution_uses_bindings_after_merge(ctx, db):
+    """Outbound seam: a survivor whose id is not channel-shaped resolves its
+    channel via the binding map (prefer WhatsApp)."""
+    from bob_server.services.wake_service import conversation_channel
+
+    repo = ConversationRepository(db)
+    # Channel-shaped id: key parsing wins, no lookup needed.
+    await repo.ensure("agent:main:whatsapp:dm:777")
+    channel, key = await conversation_channel(ctx, "agent:main:whatsapp:dm:777")
+    assert channel == "whatsapp" and key == "agent:main:whatsapp:dm:777"
+
+    # Non-channel-shaped conversation with a WA binding attached via merge.
+    now = "2026-01-01T00:00:00+00:00"
+    await db.execute(
+        "INSERT INTO conversations (id, kind, created_at, updated_at) VALUES (?, 'dm', ?, ?)",
+        ("person-merged-1", now, now))
+    await repo.ensure("agent:main:whatsapp:dm:888")
+    await repo.ensure("agent:main:email:thread:t-888")
+    await repo.merge(["agent:main:whatsapp:dm:888", "agent:main:email:thread:t-888"],
+                     "person-merged-1")
+    channel, key = await conversation_channel(ctx, "person-merged-1")
+    assert channel == "whatsapp" and key == "agent:main:whatsapp:dm:888"

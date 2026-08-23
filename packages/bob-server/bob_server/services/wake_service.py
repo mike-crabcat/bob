@@ -34,6 +34,29 @@ def session_key_to_chat_id(session_key: str) -> str | None:
     return None
 
 
+async def conversation_channel(ctx: AppContext, conversation_id: str) -> tuple[str, str]:
+    """Resolve (channel, channel_session_key) for a conversation.
+
+    For unmerged conversations id == binding session_key so key parsing wins.
+    After a merge the survivor id may not match a channel shape — fall back
+    to the binding map and prefer a WhatsApp binding (richest wake pipeline),
+    then any binding. This is the plan's "key-parsing replaced by binding
+    lookups" seam (Phase VI item 3) for the outbound side.
+    """
+    channel = _channel_of(conversation_id)
+    if channel not in ("internal",):
+        return channel, conversation_id
+    try:
+        from bob_server.repositories.conversations import ConversationRepository
+        bindings = await ConversationRepository(ctx.db).bindings_for(conversation_id)
+    except Exception:
+        return channel, conversation_id
+    if not bindings:
+        return channel, conversation_id
+    preferred = next((b for b in bindings if b["channel"] == "whatsapp"), bindings[0])
+    return _channel_of(preferred["session_key"]), preferred["session_key"]
+
+
 async def wake_conversation(
     ctx: AppContext,
     session_key: str,
@@ -49,7 +72,7 @@ async def wake_conversation(
     """
     from bob_server.services.session_service import SessionService
 
-    channel = _channel_of(session_key)
+    channel, _ = await conversation_channel(ctx, session_key)
     await SessionService(ctx).add_message(
         session_key, "user", content,
         channel=channel, metadata=metadata, dispatched=0,

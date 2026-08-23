@@ -550,6 +550,20 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
+        # Bob3 Phase VI item 3: canonicalize onto the conversation id. The
+        # channel-derived key above is the binding; everything downstream
+        # (participants, routes, messages, events, dispatch) keys under the
+        # conversation, so a merged binding lands in its survivor
+        # conversation with no per-call-site changes. 1:1 today (ensure()
+        # backfills conversation.id = session_key) — diverges only on merge.
+        binding_key = session_key
+        try:
+            from bob_server.repositories.conversations import ConversationRepository
+            conversation = await ConversationRepository(self.db).ensure(session_key)
+            session_key = conversation["id"]
+        except Exception:
+            logger.warning("conversation resolve failed for %s", session_key, exc_info=True)
+
         # Slash command interception — trusted contacts only, never stored or dispatched
         if text.startswith("/"):
             logger.info("slash command intercepted from %s (trusted=%s): %s", sender_name, is_trusted, text[:50])
@@ -732,7 +746,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             )
             ingress_event_id = await event_repo.append(Event(
                 event_type="message.received",
-                binding_key=session_key,
+                binding_key=binding_key,
                 conversation_id=session_key,
                 source="whatsapp",
                 external_id=wa_message_id or None,
@@ -744,13 +758,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     "has_media": bool(message_metadata),
                 },
             ), txn=txn)
-
-        # Bob3 Phase VI: keep the binding map current for new sessions.
-        try:
-            from bob_server.repositories.conversations import ConversationRepository
-            await ConversationRepository(self.db).ensure(session_key)
-        except Exception:
-            logger.warning("failed to ensure conversation for %s", session_key, exc_info=True)
 
         logger.info("dispatching whatsapp message session=%s idempotency=%s", session_key, wa_message_id)
 

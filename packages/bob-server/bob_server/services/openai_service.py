@@ -497,7 +497,12 @@ class OpenAIService(BaseService):
                 elapsed = time.monotonic() - t0
                 content = _response_text_with_citations(response)
                 if not content:
-                    logger.warning(
+                    # After tool iterations an empty final message is the
+                    # normal shape (reply was delivered via send_message
+                    # etc.) — only a turn with NO tool calls going silent
+                    # is noteworthy.
+                    _empty_log = logger.debug if iteration > 0 else logger.warning
+                    _empty_log(
                         "OpenAI empty response: model=%s status=%s output_types=%s refusal=%s",
                         resolved_model,
                         getattr(response, "status", None),

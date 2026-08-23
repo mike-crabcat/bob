@@ -97,6 +97,19 @@ def _build_session_key(thread_id: str) -> str:
     return f"agent:main:email:thread:{thread_id}"
 
 
+async def _canonical_session_key(db: Database, binding_key: str) -> str:
+    """Bob3 Phase VI item 3: resolve the channel-derived key (binding) to its
+    conversation id so downstream state keys under the conversation. 1:1
+    today; diverges only after an explicit merge."""
+    try:
+        from bob_server.repositories.conversations import ConversationRepository
+        conversation = await ConversationRepository(db).ensure(binding_key)
+        return conversation["id"]
+    except Exception:
+        logger.warning("conversation resolve failed for %s", binding_key, exc_info=True)
+        return binding_key
+
+
 async def resolve_or_create_email_thread(
     db: Database,
     *,
@@ -127,7 +140,7 @@ async def resolve_or_create_email_thread(
             )
         return existing, False
 
-    session_key = _build_session_key(agentmail_thread_id)
+    session_key = await _canonical_session_key(db, _build_session_key(agentmail_thread_id))
     now = utcnow()
     now_iso = now.isoformat()
 
@@ -352,7 +365,8 @@ class EmailPollingService(BaseService):
         # accept-once; audit-only in Phase I (dispatch unchanged).
         from bob_server.repositories import Event, EventLogRepository
 
-        session_key_for_event = _build_session_key(thread_id)
+        binding_key_for_event = _build_session_key(thread_id)
+        session_key_for_event = await _canonical_session_key(self.db, binding_key_for_event)
         message_id = str(uuid4())
         async with self.db.transaction() as txn:
             await txn.execute(
@@ -389,7 +403,7 @@ class EmailPollingService(BaseService):
             )
             await EventLogRepository(self.db).append(Event(
                 event_type="message.received",
-                binding_key=session_key_for_event,
+                binding_key=binding_key_for_event,
                 conversation_id=session_key_for_event,
                 source="email",
                 external_id=agentmail_message_id,
@@ -480,12 +494,6 @@ class EmailPollingService(BaseService):
                 saved_attachments=saved_attachments,
             ))
 
-        # Bob3 Phase VI: keep the binding map current for new sessions.
-        try:
-            from bob_server.repositories.conversations import ConversationRepository
-            await ConversationRepository(self.db).ensure(session_key_for_event)
-        except Exception:
-            logger.warning("failed to ensure conversation for %s", session_key_for_event, exc_info=True)
         return True
 
     async def _resolve_or_create_thread(
