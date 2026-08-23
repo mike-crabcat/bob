@@ -145,13 +145,26 @@ async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
     bridge = getattr(request.app.state, "whatsapp_bridge_service", None)
     if bridge is None:
         return {"ok": False, "error": "whatsapp bridge not running"}
+
+    # The killed dispatch already marked its user messages dispatched=1, and
+    # DispatchRunner refuses to run with nothing pending — restore the zombie
+    # turn's claimed messages first so the retry has something to claim.
+    restored = await db.execute(
+        """UPDATE session_messages SET dispatched = 0
+           WHERE role = 'user' AND id IN (
+             SELECT json_extract(e.payload_json, '$.session_message_id')
+             FROM turn_events te JOIN event_log e ON e.id = te.event_id
+             WHERE te.turn_id = ?
+               AND json_extract(e.payload_json, '$.session_message_id') IS NOT NULL)""",
+        (turn_id,))
     try:
         await bridge.wake_session(conversation_id)
     except Exception as exc:
         logger.warning("dashboard: stuck-turn retry failed for %s", turn_id, exc_info=True)
         return {"ok": False, "error": str(exc)}
-    logger.info("dashboard: stuck turn %s re-armed by operator (%s)", turn_id, conversation_id)
-    return {"ok": True}
+    logger.info("dashboard: stuck turn %s re-armed by operator (%s, %s message(s) restored)",
+                turn_id, conversation_id, restored)
+    return {"ok": True, "restored_messages": restored}
 
 
 @router.post("/api/effects/{effect_id}/retry")
