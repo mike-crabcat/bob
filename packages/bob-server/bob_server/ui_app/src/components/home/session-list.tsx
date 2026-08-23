@@ -30,7 +30,7 @@ const CHANNEL_COLORS: Record<string, string> = {
 
 export function SessionList({ sessions }: Props) {
   if (sessions.length === 0) {
-    return <div className="text-xs text-muted text-center py-3">no active sessions</div>;
+    return <div className="text-xs text-muted text-center py-3">no active conversations</div>;
   }
 
   return (
