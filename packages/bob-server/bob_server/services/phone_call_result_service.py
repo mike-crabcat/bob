@@ -110,12 +110,16 @@ async def dispatch_call_result(
         f"{summary}"
     )
 
-    await _settle_call_goal(ctx, call_id, status, result_content)
+    woke_via_goal = await _settle_call_goal(ctx, call_id, status, result_content)
     await _append_call_event(ctx, call_id, origin_session_key, status)
-    await wake_conversation(
-        ctx, origin_session_key, result_content,
-        call_category="call_result",
-    )
+    if not woke_via_goal:
+        # No linked goal (or it was already settled): relay directly. When a
+        # goal settled, the wake rode the settle chokepoint (goal_result /
+        # call_result content, or the hierarchy roll-up for child goals).
+        await wake_conversation(
+            ctx, origin_session_key, result_content,
+            call_category="call_result",
+        )
 
 
 async def _append_call_event(
@@ -148,15 +152,18 @@ async def _append_call_event(
         logger.warning("failed to append call event for %s", call_id, exc_info=True)
 
 
-async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: str) -> None:
-    """Settle the goal linked to this call's subagent, if any (wake handled
-    by the caller)."""
+async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: str) -> bool:
+    """Settle the goal linked to this call's subagent, if any.
+
+    Returns True when the settle path took responsibility for relaying the
+    result (origin wake via the chokepoint, or the hierarchy roll-up for a
+    child goal) — the caller then skips its own direct wake."""
     try:
         from bob_server.repositories.phone_calls import PhoneCallRepository
         row = await PhoneCallRepository(ctx.db).get(call_id)
         subagent_id = row["subagent_id"] if row else None
         if not subagent_id:
-            return
+            return False
         from bob_server.repositories.goals import GoalRepository
         from bob_server.services.goal_service import settle_goal
 
@@ -164,6 +171,9 @@ async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: 
         if goal and goal["status"] == "active":
             outcome = "completed" if status == "completed" else "failed"
             await settle_goal(ctx, goal["id"], status=outcome, result=result,
-                              wake_origin=False)
+                              wake_content=result,
+                              wake_category="call_result")
+            return True
     except Exception:
         logger.warning("failed to settle goal for call %s", call_id, exc_info=True)
+    return False

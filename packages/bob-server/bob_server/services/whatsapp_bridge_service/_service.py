@@ -823,11 +823,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Dream plans — Tier 1 injection for sessions with linked plans
         dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
 
-        # Check for active outreach request and inject into system prompt
-        outreach_prompt = await assembler.outreach_prompt(session_key)
+        # Active goals held by this conversation (Bob Events §1.4) — includes
+        # the old outreach block; outreach state rides in the goal itself.
+        goals_prompt = await assembler.goals_block(session_key)
 
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, outreach_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
         )
 
         from bob_server.services.llm_dispatch import LLMDispatchService
@@ -848,6 +849,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         if contact_id and (is_trusted or chat_kind == "group"):
             from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
+
+        # Bob Events §1.5: proactive group send — trusted only; each target
+        # group must also enable it via conversation policy (off by default).
+        if is_trusted:
+            from bob_server.services.whatsapp_outreach_tools import make_group_send_tools
+            tools.extend(make_group_send_tools(self.ctx, self, session_key))
 
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:

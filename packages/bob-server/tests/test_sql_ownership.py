@@ -42,6 +42,8 @@ OWNERS: dict[str, list[str]] = {
     "event_log": ["repositories/event_log.py"],
     "goals": ["repositories/goals.py"],
     "goal_transitions": ["repositories/goals.py"],
+    "goal_conversations": ["repositories/goals.py"],
+    "claim_router_watermark": ["services/memory/claim_router.py"],
     "wakeups": ["repositories/wakeups.py"],
     "attention_shadow": ["services/attention/"],
     "llm_call_log": ["repositories/llm_call_log.py"],

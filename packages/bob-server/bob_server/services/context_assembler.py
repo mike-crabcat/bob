@@ -10,7 +10,6 @@ built.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -116,22 +115,35 @@ class ContextAssembler:
         return await build_session_plans_prompt(
             self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled)
 
-    async def outreach_prompt(self, session_key: str) -> str:
-        """Active-outreach block from the conversation's outreach goal."""
+    async def goals_block(self, session_key: str) -> str:
+        """Active-goal context block (bob-events-plan.md §1.4): every goal a
+        conversation holds, newest activity first, top 5, each rendered
+        within a budget. Replaces the special-cased outreach prompt — the
+        outreach requestor/message ride in the goal's legacy_outreach state.
+        """
+        from bob_server.repositories.conversations import ConversationRepository
         from bob_server.repositories.goals import GoalRepository
-        goal = await GoalRepository(self.db).active_outreach(session_key)
-        if not goal:
-            return ""
-        try:
-            strategy = json.loads(goal["strategy_json"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            strategy = {}
-        return (
-            "## Active Outreach Request\n"
-            "You proactively sent a message to this contact.\n"
-            f"- Requested by: {strategy.get('requestor', 'unknown')}\n"
-            f"- Objective: {goal['objective'] or 'unknown'}\n"
-            f"- Your initial message: \"{strategy.get('message', '')}\"\n\n"
-            "Your goal is to achieve the objective through this conversation. "
-            "When you have the information needed, call the finish_outreach tool to relay the result back."
+        from bob_server.services.goal_state_service import (
+            GoalStrategy, parse_strategy, render_strategy,
         )
+
+        cid = await ConversationRepository(self.db).resolve_cid(session_key)
+        goals = await GoalRepository(self.db).goals_held_by(cid, limit=5)
+        if not goals:
+            return ""
+
+        blocks: list[str] = []
+        for goal in goals:
+            state: GoalStrategy = parse_strategy(goal)
+            lines = [f"### {goal['objective']} ({goal['kind']}, id {goal['id']})"]
+            body = render_strategy(state)
+            if body:
+                lines.append(body)
+            if goal["kind"] == "outreach":
+                lines.append(
+                    "You proactively sent a message to this contact. Achieve the "
+                    "objective through this conversation; when you have the "
+                    "information needed, call finish_outreach to relay the result back.")
+            blocks.append("\n".join(lines))
+
+        return "## Active Goals\n\n" + "\n\n".join(blocks)
