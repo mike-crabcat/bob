@@ -79,8 +79,9 @@ Key memory facts:
 - No LLM tool schedules a wakeup or routine directly.
 - Effects system: durable idempotent executors, **one global unique key
   string** per effect.
-- `approvals` table exists (migration 160) with a CHECK-constrained
-  `approval_type` — reusable for the payment gate after extending the CHECK.
+- `approvals` table: created by migration 160, **dropped as dead by 458**
+  (no code users; rows archived) — Bob Events migration 460 recreates it
+  fresh with the `purchase` approval type.
 - Image generation: `skills/openai-image` workspace skill (writes files;
   WhatsApp media-send handles files fine).
 

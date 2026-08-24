@@ -139,12 +139,16 @@ def make_whatsapp_outreach_tools(
         message: str,
         objective: str,
         media_path: str = "",
+        parent_goal_id: str = "",
     ) -> str:
         """Send a WhatsApp message to a contact (not the current chat).
         The 'objective' describes the specific outcome you need from this conversation,
         e.g. "Find out if John can meet on Thursday and what time works." The target
         session will be instructed to work toward this objective and report back when complete.
-        Optionally attach an image or media file by providing media_path."""
+        Optionally attach an image or media file by providing media_path.
+        Pass parent_goal_id to roll this outreach up into a plan's child goal
+        (e.g. a time-negotiation fan-out) instead of waking you directly."""
+        parent_goal = parent_goal_id.strip() or None
         from bob_server.services.session_service import SessionService
 
         db = ctx.db
@@ -212,6 +216,7 @@ def make_whatsapp_outreach_tools(
                 kind="outreach",
                 strategy={"requestor": requestor_name, "message": message},
                 deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                parent_goal_id=parent_goal,
             )
             goal_id = goal["id"]
         except Exception:

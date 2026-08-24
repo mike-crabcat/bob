@@ -336,6 +336,21 @@ class DreamSettings:
 
 
 @dataclass(slots=True)
+class MerchSettings:
+    """Print-on-demand ordering (bob-events-plan.md §3.4).
+
+    The API key lives in a FILE under config_dir (mode 0600), read only by
+    the server-side effect executor — never in an environment variable the
+    agent's bash can read (the open Twilio-creds finding's lesson). Disabled
+    by default; enable only with a real (or rehearsal-stub) API configured.
+    """
+
+    enabled: bool = False
+    api_base: str = "https://api.printful.com"
+    api_key_file: str = "printful_api_key"
+
+
+@dataclass(slots=True)
 class GoalsSettings:
     """Configuration for the goal-state reviser (bob-events-plan.md §1.3).
 
@@ -379,6 +394,7 @@ class Settings:
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
+    merch: MerchSettings = field(default_factory=MerchSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
@@ -683,6 +699,11 @@ class Settings:
                 reviser_model=os.getenv("BOB_GOALS_REVISER_MODEL", ""),
                 max_concurrent_revisions=int(os.getenv("BOB_GOALS_MAX_CONCURRENT_REVISIONS", "3")),
                 max_cas_retries=int(os.getenv("BOB_GOALS_MAX_CAS_RETRIES", "3")),
+            ),
+            merch=MerchSettings(
+                enabled=_env_bool("BOB_MERCH_ENABLED"),
+                api_base=os.getenv("BOB_MERCH_API_BASE", "https://api.printful.com"),
+                api_key_file=os.getenv("BOB_MERCH_API_KEY_FILE", "printful_api_key"),
             ),
         )
 

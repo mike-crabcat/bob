@@ -161,6 +161,12 @@ Rules:
 - Set wake_needed=true ONLY if the stimulus changes decisions or next actions
   (new answer, conflict resolved, deadline forced a choice, action now
   overdue). Routine confirmations of what is already known → wake_needed=false.
+- Decision rules: if the state carries a `decision` rule (e.g.
+  {"quorum": 0.75, "of": "invitees", "decide_by": "<iso>"}), evaluate it
+  against the accumulated `known` on every relevant stimulus. When a rule is
+  satisfied — or decide_by has passed — set next_actions to decide/settle
+  (e.g. "settle this goal: quorum reached", "decide now with what you have")
+  and wake_needed=true. Do not settle anything yourself; the woken model does.
 
 Respond with ONLY a JSON object:
 {"state": {"v": 2, "plan": "...", "known": ["..."], "open_questions": ["..."],

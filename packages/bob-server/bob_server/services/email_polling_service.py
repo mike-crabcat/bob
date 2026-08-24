@@ -709,6 +709,8 @@ class EmailPollingService(BaseService):
         if is_trusted:
             from bob_server.services.goal_tools import make_goal_tools
             tools.extend(make_goal_tools(self.ctx, session_key))
+            from bob_server.services.approval_tools import make_approval_tools
+            tools.extend(make_approval_tools(self.ctx, session_key))
 
         # If this thread was initiated from another session, inject the finish_email_thread tool
         if origin_session_key:

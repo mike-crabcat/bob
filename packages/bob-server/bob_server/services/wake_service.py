@@ -130,6 +130,8 @@ async def _generic_wake_dispatch(
     # The wake is system-initiated, so no separate trust gate applies.
     from bob_server.services.goal_tools import make_goal_tools
     tools.extend(make_goal_tools(ctx, session_key))
+    from bob_server.services.approval_tools import make_approval_tools
+    tools.extend(make_approval_tools(ctx, session_key))
     dispatch_id = str(uuid4())
 
     async def _run() -> None:

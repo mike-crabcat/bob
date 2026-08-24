@@ -25,6 +25,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         model: str = "",
         contact_id: str | None = None,
         modality: str = "phone",
+        goal_parent_id: str = "",
     ) -> str:
         """Spawn a subagent to work on a task asynchronously. Returns subagent_id immediately.
 
@@ -81,6 +82,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
             task,
             session_key,
             agent_type=agent_type,
+            goal_parent_id=goal_parent_id or None,
             persona=persona,
             model=model,
             contact_id=contact_id,

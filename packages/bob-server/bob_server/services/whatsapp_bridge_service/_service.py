@@ -860,6 +860,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         if is_trusted:
             from bob_server.services.goal_tools import make_goal_tools
             tools.extend(make_goal_tools(self.ctx, session_key))
+            # Bob Events §3.4: the payment gate's human side.
+            from bob_server.services.approval_tools import make_approval_tools
+            tools.extend(make_approval_tools(self.ctx, session_key))
 
         # Voice outreach: attach whenever the requester is a trusted contact, in any
         # chat context (DM or group). Untrusted users don't get the tool — it costs

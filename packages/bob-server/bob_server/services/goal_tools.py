@@ -257,6 +257,50 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         return json.dumps({"ok": True, "goal_id": goal_id, "not_before": not_before})
 
     @tool
+    async def list_goal_templates() -> str:
+        """List available goal templates — playbooks instantiable as a full
+        goal tree (children + decision rules). Shows each template's
+        description and required params."""
+        from bob_server.services.goal_templates import load_templates
+
+        templates = load_templates(ctx.settings.config_dir)
+        return json.dumps({"ok": True, "templates": [
+            {"name": name, "description": t.get("description", ""),
+             "params": t.get("params", [])}
+            for name, t in sorted(templates.items())]})
+
+    @tool
+    async def instantiate_goal_template(
+        template: str,
+        params_json: str = "{}",
+    ) -> str:
+        """Instantiate a goal template as a goal tree worked by THIS
+        conversation (root + children with decision rules; the named group
+        conversation is registered as a holder so replies given there route
+        back).
+
+        params_json example for team-event:
+        {"event_name": "team lunch", "group_name": "AI doom",
+         "group_session_key": "agent:main:whatsapp:group:<groupid>",
+         "decide_by": "2026-09-05T17:00:00+00:00"}
+        Adapt the created tree afterwards with the other goal tools."""
+        from bob_server.services.goal_templates import instantiate_template
+
+        try:
+            params = json.loads(params_json or "{}")
+        except json.JSONDecodeError as exc:
+            return json.dumps({"ok": False, "error": f"params_json invalid: {exc}"})
+        if not isinstance(params, dict):
+            return json.dumps({"ok": False, "error": "params_json must be an object"})
+        try:
+            result = await instantiate_template(
+                ctx, template_name=template, session_key=session_key,
+                params={k: str(v) for k, v in params.items()})
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+        return json.dumps({"ok": True, **result})
+
+    @tool
     async def complete_goal(goal_id: str, result: str) -> str:
         """Complete an active goal with its outcome. If the goal was created
         on behalf of another conversation and has no parent, that
@@ -301,4 +345,5 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         return json.dumps({"ok": True, "goals": goals})
 
     return [create_goal, update_goal, update_goal_state,
-            schedule_goal_wakeup, complete_goal, list_goals]
+            schedule_goal_wakeup, list_goal_templates,
+            instantiate_goal_template, complete_goal, list_goals]

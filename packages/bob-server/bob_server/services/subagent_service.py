@@ -72,6 +72,7 @@ class SubagentService(BaseService):
         model: str = "",
         contact_id: str | None = None,
         modality: str = "phone",
+        goal_parent_id: str | None = None,
     ) -> dict[str, Any]:
         # Normalise voice-agent aliases the parent LLM invents. Anything in the
         # voice vocabulary routes to the openai_voice path; the stored values
@@ -115,6 +116,7 @@ class SubagentService(BaseService):
                 origin_conversation_id=parent_session_key,
                 kind="call" if agent_type == "openai_voice" else "subagent",
                 external_ref=subagent_id,
+                parent_goal_id=goal_parent_id,
             )
         except Exception:
             logger.warning("failed to create goal for subagent %s", short_id, exc_info=True)
