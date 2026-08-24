@@ -83,7 +83,12 @@ class GroupEventsMixin:
                 continue
             await participants_repo.upsert(
                 session_key, phone_number,
-                display_name=display_name or contact["id"],
+                # Roster syncs often carry no per-member name; fall back to
+                # the contact's name, and pass '' (upsert then keeps any
+                # previously learned pushname) — never the contact UUID,
+                # which used to clobber real names on every restart's
+                # connect-time sync.
+                display_name=display_name or contact.get("name") or "",
                 contact_id=contact["id"],
                 is_trusted=bool(contact.get("is_trusted")), now_iso=now_iso)
         from bob_server.repositories.conversations import ConversationRepository

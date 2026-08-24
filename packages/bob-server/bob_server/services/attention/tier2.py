@@ -53,6 +53,10 @@ Consider the Session context — if {bot_name} has an active role (assistant, pl
 coordinator), lean toward ACT for questions and follow-ups. Default to STAND_DOWN only \
 for reactions and explicit addressing of another named participant.
 
+Transcript lines are labelled with the speaker's name — lines from {bot_name} itself are \
+labelled "{bot_name}". Use these labels to tell participants apart and to spot who a \
+message is addressed to.
+
 Respond with ONLY a JSON object: {{"decision": "ACT"|"WAIT"|"STAND_DOWN", "reason": "<brief>"}}"""
 
 
@@ -132,6 +136,7 @@ async def _build_context(ctx: Any, session_key: str, max_context: int,
                          *, bot_name: str = "Bob") -> str:
     """Session agenda + recent dispatched dialogue + the pending batch."""
     from bob_server.repositories.history import HistoryRepository
+    from bob_server.repositories.participants import ParticipantRepository
     from bob_server.services.session_agenda_service import SessionAgendaService
 
     parts: list[str] = []
@@ -141,14 +146,42 @@ async def _build_context(ctx: Any, session_key: str, max_context: int,
         parts.append("## Session context")
         parts.append(agenda.strip())
 
+    # Attribution: STAND_DOWN/WAIT heuristics key on WHO spoke ("hey david"
+    # is a stand-down only if David didn't send it; one sender mid-thought
+    # suggests WAIT), so resolve sender_id -> display name the same way
+    # prompt assembly does.
+    sender_names: dict[str, str] = {}
+    for p in await ParticipantRepository(ctx.db).list_for(session_key):
+        if p["contact_id"] and p["display_name"]:
+            sender_names[p["contact_id"]] = p["display_name"]
+
+    def speaker(row: dict) -> str:
+        if row["role"] != "user":
+            return bot_name
+        return sender_names.get(row["sender_id"] or "") or "User"
+
     repo = HistoryRepository(ctx.db)
     rows = await repo.recent_dialogue(session_key, limit=max_context,
                                       dispatched_only=True)
     if rows:
         parts.append("## Recent conversation")
         for row in rows:
-            role = "User" if row["role"] == "user" else "Bot"
-            parts.append(f"{role}: {(row['content'] or '')[:200]}")
+            # Routine prompts and subagent chatter ride the same history but
+            # aren't dialogue by group participants — without this they render
+            # as anonymous "User:" lines and pollute the transcript the probe
+            # reads. Routine OUTPUTS (assistant rows) stay: they're real
+            # messages the bot sent and humans may be replying to.
+            if row["role"] == "user" and row["channel"] in ("routine", "subagent"):
+                continue
+            # Same stale-marker skip as prompt assembly: NO_REPLY/empty rows
+            # are internal bookkeeping, not replies, and read to the probe
+            # like the bot already declined.
+            if row["role"] == "assistant" and (
+                    not (row["content"] or "").strip()
+                    or (row["content"] or "").strip().upper().rstrip(".")
+                    in ("NO_REPLY", "NO REPLY", "NOTHING TO SAY")):
+                continue
+            parts.append(f"{speaker(row)}: {(row['content'] or '')[:200]}")
 
     pending = await repo.recent_dialogue(session_key, limit=10,
                                          dispatched_only=False,
@@ -156,7 +189,7 @@ async def _build_context(ctx: Any, session_key: str, max_context: int,
     if pending:
         parts.append("## Pending unprocessed messages")
         for row in pending:
-            parts.append((row["content"] or "")[:300])
+            parts.append(f"{speaker(row)}: {(row['content'] or '')[:300]}")
 
     parts.append("## Decision")
     parts.append(f"Should {bot_name} respond to the pending batch? "
