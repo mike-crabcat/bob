@@ -111,6 +111,48 @@ class GoalRepository:
             (conversation_id, limit))
         return [dict(r) for r in rows] if rows else []
 
+    async def active_goal_ids_referencing_entities(
+        self, entity_ids: list[str],
+    ) -> list[str]:
+        """Active goals whose strategy refs.entities names any of the given
+        entities — the claim router's strong (ref) match (Bob Events §2.3)."""
+        if not entity_ids:
+            return []
+        marks = ",".join("?" for _ in entity_ids)
+        rows = await self.db.fetch_all(
+            f"""SELECT DISTINCT id FROM goals
+                WHERE status = 'active'
+                  AND json_extract(strategy_json, '$.refs.entities') IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM json_each(
+                      json_extract(strategy_json, '$.refs.entities')) je
+                      WHERE je.value IN ({marks}))""",
+            tuple(entity_ids))
+        return [r["id"] for r in rows or []]
+
+    async def active_goal_ids_held_by_conversations(
+        self, conversation_ids: list[str], *,
+        exclude_conversation_id: str | None = None,
+    ) -> list[str]:
+        """Active goals held by any of the given conversations (holder-based
+        claim-router matching; the excluded conversation implements echo
+        suppression — a goal held only by the originating conversation is not
+        a candidate through that link)."""
+        if not conversation_ids:
+            return []
+        marks = ",".join("?" for _ in conversation_ids)
+        params: list[Any] = list(conversation_ids)
+        exclude = ""
+        if exclude_conversation_id is not None:
+            exclude = "AND gc.conversation_id != ?"
+            params.append(exclude_conversation_id)
+        rows = await self.db.fetch_all(
+            f"""SELECT DISTINCT g.id FROM goals g
+                JOIN goal_conversations gc ON gc.goal_id = g.id
+                WHERE g.status = 'active' AND gc.conversation_id IN ({marks})
+                {exclude}""",
+            tuple(params))
+        return [r["id"] for r in rows or []]
+
     async def get(self, goal_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one("SELECT * FROM goals WHERE id = ?", (goal_id,))
 

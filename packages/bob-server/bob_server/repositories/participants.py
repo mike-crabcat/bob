@@ -104,6 +104,20 @@ class ParticipantRepository:
             (contact_id,))
         return [r["conversation_id"] for r in rows]
 
+    async def conversations_sharing_contacts(self, conversation_id: str) -> list[str]:
+        """Conversations sharing at least one human contact with the given
+        conversation (contact_id-based — the agent has no contact row, so it
+        cannot over-match). Bob Events §2.3 weak-match routing."""
+        rows = await self.db.fetch_all(
+            """SELECT DISTINCT p2.conversation_id AS cid2
+               FROM participants p1
+               JOIN participants p2 ON p2.contact_id = p1.contact_id
+                                    AND p2.conversation_id != p1.conversation_id
+               WHERE p1.conversation_id = ?
+                 AND p1.contact_id IS NOT NULL AND p2.contact_id IS NOT NULL""",
+            (conversation_id,))
+        return [r["cid2"] for r in rows]
+
     async def contact_session_rollup(self, contact_id: str) -> list[dict[str, Any]]:
         """A contact's conversations with LLM-call counts, most recent first."""
         rows = await self.db.fetch_all(

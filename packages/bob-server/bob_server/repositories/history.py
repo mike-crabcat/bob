@@ -173,6 +173,18 @@ class HistoryRepository:
 
     # ------------------------------------------------- dispatch claim/restore
 
+    async def messages_by_ids(self, message_ids: list[str]) -> list[dict]:
+        """Raw message rows by id (id, conversation_id, created_at) — the
+        entity-mention index resolves claim provenance through here (Bob
+        Events §2.1). Missing ids simply don't resolve."""
+        if not message_ids:
+            return []
+        marks = ",".join("?" for _ in message_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT id, conversation_id, created_at FROM messages "
+            f"WHERE id IN ({marks})", tuple(message_ids))
+        return [dict(r) for r in rows] if rows else []
+
     async def pending_user_ids(self, session_key: str) -> list[str]:
         rows = await self.db.fetch_all(
             "SELECT id FROM messages "

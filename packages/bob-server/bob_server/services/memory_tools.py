@@ -122,7 +122,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 subject_id=entity_id,
                 value=f"[removed] {reason}",
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             await write_claim(ctx.db, truth_claim)
@@ -155,7 +154,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 subject_id=entity_id,
                 value=f"[removed {claim_type_key}] {reason}",
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             await write_claim(ctx.db, truth_claim)
@@ -187,7 +185,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 object_id=new_object_id or None,
                 value=new_value or None,
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             await write_claim(ctx.db, claim)
@@ -217,7 +214,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 subject_id=entity_id,
                 value=value,
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             await write_claim(ctx.db, claim)
@@ -293,7 +289,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 object_id=new_object_id or None,
                 value=new_value or None,
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             await write_claim(ctx.db, replacement)
@@ -365,7 +360,6 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                     object_id=cl_object,
                     value=cl_value,
                     status="active",
-                    source_bulletins=[],
                     created_at=datetime.now(),
                 )
                 await write_claim(ctx.db, claim)

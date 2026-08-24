@@ -525,6 +525,25 @@ class WakeupPumpTask:
             logger.info("wakeup pump fired %d wakeup(s)", fired)
 
 
+class ClaimRouterSweepTask:
+    """Replay un-routed memory.claims_created events (Bob Events §2.2).
+
+    The inline path delivers at extraction time; this sweep exists for crash
+    leftovers and for replaying the gap when BOB_CLAIM_ROUTER_DISABLED is
+    lifted (the watermark holds while disabled). Routing effects are
+    idempotent per (goal, stimulus), so replay after inline delivery is
+    harmless."""
+
+    name = "claim_router_sweep"
+
+    async def run(self, ctx: AppContext) -> None:
+        from bob_server.services.memory.claim_router import replay_pending
+
+        replayed = await replay_pending(ctx)
+        if replayed:
+            logger.info("claim router sweep replayed %d event(s)", replayed)
+
+
 _last_deletion_propagation: datetime | None = None
 
 

@@ -14,7 +14,7 @@ from bob_server.services.memory.claim_types import (
     ENTITY_TYPE_REGISTRY,
     render_entity,
 )
-from bob_server.services.memory.models import Claim, Bulletin
+from bob_server.services.memory.models import Claim
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +22,66 @@ _NEW_PERSON_RE = re.compile(r"^person:new:(.+)$")
 _NEW_PERSON_ALT_RE = re.compile(r"^person-new[:\-](.+)$")
 
 
+async def update_entity_mentions(db: Any, entity_ids: list[str],
+                                 message_ids: list[str]) -> None:
+    """Upsert entity↔conversation mention intervals (bob-events-plan §2.1).
+
+    Every claim write path funnels through here so the index covers
+    extraction, memory_correct, reconciliation, and answer-question alike.
+    Message ids that don't resolve (an extraction turn's marker message is
+    inserted only after the tool loop finishes) are skipped here and picked
+    up by the post-turn refresh. Never raises: the index is an accelerator,
+    not a gate.
+    """
+    if not entity_ids or not message_ids:
+        return
+    try:
+        from bob_server.repositories.history import HistoryRepository
+        rows = await HistoryRepository(db).messages_by_ids(message_ids)
+        for row in rows or []:
+            cid = row["conversation_id"]
+            at = row["created_at"] or ""
+            for eid in entity_ids:
+                await db.execute(
+                    """INSERT OR IGNORE INTO memory_entity_mentions
+                       (entity_id, conversation_id, first_message_id,
+                        last_message_id, first_at, last_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (eid, cid, row["id"], row["id"], at, at))
+                # Widen the interval; first_* stays at the earliest ever seen.
+                await db.execute(
+                    """UPDATE memory_entity_mentions
+                       SET last_message_id = ?, last_at = ?
+                       WHERE entity_id = ? AND conversation_id = ?
+                         AND (last_at < ? OR (last_at = ? AND last_message_id != ?))""",
+                    (row["id"], at, eid, cid, at, at, row["id"]))
+    except Exception:
+        logger.warning("entity-mention index update failed", exc_info=True)
+
+
+async def list_claim_provenance(db: Any) -> list[dict[str, Any]]:
+    """(subject, object, source_messages) for every claim — the
+    mentions-backfill CLI reads through here (memory tables stay owned by
+    this package)."""
+    rows = await db.fetch_all(
+        "SELECT subject_id, object_id, source_messages FROM memory_claims")
+    return [dict(r) for r in rows or []]
+
+
+async def count_entity_mentions(db: Any) -> int:
+    row = await db.fetch_one("SELECT COUNT(*) AS n FROM memory_entity_mentions")
+    return int(row["n"]) if row else 0
+
+
+async def _claim_mention_entities(claim: Claim) -> list[str]:
+    ids = [claim.subject_id]
+    if claim.object_id and _is_valid_object_id(claim.object_id):
+        ids.append(claim.object_id)
+    return list(dict.fromkeys(ids))
+
+
 async def write_claim(db: Any, claim: Claim) -> str:
-    """Write a claim to the database. Deduplicates by merging bulletin sources."""
+    """Write a claim to the database. Deduplicates by merging message provenance."""
     # The DB CHECK constraint allows at most one of object_id / value. If both
     # were supplied (e.g. by supersede_claim_tool echoing the same string into
     # both fields), prefer object_id when it is a well-formed entity reference;
@@ -78,6 +136,10 @@ async def write_claim(db: Any, claim: Claim) -> str:
                     "UPDATE memory_claims SET source_messages = ? WHERE id = ?",
                     (json.dumps(merged_messages), existing_id),
                 )
+            # The dedupe merge widened provenance with this write's messages —
+            # the entity was discussed in their conversation too (plan §2.1).
+            await update_entity_mentions(db, await _claim_mention_entities(claim),
+                                         claim.source_messages)
             return existing_id
 
     await db.execute(
@@ -100,6 +162,8 @@ async def write_claim(db: Any, claim: Claim) -> str:
         ),
     )
     logger.info("Claim written: %s", claim.id)
+    await update_entity_mentions(db, await _claim_mention_entities(claim),
+                                 claim.source_messages)
     return claim.id
 
 

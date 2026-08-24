@@ -21,7 +21,7 @@ The fundamental problem Bob solves is continuity: facts that span many sessions,
 Data flows from raw session messages through an extraction turn into atomic claims, which are the single source of truth. Entity rows hold identity only; everything the agent reads is a rendered view generated from claims:
 
 ```
-  session_messages ─────────────────────────────────────────────────────────┐
+  messages ───────────────────────────────────────────────────────────────────┐
   (raw conversation:                                                        │
    WhatsApp / email / voice,                                                │
    user + assistant turns)                                                  │
@@ -115,7 +115,7 @@ A claim is a single typed proposition about one entity, stored in `memory_claims
 | `subject_id` | Entity the claim is about; must reference an existing entity row (orphan guard in `write_claim`) |
 | `object_id` / `value` | Exactly one of: an entity reference (`spouse → person-blair-nicol`) or a scalar (`birthday = "1990-03-15"`); enforced by a table CHECK and normalised in code |
 | `status` | `active`, `superseded`, `retracted`, `expired`, `disputed`, `archived`, `redundant`, `disproven`, `obsolete` — only `active` claims are read anywhere |
-| `source_messages` | JSON array of `session_messages.id` values — the provenance trail pointing at the extraction turn(s) that recorded the claim |
+| `source_messages` | JSON array of `messages.id` values — the provenance trail pointing at the extraction turn(s) that recorded the claim |
 | `visibility` / `scope` | Access-control tags (see *Visibility and scope*) |
 | `superseded_by` | JSON array of claim IDs or the label `"reconciliation"` |
 
@@ -316,7 +316,7 @@ Memory plugs into the rest of Bob at four seams: tool registration, prompt assem
                  ▼
   ┌────────────────────────────────────────────────────────────────────┐
   │  SessionService.add_message(role="assistant")                      │
-  │    synthetic = pop_memory_used(dispatch_id) → session_messages.    │
+  │    synthetic = pop_memory_used(dispatch_id) → messages.    │
   │    synthetic=1 when the reply echoed memory                        │
   └──────────────┬─────────────────────────────────────────────────────┘
                  │ session idle > 5 min, new msgs since last turn

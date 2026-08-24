@@ -19,6 +19,56 @@ def memory_reconcile(
     asyncio.run(_memory_reconcile(entity_ids, all, render_only))
 
 
+@app.command("mentions-backfill")
+def memory_mentions_backfill(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report only, no writes")] = False,
+) -> None:
+    """Backfill memory_entity_mentions from existing claims (Bob Events §2.1).
+
+    Walks every claim's source_messages provenance, resolves the messages to
+    conversations, and upserts entity↔conversation mention intervals. Safe to
+    re-run (idempotent upserts)."""
+    import asyncio
+    asyncio.run(_memory_mentions_backfill(dry_run))
+
+
+async def _memory_mentions_backfill(dry_run: bool) -> None:
+    from bob_server.config import Settings
+    from bob_server.database import Database
+    from bob_server.services.memory.claim_service import (
+        count_entity_mentions, list_claim_provenance, update_entity_mentions,
+    )
+
+    settings = Settings.from_env()
+    schema_dir = Path(__file__).parent.parent / "schemas"
+    db_path = settings.db_path or Path("bob.db")
+    db = Database(db_path, schema_dir)
+    await db.connect()
+    try:
+        rows = await list_claim_provenance(db)
+        total = len(rows)
+        touched = 0
+        for row in rows:
+            try:
+                message_ids = json.loads(row["source_messages"] or "[]")
+            except (TypeError, ValueError):
+                continue
+            entity_ids = [row["subject_id"]]
+            if row["object_id"]:
+                entity_ids.append(row["object_id"])
+            if not message_ids:
+                continue
+            if not dry_run:
+                await update_entity_mentions(db, entity_ids, message_ids)
+            touched += 1
+        typer.echo(
+            f"claims scanned: {total}, processed: {touched}, "
+            f"mention rows now: {await count_entity_mentions(db)}"
+            + (" (dry run — rows not written)" if dry_run else ""))
+    finally:
+        await db.close()
+
+
 async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only: bool) -> None:
     from bob_server.config import Settings
     from bob_server.context import AppContext
