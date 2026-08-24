@@ -372,3 +372,22 @@ async def backfill_people(request: Request) -> dict[str, Any]:
     return {"ok": True, "message": "Use 'bob memory seed' to regenerate from session history"}
 
 
+
+
+@router.get("/api/memory/routing-log")
+async def routing_log(request: Request) -> dict[str, Any]:
+    """Recent claim-routing decisions (Bob Events §4.2) — the routing
+    analogue of the attention shadow table."""
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    from bob_server.services.memory.claim_router import recent_routing_log
+
+    rows = await recent_routing_log(_db(request), limit=50)
+    import json as _json
+    for r in rows:
+        for col in ("claim_ids", "entity_ids"):
+            try:
+                r[col] = _json.loads(r.get(col) or "[]")
+            except (TypeError, ValueError):
+                r[col] = []
+    return {"decisions": rows}

@@ -290,6 +290,32 @@ class GoalRepository:
                ORDER BY gt.created_at DESC LIMIT ?""", (conversation_id, limit))
         return [dict(r) for r in rows] if rows else []
 
+    async def stale_active(self, *, older_than: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Active goals not touched since ``older_than``, stallest first —
+        the progress-review loop's scan (plan §4.1). Parsed in Python:
+        updated_at writers emit full microsecond ISO."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM goals WHERE status = 'active'")
+        cutoff = older_than[:19]
+        stale = [dict(r) for r in rows or []
+                 if (r["updated_at"] or "")[:19] < cutoff]
+        stale.sort(key=lambda r: r["updated_at"] or "")
+        return stale[:limit]
+
+    async def children_map(self, goal_ids: list[str]) -> dict[str, list[str]]:
+        """parent_goal_id → [child ids], for the goal-tree dashboard view."""
+        if not goal_ids:
+            return {}
+        marks = ",".join("?" for _ in goal_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT parent_goal_id, id FROM goals "
+            f"WHERE parent_goal_id IN ({marks}) ORDER BY created_at",
+            tuple(goal_ids))
+        out: dict[str, list[str]] = {}
+        for r in rows or []:
+            out.setdefault(r["parent_goal_id"], []).append(r["id"])
+        return out
+
     async def active_count(self) -> int:
         row = await self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM goals WHERE status = 'active'")

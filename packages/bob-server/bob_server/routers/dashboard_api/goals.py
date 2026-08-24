@@ -23,11 +23,13 @@ async def list_goals(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
+    rows = await GoalRepository(db).list_recent(limit=100)
     goals = [
         {
             "id": r["id"],
             "conversation_id": r["conversation_id"],
             "origin_conversation_id": r["origin_conversation_id"],
+            "parent_goal_id": r.get("parent_goal_id"),
             "kind": r["kind"],
             "objective": r["objective"],
             "progress": r["progress"],
@@ -37,11 +39,27 @@ async def list_goals(request: Request) -> dict[str, Any]:
             "created_at": _utc(r["created_at"]),
             "updated_at": _utc(r["updated_at"]),
         }
-        for r in await GoalRepository(db).list_recent(limit=100)
+        for r in rows
     ]
 
-    transitions_by_goal: dict[str, list[dict[str, Any]]] = {}
     goal_ids = [g["id"] for g in goals]
+    children_by_goal = await GoalRepository(db).children_map(goal_ids)
+
+    from bob_server.services.goal_state_service import parse_strategy
+    for g, r in zip(goals, rows):
+        g["children"] = children_by_goal.get(g["id"], [])
+        state = parse_strategy(r)
+        g["state"] = {
+            "plan": state.plan[:200],
+            "known": len(state.known),
+            "open_questions": state.open_questions[:5],
+            "next_actions": [
+                {"action": na.action[:160], "due": na.due}
+                for na in state.next_actions[:5]],
+            "entities": state.refs.entities[:8],
+        }
+
+    transitions_by_goal: dict[str, list[dict[str, Any]]] = {}
     if goal_ids:
         for t in await GoalRepository(db).transitions_for(goal_ids):
             transitions_by_goal.setdefault(t["goal_id"], []).append({

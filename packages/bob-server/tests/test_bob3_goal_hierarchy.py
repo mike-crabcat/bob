@@ -404,3 +404,74 @@ async def test_call_result_wake_rides_settle_chokepoint(ctx, db, mock_wake, revi
     assert woke is True
     mock_wake.assert_not_awaited(), "child settle rolls up rather than waking"
     assert (await GoalRepository(db).get(call_goal["id"]))["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Progress-review loop (§4.1)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def review_task(monkeypatch):
+    from bob_server import heartbeat
+    monkeypatch.setattr(heartbeat, "_last_goal_review", None)
+    monkeypatch.delenv("BOB_GOAL_REVIEW_DISABLED", raising=False)
+    return heartbeat.GoalReviewTask()
+
+
+async def _age_goal(db, goal_id: str, hours: float = 48) -> None:
+    from datetime import datetime, timezone
+    old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    await db.execute("UPDATE goals SET updated_at = ? WHERE id = ?",
+                     (old, goal_id))
+
+
+async def test_goal_review_escalates_stuck_goal_to_origin(ctx, db, mock_wake,
+                                                          reviser, review_task):
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="work", objective="plan lunch",
+        origin_conversation_id="asker")
+    await _age_goal(db, goal["id"])
+    reviser.response = json.dumps({
+        "state": {"v": 2, "plan": "stalled", "review_streak": 4},
+        "wake_needed": False, "wake_summary": ""})
+
+    await review_task.run(ctx)
+
+    # Streak 4 → the task wakes the ORIGIN (the reviser's own wake covers
+    # the working conversation at streak 2).
+    assert mock_wake.await_count == 1
+    args = mock_wake.await_args
+    assert args.args[1] == "asker"
+    assert args.kwargs.get("call_category") == "goal_escalation"
+
+
+async def test_goal_review_no_escalation_when_moving(ctx, db, mock_wake,
+                                                     reviser, review_task):
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="work", objective="plan", origin_conversation_id="asker")
+    await _age_goal(db, goal["id"])
+    reviser.response = _reviser_json({"plan": "moving again"})  # no streak
+
+    await review_task.run(ctx)
+    mock_wake.assert_not_awaited()
+
+
+async def test_goal_review_skips_fresh_goals(ctx, db, mock_wake, reviser,
+                                             review_task):
+    await goal_service.create_goal(ctx, conversation_id="work", objective="fresh")
+    await review_task.run(ctx)
+    reviser.assert_not_awaited() if hasattr(reviser, "assert_not_awaited") else None
+    # No revision effect enqueued for a fresh goal.
+    assert await db.fetch_one(
+        "SELECT 1 FROM effects WHERE kind = 'goal_revise_state' "
+        "AND payload_json LIKE '%review:%'") is None
+
+
+async def test_goal_review_kill_switch(ctx, db, mock_wake, reviser,
+                                       review_task, monkeypatch):
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="work", objective="plan", origin_conversation_id="asker")
+    await _age_goal(db, goal["id"])
+    monkeypatch.setenv("BOB_GOAL_REVIEW_DISABLED", "1")
+    await review_task.run(ctx)
+    mock_wake.assert_not_awaited()

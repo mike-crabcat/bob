@@ -544,6 +544,92 @@ class ClaimRouterSweepTask:
             logger.info("claim router sweep replayed %d event(s)", replayed)
 
 
+_last_goal_review: datetime | None = None
+
+
+class GoalReviewTask:
+    """Progress-review loop (bob-events-plan.md §4.1, gap G6).
+
+    An OWN heartbeat task — deliberately not dream scheduling, which is
+    gated on ``dream.enabled`` (default false) and would silently never run.
+    Scans active goals untouched for longer than the threshold and runs the
+    reviser with a coherence-check stimulus. The reviser maintains a
+    ``review_streak`` in the goal's state (reset when something changed,
+    incremented when the review found nothing new) and wakes the working
+    conversation on the streak-2 escalation. This task adds the origin
+    escalation at streak 4 (one wake, not per-cycle). Kill switch:
+    ``BOB_GOAL_REVIEW_DISABLED=1``."""
+
+    name = "goal_review"
+    _THROTTLE = timedelta(hours=1)
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_goal_review
+        import os as _os
+        if _os.getenv("BOB_GOAL_REVIEW_DISABLED", "").strip().lower() in (
+                "1", "true", "yes", "on"):
+            return
+        now = datetime.now(timezone.utc)
+        if _last_goal_review and (now - _last_goal_review) < self._THROTTLE:
+            return
+        _last_goal_review = now
+
+        from bob_server.repositories.goals import GoalRepository
+        from bob_server.services.goal_state_service import (
+            enqueue_revision, parse_strategy,
+        )
+
+        cutoff = (now - timedelta(
+            hours=ctx.settings.goals.review_threshold_hours)).isoformat()
+        repo = GoalRepository(ctx.db)
+        stale = await repo.stale_active(older_than=cutoff, limit=10)
+        reviewed = escalated = 0
+        for goal in stale:
+            date = now.strftime("%Y-%m-%d")
+            stimulus = (
+                "## Coherence review\n"
+                "This goal has been quiet. Validate: are open_questions still "
+                "actionable? are next_actions overdue (and worth chasing)? is "
+                "`known` still true? If NOTHING changed since the last review, "
+                "increment `review_streak` by 1 and set wake_needed=true ONLY "
+                "if the new streak equals 2 (first escalation); routine stuck "
+                "confirmations do not re-wake. If the state changed, reset "
+                "`review_streak` to 0 and apply the normal wake rules.")
+            try:
+                await enqueue_revision(
+                    ctx, goal["id"], stimulus,
+                    stimulus_id=f"review:{goal['id']}:{date}")
+            except Exception:
+                logger.exception("goal review failed for %s", goal["id"])
+                continue
+            reviewed += 1
+
+            row = await repo.get(goal["id"])
+            streak = (parse_strategy(row).model_extra or {}).get(
+                "review_streak", 0) if row else 0
+            if isinstance(streak, (int, float)) and streak >= 4:
+                # The reviser's wake covers the working conversation at
+                # streak 2; this is the origin escalation (plan §1.2 wake
+                # matrix) — one wake at the streak-4 threshold, not per cycle.
+                target = goal["origin_conversation_id"] or goal["conversation_id"]
+                from bob_server.services.wake_service import wake_conversation
+                try:
+                    await wake_conversation(
+                        ctx, target,
+                        f"## Goal stuck\nObjective: {goal['objective']}\n\n"
+                        "This goal has been stalled across multiple reviews. "
+                        "Decide: revive it, narrow it, or cancel it.",
+                        call_category="goal_escalation",
+                        metadata={"goal_id": goal["id"], "review_streak": streak})
+                    escalated += 1
+                except Exception:
+                    logger.exception("origin escalation wake failed for %s",
+                                     goal["id"])
+        if reviewed:
+            logger.info("goal review: %d stale goal(s) reviewed, %d escalated",
+                        reviewed, escalated)
+
+
 _last_deletion_propagation: datetime | None = None
 
 

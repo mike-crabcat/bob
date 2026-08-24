@@ -415,6 +415,18 @@ async def get_watermark(db: Any) -> str | None:
     return row["event_id"] if row else None
 
 
+async def recent_routing_log(db: Any, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Newest routing decisions — the dashboard's routing browser reads
+    through here (memory tables stay owned by this package, plan §4.2)."""
+    rows = await db.fetch_all(
+        """SELECT id, stimulus_id, source_conversation_id, goal_id, claim_ids,
+                  entity_ids, match_type, probe_verdict, revise_outcome,
+                  wake_decision, detail, created_at
+           FROM memory_routing_log ORDER BY created_at DESC LIMIT ?""",
+        (limit,))
+    return [dict(r) for r in rows] if rows else []
+
+
 async def advance_watermark(db: Any, event_id: str) -> None:
     from bob_server.services.base import utcnow
     await db.execute(

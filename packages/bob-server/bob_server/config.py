@@ -363,6 +363,9 @@ class GoalsSettings:
     reviser_model: str = ""
     max_concurrent_revisions: int = 3
     max_cas_retries: int = 3
+    # Progress-review loop (§4.1); BOB_GOAL_REVIEW_DISABLED is the runtime
+    # kill switch, read at call time.
+    review_threshold_hours: float = 24.0
 
 
 @dataclass(slots=True)
@@ -699,6 +702,7 @@ class Settings:
                 reviser_model=os.getenv("BOB_GOALS_REVISER_MODEL", ""),
                 max_concurrent_revisions=int(os.getenv("BOB_GOALS_MAX_CONCURRENT_REVISIONS", "3")),
                 max_cas_retries=int(os.getenv("BOB_GOALS_MAX_CAS_RETRIES", "3")),
+                review_threshold_hours=float(os.getenv("BOB_GOAL_REVIEW_THRESHOLD_HOURS", "24")),
             ),
             merch=MerchSettings(
                 enabled=_env_bool("BOB_MERCH_ENABLED"),
