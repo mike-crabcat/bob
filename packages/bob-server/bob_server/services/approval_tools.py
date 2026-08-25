@@ -21,12 +21,36 @@ from bob_server.services.tools import tool
 logger = logging.getLogger(__name__)
 
 
+def _summarize_proposal(proposal: Any) -> str:
+    """Small human-readable summary for the approval wake. Vendor-agnostic:
+    any proposal with an ``order.items`` list gets an itemised total; other
+    proposals fall back to their ``summary`` field."""
+    if not isinstance(proposal, dict):
+        return ""
+    order = proposal.get("order")
+    if not isinstance(order, dict):
+        return str(proposal.get("summary") or "")
+    lines = []
+    total = 0.0
+    for item in order.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        qty = item.get("quantity", 1) or 1
+        price = item.get("retail_price")
+        lines.append(f"- {qty} × {item.get('name', 'item')}"
+                     + (f" (variant {item.get('variant_id')})" if item.get("variant_id") else ""))
+        if isinstance(price, (int, float)):
+            total += qty * price
+    body = "\n".join(lines)
+    return (body + (f"\nEstimated total: ${total:.2f}" if total else "")) or \
+        str(proposal.get("summary") or "")
+
+
 def _register_approval_executors() -> None:
     from bob_server.services import effects as effects_svc
 
     async def _exec_request(ctx, payload):
         from bob_server.repositories.approvals import ApprovalRepository
-        from bob_server.services.merch_service import build_cart_summary
 
         row = await ApprovalRepository(ctx.db).create(
             approval_type=payload["approval_type"],
@@ -38,14 +62,11 @@ def _register_approval_executors() -> None:
             metadata={"origin_conversation_id": payload.get("origin_conversation_id")})
 
         # The gate wake: the human is asked in the origin conversation with
-        # the cart summary in hand.
+        # the proposal summary in hand.
         origin = payload.get("origin_conversation_id")
         if origin:
             from bob_server.services.wake_service import wake_conversation
-            summary = ""
-            proposal = payload.get("proposal") or {}
-            if isinstance(proposal, dict) and proposal.get("order"):
-                summary = build_cart_summary(proposal["order"])
+            summary = _summarize_proposal(payload.get("proposal"))
             try:
                 await wake_conversation(
                     ctx, origin,
@@ -72,36 +93,14 @@ def _register_approval_executors() -> None:
             if already and already["status"] == payload["decision"]:
                 return already["id"]  # idempotent duplicate (effect pump retry)
             raise RuntimeError("approval already settled or not found")
-
-        if payload["decision"] == "approved" and row["approval_type"] == "purchase":
-            await _enqueue_purchase_order(ctx, row)
+        # Approving records the decision only. Acting on an approval (e.g.
+        # placing an order via a skill) is the agent's job on the wake that
+        # follows — by design: the platform records human intent, it doesn't
+        # execute vendor actions.
         return row["id"]
 
     effects_svc.register_executor("approval_request", _exec_request)
     effects_svc.register_executor("approval_respond", _exec_respond)
-
-
-async def _enqueue_purchase_order(ctx: AppContext, approval: dict[str, Any]) -> None:
-    """Chain an approved purchase into the durable merch_order effect. The
-    cart rides in proposal_data; the order executor re-verifies the approval
-    (its precondition), so the chain is safe even if effects interleave."""
-    try:
-        proposal = json.loads(approval["proposal_data"] or "{}")
-    except (TypeError, ValueError):
-        proposal = {}
-    order = proposal.get("order")
-    if not order:
-        logger.warning("approval %s approved but proposal has no order payload",
-                       approval["id"])
-        return
-    from bob_server.services.effects import emit_and_deliver
-
-    await emit_and_deliver(
-        ctx, kind="merch_order",
-        idempotency_key=f"merch_order:{approval['id']}",
-        payload={"approval_id": approval["id"],
-                 "goal_id": proposal.get("goal_id"),
-                 "order": order})
 
 
 _register_approval_executors()

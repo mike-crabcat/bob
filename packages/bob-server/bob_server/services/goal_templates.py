@@ -89,10 +89,11 @@ DEFAULT_TEMPLATES: dict[str, dict[str, Any]] = {
                              "merch",
                 "kind": "task",
                 "strategy": {
-                    "payment_gate": (
-                        "the order requires an approved `purchase` approval "
-                        "(respond_approval in the origin conversation); "
-                        "never spend without it"),
+                    "how": (
+                        "order via the printful skill "
+                        "(workspace/skills/printful) — reuse its "
+                        "--external-id idempotency; request_approval for "
+                        "non-trivial spend is good judgment, not a hard gate"),
                 },
             },
         ],

@@ -5,7 +5,7 @@ scenario plus perturbation reruns. Status of the scripted harness:
 
 - ``all_group`` (every reply in the wrong channel — the historically-lost
   case) is the deterministic end-to-end gate: full flow, zero loss, one
-  order through the payment gate.
+  order placed via the skill after approval.
 - ``mixed`` / ``late_cancel`` / ``wrong_slug`` intermittently stall on the
   negotiate-settle step: the settle crosses several detached wake-dispatch
   generations under the scripted actor, and one link in that chain doesn't
@@ -75,10 +75,9 @@ async def test_rehearsal_pod_stub_replay_is_idempotent(ctx, db, monkeypatch,
     effect cannot double-order (the crash-retry property)."""
     import httpx
 
-    from tests.rehearsal.pod_stub import install_pod_stub, make_pod_stub
+    from tests.rehearsal.pod_stub import make_pod_stub
 
     stub = make_pod_stub()
-    install_pod_stub(monkeypatch, stub)
     transport = httpx.ASGITransport(app=stub)  # type: ignore[arg-type]
     order = {"external_id": "bob-approval-1",
              "items": [{"variant_id": 1, "quantity": 1}]}

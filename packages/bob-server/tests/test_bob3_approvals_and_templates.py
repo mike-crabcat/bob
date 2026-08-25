@@ -1,7 +1,10 @@
-"""Payment gate + merch ordering + goal templates (bob-events-plan.md Phase 3).
+"""Approvals + goal templates (bob-events-plan.md Phase 3).
 
-The gate's hard property: nothing spends without a recorded human approval,
-and the order executor independently re-checks it.
+The vendor integration is deliberately absent: approvals record human
+decisions and wake the asker — acting on an approval (placing an order via
+a skill) is the agent's job, not the platform's. The template's merch child
+points at the workspace skill, with approvals as judgment rather than a
+hard gate.
 """
 
 from __future__ import annotations
@@ -22,16 +25,16 @@ def mock_wake(monkeypatch):
     return wake
 
 
-async def _purchase_approval(ctx, *, cart=None, goal_id=None) -> str:
+async def _purchase_approval(ctx, *, goal_id=None) -> str:
     row = await ApprovalRepository(ctx.db).create(
         approval_type="purchase", entity_id=goal_id or "goal-x",
         title="Team lunch merch order",
         description="8 × team tee",
         proposal={"goal_id": goal_id, "summary": "8 × team tee, ~$160",
-                  "order": cart or {
-                      "recipient": {"name": "Mike", "address1": "1 Main St"},
-                      "items": [{"variant_id": 42, "quantity": 8,
-                                 "name": "team tee", "retail_price": 20.0}]}})
+                  "order": {"recipient": {"name": "Mike"},
+                            "items": [{"variant_id": 42, "quantity": 8,
+                                       "name": "team tee",
+                                       "retail_price": 20.0}]}})
     return row["id"]
 
 
@@ -62,40 +65,47 @@ async def test_pending_view_and_list(ctx, db):
 
 
 # ---------------------------------------------------------------------------
-# respond_approval tool + order chaining
+# Approval tools — record decisions, wake the asker, chain nothing
 # ---------------------------------------------------------------------------
 
-async def test_approve_chains_merch_order_effect(ctx, db, mock_wake, monkeypatch):
-    ctx.settings.merch.enabled = True
-    approval_id = await _purchase_approval(ctx)
-
-    placed: dict = {}
-
-    async def _fake_place(ctx_, *, approval_id, order):
-        placed["approval_id"] = approval_id
-        placed["order"] = order
-        return "pod-123"
-
-    from bob_server.services import merch_service
-    monkeypatch.setattr(merch_service, "place_order", _fake_place)
-
+async def test_approval_request_wakes_origin_with_summary(ctx, db, mock_wake):
     from bob_server.services.approval_tools import make_approval_tools
-    tools = {t.name: t for t in make_approval_tools(ctx, "agent:main:whatsapp:dm:1")}
 
-    listed = json.loads(await tools["list_pending_approvals"].handler())
-    assert listed["pending"][0]["summary"] == "8 × team tee, ~$160"
+    tools = {t.name: t for t in make_approval_tools(ctx, "conv-origin")}
+    out = json.loads(await tools["request_approval"].handler(
+        title="Team lunch merch order", description="8 × team tee",
+        approval_json=json.dumps({
+            "approval_type": "purchase", "entity_id": "goal-9",
+            "origin_conversation_id": "conv-origin",
+            "proposal": {"summary": "4 × tee",
+                         "order": {"items": [{"variant_id": 1, "quantity": 4,
+                                              "name": "tee",
+                                              "retail_price": 20.0}]}}})))
+    assert out["ok"], out
+    mock_wake.assert_awaited_once()
+    args = mock_wake.await_args
+    assert args.args[1] == "conv-origin"
+    assert "4 × tee" in args.args[2] and "$80.00" in args.args[2]
+
+
+async def test_approve_records_decision_and_chains_no_effects(ctx, db, mock_wake):
+    """Approving settles the approval row only — placing any order is the
+    agent's job (via its skills) on the wake that follows. No vendor effect
+    may exist in the platform."""
+    approval_id = await _purchase_approval(ctx)
+    from bob_server.services.approval_tools import make_approval_tools
+    tools = {t.name: t for t in make_approval_tools(ctx, "conv")}
 
     out = json.loads(await tools["respond_approval"].handler(
         approval_id=approval_id, decision="approve"))
     assert out["ok"] and out["status"] == "approved"
-    assert placed["approval_id"] == approval_id
-    assert placed["order"]["items"][0]["variant_id"] == 42
+    rows = await db.fetch_all(
+        "SELECT DISTINCT kind FROM effects WHERE kind NOT LIKE 'goal%' "
+        "AND kind NOT IN ('approval_request', 'approval_respond')")
+    assert rows == [], f"no vendor/order effects expected, got {rows}"
 
-    eff = await db.fetch_one("SELECT * FROM effects WHERE kind = 'merch_order'")
-    assert eff is not None and eff["status"] == "delivered"
 
-
-async def test_reject_does_not_order(ctx, db, mock_wake):
+async def test_reject_records_without_side_effects(ctx, db, mock_wake):
     approval_id = await _purchase_approval(ctx)
     from bob_server.services.approval_tools import make_approval_tools
     tools = {t.name: t for t in make_approval_tools(ctx, "conv")}
@@ -103,97 +113,8 @@ async def test_reject_does_not_order(ctx, db, mock_wake):
     out = json.loads(await tools["respond_approval"].handler(
         approval_id=approval_id, decision="reject"))
     assert out["ok"] and out["status"] == "rejected"
-    assert await db.fetch_one(
-        "SELECT 1 FROM effects WHERE kind = 'merch_order'") is None
-
-
-async def test_merch_order_never_spends_without_recorded_approval(
-        ctx, db, mock_wake):
-    from bob_server.services import merch_service
-
-    approval_id = await _purchase_approval(ctx)  # still pending
-    with pytest.raises(RuntimeError, match="not approved"):
-        await merch_service.place_order(
-            ctx, approval_id=approval_id, order={"items": []})
-
-    # Approved but merch disabled → also refuses (no account configured).
-    await ApprovalRepository(db).respond(approval_id, "approved")
-    with pytest.raises(RuntimeError, match="disabled"):
-        await merch_service.place_order(
-            ctx, approval_id=approval_id, order={"items": []})
-
-
-async def test_merch_order_api_key_from_config_file(ctx, db, mock_wake,
-                                                    monkeypatch, tmp_path):
-    ctx.settings.merch.enabled = True
-    approval_id = await _purchase_approval(ctx)
-    await ApprovalRepository(db).respond(approval_id, "approved")
-
-    # Keep the test off the real ~/config — the key file is tmp-scoped and
-    # the config_dir override keeps any other config lookup sandboxed too.
-    monkeypatch.setattr(ctx.settings, "config_dir", tmp_path)
-    key_file = tmp_path / "printful_api_key"
-    key_file.write_text("  sekret-key  \n")
-
-    seen: dict = {}
-
-    class _FakeResp:
-        status_code = 201
-        text = ""
-        def json(self):
-            return {"result": {"id": 555001}}
-
-    class _FakeClient:
-        def __init__(self, **kw):
-            pass
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *a):
-            return False
-        async def post(self, url, *, headers=None, json=None):
-            seen["url"] = url
-            seen["auth"] = headers.get("Authorization")
-            seen["json"] = json
-            return _FakeResp()
-
-    import bob_server.services.merch_service as ms
-    monkeypatch.setattr(ms.httpx, "AsyncClient", _FakeClient, raising=False)
-
-    order_id = await ms.place_order(
-        ctx, approval_id=approval_id, order={"items": [{"variant_id": 9}]})
-    assert order_id == "555001"
-    assert seen["url"].endswith("/v2/orders")
-    assert seen["auth"] == "Bearer sekret-key", "key read from file, trimmed"
-    assert seen["json"]["external_id"] == f"bob-{approval_id}", \
-        "external_id idempotency on the vendor side"
-
-    key_file.unlink()
-
-
-async def test_merch_order_settles_linked_goal_through_chokepoint(
-        ctx, db, mock_wake, monkeypatch):
-    from bob_server.services import goal_service, merch_service
-
-    root = await goal_service.create_goal(
-        ctx, conversation_id="work", objective="plan", origin_conversation_id="asker")
-    merch_child = await goal_service.create_goal(
-        ctx, conversation_id="work", objective="produce merch",
-        parent_goal_id=root["id"])
-    approval_id = await _purchase_approval(ctx, goal_id=merch_child["id"])
-
-    async def _fake_place(ctx_, *, approval_id, order):
-        return "pod-9"
-
-    monkeypatch.setattr(merch_service, "place_order", _fake_place)
-    from bob_server.services.approval_tools import make_approval_tools
-    tools = {t.name: t for t in make_approval_tools(ctx, "asker")}
-    out = json.loads(await tools["respond_approval"].handler(
-        approval_id=approval_id, decision="approve"))
-    assert out["ok"]
-
-    row = await GoalRepository(db).get(merch_child["id"])
-    assert row["status"] == "completed"
-    assert "pod-9" in row["result"]
+    row = await ApprovalRepository(db).get(approval_id)
+    assert row["reviewed_by"] == "conv"
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +159,13 @@ async def test_instantiate_team_event_template(ctx, db, mock_wake):
                for h in await repo.holders_of(root["id"])}
     assert holders.get("agent:main:whatsapp:group:doom") == "holder"
 
-    from bob_server.repositories.goals import GoalRepository as GR
-    held = await GR(db).goals_held_by("agent:main:whatsapp:group:doom")
+    held = await repo.goals_held_by("agent:main:whatsapp:group:doom")
     assert any(g["id"] == root["id"] for g in held)
+
+    # The merch child points at the skill, not a platform vendor.
+    merch = await repo.get(result["children"]["merch"])
+    merch_strategy = json.loads(merch["strategy_json"])
+    assert "skills/printful" in merch_strategy["how"]
 
 
 async def test_instantiate_missing_params_lists_them(ctx, db, mock_wake):
@@ -291,7 +216,6 @@ async def test_outreach_tool_parents_under_goal(ctx, db, mock_wake):
     tools = {t.name: t for t in make_whatsapp_outreach_tools(
         ctx, _FakeBridge(), "work")}
 
-    # Contact for the fan-out target.
     await db.execute(
         "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
         "VALUES ('c-alice', 'Alice', '+61400000002', datetime('now'), datetime('now'))")

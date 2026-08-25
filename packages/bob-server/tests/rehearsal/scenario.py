@@ -4,8 +4,8 @@
 persona-scripted rehearsal: template kickoff → availability fan-out →
 replies across channels (including the wrong-channel cases) → extraction →
 routing → reviser folds → quorum decision → announcement → booking call
-result → event memory + reminders → merch behind the payment gate → POD
-order → (perturbation) cancellation loop.
+result → event memory + reminders → merch approval + skill-placed
+POD order → (perturbation) cancellation loop.
 
 Scope notes (deliberate): the WhatsApp inbound gate and attention windows
 are exercised by their own suites — this harness injects persona messages
@@ -112,18 +112,17 @@ class RehearsalScenario:
 
     # ------------------------------------------------------------------
     async def setup(self) -> None:
-        from tests.rehearsal.pod_stub import install_pod_stub, make_pod_stub
+        from tests.rehearsal.pod_stub import make_pod_stub
         from tests.rehearsal.scripted import ScriptedActors
 
         for env in ("BOB_CLAIM_ROUTER_DISABLED", "BOB_GOAL_STATE_SHADOW",
                     "BOB_GOAL_REVIEW_DISABLED"):
             self.monkeypatch.delenv(env, raising=False)
 
-        self.ctx.settings.merch.enabled = True
-        key_file = self.tmp_path / "pod-key"
-        key_file.write_text("rehearsal-key")
-        self.ctx.settings.merch.api_key_file = str(key_file)
-        self.pod_state = install_pod_stub(self.monkeypatch, make_pod_stub())
+        # The POD stub stands in for the vendor Bob's printful skill talks
+        # to (the skill itself lives in the workspace, outside the repo).
+        self.pod_stub = make_pod_stub()
+        self.pod_state = self.pod_stub.state.pod_state
 
         from bob_server.services import effects as effects_svc
         # Save ONLY the key we override: a full-registry snapshot captured
@@ -323,6 +322,11 @@ class RehearsalScenario:
                 agenda="book the bistro", status="completed")
 
     async def approve(self) -> None:
+        """Mike's affirmative reply (respond_approval), then Bob's skill
+        turn: the printful skill places the order against the stub and the
+        merch child settles through the chokepoint. The skill itself lives
+        in the workspace, so the harness simulates its HTTP behaviour —
+        same key discipline, same external_id idempotency."""
         from bob_server.repositories.approvals import ApprovalRepository
         from bob_server.services.approval_tools import make_approval_tools
 
@@ -332,6 +336,20 @@ class RehearsalScenario:
         out = json.loads(await tools["respond_approval"](
             approval_id=row["id"], decision="approve"))
         assert out["ok"], out
+
+        from tests.rehearsal.pod_stub import stub_client
+        cart = dict(self.bb["cart"])
+        cart["external_id"] = f"bob-{row['id']}"
+        async with stub_client(self.pod_stub) as client:
+            r = await client.post(
+                "http://stub/v2/orders", json=cart,
+                headers={"Authorization": "Bearer rehearsal-key"})
+            assert r.status_code < 400, r.text
+            order_id = r.json()["result"]["id"]
+        from bob_server.services import goal_service
+        await goal_service.settle_goal(
+            self.ctx, self.bb["merch"], status="completed",
+            result=f"POD order {order_id} placed via the printful skill")
 
     # ------------------------------------------------------------------
     async def _status(self, goal_id: str):
