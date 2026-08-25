@@ -2,6 +2,32 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-08-24 – 2026-08-25
+
+### Added
+- Add hierarchical goals with living state (Bob Events): parent/child links with a goal↔conversation holder set keyed on canonical conversation ids, child results roll up into the parent's strategy worksheet via a cheap-model reviser instead of waking the origin, child deadline wakeups land on the root's working conversation, and versioned strategy worksheets (plan, known, open questions, next actions, entity refs) replace transcript re-derivation — goal context now injects into prompts on the WhatsApp inbound, generic wake, and email paths
+- Add silent goal-state revision: the reviser folds routed claims and child results with decision-rule evaluation (quorum, decide-by), wakes the working conversation only when decisions or next actions actually change, degrades to a wake rather than losing information on failure, and runs behind per-goal serialization, a concurrency cap, and BOB_GOAL_STATE_SHADOW / BOB_CLAIM_ROUTER_DISABLED kill switches
+- Route memory to goals across channels: claims extracted in any conversation reach the goals they affect via strategy entity-ref matches, a new entity↔conversation mention index (maintained on every claim write and backfilled by `bob memory mentions-backfill`), and human participant overlap with a relevance probe that fails open; delivery is durable through an event-log watermark with heartbeat replay, echo-suppressed per originating conversation, and every decision audited in a routing log
+- Steer cross-conversation entity identity: the silent-turn extractor prompt gains a candidate-entities block seeded from held and participant-overlapping goals so the same real-world thing reuses one entity id, and create_entity steers the model away from exact display-name duplicates
+- Extend the goal tool surface: create_goal takes kind, parent, and a validated strategy; new update_goal_state does CAS worksheet writes, schedule_goal_wakeup books reminder wakeups, and list/instantiate goal templates create a full plan DAG (negotiate with decision rules, venue, book, remind, merch) as data overridable from config; goal tools reach the generic wake and email paths, outreach and subagent spawns can parent under plan children, and a policy-gated proactive group-send tool ships off by default per group
+- Add the merch pipeline behind a human payment gate: an approvals table (recreated with a purchase type) with request/respond tools where approving a purchase chains exactly one durable order effect whose executor independently re-verifies the recorded approval before contacting the vendor, holds credentials in a server-side file outside the agent's bash reach, and sends vendor idempotency keys so crash retries cannot double-order (BOB_MERCH_ENABLED, off by default)
+- Add a progress-review heartbeat loop: goals untouched past a threshold (24h default) get coherence checks that track a stuck streak, wake the working conversation on the second consecutive no-change review, and escalate to the origin at the fourth
+- Add dashboard observability for the new machinery: the goals page renders the goal tree with state worksheets (plan, open questions, next actions, entity chips) plus a memory-routing decision feed, backed by tree and state fields on the goals API and a routing-log endpoint
+- Add a multi-party rehearsal harness for the benchmark scenario: persona-scripted parties replying across channels including the wrong-channel cases, scripted LLM stand-ins driving the real extraction, routing, reviser, goal, wake, and effects pipeline, a local print-on-demand stub, compressed-deadline time control, and a formal zero-information-loss scorer gated on the deterministic all-replies-in-group run
+
+### Changed
+- Make goal settlement the single wake chokepoint: phone-call results ride it with their own content and category overrides, and child roll-ups queue for the effects pump instead of executing inline inside executor call stacks
+
+### Fixed
+- Fix wake dispatches silently disappearing: detached dispatch tasks were only weakly referenced, so the scheduler could garbage-collect one mid-flight and drop the wake entirely — they are now strongly referenced until completion
+- Fix routed replies fragmenting across the goal tree (template children lacked versioned envelopes and the root's entity refs) and persona-DM extraction minting duplicate entity slugs (parented outreach goals now inherit the parent's refs so candidate seeding reaches the target conversation)
+- Fix overdue-goal detection comparing second-truncated timestamps against microsecond-ISO writers
+- Make the reviser's per-goal locks and concurrency semaphore loop-aware so a process running multiple event loops cannot inherit primitives bound to a dead one
+- Fix the attention probe misreading group transcripts: speaker lines are attributed through participants instead of anonymous "User:" labels, and routine or subagent chatter and NO_REPLY bookkeeping rows no longer pollute the probe's view of the conversation
+
+### Removed
+- Remove the dead bulletin pipeline residue: Bulletin models and generator inputs, source_bulletins fields and their constructor sites, memory_entity_bulletins write paths, and the caller-less group-entity helpers — the tables were dropped by migration 353, making those writes latent errors
+
 ## 2026-08-23
 
 ### Added
