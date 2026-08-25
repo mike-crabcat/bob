@@ -124,13 +124,15 @@ async def test_merch_order_never_spends_without_recorded_approval(
 
 
 async def test_merch_order_api_key_from_config_file(ctx, db, mock_wake,
-                                                    monkeypatch):
+                                                    monkeypatch, tmp_path):
     ctx.settings.merch.enabled = True
     approval_id = await _purchase_approval(ctx)
     await ApprovalRepository(db).respond(approval_id, "approved")
 
-    key_file = ctx.settings.config_dir / "printful_api_key"
-    key_file.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the test off the real ~/config — the key file is tmp-scoped and
+    # the config_dir override keeps any other config lookup sandboxed too.
+    monkeypatch.setattr(ctx.settings, "config_dir", tmp_path)
+    key_file = tmp_path / "printful_api_key"
     key_file.write_text("  sekret-key  \n")
 
     seen: dict = {}
