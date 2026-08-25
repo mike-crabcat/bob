@@ -227,6 +227,9 @@ async def test_instantiate_team_event_template(ctx, db, mock_wake):
     neg_strategy = json.loads(negotiate["strategy_json"])
     assert neg_strategy["decision"]["quorum"] == 0.75
     assert neg_strategy["decision"]["of"] == "invitees"
+    # Children inherit the root's refs so router ref-matches reach the child
+    # accumulating the information (attendance must not fragment).
+    assert "event-team-lunch" in neg_strategy["refs"]["entities"]
 
     # Group chat registered as holder → routing + seeding cover group replies.
     holders = {h["conversation_id"]: h["role"]

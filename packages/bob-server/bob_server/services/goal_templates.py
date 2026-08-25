@@ -188,12 +188,23 @@ async def instantiate_template(
 
     repo = GoalRepository(ctx.db)
     children: dict[str, str] = {}
+    root_refs = (root_spec.get("strategy") or {}).get("refs")
     for child_spec in spec.get("children", []):
+        child_strategy = dict(child_spec.get("strategy") or {})
+        # Children inherit the root's entity refs so the claim router's ref
+        # match reaches the child that accumulates the information (e.g.
+        # group-chat attendance folds into the negotiate child, not just the
+        # root) — otherwise replies fragment across the tree.
+        if root_refs and "refs" not in child_strategy:
+            child_strategy["refs"] = dict(root_refs)
+        # v2 envelope so the state stays a first-class strategy (decision
+        # rules ride as extra keys), not legacy-wrapped residue.
+        child_strategy.setdefault("v", 2)
         child = await goal_service.create_goal(
             ctx, conversation_id=session_key,
             objective=child_spec["objective"],
             kind=child_spec.get("kind", "task"),
-            strategy=child_spec.get("strategy") or None,
+            strategy=child_strategy or None,
             parent_goal_id=root["id"])
         children[child_spec["key"]] = child["id"]
 

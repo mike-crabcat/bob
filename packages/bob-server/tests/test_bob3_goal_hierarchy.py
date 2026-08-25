@@ -122,6 +122,8 @@ async def test_child_settle_rolls_up_without_origin_wake(ctx, db, mock_wake, rev
          "refs": {"entities": ["event-team-lunch"], "claims": []}})
 
     await goal_service.complete_goal(ctx, child["id"], result="alice confirmed 3pm")
+    from bob_server.services.effects import pump_due_effects
+    await pump_due_effects(ctx)  # roll-up revisions queue for the pump
 
     # Child settle never wakes the origin directly.
     mock_wake.assert_not_awaited()
@@ -142,6 +144,8 @@ async def test_reviser_wakes_parent_working_conversation_not_origin(
         {"plan": "x"}, wake_needed=True, summary="alice confirmed — quorum reached")
 
     await goal_service.complete_goal(ctx, child["id"], result="alice confirmed 3pm")
+    from bob_server.services.effects import pump_due_effects
+    await pump_due_effects(ctx)
 
     mock_wake.assert_awaited_once()
     args = mock_wake.await_args
@@ -152,6 +156,8 @@ async def test_reviser_wakes_parent_working_conversation_not_origin(
 async def test_root_settle_wakes_origin_once(ctx, db, mock_wake, reviser):
     root, child = await _make_tree(ctx)
     await goal_service.complete_goal(ctx, child["id"], result="done")
+    from bob_server.services.effects import pump_due_effects
+    await pump_due_effects(ctx)
     await goal_service.complete_goal(ctx, root["id"], result="lunch booked")
 
     # Only the root's settle wakes the origin — exactly once.

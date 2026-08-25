@@ -201,20 +201,32 @@ def make_whatsapp_outreach_tools(
         # Bob3 Phase V + Increment 3: outreach state lives ON the goal
         # (strategy carries requestor/message for the target-side prompt).
         # A 24h deadline wakeup resurfaces unanswered outreach in the origin
-        # conversation.
+        # conversation. Bob Events: a parented outreach inherits the parent's
+        # entity refs so the target DM's §2.0 candidate seeding offers the
+        # plan's entities — otherwise the extractor there mints duplicate
+        # slugs and the reply never ref-matches back into the plan.
         goal_id = None
         try:
             from datetime import datetime, timedelta, timezone
 
             from bob_server.services.goal_service import create_goal
             phone_digits_g = re.sub(r"\D", "", phone)
+            strategy = {"requestor": requestor_name, "message": message}
+            if parent_goal:
+                from bob_server.repositories.goals import GoalRepository
+                from bob_server.services.goal_state_service import parse_strategy
+                parent = await GoalRepository(db).get(parent_goal)
+                if parent is not None:
+                    refs = parse_strategy(parent).refs.entities
+                    if refs:
+                        strategy["refs"] = {"entities": list(refs), "claims": []}
             goal = await create_goal(
                 ctx,
                 conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
                 objective=objective,
                 origin_conversation_id=current_session_key,
                 kind="outreach",
-                strategy={"requestor": requestor_name, "message": message},
+                strategy=strategy,
                 deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
                 parent_goal_id=parent_goal,
             )

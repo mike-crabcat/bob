@@ -115,26 +115,30 @@ def _shadow_mode() -> bool:
 
 # Per-goal serialization (plan §2.2): revisions of the same goal run one at a
 # time so CAS conflicts come from genuinely concurrent writers, not from our
-# own fan-out. Locks are tiny and per-goal-id; the count is bounded by goals.
-_GOAL_LOCKS: dict[str, asyncio.Lock] = {}
+# own fan-out. asyncio primitives bind to the running loop, so keys carry the
+# loop identity — one loop per process in production, but tests get a fresh
+# loop each case.
+_GOAL_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 
 # Global cap on concurrent reviser LLM calls (lazily sized from settings on
 # first use — module import happens before env-driven Settings exist).
-_REVISER_SEMAPHORE: asyncio.Semaphore | None = None
+_REVISER_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
 
 
 async def _semaphore(ctx: AppContext) -> asyncio.Semaphore:
-    global _REVISER_SEMAPHORE
-    if _REVISER_SEMAPHORE is None:
-        _REVISER_SEMAPHORE = asyncio.Semaphore(
+    loop_id = id(asyncio.get_running_loop())
+    sem = _REVISER_SEMAPHORES.get(loop_id)
+    if sem is None:
+        sem = _REVISER_SEMAPHORES[loop_id] = asyncio.Semaphore(
             ctx.settings.goals.max_concurrent_revisions)
-    return _REVISER_SEMAPHORE
+    return sem
 
 
 def _lock_for(goal_id: str) -> asyncio.Lock:
-    lock = _GOAL_LOCKS.get(goal_id)
+    key = (id(asyncio.get_running_loop()), goal_id)
+    lock = _GOAL_LOCKS.get(key)
     if lock is None:
-        lock = _GOAL_LOCKS[goal_id] = asyncio.Lock()
+        lock = _GOAL_LOCKS[key] = asyncio.Lock()
     return lock
 
 
@@ -390,15 +394,27 @@ async def enqueue_revision(
     *,
     stimulus_id: str,
     allow_wake: bool = True,
+    inline: bool = True,
 ) -> dict[str, Any]:
     """Durably enqueue a reviser run (effect kind ``goal_revise_state``).
     Idempotent per (goal, stimulus): replays and double-enqueues are
-    suppressed by the effects' unique idempotency key."""
+    suppressed by the effects' unique idempotency key.
+
+    ``inline=False`` records the effect for the background pump instead of
+    delivering in this call stack — used by the settle roll-up, which
+    typically already runs inside an effect executor; nesting a reviser LLM
+    call (and its own wake dispatch) inside that chain re-enters the
+    connection pool and the per-goal locks for no benefit."""
+    payload = {"goal_id": goal_id, "stimulus": stimulus,
+               "stimulus_id": stimulus_id, "allow_wake": allow_wake}
+    key = f"goal_revise:{goal_id}:{stimulus_id}"
+    if not inline:
+        from bob_server.repositories.effects import EffectRepository
+        effect_id = await EffectRepository(ctx.db).emit(
+            kind="goal_revise_state", idempotency_key=key, payload=payload)
+        return {"ok": True, "effect_id": effect_id, "queued": True}
+
     from bob_server.services.effects import emit_and_deliver
 
     return await emit_and_deliver(
-        ctx, kind="goal_revise_state",
-        idempotency_key=f"goal_revise:{goal_id}:{stimulus_id}",
-        payload={"goal_id": goal_id, "stimulus": stimulus,
-                 "stimulus_id": stimulus_id, "allow_wake": allow_wake},
-    )
+        ctx, kind="goal_revise_state", idempotency_key=key, payload=payload)

@@ -104,7 +104,15 @@ async def candidate_entity_ids(db: Any, session_key: str) -> list[tuple[str, str
 
     candidates: dict[str, str] = {}
     for goal in goals:
-        for eid in parse_strategy(goal).refs.entities:
+        state = parse_strategy(goal)
+        entities = list(state.refs.entities)
+        legacy = state.legacy_outreach or {}
+        if isinstance(legacy, dict):
+            legacy_refs = legacy.get("refs") or {}
+            if isinstance(legacy_refs, dict):
+                entities += [e for e in legacy_refs.get("entities") or []
+                             if isinstance(e, str)]
+        for eid in entities:
             if eid and eid not in candidates:
                 candidates[eid] = (goal["objective"] or "")[:100]
             if len(candidates) >= _MAX_CANDIDATE_ENTITIES:

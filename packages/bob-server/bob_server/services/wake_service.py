@@ -13,12 +13,19 @@ delivered-only history). Other channels get a generic workspace-tools turn.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from bob_server.context import AppContext
 
 logger = logging.getLogger(__name__)
+
+# Detached wake dispatches. Holding strong references prevents the asyncio
+# scheduler from garbage-collecting a task mid-flight (asyncio keeps only
+# weak refs) — a collected task dies silently, dropping the wake. Same
+# pattern as the memory service's _remember_tasks.
+_pending_dispatches: set[asyncio.Task] = set()
 
 
 def session_key_to_chat_id(session_key: str) -> str | None:
@@ -160,5 +167,7 @@ async def _generic_wake_dispatch(
         except Exception:
             logger.exception("wake: generic dispatch failed for %s", session_key)
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _pending_dispatches.add(task)
+    task.add_done_callback(_pending_dispatches.discard)
     return True

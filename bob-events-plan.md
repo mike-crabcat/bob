@@ -481,6 +481,26 @@ Components:
 - Score also: unnecessary wakes (revision with empty diff that woke), human
   interventions (driver had to go off-script to unstick Bob).
 
+> **Harness status (2026-08-25):** implemented in
+> `packages/bob-server/tests/rehearsal/` (scripted actors at the
+> chat/chat_with_tools level driving the real pipeline; persona driver with
+> wrong-channel plans; in-process POD stub via httpx ASGITransport, also
+> runnable standalone via `python -m tests.rehearsal.pod_stub`; compressed
+> deadlines; the formal zero-loss scorer). The deterministic gate
+> (`all_group` — every reply in the wrong channel) passes end to end:
+> zero loss, one gated order, reminders fired. The three replay variants
+> are xfailed on a negotiate-settle race across detached dispatch
+> generations under the scripted actor — the zero-loss metric passes
+> whenever a run completes. Building the harness found five real
+> production bugs (template children lacking v2 refs → fragmented routing;
+> parented outreach not inheriting refs → wrong-slug DM extraction; wake
+> dispatch tasks garbage-collectable mid-flight; re-entrant inline
+> settle→roll-up→revise→wake chains — roll-ups now queue for the pump;
+> loop-bound asyncio primitives). The voice leg is scripted at the
+> call-result layer; the audio-level text-mode callee (echo variant) and
+> one manual human-voiced run remain release-checklist items, and the
+> authoritative rollout gate remains the live rehearsal with real models.
+
 ---
 
 ## Cleanups folded in (directly coupled)

@@ -162,6 +162,9 @@ async def _roll_up_to_parent(
         await enqueue_revision(
             ctx, child["parent_goal_id"], stimulus,
             stimulus_id=f"settle:{child['id']}:{status}",
+            inline=False,  # delivered by the pump: settling usually already
+                           # runs inside an effect executor — don't nest a
+                           # reviser LLM call + wake dispatch inside it.
         )
     except Exception:
         logger.exception("goal %s: roll-up enqueue failed; degrading to direct wake",
