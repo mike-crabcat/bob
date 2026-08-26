@@ -420,8 +420,11 @@ class SubagentService(BaseService):
     async def cleanup_stale(self) -> int:
         """Set any running subagents to failed (e.g. after server restart).
 
-        Excludes ``openai_voice`` subagents — they legitimately stay in 'running'
-        for minutes-to-hours while the contact hasn't picked up yet.
+        ``openai_voice`` subagents legitimately stay 'running' for
+        minutes-to-hours while the contact hasn't picked up yet, so the
+        immediate restart sweep skips them — but see ``fail_stale`` for the
+        age horizons that eventually reap leaked voice rows and abandoned
+        ``waiting_for_parent`` results.
         """
         now = utcnow().isoformat()
         count = await self._repo().fail_stale(now)

@@ -113,9 +113,29 @@ class SubagentRepository:
 
     async def fail_stale(self, now_iso: str) -> int:
         """Fail created/running subagents on restart (their asyncio tasks
-        died with the process). Voice subagents are excluded — they
-        legitimately stay 'running' while the phone rings."""
-        return await self.db.execute(
+        died with the process). Voice subagents are excluded from that
+        immediate sweep — they legitimately stay 'running' while the phone
+        rings — but age horizons reap what the sweep can never catch: a
+        voice call that never reported an outcome (leaked row), and
+        finished work whose parent is long gone."""
+        total = 0
+        # Restart sweep: non-voice tasks died with the process.
+        total += await self.db.execute(
             "UPDATE subagents SET status = 'failed', error_message = 'Server restarted', updated_at = ? "
             "WHERE status IN ('created', 'running') AND agent_type != 'openai_voice'",
             (now_iso,))
+        # A voice call still 'running' after a day reported no outcome.
+        total += await self.db.execute(
+            "UPDATE subagents SET status = 'failed', "
+            "error_message = 'Reaped: voice call never reported an outcome', updated_at = ? "
+            "WHERE status = 'running' AND agent_type = 'openai_voice' "
+            "AND updated_at < datetime('now', '-24 hours')",
+            (now_iso,))
+        # waiting_for_parent older than a week: the result relay is long
+        # abandoned; finish the bookkeeping (result text is preserved).
+        total += await self.db.execute(
+            "UPDATE subagents SET status = 'completed', updated_at = ? "
+            "WHERE status = 'waiting_for_parent' "
+            "AND updated_at < datetime('now', '-7 days')",
+            (now_iso,))
+        return total

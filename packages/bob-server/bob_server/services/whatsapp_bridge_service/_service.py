@@ -779,6 +779,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             bot_name=settings.patience.bot_name,
             mentioned_jids=tuple(mentioned_jids or ()),
             sender_name=sender_name or "",
+            is_trusted=is_trusted,
             probe_enabled=probe_enabled,
             probe_model=settings.patience.model,
             event_id=ingress_event_id,

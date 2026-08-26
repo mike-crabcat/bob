@@ -9,7 +9,11 @@ Tiers:
 - Tier 1 (this module): sliding debounce windows. Addressed stimuli close in a
   2.5s micro-window; unaddressed group chatter batches for 20s. Every new
   stimulus slides the timer; typing indicators extend it; a hard max-wait cap
-  bounds total latency from the first pending stimulus.
+  bounds total latency from the first pending stimulus. A window batches every
+  sender's messages into ONE turn, but each message carries its own dispatch
+  spec (built with that sender's trust level) — so the window remembers the
+  highest-trust spec it has seen and flies that one, not whichever message
+  happened to arrive last.
 - Tier 2 (tier2.py): actionability probe, run ONLY at window close and ONLY
   for batches with no addressed stimulus. ACT dispatches, STAND_DOWN flushes
   without the main LLM, WAIT extends the window once then forces a decision.
@@ -59,6 +63,8 @@ class _Window:
     timer: asyncio.TimerHandle | None = None
     wait_extended: bool = False        # Tier 2 WAIT used its one extension
     senders: set = field(default_factory=set)
+    any_trusted: bool = False          # any sender in this batch is trusted
+    chosen_fn: Callable[[], Awaitable[Any]] | None = None  # highest-trust spec
     _close_cb: Callable[[], None] | None = None
 
     def cancel_timer(self) -> None:
@@ -99,6 +105,7 @@ class AttentionCoordinator:
         mentioned_jids: tuple[str, ...] | list[str] = (),
         reply_to_bot: bool = False,
         sender_name: str = "",
+        is_trusted: bool = False,
         probe_enabled: bool = False,
         probe_model: str = "gpt-5.6-luna",
         event_id: str | None = None,
@@ -130,13 +137,26 @@ class AttentionCoordinator:
 
         if session_key in self._dispatching:
             # In-flight dispatch will either claim this message (if it hasn't
-            # locked yet) or the post-dispatch sweep re-arms for leftovers.
+            # locked yet) or the post-dispatch sweep re-arms for leftovers
+            # under the flown spec (a mid-turn message cannot upgrade or
+            # downgrade a turn that is already running).
             logger.info("attention: dispatch in progress for %s, buffering", session_key)
             return
 
+        # Spec selection: the batch turns every sender's messages into one
+        # LLM call, and each message's dispatch spec was built with that
+        # sender's trust level. Highest trust wins — a trusted participant
+        # must not lose capabilities because an untrusted member spoke after
+        # them — and within a level the latest spec wins (historical
+        # behaviour). Who is trusted stays visible per-message, so the model
+        # still knows whose instructions carry what weight.
+        if w.chosen_fn is None or is_trusted or not w.any_trusted:
+            w.chosen_fn = dispatch_fn
+        w.any_trusted = w.any_trusted or is_trusted
+
         # Addressed stimuli shrink an already-armed long window.
         effective = WINDOW_ADDRESSED_S if w.addressed_any else WINDOW_GROUP_S
-        self._arm(session_key, w, effective, dispatch_fn,
+        self._arm(session_key, w, effective, w.chosen_fn or dispatch_fn,
                   probe_enabled=probe_enabled, probe_model=probe_model,
                   bot_name=bot_name)
 
@@ -167,6 +187,7 @@ class AttentionCoordinator:
         w.first_at = time.monotonic()
         w.message_count = max(w.message_count, 1)
         w.addressed_any = True  # stored pending messages must not be re-probed into silence
+        w.chosen_fn = dispatch_fn  # no fresher spec exists for a recovered batch
         self._arm(session_key, w, WINDOW_ADDRESSED_S, dispatch_fn,
                   probe_enabled=False, probe_model="", bot_name="Bob")
 
