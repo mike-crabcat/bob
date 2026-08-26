@@ -1,8 +1,9 @@
 """Entity reconciliation — LLM-driven consistency checking and repair.
 
-After dream processes bulletins, this module reviews entities against
-per-type rules. The LLM uses tools to look up related entities and
-apply fixes (add/retract/supersede claims, create/delete entities).
+Reviews entities against per-type rules after silent-turn extraction has
+written claims (throttled heartbeat task). The LLM uses tools to look up
+related entities and apply fixes (add/retract/supersede claims,
+create/delete entities).
 """
 
 from __future__ import annotations
@@ -151,7 +152,6 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             value=val,
             object_id=obj,
             status="active",
-            source_bulletins=[],
             created_at=datetime.now(),
         )
         err = validate_claim_for_write(claim)
@@ -226,7 +226,6 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
                 value=nv,
                 object_id=no,
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             await supersede_claim(db, row["id"], new_claim, "reconciliation")
@@ -274,7 +273,6 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
                 value=cl.get("value"),
                 object_id=cl.get("object_id"),
                 status="active",
-                source_bulletins=[],
                 created_at=datetime.now(),
             )
             err = validate_claim_for_write(claim)

@@ -87,6 +87,24 @@ class EventLogRepository:
         return await self.db.fetch_one(
             "SELECT * FROM event_log WHERE id = ?", (event_id,))
 
+    async def events_after(
+        self, event_type: str, after_id: str, *, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Events of one type strictly after an id, in id order — the claim
+        router's watermark replay reads through here (Bob Events §2.2)."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM event_log WHERE event_type = ? AND id > ? "
+            "ORDER BY id LIMIT ?",
+            (event_type, after_id, limit))
+        return [dict(r) for r in rows] if rows else []
+
+    async def newest_event_id(self, event_type: str) -> str:
+        """Highest event id of a type — watermark initialisation reads this."""
+        row = await self.db.fetch_one(
+            "SELECT id FROM event_log WHERE event_type = ? ORDER BY id DESC LIMIT 1",
+            (event_type,))
+        return row["id"] if row else ""
+
     async def find_by_external_id(self, source: str, external_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one(
             "SELECT * FROM event_log WHERE source = ? AND external_id = ?",

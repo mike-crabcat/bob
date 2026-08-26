@@ -30,29 +30,59 @@ async def create_goal(
     strategy: dict[str, Any] | None = None,
     deadline: str | None = None,
     external_ref: str | None = None,
+    parent_goal_id: str | None = None,
     goal_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create an active goal; a deadline schedules a wakeup for the origin
-    (or working) conversation so unanswered goals resurface."""
+    """Create an active goal; a deadline schedules a wakeup so unanswered
+    goals resurface.
+
+    Bob Events §1.1/§1.2: ids are canonicalised via ``resolve_cid``; the goal
+    registers its working conversation (worker) and origin (origin) as
+    holders; a child goal's deadline wakeup targets the ROOT goal's working
+    conversation, never the child's own channel endpoint."""
+    from bob_server.repositories.conversations import ConversationRepository
+
     repo = GoalRepository(ctx.db)
+    conv_repo = ConversationRepository(ctx.db)
+    cid = await conv_repo.resolve_cid(conversation_id)
+    origin_cid = (await conv_repo.resolve_cid(origin_conversation_id)
+                  if origin_conversation_id else None)
+
     goal = await repo.create(
-        conversation_id=conversation_id,
+        conversation_id=cid,
         objective=objective,
-        origin_conversation_id=origin_conversation_id,
+        origin_conversation_id=origin_cid,
         kind=kind,
         strategy_json=json.dumps(strategy) if strategy else None,
         deadline=deadline,
         external_ref=external_ref,
+        parent_goal_id=parent_goal_id,
         goal_id=goal_id,
     )
+    await repo.add_holder(goal["id"], cid, role="worker")
+    if origin_cid and origin_cid != cid:
+        await repo.add_holder(goal["id"], origin_cid, role="origin")
+
     if deadline:
         await WakeupRepository(ctx.db).schedule(
-            conversation_id=origin_conversation_id or conversation_id,
+            conversation_id=await _wakeup_target(repo, goal),
             not_before=deadline,
             goal_id=goal["id"],
         )
     await _append_goal_event(ctx, goal, "goal.created")
     return goal
+
+
+async def _wakeup_target(repo: GoalRepository, goal: dict[str, Any]) -> str:
+    """Where this goal's deadline wakeups land (plan §1.2 wake matrix): a
+    child's deadline wakes the ROOT's working conversation (never an outreach
+    child's target DM); a root goal keeps today's behaviour — the origin
+    (asker) if set, else its own working conversation."""
+    if goal.get("parent_goal_id"):
+        root = await repo.root_of(goal["id"])
+        if root is not None:
+            return root["conversation_id"]
+    return goal["origin_conversation_id"] or goal["conversation_id"]
 
 
 async def settle_goal(
@@ -63,10 +93,21 @@ async def settle_goal(
     result: str,
     wake_origin: bool = True,
     note: str | None = None,
+    wake_content: str | None = None,
+    wake_category: str | None = None,
 ) -> bool:
     """Terminal transition (completed/failed/cancelled). Exactly one settler
     wins the CAS; the winner cancels wakeups, appends the goal event, and
-    wakes the origin conversation with the result in context."""
+    wakes the origin conversation with the result in context.
+
+    Bob Events §1.2 wake matrix — the single chokepoint every settle caller
+    inherits:
+    - child goal (has parent): NEVER wakes the origin directly. The result
+      rolls up as a reviser stimulus on the parent; the reviser decides
+      whether the parent's working conversation gets a ``goal_progress`` wake.
+    - root goal: wakes the origin (today's behaviour), with optional caller
+      overrides for content/category (e.g. call results).
+    """
     repo = GoalRepository(ctx.db)
     moved = await repo.transition(goal_id, to_status=status, result=result, note=note)
     if not moved:
@@ -78,11 +119,16 @@ async def settle_goal(
         return True
     await _append_goal_event(ctx, goal, f"goal.{status}")
 
+    parent_id = goal.get("parent_goal_id")
+    if parent_id:
+        await _roll_up_to_parent(ctx, goal, status, result)
+        return True
+
     origin = goal["origin_conversation_id"]
     if wake_origin and origin and origin != goal["conversation_id"]:
         from bob_server.services.wake_service import wake_conversation
 
-        content = (
+        content = wake_content or (
             f"## Goal {status}\n"
             f"Objective: {goal['objective']}\n\n"
             f"{result}"
@@ -90,12 +136,53 @@ async def settle_goal(
         try:
             await wake_conversation(
                 ctx, origin, content,
-                call_category="goal_result",
+                call_category=wake_category or "goal_result",
                 metadata={"goal_id": goal_id, "goal_kind": goal["kind"]},
             )
         except Exception:
             logger.exception("goal %s: failed to wake origin %s", goal_id, origin)
     return True
+
+
+async def _roll_up_to_parent(
+    ctx: AppContext, child: dict[str, Any], status: str, result: str,
+) -> None:
+    """Child-settle roll-up (plan §1.2): enqueue a durable reviser run on the
+    parent with the child's outcome as the stimulus. If effect enqueueing
+    itself fails, degrade to a direct wake of the parent's working
+    conversation — information must not be lost to infrastructure."""
+    from bob_server.services.goal_state_service import enqueue_revision
+
+    stimulus = (
+        f"## Child goal {status}\n"
+        f"Objective: {child['objective']}\n\n"
+        f"Result: {result}"
+    )
+    try:
+        await enqueue_revision(
+            ctx, child["parent_goal_id"], stimulus,
+            stimulus_id=f"settle:{child['id']}:{status}",
+            inline=False,  # delivered by the pump: settling usually already
+                           # runs inside an effect executor — don't nest a
+                           # reviser LLM call + wake dispatch inside it.
+        )
+    except Exception:
+        logger.exception("goal %s: roll-up enqueue failed; degrading to direct wake",
+                         child["id"])
+        from bob_server.services.wake_service import wake_conversation
+
+        parent = await GoalRepository(ctx.db).get(child["parent_goal_id"])
+        if parent is None:
+            return
+        try:
+            await wake_conversation(
+                ctx, parent["conversation_id"], stimulus,
+                call_category="goal_progress",
+                metadata={"goal_id": parent["id"],
+                          "rolled_up_from": child["id"]},
+            )
+        except Exception:
+            logger.exception("goal %s: roll-up degrade wake failed", child["id"])
 
 
 async def complete_goal(ctx: AppContext, goal_id: str, *, result: str,

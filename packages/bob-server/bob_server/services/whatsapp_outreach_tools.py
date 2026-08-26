@@ -25,6 +25,103 @@ def _phone_to_jid(phone_number: str) -> str:
     return f"{digits}@s.whatsapp.net"
 
 
+# Proactive group-send rate limiting (Bob Events §1.5): per-group hourly cap.
+_GROUP_SEND_HOURS = 1
+_GROUP_SEND_MAX_PER_HOUR = 4
+_group_send_times: dict[str, list[float]] = {}
+
+
+def _group_send_allowed(group_key: str, now: float) -> bool:
+    import time
+
+    recent = [t for t in _group_send_times.get(group_key, [])
+              if now - t < _GROUP_SEND_HOURS * 3600]
+    _group_send_times[group_key] = recent
+    return len(recent) < _GROUP_SEND_MAX_PER_HOUR
+
+
+def _record_group_send(group_key: str, now: float) -> None:
+    _group_send_times.setdefault(group_key, []).append(now)
+
+
+def make_group_send_tools(
+    ctx: AppContext,
+    wa_service: WhatsAppBridgeService,
+    current_session_key: str,
+) -> list:
+    """Proactive group-send tool (Bob Events §1.5). Policy-gated per group:
+    off by default, enabled via conversation policy ``group_outbound_enabled``
+    (the migration-452 policy_json machinery); Bob must already be in the
+    group (an active group binding must exist); rate-limited per group; every
+    send records goal provenance in its effect payload."""
+
+    @tool
+    async def send_whatsapp_group_message(
+        group_id: str,
+        message: str,
+        goal_id: str = "",
+    ) -> str:
+        """Send a proactive message to a WhatsApp group you are a member of
+        (group_id is the raw group id, no @g.us). Use for polls, updates, and
+        reminders tied to a plan; pass goal_id when the send serves a goal so
+        the send is attributable. Requires the group to allow outbound sends."""
+        import time
+
+        from bob_server.repositories.conversations import ConversationRepository
+
+        if not wa_service.connected:
+            return json.dumps({"ok": False, "error": "WhatsApp bridge is not connected"})
+
+        group_key = f"agent:main:whatsapp:group:{group_id}"
+        conv_repo = ConversationRepository(ctx.db)
+
+        # Membership: an active group binding must exist for this group.
+        binding = await conv_repo.active_binding(group_key)
+        if not binding or binding.get("endpoint_kind") != "group":
+            return json.dumps({"ok": False,
+                               "error": "Not a member of that group (no active group binding)"})
+
+        # Policy gate: disabled by default per group.
+        policy = await conv_repo.get_policy(group_key)
+        if not policy.get("group_outbound_enabled"):
+            return json.dumps({"ok": False,
+                               "error": "Group outbound sends are not enabled for this group"})
+
+        now = time.monotonic()
+        if not _group_send_allowed(group_key, now):
+            return json.dumps({"ok": False, "error": "Group send rate limit reached; retry later"})
+
+        from bob_server.services.effects import emit_and_deliver
+
+        seq = uuid4().hex[:8]
+        result = await emit_and_deliver(
+            ctx, kind="whatsapp_send",
+            idempotency_key=f"whatsapp_group_send:{group_key}:{seq}",
+            payload={"chat_id": f"{group_id}@g.us", "text": message,
+                     "origin_session_key": current_session_key,
+                     "goal_id": goal_id or None},
+        )
+        if not result.get("ok"):
+            return json.dumps({"ok": False, "error": result.get("error", "delivery failed")})
+        _record_group_send(group_key, now)
+
+        # Mirror the sent message into the group conversation's history (as
+        # the bridge does for inbound), so later prompts see it.
+        try:
+            from bob_server.services.session_service import SessionService
+            await SessionService(ctx).add_message(
+                group_key, "assistant", message, channel="whatsapp",
+                metadata={"proactive_group_send": True, "goal_id": goal_id or None},
+            )
+        except Exception:
+            logger.warning("group send: history mirror failed for %s", group_key,
+                           exc_info=True)
+
+        return json.dumps({"ok": True, "chat_id": f"{group_id}@g.us"})
+
+    return [send_whatsapp_group_message]
+
+
 def make_whatsapp_outreach_tools(
     ctx: AppContext,
     wa_service: WhatsAppBridgeService,
@@ -42,12 +139,16 @@ def make_whatsapp_outreach_tools(
         message: str,
         objective: str,
         media_path: str = "",
+        parent_goal_id: str = "",
     ) -> str:
         """Send a WhatsApp message to a contact (not the current chat).
         The 'objective' describes the specific outcome you need from this conversation,
         e.g. "Find out if John can meet on Thursday and what time works." The target
         session will be instructed to work toward this objective and report back when complete.
-        Optionally attach an image or media file by providing media_path."""
+        Optionally attach an image or media file by providing media_path.
+        Pass parent_goal_id to roll this outreach up into a plan's child goal
+        (e.g. a time-negotiation fan-out) instead of waking you directly."""
+        parent_goal = parent_goal_id.strip() or None
         from bob_server.services.session_service import SessionService
 
         db = ctx.db
@@ -100,21 +201,34 @@ def make_whatsapp_outreach_tools(
         # Bob3 Phase V + Increment 3: outreach state lives ON the goal
         # (strategy carries requestor/message for the target-side prompt).
         # A 24h deadline wakeup resurfaces unanswered outreach in the origin
-        # conversation.
+        # conversation. Bob Events: a parented outreach inherits the parent's
+        # entity refs so the target DM's §2.0 candidate seeding offers the
+        # plan's entities — otherwise the extractor there mints duplicate
+        # slugs and the reply never ref-matches back into the plan.
         goal_id = None
         try:
             from datetime import datetime, timedelta, timezone
 
             from bob_server.services.goal_service import create_goal
             phone_digits_g = re.sub(r"\D", "", phone)
+            strategy = {"requestor": requestor_name, "message": message}
+            if parent_goal:
+                from bob_server.repositories.goals import GoalRepository
+                from bob_server.services.goal_state_service import parse_strategy
+                parent = await GoalRepository(db).get(parent_goal)
+                if parent is not None:
+                    refs = parse_strategy(parent).refs.entities
+                    if refs:
+                        strategy["refs"] = {"entities": list(refs), "claims": []}
             goal = await create_goal(
                 ctx,
                 conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
                 objective=objective,
                 origin_conversation_id=current_session_key,
                 kind="outreach",
-                strategy={"requestor": requestor_name, "message": message},
+                strategy=strategy,
                 deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                parent_goal_id=parent_goal,
             )
             goal_id = goal["id"]
         except Exception:

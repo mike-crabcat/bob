@@ -779,6 +779,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             bot_name=settings.patience.bot_name,
             mentioned_jids=tuple(mentioned_jids or ()),
             sender_name=sender_name or "",
+            is_trusted=is_trusted,
             probe_enabled=probe_enabled,
             probe_model=settings.patience.model,
             event_id=ingress_event_id,
@@ -823,11 +824,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Dream plans — Tier 1 injection for sessions with linked plans
         dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
 
-        # Check for active outreach request and inject into system prompt
-        outreach_prompt = await assembler.outreach_prompt(session_key)
+        # Active goals held by this conversation (Bob Events §1.4) — includes
+        # the old outreach block; outreach state rides in the goal itself.
+        goals_prompt = await assembler.goals_block(session_key)
 
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, outreach_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
         )
 
         from bob_server.services.llm_dispatch import LLMDispatchService
@@ -849,10 +851,19 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
+        # Bob Events §1.5: proactive group send — trusted only; each target
+        # group must also enable it via conversation policy (off by default).
+        if is_trusted:
+            from bob_server.services.whatsapp_outreach_tools import make_group_send_tools
+            tools.extend(make_group_send_tools(self.ctx, self, session_key))
+
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:
             from bob_server.services.goal_tools import make_goal_tools
             tools.extend(make_goal_tools(self.ctx, session_key))
+            # Bob Events §3.4: the payment gate's human side.
+            from bob_server.services.approval_tools import make_approval_tools
+            tools.extend(make_approval_tools(self.ctx, session_key))
 
         # Voice outreach: attach whenever the requester is a trusted contact, in any
         # chat context (DM or group). Untrusted users don't get the tool — it costs

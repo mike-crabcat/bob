@@ -5,8 +5,9 @@ Claims are the source of truth. Entity documents are minimal records
 the template renderer in claim_types.py.
 
 The v7 pipeline is:
-  channel  ->  bulletin  ->  claim  ->  entity record
-  (source)    (record)     (atom)     (identity)
+  channel  ->  silent-turn extraction  ->  claim  ->  entity record
+  (source)    (per-turn, provenance-   (atom)     (identity)
+              threaded to messages)
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ VISIBILITY_LEVELS: tuple[str, ...] = (
 
 @dataclass(slots=True)
 class EntityRef:
-    """A lightweight reference to an entity within a bulletin or other document."""
+    """A lightweight reference to an entity within a document."""
 
     id: str
     display_name: str | None = None
@@ -90,25 +91,8 @@ class EntityRef:
 
 
 @dataclass(slots=True)
-class Bulletin:
-    """An immutable plain-text memory note.
-
-    Bulletins are simple factual observations. Contacts are referenced inline
-    using ``{{contact:ID|Name}}`` tags.
-    """
-
-    id: str
-    created_at: datetime
-    channel_id: str
-    source_type: str
-    source_id: str
-    visibility: str = "channel"
-    content: str = ""
-
-
-@dataclass(slots=True)
 class Claim:
-    """An atomic, typed memory extracted from one or more bulletins.
+    """An atomic, typed memory extracted from conversation messages.
 
     Each claim expresses a single proposition using a predefined claim type.
     Entity references go in object_id; scalar values go in value.
@@ -120,7 +104,6 @@ class Claim:
     object_id: str | None = None
     value: str | None = None
     status: str = "active"
-    source_bulletins: list[str] = field(default_factory=list)
     source_messages: list[str] = field(default_factory=list)
     visibility: str = "channel"
     scope: list[str] = field(default_factory=list)
@@ -140,7 +123,6 @@ class EntityDocument:
     entity_type: str
     display_name: str
     status: str = "active"
-    source_bulletins: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -150,21 +132,3 @@ class QueryContext:
     actor: str | None = None
     channel_id: str | None = None
     allowed_scopes: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class BulletinMessage:
-    """A single message in the bulletin generator input."""
-
-    sender_contact_id: str
-    timestamp: str
-    content: str
-
-
-@dataclass(slots=True)
-class BulletinGeneratorInput:
-    """Compact input for the bulletin generation prompt."""
-
-    session_key: str
-    messages: list[BulletinMessage] = field(default_factory=list)
-    participants: list[dict[str, str]] = field(default_factory=list)

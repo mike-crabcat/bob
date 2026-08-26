@@ -116,6 +116,27 @@ def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
         if existing:
             return f"Entity {entity_id} already exists — use add_claim on it instead."
         display_name = entity_id.split("-", 1)[-1].replace("-", " ").title() if "-" in entity_id else entity_id
+        # Bob Events §2.0 layer 2 — write-time soft resolution: an exact
+        # display-name match on the same entity type is almost certainly the
+        # same real-world thing mentioned in another conversation. Steer the
+        # extractor to reuse the existing id rather than minting a
+        # near-duplicate that fragments routing (reconciliation merges what
+        # still slips past). A genuinely different thing deserves a more
+        # specific slug — which then won't display-name-match.
+        near = await db.fetch_one(
+            "SELECT entity_id FROM memory_entities "
+            "WHERE status = 'active' AND entity_type = ? AND entity_id != ? "
+            "AND LOWER(display_name) = LOWER(?)",
+            (entity_type, entity_id, display_name),
+        )
+        if near:
+            return (
+                f"An existing {entity_type} entity '{near['entity_id']}' has the same "
+                f"display name as {entity_id!r}. If the conversation refers to the same "
+                f"real-world thing, reuse it — call add_claim on {near['entity_id']} "
+                "instead of creating a near-duplicate. Only create a new entity if it "
+                "is genuinely a different thing (then pick a more distinguishing id)."
+            )
         await db.execute(
             "INSERT OR IGNORE INTO memory_entities (entity_id, entity_type, display_name, status) "
             "VALUES (?, ?, ?, 'active')",

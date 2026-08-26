@@ -69,8 +69,9 @@ class EffectRepository:
                     (now, limit))
             for row in rows:
                 await txn.execute(
-                    "UPDATE effects SET status = 'delivering', attempt = attempt + 1 WHERE id = ?",
-                    (row["id"],))
+                    """UPDATE effects SET status = 'delivering', attempt = attempt + 1,
+                       claimed_at = ? WHERE id = ?""",
+                    (now, row["id"]))
                 row["attempt"] = row["attempt"] + 1
                 claimed.append(row)
         return claimed
@@ -100,6 +101,46 @@ class EffectRepository:
                    WHERE id = ?""",
                 (error[:2000], _iso(_utcnow() + timedelta(seconds=backoff)), effect_id))
             return "pending"
+
+    async def requeue_stale_delivering(
+        self, *, older_than_minutes: int = 15, limit: int = 20,
+    ) -> int:
+        """Re-queue effects stuck in 'delivering' — a crash between the
+        pending→delivering claim and the outcome write loses them otherwise
+        (pump only ever claims 'pending'). Completion writes are guarded by
+        ``AND status = 'delivering'`` and executors are idempotent per
+        idempotency key, so a stale executor racing the redelivery can at
+        worst duplicate an at-least-once delivery — the same guarantee a
+        backoff retry already makes. Effects past MAX_ATTEMPTS dead-letter.
+
+        Rows with no claimed_at (pre-reaper) fall back to created_at.
+        Returns the number of effects re-queued or dead-lettered."""
+        from datetime import timedelta
+
+        cutoff = _iso(_utcnow() - timedelta(minutes=older_than_minutes))
+        # julianday() parses both Python isoformat stamps (T + timezone) and
+        # legacy SQLite datetime('now') stamps, so mixed vintages compare sanely.
+        rows = await self.db.fetch_all(
+            """SELECT id, attempt, COALESCE(claimed_at, created_at) AS claimed
+               FROM effects
+               WHERE status = 'delivering'
+                  AND julianday(COALESCE(claimed_at, created_at)) < julianday(?)
+               ORDER BY created_at LIMIT ?""",
+            (cutoff, limit))
+        moved = 0
+        for row in rows or []:
+            if int(row["attempt"]) >= MAX_ATTEMPTS:
+                await self.db.execute(
+                    "UPDATE effects SET status = 'dead', error = ? WHERE id = ?",
+                    ("stuck in delivering; dead-lettered by reaper", row["id"]))
+            else:
+                await self.db.execute(
+                    """UPDATE effects SET status = 'pending', available_at = ?,
+                       error = COALESCE(error, '') || ' [requeued: stuck delivering]'
+                       WHERE id = ?""",
+                    (_iso(_utcnow()), row["id"]))
+            moved += 1
+        return moved
 
     async def status_counts(self) -> dict[str, int]:
         rows = await self.db.fetch_all(

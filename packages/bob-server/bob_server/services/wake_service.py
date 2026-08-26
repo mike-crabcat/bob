@@ -13,12 +13,19 @@ delivered-only history). Other channels get a generic workspace-tools turn.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from bob_server.context import AppContext
 
 logger = logging.getLogger(__name__)
+
+# Detached wake dispatches. Holding strong references prevents the asyncio
+# scheduler from garbage-collecting a task mid-flight (asyncio keeps only
+# weak refs) — a collected task dies silently, dropping the wake. Same
+# pattern as the memory service's _remember_tasks.
+_pending_dispatches: set[asyncio.Task] = set()
 
 
 def session_key_to_chat_id(session_key: str) -> str | None:
@@ -125,15 +132,26 @@ async def _generic_wake_dispatch(
         return False
 
     tools = make_workspace_tools(ctx, session_key=session_key)
+    # Bob Events §1.5: goal tools on the generic wake path — a goal_deadline
+    # wake tells the LLM to "revise the goal", so it must actually be able to.
+    # The wake is system-initiated, so no separate trust gate applies.
+    from bob_server.services.goal_tools import make_goal_tools
+    tools.extend(make_goal_tools(ctx, session_key))
+    from bob_server.services.approval_tools import make_approval_tools
+    tools.extend(make_approval_tools(ctx, session_key))
     dispatch_id = str(uuid4())
 
     async def _run() -> None:
         try:
             workspace_prompt = await load_workspace_prompt(
                 settings.harness.workspace_dir, db=ctx.db)
+            from bob_server.services.context_assembler import ContextAssembler
+            goals_prompt = await ContextAssembler(ctx).goals_block(session_key)
+            system_content = "\n\n".join(
+                p for p in (workspace_prompt, goals_prompt) if p)
             messages = await build_chat_messages(
                 content, session_key, db=ctx.db,
-                system_content=workspace_prompt, max_history=20,
+                system_content=system_content, max_history=20,
             )
             result = await LLMDispatchService(ctx).chat_with_tools(
                 messages, tools,
@@ -149,5 +167,7 @@ async def _generic_wake_dispatch(
         except Exception:
             logger.exception("wake: generic dispatch failed for %s", session_key)
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _pending_dispatches.add(task)
+    task.add_done_callback(_pending_dispatches.discard)
     return True

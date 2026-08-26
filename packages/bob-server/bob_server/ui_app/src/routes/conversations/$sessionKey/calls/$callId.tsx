@@ -222,6 +222,14 @@ function CallDetailPage() {
         </Collapsible>
       )}
 
+      {call.system_prompt && (
+        <Collapsible title="system prompt">
+          <div className="bg-accent/5 border border-accent/20 p-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
+            {call.system_prompt}
+          </div>
+        </Collapsible>
+      )}
+
       <section>
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-1">user message</h2>
         <div className="bg-surface border border-border p-2 text-xs whitespace-pre-wrap break-words">
@@ -274,14 +282,6 @@ function CallDetailPage() {
             ))}
           </div>
         </section>
-      )}
-
-      {call.system_prompt && (
-        <Collapsible title="system prompt">
-          <div className="bg-accent/5 border border-accent/20 p-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
-            {call.system_prompt}
-          </div>
-        </Collapsible>
       )}
 
       {call.tools && call.tools.length > 0 && (

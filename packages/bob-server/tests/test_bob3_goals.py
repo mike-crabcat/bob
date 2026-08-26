@@ -242,8 +242,9 @@ async def test_subagent_failure_fails_goal(ctx, db, monkeypatch):
 
 
 async def test_outreach_state_lives_on_goal(ctx, db):
-    """Increment 3: the outreach prompt and reply-tool gate read the active
-    outreach goal, not route metadata; settling clears them."""
+    """Increment 3 + Bob Events §1.4: the goals block and reply-tool gate
+    read the active outreach goal, not route metadata; settling clears them.
+    The outreach requestor/message ride in the goal's legacy state."""
     from bob_server.services.context_assembler import ContextAssembler
     from bob_server.services.goal_service import create_goal, settle_goal
 
@@ -254,9 +255,10 @@ async def test_outreach_state_lives_on_goal(ctx, db):
         kind="outreach",
         strategy={"requestor": "Mike", "message": "hey, BBQ sat?"})
 
-    prompt = await ContextAssembler(ctx).outreach_prompt(target)
-    assert "Active Outreach Request" in prompt
+    prompt = await ContextAssembler(ctx).goals_block(target)
+    assert "## Active Goals" in prompt
     assert "Mike" in prompt and "ask about the BBQ" in prompt and "BBQ sat?" in prompt
+    assert "finish_outreach" in prompt
 
     await settle_goal(ctx, goal["id"], status="completed", result="done")
-    assert await ContextAssembler(ctx).outreach_prompt(target) == ""
+    assert await ContextAssembler(ctx).goals_block(target) == ""

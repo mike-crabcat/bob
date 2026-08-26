@@ -258,7 +258,7 @@ class HarnessSettings:
     max_history_messages: int = 20
     skill_dev_enabled: bool = False
     skill_dev_max_budget_usd: float = 5.0
-    skill_dev_timeout_seconds: float = 300.0
+    skill_dev_timeout_seconds: float = 1800.0
     local_subagent_model: str = "gpt-5.6-sol"
 
 
@@ -336,6 +336,24 @@ class DreamSettings:
 
 
 @dataclass(slots=True)
+class GoalsSettings:
+    """Configuration for the goal-state reviser (bob-events-plan.md §1.3).
+
+    reviser_model empty → the low-cost memory model (openai.get_memory_model()).
+    Shadow mode (revisions run, wakes suppressed and logged) is the
+    BOB_GOAL_STATE_SHADOW env kill switch, read at call time so it toggles
+    without a restart.
+    """
+
+    reviser_model: str = ""
+    max_concurrent_revisions: int = 3
+    max_cas_retries: int = 3
+    # Progress-review loop (§4.1); BOB_GOAL_REVIEW_DISABLED is the runtime
+    # kill switch, read at call time.
+    review_threshold_hours: float = 24.0
+
+
+@dataclass(slots=True)
 class Settings:
     """Runtime settings for the API service and CLI."""
 
@@ -363,6 +381,7 @@ class Settings:
     patience: PatienceSettings = field(default_factory=PatienceSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
+    goals: GoalsSettings = field(default_factory=GoalsSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
@@ -580,7 +599,7 @@ class Settings:
             max_history_messages=int(os.getenv("BOB_HARNESS_MAX_HISTORY_MESSAGES", "20")),
             skill_dev_enabled=os.getenv("BOB_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             skill_dev_max_budget_usd=float(os.getenv("BOB_HARNESS_SKILL_DEV_MAX_BUDGET_USD", "5.0")),
-            skill_dev_timeout_seconds=float(os.getenv("BOB_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "300")),
+            skill_dev_timeout_seconds=float(os.getenv("BOB_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "1800")),
             local_subagent_model=os.getenv("BOB_HARNESS_LOCAL_SUBAGENT_MODEL", "gpt-5.6-sol"),
         )
 
@@ -663,6 +682,12 @@ class Settings:
             patience=patience,
             reconciliation=reconciliation,
             dream=dream,
+            goals=GoalsSettings(
+                reviser_model=os.getenv("BOB_GOALS_REVISER_MODEL", ""),
+                max_concurrent_revisions=int(os.getenv("BOB_GOALS_MAX_CONCURRENT_REVISIONS", "3")),
+                max_cas_retries=int(os.getenv("BOB_GOALS_MAX_CAS_RETRIES", "3")),
+                review_threshold_hours=float(os.getenv("BOB_GOAL_REVIEW_THRESHOLD_HOURS", "24")),
+            ),
         )
 
     def ensure_directories(self) -> None:

@@ -165,7 +165,6 @@ class MemoryService(BaseService):
             subject_id=entity_id,
             value=f"[Q: {row['question']}] {answer}",
             status="active",
-            source_bulletins=[],
             created_at=datetime.now(),
         )
         await write_claim(self.db, claim)
@@ -390,8 +389,19 @@ class MemoryService(BaseService):
                     f'still apply every quality rule; do not create a claim unless '
                     f'it genuinely holds up.\n\n'
                 )
+            # Bob Events §2.0 layer 1: steer the extractor to reuse entity ids
+            # referenced by active plans (cross-conversation identity).
+            candidates_block = ""
+            try:
+                from bob_server.services.memory.claim_router import (
+                    build_candidate_entities_block,
+                )
+                candidates_block = await build_candidate_entities_block(db, session_key)
+            except Exception:
+                logger.debug("candidate entities block unavailable", exc_info=True)
             instruction = (
                 hint_block
+                + (candidates_block + "\n\n" if candidates_block else "")
                 + "The messages above are the recent conversation in this channel, "
                 "now idle. Review them and use the memory tools to record anything "
                 "worth remembering about the people, groups, trips, or other "
@@ -472,6 +482,14 @@ class MemoryService(BaseService):
                           **({"hint": hint} if hint else {})},
             )
 
+            # Bob Events §2.1: the marker message now exists, so the claims
+            # written during the loop (whose source_messages reference it)
+            # can resolve to a conversation — refresh their mention rows.
+            from bob_server.services.memory.claim_router import (
+                refresh_mentions_for_turn,
+            )
+            await refresh_mentions_for_turn(db, turn_message_id)
+
             # Verbose surface: if the session has memory_verbose enabled and
             # the turn actually recorded something, post a system-notice
             # message and publish an event for active transports to deliver.
@@ -498,6 +516,22 @@ class MemoryService(BaseService):
             "Silent turn %s: %d claim(s) recorded for session %s",
             turn_message_id, claims_created, session_key,
         )
+
+        # Bob Events §2.2: route the batch's claims to the goals that care
+        # (inline; durable via the memory.claims_created event + watermark
+        # replay in the heartbeat sweep). Never blocks extraction on failure.
+        if claims_created:
+            try:
+                from bob_server.services.memory.claim_router import (
+                    handle_extraction_batch,
+                )
+                await handle_extraction_batch(
+                    self.ctx, session_key=session_key,
+                    turn_message_id=turn_message_id)
+            except Exception:
+                logger.warning("claim routing failed for turn %s",
+                               turn_message_id, exc_info=True)
+
         return {
             "status": "ok",
             "turn_message_id": turn_message_id,
@@ -644,13 +678,6 @@ class MemoryService(BaseService):
                 alias_params,
             )
 
-        # Update entity↔bulletin join rows
-        if entity.source_bulletins:
-            await self.db.execute_many(
-                "INSERT OR IGNORE INTO memory_entity_bulletins (entity_id, bulletin_id) VALUES (?, ?)",
-                [(entity.entity_id, bid) for bid in entity.source_bulletins],
-            )
-
         # Render and update FTS
         await self._update_entity_fts(entity.entity_id)
 
@@ -671,7 +698,6 @@ class MemoryService(BaseService):
             entity_type=row["entity_type"],
             display_name=row["display_name"] or "",
             status=row["status"] or "active",
-            source_bulletins=[],  # Not stored on entity in v7
         )
 
     async def list_entities(self, workspace_dir: Path, entity_type: str) -> list[EntityDocument]:
@@ -1065,64 +1091,10 @@ class MemoryService(BaseService):
 
     # ── Group helpers ─────────────────────────────────────────────
 
-    async def _resolve_group_entity_id(self, source_id: str) -> str | None:
-        """Look up the group entity ID for a bulletin's source session."""
-        if not source_id:
-            return None
-        from bob_server.repositories.conversations import ConversationRepository
-        route = await ConversationRepository(self.db).route_for(source_id)
-        if not route or route["endpoint_kind"] != "group" or not route["address"]:
-            return None
-        from bob_server.repositories.groups import GroupRepository
-        return await GroupRepository(self.db).memory_entity_id(route["address"])
-
-    async def ensure_group_entity(
-        self,
-        workspace_dir: Path,
-        session_key: str,
-        bulletin_id: str,
-    ) -> str | None:
-        """Ensure a group entity exists for a group session and link the bulletin."""
-        from bob_server.repositories.conversations import ConversationRepository
-        route = await ConversationRepository(self.db).route_for(session_key)
-        if not route or route["endpoint_kind"] != "group" or not route["address"]:
-            return None
-
-        chat_id = route["address"]
-
-        from bob_server.repositories.groups import GroupRepository
-        groups = GroupRepository(self.db)
-        group_row = await groups.get_by_jid(chat_id)
-        if not group_row:
-            return None
-
-        group_name = group_row["name"] or chat_id
-        existing_entity_id = group_row["memory_entity_id"]
-
-        if existing_entity_id:
-            entity = await self.read_entity(workspace_dir, existing_entity_id)
-            if entity and entity.display_name != group_name:
-                entity.display_name = group_name
-                await self.write_entity(workspace_dir, entity)
-        else:
-            entity_id = f"group-{uuid.uuid4().hex[:8]}"
-            entity = EntityDocument(
-                entity_id=entity_id,
-                entity_type="group",
-                display_name=group_name,
-                status="active",
-            )
-            await self.write_entity(workspace_dir, entity)
-            existing_entity_id = entity_id
-
-            await groups.set_memory_entity(group_row["id"], entity_id)
-
-        await self.db.execute(
-            "INSERT OR IGNORE INTO memory_entity_bulletins (entity_id, bulletin_id) VALUES (?, ?)",
-            (existing_entity_id, bulletin_id),
-        )
-
-        return existing_entity_id
+    # (ensure_group_entity and _resolve_group_entity_id were removed with the
+    # bulletin pipeline — migration 353 dropped memory_entity_bulletins, and
+    # both had no remaining callers. Group memory entities are created by
+    # channel_policies via write_entity.)
 
     # ── Validation ────────────────────────────────────────────────
 

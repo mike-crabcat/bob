@@ -38,20 +38,25 @@ def _excerpt_matches(excerpt: str, line_content: str) -> bool:
 class ReviewService(BaseService):
     """Builds transcripts, calls the review LLM, validates candidates."""
 
-    async def build_roster(self, session_key: str) -> tuple[str, str]:
-        """Contact roster for the session: 'contact-hex8|Name|person-slug' lines + header."""
+    async def build_roster(self, session_key: str) -> tuple[str, dict[str, str]]:
+        """Roster header + sender_id→name map for the session's contacts."""
         from bob_server.repositories.contacts import ContactRepository
         rows = await ContactRepository(self.db).list_active()
+        names: dict[str, str] = {}
         lines = []
         for r in rows or []:
-            name = (r["name"] or "").strip() or r["id"]
-            lines.append(f"{r['id']}|{name}|person-{_slug(name)}")
+            name = (r["name"] or "").strip()
+            names[r["id"]] = name
+            display = name or r["id"]
+            lines.append(f"{r['id']}|{display}|person-{_slug(display)}")
         roster = "\n".join(lines)
         header = "Roster (sender_id|name|entity_id):\n" + roster if roster else "Roster: (no contacts)"
-        return header, roster
+        return header, names
 
-    def build_transcript(self, messages: list[dict]) -> list[str]:
-        """Numbered transcript lines. Assistant messages are tagged [BOB]."""
+    def build_transcript(self, messages: list[dict], sender_names: dict[str, str] | None = None) -> list[str]:
+        """Numbered transcript lines. Assistant messages are tagged [BOB]; user
+        messages with the speaker's roster name when the sender is known."""
+        names = sender_names or {}
         lines = []
         for i, m in enumerate(messages, 1):
             role = m.get("role", "user")
@@ -59,7 +64,9 @@ class ReviewService(BaseService):
             if role == "assistant":
                 lines.append(f"[{i}] [BOB] {content}")
             else:
-                lines.append(f"[{i}] [user] {content}")
+                name = names.get(str(m.get("sender_id") or ""))
+                tag = f"[{name}]" if name else "[user]"
+                lines.append(f"[{i}] {tag} {content}")
         return lines
 
     async def review_session(
@@ -84,8 +91,8 @@ class ReviewService(BaseService):
         if len(messages) < 2:
             return {"resolutions": [], "plans": [], "stats": stats}
 
-        roster_header, _ = await self.build_roster(session_key)
-        transcript = self.build_transcript(messages)
+        roster_header, names = await self.build_roster(session_key)
+        transcript = self.build_transcript(messages, names)
         user_prompt = (
             f"Session: {session_key}\n{group_hint}\n{roster_header}\n\n"
             f"Transcript ({len(transcript)} lines):\n" + "\n".join(transcript)

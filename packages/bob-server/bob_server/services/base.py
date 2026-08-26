@@ -11,9 +11,27 @@ from bob_server.database import Database
 
 
 def utcnow() -> datetime:
-    """Return the current UTC timestamp."""
+    """Return the current UTC timestamp.
 
-    return datetime.now(UTC)
+    Bob Events §4.3: an override seam so tests can time-travel unit-level
+    wakeup/deadline logic (full event-loop fake-clock control stays out of
+    scope; the e2e rehearsal uses compressed deadlines instead). Callers
+    import the function object, and the override is read at call time.
+    """
+
+    return _CLOCK_OVERRIDE if _CLOCK_OVERRIDE is not None else datetime.now(UTC)
+
+
+_CLOCK_OVERRIDE: datetime | None = None
+
+
+def set_clock_override(value: datetime | None) -> None:
+    global _CLOCK_OVERRIDE
+    _CLOCK_OVERRIDE = value
+
+
+def clear_clock_override() -> None:
+    set_clock_override(None)
 
 
 def iso_utc(value: str | datetime | None = None) -> str:

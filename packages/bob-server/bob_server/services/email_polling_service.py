@@ -668,7 +668,10 @@ class EmailPollingService(BaseService):
                 settings.harness.workspace_dir
             )
 
-        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.", memory_prompt) if p)
+        # Bob Events §1.4: goals held by this thread's conversation.
+        goals_prompt = await ContextAssembler(self.ctx).goals_block(session_key)
+
+        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.", memory_prompt, goals_prompt) if p)
 
         # If this thread was initiated from another session, inject outreach prompt + result tool
         origin_session_key = thread.get("origin_session_key")
@@ -701,6 +704,13 @@ class EmailPollingService(BaseService):
             inbox_agentmail_id=inbox["agentmail_inbox_id"],
         )
         tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
+        # Bob Events §1.5: goal tools for trusted email threads (parity with
+        # the WhatsApp inbound path).
+        if is_trusted:
+            from bob_server.services.goal_tools import make_goal_tools
+            tools.extend(make_goal_tools(self.ctx, session_key))
+            from bob_server.services.approval_tools import make_approval_tools
+            tools.extend(make_approval_tools(self.ctx, session_key))
 
         # If this thread was initiated from another session, inject the finish_email_thread tool
         if origin_session_key:

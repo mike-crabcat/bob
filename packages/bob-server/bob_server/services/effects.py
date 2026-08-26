@@ -163,17 +163,29 @@ async def deliver(ctx: Any, effect: dict[str, Any]) -> dict[str, Any]:
 async def pump_due_effects(ctx: Any, *, limit: int = 20) -> int:
     """Claim and deliver due pending effects (crash leftovers + backoff retries).
 
-    Returns the number of effects processed. Called by the heartbeat task.
+    Also requeues effects stuck in 'delivering' past the staleness window —
+    a crash between claim and outcome write would otherwise lose them (the
+    pump only ever claims 'pending'). Returns the number of effects
+    processed. Called by the heartbeat task.
     """
     from bob_server.repositories.effects import EffectRepository
 
     kinds = registered_kinds(retryable_only=True)
     if not kinds:
         return 0
-    claimed = await EffectRepository(ctx.db).claim_due(kinds=kinds, limit=limit)
+    repo = EffectRepository(ctx.db)
+    requeued = await repo.requeue_stale_delivering()
+    if requeued:
+        logger.info("effect pump requeued %d stuck delivering effect(s)", requeued)
+    claimed = await repo.claim_due(kinds=kinds, limit=limit)
     for effect in claimed:
         await deliver(ctx, effect)
     return len(claimed)
+
+
+def _iso_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 async def _claim_one(ctx: Any, effect_id: str) -> dict[str, Any] | None:
@@ -184,8 +196,9 @@ async def _claim_one(ctx: Any, effect_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         await txn.execute(
-            "UPDATE effects SET status = 'delivering', attempt = attempt + 1 WHERE id = ?",
-            (effect_id,))
+            """UPDATE effects SET status = 'delivering', attempt = attempt + 1,
+               claimed_at = ? WHERE id = ?""",
+            (_iso_now(), effect_id))
         row["attempt"] = row["attempt"] + 1
         return row
 

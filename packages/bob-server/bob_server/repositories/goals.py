@@ -6,7 +6,10 @@ strategy can never overwrite a newer one. Every status change is recorded in
 ``goal_transitions``.
 
 ``conversation_id`` / ``origin_conversation_id`` carry session_keys until
-Phase VI introduces conversations proper.
+Phase VI introduces conversations proper. The Bob Events hierarchy
+(migration 459) adds ``parent_goal_id`` and the ``goal_conversations`` holder
+set — those rows hold CANONICAL conversation ids (``resolve_cid()``), never
+raw session_keys.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ class GoalRepository:
         strategy_json: str | None = None,
         deadline: str | None = None,
         external_ref: str | None = None,
+        parent_goal_id: str | None = None,
         goal_id: str | None = None,
     ) -> dict[str, Any]:
         gid = goal_id or str(uuid.uuid4())
@@ -45,13 +49,109 @@ class GoalRepository:
         await self.db.execute(
             """INSERT INTO goals
                (id, conversation_id, origin_conversation_id, kind, objective,
-                strategy_json, deadline, external_ref, status, version,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)""",
+                strategy_json, deadline, external_ref, parent_goal_id, status,
+                version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)""",
             (gid, conversation_id, origin_conversation_id, kind, objective,
-             strategy_json, deadline, external_ref, now, now),
+             strategy_json, deadline, external_ref, parent_goal_id, now, now),
         )
         return (await self.get(gid))  # type: ignore[return-value]
+
+    async def children_of(
+        self, parent_goal_id: str, *, status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = ("SELECT * FROM goals WHERE parent_goal_id = ?"
+               + (" AND status = ?" if status else "")
+               + " ORDER BY created_at")
+        params: tuple[Any, ...] = ((parent_goal_id, status) if status
+                                   else (parent_goal_id,))
+        return await self.db.fetch_all(sql, params)
+
+    async def root_of(self, goal_id: str) -> dict[str, Any] | None:
+        """Walk the parent chain to the root goal (bounded depth; cycles are
+        structurally impossible but a hard cap keeps a corrupt row from
+        looping forever)."""
+        current = await self.get(goal_id)
+        seen: set[str] = set()
+        while current is not None and current.get("parent_goal_id"):
+            pid = current["parent_goal_id"]
+            if pid in seen:
+                break
+            seen.add(pid)
+            current = await self.get(pid)
+        return current
+
+    async def add_holder(self, goal_id: str, conversation_id: str,
+                         *, role: str = "holder") -> None:
+        await self.db.execute(
+            """INSERT OR REPLACE INTO goal_conversations
+               (goal_id, conversation_id, role, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (goal_id, conversation_id, role, _now_iso()),
+        )
+
+    async def holders_of(self, goal_id: str) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            "SELECT goal_id, conversation_id, role, created_at "
+            "FROM goal_conversations WHERE goal_id = ? ORDER BY created_at",
+            (goal_id,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def goals_held_by(
+        self, conversation_id: str, *, active_only: bool = True, limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Goals a conversation holds (any role), newest activity first —
+        the prompt-injection query (plan §1.4)."""
+        where = "1=1" if not active_only else "g.status = 'active'"
+        rows = await self.db.fetch_all(
+            f"""SELECT g.* FROM goals g
+                JOIN goal_conversations gc ON gc.goal_id = g.id
+                WHERE gc.conversation_id = ? AND {where}
+                ORDER BY g.updated_at DESC LIMIT ?""",
+            (conversation_id, limit))
+        return [dict(r) for r in rows] if rows else []
+
+    async def active_goal_ids_referencing_entities(
+        self, entity_ids: list[str],
+    ) -> list[str]:
+        """Active goals whose strategy refs.entities names any of the given
+        entities — the claim router's strong (ref) match (Bob Events §2.3)."""
+        if not entity_ids:
+            return []
+        marks = ",".join("?" for _ in entity_ids)
+        rows = await self.db.fetch_all(
+            f"""SELECT DISTINCT id FROM goals
+                WHERE status = 'active'
+                  AND json_extract(strategy_json, '$.refs.entities') IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM json_each(
+                      json_extract(strategy_json, '$.refs.entities')) je
+                      WHERE je.value IN ({marks}))""",
+            tuple(entity_ids))
+        return [r["id"] for r in rows or []]
+
+    async def active_goal_ids_held_by_conversations(
+        self, conversation_ids: list[str], *,
+        exclude_conversation_id: str | None = None,
+    ) -> list[str]:
+        """Active goals held by any of the given conversations (holder-based
+        claim-router matching; the excluded conversation implements echo
+        suppression — a goal held only by the originating conversation is not
+        a candidate through that link)."""
+        if not conversation_ids:
+            return []
+        marks = ",".join("?" for _ in conversation_ids)
+        params: list[Any] = list(conversation_ids)
+        exclude = ""
+        if exclude_conversation_id is not None:
+            exclude = "AND gc.conversation_id != ?"
+            params.append(exclude_conversation_id)
+        rows = await self.db.fetch_all(
+            f"""SELECT DISTINCT g.id FROM goals g
+                JOIN goal_conversations gc ON gc.goal_id = g.id
+                WHERE g.status = 'active' AND gc.conversation_id IN ({marks})
+                {exclude}""",
+            tuple(params))
+        return [r["id"] for r in rows or []]
 
     async def get(self, goal_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one("SELECT * FROM goals WHERE id = ?", (goal_id,))
@@ -190,18 +290,57 @@ class GoalRepository:
                ORDER BY gt.created_at DESC LIMIT ?""", (conversation_id, limit))
         return [dict(r) for r in rows] if rows else []
 
+    async def stale_active(self, *, older_than: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Active goals not touched since ``older_than``, stallest first —
+        the progress-review loop's scan (plan §4.1). Parsed in Python:
+        updated_at writers emit full microsecond ISO."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM goals WHERE status = 'active'")
+        cutoff = older_than[:19]
+        stale = [dict(r) for r in rows or []
+                 if (r["updated_at"] or "")[:19] < cutoff]
+        stale.sort(key=lambda r: r["updated_at"] or "")
+        return stale[:limit]
+
+    async def children_map(self, goal_ids: list[str]) -> dict[str, list[str]]:
+        """parent_goal_id → [child ids], for the goal-tree dashboard view."""
+        if not goal_ids:
+            return {}
+        marks = ",".join("?" for _ in goal_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT parent_goal_id, id FROM goals "
+            f"WHERE parent_goal_id IN ({marks}) ORDER BY created_at",
+            tuple(goal_ids))
+        out: dict[str, list[str]] = {}
+        for r in rows or []:
+            out.setdefault(r["parent_goal_id"], []).append(r["id"])
+        return out
+
     async def active_count(self) -> int:
         row = await self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM goals WHERE status = 'active'")
         return int(row["n"]) if row else 0
 
     async def overdue(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Active goals whose deadline passed. Compared in Python: deadline
+        writers emit full microsecond ISO with offset, so a TEXT compare
+        against a second-truncated strftime 'now' mismatches at the edges."""
         rows = await self.db.fetch_all(
             """SELECT id, objective, kind, deadline, conversation_id FROM goals
-               WHERE status = 'active' AND deadline IS NOT NULL
-                 AND deadline < strftime('%Y-%m-%dT%H:%M:%S', 'now')
-               ORDER BY deadline LIMIT ?""", (limit,))
-        return [dict(r) for r in rows] if rows else []
+               WHERE status = 'active' AND deadline IS NOT NULL""")
+        now = datetime.now(timezone.utc)
+        due: list[dict[str, Any]] = []
+        for row in rows or []:
+            try:
+                dl = datetime.fromisoformat(str(row["deadline"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if dl.tzinfo is None:
+                dl = dl.replace(tzinfo=timezone.utc)
+            if dl <= now:
+                due.append(dict(row))
+        due.sort(key=lambda r: r["deadline"])
+        return due[:limit]
 
     async def active_outreach(self, conversation_id: str) -> dict[str, Any] | None:
         """Latest active outreach goal held by a conversation."""

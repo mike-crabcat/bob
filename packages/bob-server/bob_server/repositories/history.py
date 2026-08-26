@@ -111,6 +111,11 @@ class HistoryRepository:
             f"WHERE conversation_id = ? {internal}ORDER BY created_at ASC LIMIT ?",
             (cid, limit))
 
+    async def message_by_id(self, message_id: str) -> dict | None:
+        """Single message row by primary key (idempotency/lookups by id)."""
+        return await self.db.fetch_one(
+            "SELECT * FROM messages WHERE id = ?", (message_id,))
+
     async def messages_since(
         self,
         session_key: str,
@@ -172,6 +177,18 @@ class HistoryRepository:
         return list(reversed(rows or []))
 
     # ------------------------------------------------- dispatch claim/restore
+
+    async def messages_by_ids(self, message_ids: list[str]) -> list[dict]:
+        """Raw message rows by id (id, conversation_id, created_at) — the
+        entity-mention index resolves claim provenance through here (Bob
+        Events §2.1). Missing ids simply don't resolve."""
+        if not message_ids:
+            return []
+        marks = ",".join("?" for _ in message_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT id, conversation_id, created_at FROM messages "
+            f"WHERE id IN ({marks})", tuple(message_ids))
+        return [dict(r) for r in rows] if rows else []
 
     async def pending_user_ids(self, session_key: str) -> list[str]:
         rows = await self.db.fetch_all(
