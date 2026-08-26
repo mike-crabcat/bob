@@ -97,7 +97,7 @@ function Countdown({ iso }: { iso: string }) {
   return <span className="text-text">{Math.floor(hours / 24)}d</span>;
 }
 
-function GoalCard({ goal }: { goal: Goal }) {
+function GoalCard({ goal, parentObjective }: { goal: Goal; parentObjective?: string | null }) {
   const [open, setOpen] = useState(false);
   const qc = useQueryClient();
   const cancel = useMutation({
@@ -116,6 +116,11 @@ function GoalCard({ goal }: { goal: Goal }) {
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-xs text-text break-words">{goal.objective}</div>
+          {parentObjective && (
+            <div className="text-[10px] text-muted mt-0.5 truncate" title={parentObjective}>
+              under: {parentObjective}
+            </div>
+          )}
           <div className="text-[10px] text-muted mt-0.5">
             {goal.kind}
             {goal.deadline && <> · due {fmtTs(goal.deadline)}</>}
@@ -229,6 +234,11 @@ function GoalsPage() {
   const byId = new Map(goals.map((g) => [g.id, g]));
   const isChild = (g: Goal) => !!g.parent_goal_id && byId.has(g.parent_goal_id);
   const roots = active.filter((g) => !isChild(g));
+  // Parent context for cards NOT shown nested (active roots with a settled
+  // parent, and the flat settled list) so a settled child never reads as
+  // standalone.
+  const parentObjective = (g: Goal) =>
+    g.parent_goal_id ? byId.get(g.parent_goal_id)?.objective ?? null : null;
 
   return (
     <div className="flex flex-col gap-4 p-3">
@@ -242,7 +252,7 @@ function GoalsPage() {
           )}
           {roots.map((g) => (
             <div key={g.id} className="flex flex-col gap-1.5">
-              <GoalCard goal={g} />
+              <GoalCard goal={g} parentObjective={parentObjective(g)} />
               <div className="pl-3 flex flex-col gap-1.5 border-l border-border">
                 {g.children
                   .map((cid) => byId.get(cid))
@@ -300,7 +310,7 @@ function GoalsPage() {
             settled goals ({settled.length})
           </h2>
           <div className="flex flex-col gap-1.5">
-            {settled.map((g) => <GoalCard key={g.id} goal={g} />)}
+            {settled.map((g) => <GoalCard key={g.id} goal={g} parentObjective={parentObjective(g)} />)}
           </div>
         </section>
       )}

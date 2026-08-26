@@ -544,6 +544,26 @@ class ClaimRouterSweepTask:
             logger.info("claim router sweep replayed %d event(s)", replayed)
 
 
+class OutreachDetectorSweepTask:
+    """Out-of-channel answer detection for outreach goals (2026-08-26 review).
+
+    Replays message.received events past the detector watermark: when the
+    sender has an active outreach goal working a different conversation, a
+    cheap probe asks whether the message satisfies the objective; a
+    satisfied verdict completes the goal through the normal settle chokepoint.
+    Kill switch: ``BOB_OUTREACH_DETECTOR_DISABLED=1`` (watermark frozen, so
+    lifting it replays the gap)."""
+
+    name = "outreach_detector_sweep"
+
+    async def run(self, ctx: AppContext) -> None:
+        from bob_server.services.outreach_detector import sweep
+
+        processed = await sweep(ctx)
+        if processed:
+            logger.info("outreach detector processed %d inbound message(s)", processed)
+
+
 _last_goal_review: datetime | None = None
 
 

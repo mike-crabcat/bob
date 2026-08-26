@@ -30,6 +30,7 @@ from bob_server.heartbeat import (
     AttentionShadowAgreementTask,
     EffectPumpTask,
     ClaimRouterSweepTask,
+    OutreachDetectorSweepTask,
     GoalReviewTask,
     WakeupPumpTask,
     DeletionPropagationTask,
@@ -39,7 +40,10 @@ from bob_server.heartbeat import (
     SessionIdleSummaryTask,
 )
 from bob_server.models import HealthResponse
-from bob_server.routers import calendars, contacts, context, dashboard_api, dashboard_ws, email, persona, webhooks, whatsapp
+from bob_server.routers import (
+    calendars, contacts, context, dashboard_api, dashboard_ws, email,
+    persona, published_files, webhooks, whatsapp,
+)
 from bob_server.services.event_bus import EventBus
 from bob_server.structured_logging import configure_logging, CorrelationIdMiddleware
 
@@ -118,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(EffectPumpTask())
         runner.register(WakeupPumpTask())
         runner.register(ClaimRouterSweepTask())
+        runner.register(OutreachDetectorSweepTask())
         runner.register(GoalReviewTask())
         runner.register(DeletionPropagationTask())
         runner.register(GrowthMonitoringTask())
@@ -188,6 +193,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(contacts.router, prefix="/api/v1")
     app.include_router(persona.router, prefix="/api/v1")
     app.include_router(email.router)
+    # Public (Funnel) design-file publishing for the printful skill —
+    # token-gated, images/print files only.
+    app.include_router(published_files.router)
 
     # Dashboard API (HTTP) + WebSocket (live events)
     app.include_router(dashboard_api.router, prefix="/dashboard")

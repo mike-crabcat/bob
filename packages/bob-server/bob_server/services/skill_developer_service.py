@@ -25,8 +25,10 @@ Every skill MUST include a Python helper script — skills are never markdown-on
 You have these tools available:
 - **Read**: Read file contents. Use this to examine existing skills and workspace files.
 - **Write**: Create or overwrite files. Use this to create skill files.
+- **Edit**: Make targeted string replacements in existing files.
 - **Glob**: Find files matching a pattern. Use this to discover existing skills.
 - **Grep**: Search file contents. Use this to search across workspace files.
+- **Bash**: Run shell commands. Use this to make scripts executable and run tests.
 
 ## Skill Format
 
@@ -343,11 +345,14 @@ class SkillDeveloperService(BaseService):
             "--output-format", "json",
             "--model", model,
             "--max-budget-usd", str(max_budget),
-            "--allowed-tools", "Read Write Glob Grep",
+            "--allowed-tools", "Read Write Glob Grep Edit Bash",
             "--system-prompt", SKILL_DEV_SYSTEM_PROMPT,
         ]
         if session_id:
             cmd.extend(["--resume", session_id])
+        else:
+            session_id = str(uuid4())
+            cmd.extend(["--session-id", session_id])
         cmd.append(prompt)
 
         logger.info("Spawning Claude Code: session=%s cwd=%s", session_id, cwd)
@@ -359,10 +364,21 @@ class SkillDeveloperService(BaseService):
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=self._get_settings().harness.skill_dev_timeout_seconds,
-        )
+        timeout_s = self._get_settings().harness.skill_dev_timeout_seconds
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            # Kill the run: an un-killed process keeps mutating the workspace
+            # after the failure is recorded, and its piped output is lost anyway.
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(
+                f"Claude Code timed out after {timeout_s:.0f}s "
+                f"(resumable via: claude --resume {session_id})"
+            ) from None
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()

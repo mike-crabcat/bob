@@ -150,6 +150,22 @@ async def _async_none():
 
 # ---------------------------------------------------------------- validation
 
+async def test_transcript_tags_speaker_names(ctx):
+    from bob_server.services.dream.review import ReviewService
+
+    svc = ReviewService(ctx)
+    msgs = [
+        {"role": "user", "sender_id": "c1", "content": "hello there"},
+        {"role": "user", "sender_id": "c9", "content": "unknown sender"},
+        {"role": "user", "sender_id": None, "content": "no sender"},
+        {"role": "assistant", "sender_id": None, "content": "hi!"},
+    ]
+    lines = svc.build_transcript(msgs, {"c1": "Sarah", "c2": "Don"})
+    assert lines[0] == "[1] [Sarah] hello there"
+    assert lines[1] == "[2] [user] unknown sender"
+    assert lines[2] == "[3] [user] no sender"
+    assert lines[3] == "[4] [BOB] hi!"
+
 async def test_review_validates_evidence_and_rejects_fabricated(ctx, stub_env):
     from bob_server.services.dream.review import ReviewService
 

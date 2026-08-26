@@ -111,6 +111,11 @@ class HistoryRepository:
             f"WHERE conversation_id = ? {internal}ORDER BY created_at ASC LIMIT ?",
             (cid, limit))
 
+    async def message_by_id(self, message_id: str) -> dict | None:
+        """Single message row by primary key (idempotency/lookups by id)."""
+        return await self.db.fetch_one(
+            "SELECT * FROM messages WHERE id = ?", (message_id,))
+
     async def messages_since(
         self,
         session_key: str,

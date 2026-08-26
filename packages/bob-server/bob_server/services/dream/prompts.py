@@ -41,6 +41,10 @@ human intent.
 EVIDENCE RULES: cite transcript line numbers exactly as shown (integers). The excerpt \
 must be copied from that line. Fabricated or unmatched citations cause rejection.
 
+TRANSCRIPT TAGS: each line's speaker is shown in brackets — [BOB] for Bob's own \
+messages, [Name] for a human (the roster name); [user] means the speaker could not \
+be identified. Use the speaker when attributing intent or choosing related_entities.
+
 Output STRICT JSON, nothing else:
 {"resolutions": [{"title": "...", "behaviour": "...", "trigger_condition": "...", \
 "success_signal": "...", "evidence": [{"line": 12, "excerpt": "..."}]}],

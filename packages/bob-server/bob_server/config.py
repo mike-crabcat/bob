@@ -258,7 +258,7 @@ class HarnessSettings:
     max_history_messages: int = 20
     skill_dev_enabled: bool = False
     skill_dev_max_budget_usd: float = 5.0
-    skill_dev_timeout_seconds: float = 300.0
+    skill_dev_timeout_seconds: float = 1800.0
     local_subagent_model: str = "gpt-5.6-sol"
 
 
@@ -599,7 +599,7 @@ class Settings:
             max_history_messages=int(os.getenv("BOB_HARNESS_MAX_HISTORY_MESSAGES", "20")),
             skill_dev_enabled=os.getenv("BOB_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             skill_dev_max_budget_usd=float(os.getenv("BOB_HARNESS_SKILL_DEV_MAX_BUDGET_USD", "5.0")),
-            skill_dev_timeout_seconds=float(os.getenv("BOB_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "300")),
+            skill_dev_timeout_seconds=float(os.getenv("BOB_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "1800")),
             local_subagent_model=os.getenv("BOB_HARNESS_LOCAL_SUBAGENT_MODEL", "gpt-5.6-sol"),
         )
 

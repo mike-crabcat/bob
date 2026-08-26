@@ -35,7 +35,7 @@ def _normalise_voice_agent_type(value: str) -> str:
 
 SUBAGENT_SYSTEM_PROMPT = """\
 You are a subagent of Bob, an AI assistant. You have been given a task to complete.
-Use your available tools (Read, Write, Glob, Grep) to accomplish the task.
+Use your available tools (Read, Write, Edit, Glob, Grep, Bash) to accomplish the task.
 Your working directory is the workspace — write files here by default (no absolute paths needed).
 Provide clear, concise output describing what you did and what the result is.
 """
@@ -630,13 +630,16 @@ class SubagentService(BaseService):
             claude_bin, "-p",
             "--output-format", "json",
             "--max-budget-usd", str(max_budget),
-            "--allowed-tools", "Read Write Glob Grep Bash",
+            "--allowed-tools", "Read Write Glob Grep Edit Bash",
             "--system-prompt", SUBAGENT_SYSTEM_PROMPT,
         ]
         if model:
             cmd.extend(["--model", model])
         if session_id:
             cmd.extend(["--resume", session_id])
+        else:
+            session_id = str(uuid4())
+            cmd.extend(["--session-id", session_id])
         cmd.append(prompt)
 
         logger.info("Spawning Claude Code: session=%s cwd=%s", session_id, cwd)
@@ -648,10 +651,21 @@ class SubagentService(BaseService):
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=self._get_settings().harness.skill_dev_timeout_seconds,
-        )
+        timeout_s = self._get_settings().harness.skill_dev_timeout_seconds
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            # Kill the run: an un-killed process keeps mutating the workspace
+            # after the failure is recorded, and its piped output is lost anyway.
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(
+                f"Claude Code timed out after {timeout_s:.0f}s "
+                f"(resumable via: claude --resume {session_id})"
+            ) from None
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()

@@ -44,6 +44,8 @@ OWNERS: dict[str, list[str]] = {
     "goal_transitions": ["repositories/goals.py"],
     "goal_conversations": ["repositories/goals.py"],
     "claim_router_watermark": ["services/memory/claim_router.py"],
+    "outreach_probe_log": ["services/outreach_detector.py"],
+    "outreach_detector_watermark": ["services/outreach_detector.py"],
     "approvals": ["repositories/approvals.py"],
     "wakeups": ["repositories/wakeups.py"],
     "attention_shadow": ["services/attention/"],
