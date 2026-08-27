@@ -275,9 +275,13 @@ class SubagentService(BaseService):
         )
         _running_tasks.pop(subagent_id, None)
 
-    async def message_subagent(self, subagent_id: str, message: str) -> dict[str, Any]:
+    async def message_subagent(self, subagent_id: str, message: str, *,
+                               parent_session_key: str = "") -> dict[str, Any]:
         row = await self._repo().get(subagent_id)
         if row is None:
+            return {"ok": False, "error": "Subagent not found"}
+        if parent_session_key and row["parent_session_key"] != parent_session_key:
+            # Don't confirm the existence of another session's subagent.
             return {"ok": False, "error": "Subagent not found"}
         if row["agent_type"] == "openai_voice":
             return {"ok": False, "error": "Voice subagent in progress; cannot message. Use kill_subagent to cancel."}
@@ -340,9 +344,13 @@ class SubagentService(BaseService):
             logger.info("Subagent %s messaged: cost=%.4f", subagent_id[:8], total_cost)
             return {"ok": True, "result": result_text, "subagent_id": subagent_id}
 
-    async def check_subagent(self, subagent_id: str) -> dict[str, Any]:
+    async def check_subagent(self, subagent_id: str, *,
+                             parent_session_key: str = "") -> dict[str, Any]:
         row = await self._repo().get(subagent_id)
         if row is None:
+            return {"ok": False, "error": "Subagent not found"}
+        if parent_session_key and row["parent_session_key"] != parent_session_key:
+            # Don't confirm the existence of another session's subagent.
             return {"ok": False, "error": "Subagent not found"}
         return {
             "ok": True,
@@ -369,9 +377,13 @@ class SubagentService(BaseService):
             for row in rows
         ]
 
-    async def kill_subagent(self, subagent_id: str) -> dict[str, Any]:
+    async def kill_subagent(self, subagent_id: str, *,
+                            parent_session_key: str = "") -> dict[str, Any]:
         row = await self._repo().get(subagent_id)
         if row is None:
+            return {"ok": False, "error": "Subagent not found"}
+        if parent_session_key and row["parent_session_key"] != parent_session_key:
+            # Don't confirm the existence of another session's subagent.
             return {"ok": False, "error": "Subagent not found"}
 
         task = _running_tasks.pop(subagent_id, None)

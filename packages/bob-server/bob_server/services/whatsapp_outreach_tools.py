@@ -163,6 +163,21 @@ def make_whatsapp_outreach_tools(
         if not phone:
             return json.dumps({"ok": False, "error": "Contact has no phone number"})
 
+        # Outbound-only contacts (agent-created for a call, or operator-restricted)
+        # have their inbound DMs dropped by WhatsAppInboundPolicy — outreach to
+        # them would invite a reply that can never arrive, leaving a goal
+        # waiting on an answer Bob will never see. Fail loudly instead.
+        if not bool(contact.get("allow_inbound_dm", 1)):
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    f"Contact {contact['name']} is outbound-only "
+                    "(allow_inbound_dm=0): their replies would be silently dropped. "
+                    "Ask the operator to enable inbound DMs for this contact "
+                    "in the dashboard before messaging them."
+                ),
+            })
+
         # Check bridge connectivity
         if not wa_service.connected:
             return json.dumps({"ok": False, "error": "WhatsApp bridge is not connected"})

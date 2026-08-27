@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from bob_server.services.tools import Tool
 from bob_server.services.workspace_tools import make_workspace_tools
+from bob_server.services.process_tools import make_process_tools
 from bob_server.services.memory_tools import make_memory_tools
 from bob_server.services.docs_tools import make_docs_tools
 from bob_server.services.changelog_tools import make_changelog_tools
@@ -60,6 +61,7 @@ def build_common_tools(
 
     # Core tools — available in every session
     _extend(make_workspace_tools(ctx, session_key=session_key))
+    _extend(make_process_tools(ctx))
     _extend(make_memory_tools(ctx, session_key=session_key))
     _extend(make_docs_tools(ctx, session_key=session_key))
     _extend(make_changelog_tools(ctx, session_key=session_key))
@@ -81,8 +83,16 @@ def build_common_tools(
     if is_trusted:
         _extend(make_contact_tools(ctx, is_trusted=True))
         _extend(make_reflection_tools(ctx, session_key))
-        if ctx.settings.harness.skill_dev_enabled:
-            _extend(make_subagent_tools(ctx, session_key))
+
+    # Subagents are the async-execution mechanism the skill index advertises
+    # to every session (image gen, browser runs, PDF rendering), so withholding
+    # them entirely from untrusted sessions pushes the LLM into blocking bash
+    # runs instead. Script subagents run in the same sandbox as the bash tool
+    # the session already has — no escalation — so untrusted sessions get
+    # script-only create_subagent (enforced in make_subagent_tools);
+    # claude/local/openai_voice (LLM spend, phone calls) stay trusted-only.
+    if ctx.settings.harness.skill_dev_enabled:
+        _extend(make_subagent_tools(ctx, session_key, is_trusted=is_trusted))
 
     # Phone subsystem — adds contact + phone tools when enabled.
     # create_contact stays trust-gated here too: phone-enabled untrusted

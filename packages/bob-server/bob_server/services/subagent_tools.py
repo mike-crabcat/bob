@@ -14,8 +14,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
-    """Create subagent management tools for a trusted session."""
+def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool = True) -> list:
+    """Create subagent management tools for a session.
+
+    Trusted sessions get the full toolbox. Untrusted sessions (group chats,
+    untrusted DM contacts) get script-only subagents — the async-execution
+    mechanism the skill index advertises to every session — because a script
+    subagent runs in the same workspace sandbox as the bash tool the session
+    already has. LLM-loop (claude/local) and phone (openai_voice) subagents
+    spend tokens or place real calls, so they stay trusted-only, and
+    message_subagent (which drives further LLM runs) is withheld entirely.
+    """
 
     @tool
     async def create_subagent(
@@ -77,6 +86,21 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         Use check_subagent to poll for results and message_subagent for follow-up."""
         from bob_server.services.subagent_service import SubagentService
 
+        if not is_trusted and (agent_type or "").strip().lower() != "script":
+            # Fail before the service's alias normalisation can coerce an
+            # invented type: untrusted input must never reach the LLM-loop
+            # or phone-call paths.
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    "This conversation is untrusted: only "
+                    "agent_type='script' subagents are allowed here "
+                    "(async bash commands in the workspace sandbox, e.g. "
+                    "image generation). Other agent types require a "
+                    "trusted contact."
+                ),
+            })
+
         svc = SubagentService(ctx)
         result = await svc.create_subagent(
             task,
@@ -96,7 +120,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         from bob_server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
-        result = await svc.check_subagent(subagent_id)
+        result = await svc.check_subagent(subagent_id, parent_session_key=session_key)
         return json.dumps(result)
 
     @tool
@@ -106,7 +130,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         from bob_server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
-        result = await svc.message_subagent(subagent_id, message)
+        result = await svc.message_subagent(subagent_id, message, parent_session_key=session_key)
         return json.dumps(result)
 
     @tool
@@ -125,7 +149,10 @@ def make_subagent_tools(ctx: AppContext, session_key: str) -> list:
         from bob_server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
-        result = await svc.kill_subagent(subagent_id)
+        result = await svc.kill_subagent(subagent_id, parent_session_key=session_key)
         return json.dumps(result)
 
-    return [create_subagent, check_subagent, message_subagent, list_subagents, kill_subagent]
+    tools = [create_subagent, check_subagent, list_subagents, kill_subagent]
+    if is_trusted:
+        tools.append(message_subagent)
+    return tools

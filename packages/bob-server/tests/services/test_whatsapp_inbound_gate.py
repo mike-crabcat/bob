@@ -106,3 +106,37 @@ async def test_group_message_from_outbound_only_contact_passes_gate(db):
     payload["chat_id"] = "120363422982048691@g.us"
     await svc._handle_incoming_message(payload)
     slash.assert_awaited_once()
+
+
+async def test_outreach_tool_refuses_outbound_only_contact(db):
+    """send_whatsapp_to_contact fails for allow_inbound_dm=0 contacts.
+
+    The outbound mirror of the inbound gate above: outreach to an
+    outbound-only contact invites a reply that _handle_incoming_message
+    will drop, stranding the outreach goal. The tool must fail loudly
+    instead of sending.
+    """
+    import json
+
+    from bob_server.services.whatsapp_outreach_tools import (
+        make_whatsapp_outreach_tools,
+    )
+
+    contact_id = await _seed_contact(db, OUTBOUND_ONLY, trusted=0, allow_inbound=0)
+    sent: list[tuple[str, str]] = []
+
+    class _FakeBridge:
+        connected = True
+
+        async def send_message(self, jid, message):
+            sent.append((jid, message))
+            return "req-1"
+
+    ctx = SimpleNamespace(db=db)
+    tools = {t.name: t for t in
+             make_whatsapp_outreach_tools(ctx, _FakeBridge(), "work")}
+    out = json.loads(await tools["send_whatsapp_to_contact"].handler(
+        contact_id=contact_id, message="hey", objective="say hi"))
+    assert not out["ok"]
+    assert "outbound-only" in out["error"]
+    assert sent == []  # nothing left the bridge
