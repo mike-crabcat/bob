@@ -9,10 +9,17 @@ import { fetchAPI } from "@/lib/api";
 
 interface CostByCategory {
   category: string;
+  provider?: string;
   cost: number;
   call_count: number;
   prompt_tokens: number;
   completion_tokens: number;
+}
+
+interface CostByProvider {
+  provider: string;
+  cost: number;
+  call_count: number;
 }
 
 interface HomeSnapshot {
@@ -23,6 +30,8 @@ interface HomeSnapshot {
   active_dispatches: DispatchItem[];
   entity_count: number;
   cost_by_category: CostByCategory[];
+  cost_by_provider?: CostByProvider[];
+  unpriced_calls?: number;
   total_cost_24h: number;
 }
 
@@ -92,11 +101,28 @@ function HomePage() {
             estimated cost · 24h
             <span className="text-text ml-2">${home.total_cost_24h.toFixed(2)}</span>
           </h2>
+          {home.cost_by_provider && home.cost_by_provider.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-2 text-[10px]">
+              {home.cost_by_provider.map((p) => (
+                <span key={p.provider} className="bg-surface border border-border px-2 py-0.5">
+                  <span className="text-muted uppercase tracking-wide">{p.provider}</span>
+                  <span className="text-text ml-1.5 tabular-nums">${p.cost.toFixed(2)}</span>
+                  <span className="text-muted ml-1.5">{p.call_count} calls</span>
+                </span>
+              ))}
+              {!!home.unpriced_calls && (
+                <span className="border border-border px-2 py-0.5 text-muted">
+                  {home.unpriced_calls} unpriced calls
+                </span>
+              )}
+            </div>
+          )}
           <div className="bg-surface border border-border p-2">
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-muted text-[10px] uppercase">
                   <th className="text-left px-2 pb-1">category</th>
+                  <th className="text-left px-2 pb-1">provider</th>
                   <th className="text-right px-2 pb-1">calls</th>
                   <th className="text-right px-2 pb-1">input</th>
                   <th className="text-right px-2 pb-1">output</th>
@@ -105,8 +131,9 @@ function HomePage() {
               </thead>
               <tbody>
                 {home.cost_by_category.map((c) => (
-                  <tr key={c.category} className="border-t border-border">
+                  <tr key={`${c.provider ?? "openai"}:${c.category}`} className="border-t border-border">
                     <td className="py-0.5 px-2">{c.category.replace(/_/g, " ")}</td>
+                    <td className="px-2 text-muted">{c.provider ?? "openai"}</td>
                     <td className="text-right tabular-nums px-2">{c.call_count}</td>
                     <td className="text-right tabular-nums px-2">{fmtTokens(c.prompt_tokens)}</td>
                     <td className="text-right tabular-nums px-2">{fmtTokens(c.completion_tokens)}</td>

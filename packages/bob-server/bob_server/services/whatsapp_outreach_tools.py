@@ -44,16 +44,72 @@ def _record_group_send(group_key: str, now: float) -> None:
     _group_send_times.setdefault(group_key, []).append(now)
 
 
+async def _deliver_group_send(
+    ctx: AppContext,
+    *,
+    group_key: str,
+    group_id: str,
+    message: str,
+    origin_session_key: str,
+    idempotency_key: str,
+    provenance: dict[str, Any],
+    now: float,
+) -> dict[str, Any]:
+    """The single group-send primitive: emit the whatsapp_send effect, consume
+    the per-group rate-limit slot, mirror the message into the group's history
+    (as the bridge does for inbound). Callers own every gate — membership,
+    policy, approval. Extra provenance keys ride in the effect payload for the
+    dashboard timeline and audit."""
+    from bob_server.services.effects import emit_and_deliver
+
+    result = await emit_and_deliver(
+        ctx, kind="whatsapp_send",
+        idempotency_key=idempotency_key,
+        payload={"chat_id": f"{group_id}@g.us", "text": message,
+                 "origin_session_key": origin_session_key,
+                 **provenance},
+    )
+    if not result.get("ok"):
+        return result
+    _record_group_send(group_key, now)
+
+    # Mirror the sent message into the group conversation's history (as
+    # the bridge does for inbound), so later prompts see it.
+    try:
+        from bob_server.services.session_service import SessionService
+        await SessionService(ctx).add_message(
+            group_key, "assistant", message, channel="whatsapp",
+            metadata={"proactive_group_send": True, **provenance},
+        )
+    except Exception:
+        logger.warning("group send: history mirror failed for %s", group_key,
+                       exc_info=True)
+
+    return result
+
+
 def make_group_send_tools(
     ctx: AppContext,
     wa_service: WhatsAppBridgeService,
     current_session_key: str,
+    *,
+    requester_contact_id: str | None = None,
 ) -> list:
-    """Proactive group-send tool (Bob Events §1.5). Policy-gated per group:
-    off by default, enabled via conversation policy ``group_outbound_enabled``
-    (the migration-452 policy_json machinery); Bob must already be in the
-    group (an active group binding must exist); rate-limited per group; every
-    send records goal provenance in its effect payload."""
+    """Group-send tools (Bob Events §1.5 + the approval-gated extension).
+
+    Two paths, one primitive (``_deliver_group_send``):
+
+    - ``send_whatsapp_group_message`` — Bob-initiated proactive sends, gated
+      per group on conversation policy ``group_outbound_enabled`` (off by
+      default; the migration-452 policy_json machinery).
+    - ``request_group_message`` — human-requested sends to any group Bob is
+      a member of, gated on per-message approval by the owner (routed to
+      their DM); requests from the owner go straight through.
+
+    Both require an active group binding (membership) and are rate-limited
+    per group; ``requester_contact_id`` is the dispatching sender's contact
+    (group bindings carry none themselves — it must be threaded in by the
+    caller, and stays None on wake-path turns)."""
 
     @tool
     async def send_whatsapp_group_message(
@@ -91,35 +147,56 @@ def make_group_send_tools(
         if not _group_send_allowed(group_key, now):
             return json.dumps({"ok": False, "error": "Group send rate limit reached; retry later"})
 
-        from bob_server.services.effects import emit_and_deliver
-
-        seq = uuid4().hex[:8]
-        result = await emit_and_deliver(
-            ctx, kind="whatsapp_send",
-            idempotency_key=f"whatsapp_group_send:{group_key}:{seq}",
-            payload={"chat_id": f"{group_id}@g.us", "text": message,
-                     "origin_session_key": current_session_key,
-                     "goal_id": goal_id or None},
-        )
+        result = await _deliver_group_send(
+            ctx, group_key=group_key, group_id=group_id, message=message,
+            origin_session_key=current_session_key,
+            idempotency_key=f"whatsapp_group_send:{group_key}:{uuid4().hex[:8]}",
+            provenance={"goal_id": goal_id or None}, now=now)
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "delivery failed")})
-        _record_group_send(group_key, now)
-
-        # Mirror the sent message into the group conversation's history (as
-        # the bridge does for inbound), so later prompts see it.
-        try:
-            from bob_server.services.session_service import SessionService
-            await SessionService(ctx).add_message(
-                group_key, "assistant", message, channel="whatsapp",
-                metadata={"proactive_group_send": True, "goal_id": goal_id or None},
-            )
-        except Exception:
-            logger.warning("group send: history mirror failed for %s", group_key,
-                           exc_info=True)
 
         return json.dumps({"ok": True, "chat_id": f"{group_id}@g.us"})
 
-    return [send_whatsapp_group_message]
+    @tool
+    async def request_group_message(
+        group_id: str,
+        message: str,
+        note: str = "",
+    ) -> str:
+        """Send a message to a different WhatsApp group Bob is a member of (group_id is the raw group id, no @g.us — get it from find_session). Each request is approved per message by the owner in their DM; the exact text you pass is what gets delivered, unchanged."""
+        import time
+
+        from bob_server.repositories.conversations import ConversationRepository
+
+        if not wa_service.connected:
+            return json.dumps({"ok": False, "error": "WhatsApp bridge is not connected"})
+
+        group_key = f"agent:main:whatsapp:group:{group_id}"
+        conv_repo = ConversationRepository(ctx.db)
+
+        # Membership: an active group binding must exist for this group.
+        binding = await conv_repo.active_binding(group_key)
+        if not binding or binding.get("endpoint_kind") != "group":
+            return json.dumps({"ok": False,
+                               "error": "Not a member of that group (no active group binding)"})
+
+        from bob_server.repositories.groups import GroupRepository
+        group = await GroupRepository(ctx.db).get_by_jid(f"{group_id}@g.us")
+        group_name = group["name"] if group else None
+
+        # Advisory pre-check only — the rate-limit slot is consumed on
+        # delivery, so rejected requests don't burn budget.
+        if not _group_send_allowed(group_key, time.monotonic()):
+            return json.dumps({"ok": False, "error": "Group send rate limit reached; retry later"})
+
+        from bob_server.services.group_send_approval import create_request
+        result = await create_request(
+            ctx, group_id=group_id, group_key=group_key, group_name=group_name,
+            message=message, note=note, origin_session_key=current_session_key,
+            requester_contact_id=requester_contact_id)
+        return json.dumps(result)
+
+    return [send_whatsapp_group_message, request_group_message]
 
 
 def make_whatsapp_outreach_tools(

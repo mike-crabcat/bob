@@ -18,6 +18,8 @@ import json
 import logging
 from typing import Any
 
+from bob_server.services.dispatch_runner import is_no_reply
+
 logger = logging.getLogger(__name__)
 
 VALID = ("ACT", "WAIT", "STAND_DOWN")
@@ -178,8 +180,7 @@ async def _build_context(ctx: Any, session_key: str, max_context: int,
             # like the bot already declined.
             if row["role"] == "assistant" and (
                     not (row["content"] or "").strip()
-                    or (row["content"] or "").strip().upper().rstrip(".")
-                    in ("NO_REPLY", "NO REPLY", "NOTHING TO SAY")):
+                    or is_no_reply(row["content"])):
                 continue
             parts.append(f"{speaker(row)}: {(row['content'] or '')[:200]}")
 

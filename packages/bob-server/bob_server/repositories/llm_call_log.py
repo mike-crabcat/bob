@@ -181,7 +181,7 @@ class LlmCallLogRepository:
 
     async def cost_rollup_24h(self) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
-            """SELECT call_category, model,
+            """SELECT call_category, model, provider,
                       SUM(COALESCE(prompt_tokens, 0)) as total_prompt_tokens,
                       SUM(COALESCE(completion_tokens, 0)) as total_completion_tokens,
                       SUM(COALESCE(cached_tokens, 0)) as total_cached_tokens,
@@ -191,7 +191,7 @@ class LlmCallLogRepository:
                  AND NOT (status = 'failed' AND (
                      error_message LIKE '%insufficient_quota%'
                      OR error_message LIKE '%credit_balance_exhausted%'))
-               GROUP BY call_category, model
+               GROUP BY call_category, model, provider
                ORDER BY call_category, model""")
         return [dict(r) for r in rows] if rows else []
 

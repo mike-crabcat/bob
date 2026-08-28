@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from bob_server.services.base import BaseService, iso_utc, utcnow
+from bob_server.services.dispatch_runner import is_no_reply
 from bob_server.services.memory.claim_types import (
     ENTITY_TYPE_REGISTRY,
     detect_entity_type,
@@ -243,9 +244,7 @@ class MemoryService(BaseService):
             if not content:
                 continue
             if row["role"] == "assistant":
-                if content.strip().upper().rstrip(".") in (
-                    "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
-                ):
+                if is_no_reply(content):
                     continue
                 if row["synthetic"]:
                     content = f"[SYNTHETIC] {content}"

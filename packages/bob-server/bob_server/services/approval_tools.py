@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from bob_server.context import AppContext
@@ -44,6 +44,32 @@ def _summarize_proposal(proposal: Any) -> str:
     body = "\n".join(lines)
     return (body + (f"\nEstimated total: ${total:.2f}" if total else "")) or \
         str(proposal.get("summary") or "")
+
+
+# approval_type -> async callable(ctx, row), invoked after a successful CAS
+# approve. Reserved for platform-native follow-through (the WhatsApp group
+# send); vendor actions stay on the agent side, on the wake that follows —
+# the platform records human intent, it doesn't place orders.
+_ON_APPROVED: dict[str, Callable[[Any, dict[str, Any]], Awaitable[None]]] = {}
+
+
+def register_on_approved(approval_type: str, callback) -> None:
+    _ON_APPROVED[approval_type] = callback
+
+
+async def _run_on_approved(ctx: Any, row: dict[str, Any]) -> None:
+    """Best-effort, never raises: the decision is already durably recorded and
+    the follow-through carries its own idempotency key + outbox retries."""
+    if row.get("status") != "approved":
+        return
+    approval_type = row.get("approval_type")
+    callback = _ON_APPROVED.get(approval_type) if approval_type else None
+    if callback is None:
+        return
+    try:
+        await callback(ctx, row)
+    except Exception:
+        logger.exception("on-approved follow-through failed for %s", row.get("id"))
 
 
 def _register_approval_executors() -> None:
@@ -91,16 +117,29 @@ def _register_approval_executors() -> None:
         if row is None:
             already = await repo.get(payload["approval_id"])
             if already and already["status"] == payload["decision"]:
-                return already["id"]  # idempotent duplicate (effect pump retry)
+                # Idempotent duplicate (effect pump retry). Re-run the
+                # platform-native follow-through: it is keyed on the approval
+                # id, so a send already emitted is suppressed, and one lost to
+                # a crash mid-hook is recovered here.
+                await _run_on_approved(ctx, already)
+                return already["id"]
             raise RuntimeError("approval already settled or not found")
-        # Approving records the decision only. Acting on an approval (e.g.
-        # placing an order via a skill) is the agent's job on the wake that
-        # follows — by design: the platform records human intent, it doesn't
-        # execute vendor actions.
+        # Approving records the decision. Acting on it is the agent's job on
+        # the wake that follows — with one narrow exception: platform-native
+        # effects (see _ON_APPROVED) are executed here, deterministically,
+        # from the stored proposal rather than the LLM's discretion.
+        await _run_on_approved(ctx, row)
         return row["id"]
 
     effects_svc.register_executor("approval_request", _exec_request)
     effects_svc.register_executor("approval_respond", _exec_respond)
+
+    # Platform-native follow-through (WhatsApp group send). Registered in the
+    # same breath as the executors above, so the pump can never deliver an
+    # approval_respond with the hook missing — the lazy-registration quirk
+    # that affects kinds registered in tool-assembly functions cannot bite.
+    from bob_server.services import group_send_approval as _group_send
+    _group_send.register()
 
 
 _register_approval_executors()
@@ -164,6 +203,14 @@ def make_approval_tools(ctx: AppContext, session_key: str) -> list:
                 try:
                     proposal = json.loads(r["proposal_data"])
                     item["summary"] = proposal.get("summary")
+                except (TypeError, ValueError):
+                    pass
+            if r["approval_type"] == "group_send" and r["proposal_data"]:
+                try:
+                    proposal = json.loads(r["proposal_data"])
+                    item["group_name"] = proposal.get("group_name")
+                    item["group_id"] = proposal.get("group_id")
+                    item["message"] = proposal.get("message")
                 except (TypeError, ValueError):
                     pass
             out.append(item)

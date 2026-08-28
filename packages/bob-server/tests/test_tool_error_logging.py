@@ -97,6 +97,7 @@ async def test_tool_handler_exception_logged_with_context(ctx, fake_openai_clien
     svc = OpenAIService(ctx)
     with caplog.at_level("ERROR", logger="bob_server.services.openai_service"):
         result = await svc.chat_with_tools(
+            model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "trigger the boom"}],
             tools=[],
             tool_handlers={"boom_tool": boom_handler},
@@ -137,6 +138,7 @@ async def test_unknown_tool_logged_at_error(ctx, fake_openai_client, caplog):
     svc = OpenAIService(ctx)
     with caplog.at_level("ERROR", logger="bob_server.services.openai_service"):
         result = await svc.chat_with_tools(
+            model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "call the ghost"}],
             tools=[],
             tool_handlers={},  # no tools registered → ghost_tool is unknown
@@ -175,6 +177,7 @@ async def test_tool_args_truncated_in_log(ctx, fake_openai_client, caplog):
     svc = OpenAIService(ctx)
     with caplog.at_level("ERROR", logger="bob_server.services.openai_service"):
         await svc.chat_with_tools(
+            model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "go"}],
             tools=[],
             tool_handlers={"big_tool": big_handler},

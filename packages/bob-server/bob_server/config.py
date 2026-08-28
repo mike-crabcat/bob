@@ -216,6 +216,27 @@ class OpenAISettings:
 
 
 @dataclass(slots=True)
+class OpenRouterSettings:
+    """Configuration for OpenRouter — the multi-provider LLM gateway used
+    for non-OpenAI models (vendor-qualified slugs like ``z-ai/glm-5.3-flash``,
+    see services/model_registry.py).
+
+    OpenRouter implements the OpenAI Responses API, so it reuses the same
+    request path as OpenAISettings — only the client endpoint differs.
+    The API key is read from a file (the BOB_HA_BEARER_TOKEN_FILE pattern)
+    rather than the environment: the agent's bash tool inherits the service
+    env, and this key shouldn't be readable there.
+    """
+
+    api_key: str = ""
+    base_url: str = "https://openrouter.ai/api/v1"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(slots=True)
 class OpenAIRealtimeSettings:
     """Configuration for OpenAI Realtime API voice calls.
 
@@ -375,6 +396,7 @@ class Settings:
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     phone: PhoneSettings = field(default_factory=PhoneSettings)
     openai: OpenAISettings = field(default_factory=OpenAISettings)
+    openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     openai_realtime: OpenAIRealtimeSettings = field(default_factory=OpenAIRealtimeSettings)
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
@@ -574,6 +596,19 @@ class Settings:
             web_search_enabled=os.getenv("BOB_OPENAI_WEB_SEARCH", "").lower() in ("1", "true", "yes"),
         )
 
+        # OpenRouter key: from a file by default (BOB_HA_BEARER_TOKEN_FILE
+        # pattern) to keep it out of the environment the agent's bash inherits.
+        openrouter_key_file = os.getenv(
+            "BOB_OPENROUTER_API_KEY_FILE", str(config_dir / "openrouter_api_key"))
+        try:
+            openrouter_key = Path(openrouter_key_file).expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            openrouter_key = ""
+        openrouter = OpenRouterSettings(
+            api_key=openrouter_key,
+            base_url=os.getenv("BOB_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/"),
+        )
+
         realtime_voice = os.getenv("BOB_OPENAI_REALTIME_VOICE", "cedar")
         if realtime_voice not in OpenAIRealtimeSettings.VALID_VOICES:
             logger.warning(
@@ -676,6 +711,7 @@ class Settings:
             session_summary_idle_minutes=session_summary_idle_minutes,
             phone=phone,
             openai=openai_llm,
+            openrouter=openrouter,
             openai_realtime=openai_realtime,
             harness=harness,
             whatsapp_bridge=whatsapp_bridge,

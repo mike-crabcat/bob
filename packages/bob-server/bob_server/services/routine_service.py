@@ -219,6 +219,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
     tools. Moved from the deleted RoutineSchedulerTask."""
     from uuid import uuid4
 
+    from bob_server.services.dispatch_runner import is_no_reply, resolve_session_model
     from bob_server.services.llm_dispatch import LLMDispatchService
     from bob_server.services.prompt_assembler import (
         build_chat_messages,
@@ -269,7 +270,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         chat_id = session_key_to_chat_id(session_key)
         if chat_id and wa_bridge and wa_bridge.connected:
             async def _send_whatsapp_message(text: str) -> str:
-                if text.strip().upper() == "NO_REPLY":
+                if is_no_reply(text):
                     return "No reply sent."
                 request_id = await wa_bridge.send_message(chat_id, text)
                 return f"Message sent (request_id={request_id})"
@@ -288,8 +289,12 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
             ))
 
         dispatch_id = str(uuid4())
+        # Routine replies are user-visible conversation turns — they follow the
+        # session's /model override, same as main dispatch turns.
+        model_arg = await resolve_session_model(ctx.db, ctx.settings, session_key)
         response = await LLMDispatchService(ctx).chat_with_tools(
             messages, tools,
+            model=model_arg,
             call_category="routine",
             session_key=session_key,
             dispatch_id=dispatch_id,

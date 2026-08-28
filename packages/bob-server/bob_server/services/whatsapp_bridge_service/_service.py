@@ -34,7 +34,7 @@ _quota_notify_last: dict[str, float] = {}
 _QUOTA_NOTIFY_MIN_INTERVAL = 3600.0  # 1 hour
 
 
-from bob_server.services.dispatch_runner import _is_quota_error
+from bob_server.services.dispatch_runner import _is_quota_error, is_no_reply
 
 
 async def _notify_quota_exhausted(wa_service: Any, chat_id: str, session_key: str) -> None:
@@ -414,7 +414,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         if chat_kind == "group":
             key_part = chat_id.split("@")[0]
         else:
-            key_part = sender_jid.split("@")[0]
+            key_part = sender_jid.split("@")[0].split(":")[0]
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
         # Typing extends an armed attention window (Tier 1 presence awareness).
@@ -544,12 +544,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         contact_id = resolution.contact_id
         is_trusted = resolution.is_trusted
 
-        # Derive session key
+        # Derive session key. DM keys strip the WhatsApp linked-device
+        # suffix (<phone>:<device>@s.whatsapp.net → <phone>): messages from
+        # a companion device are the same human and must land in the same
+        # conversation as the primary phone, not fork a :<device> variant.
         agent_id = "main"
         if chat_kind == "group":
             key_part = chat_id.split("@")[0] if "@" in chat_id else chat_id
         else:
             key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
+            key_part = key_part.split(":")[0]
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
         # Bob3 Phase VI item 3: canonicalize onto the conversation id. The
@@ -853,9 +857,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         # Bob Events §1.5: proactive group send — trusted only; each target
         # group must also enable it via conversation policy (off by default).
+        # Also carries request_group_message (per-message approval for
+        # human-requested cross-group sends); requester_contact_id is the
+        # dispatching sender's contact — group bindings carry none themselves.
         if is_trusted:
             from bob_server.services.whatsapp_outreach_tools import make_group_send_tools
-            tools.extend(make_group_send_tools(self.ctx, self, session_key))
+            tools.extend(make_group_send_tools(
+                self.ctx, self, session_key, requester_contact_id=contact_id))
 
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:
@@ -892,7 +900,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.effects import emit_and_deliver
 
             message_was_sent[0] = True
-            if text.strip().upper() == "NO_REPLY":
+            if is_no_reply(text):
                 return "No reply sent."
             text = strip_citation_markers(text)
             seq = send_seq[0]

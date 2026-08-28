@@ -30,6 +30,28 @@ logger = logging.getLogger(__name__)
 
 _NO_REPLY_VARIANTS = ("NO_REPLY", "NO REPLY", "NOTHING TO SAY")
 
+
+def is_no_reply(text: str | None) -> bool:
+    """True if a silence marker appears ANYWHERE in the text.
+
+    Exact-match let decorated variants through to the chat ('[NO_REPLY —
+    Simon asked for silence…]'); containment is the rule now: any
+    occurrence of a marker suppresses the whole message.
+    """
+    if not text:
+        return False
+    upper = text.upper()
+    return any(v in upper for v in _NO_REPLY_VARIANTS)
+
+# Categories where a finished turn that never called its send tool gets the
+# final text delivered by the runner (see the rescue in run()). WhatsApp
+# only for now: it's the measured failure (GLM-5.3 skips the final send call
+# on ~20% of turns, 58% for routine-style prompts; GPT models essentially
+# never do), and the email send tool doesn't pre-set its sent flag, so a
+# failed email_reply would leave an error string as "final text" that the
+# rescue must not mail out.
+_SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
+
 _LEASE_OWNER: str | None = None
 
 
@@ -60,6 +82,36 @@ class DispatchSpec:
     on_quota_exhausted: Callable[[], Awaitable[None]] | None = None
     transform_messages: Callable[[list], list] | None = None
     event: tuple[str, dict] | None = None  # (event_bus topic, payload)
+
+
+async def resolve_session_model(db: Any, settings: Any, session_key: str) -> str | None:
+    """Resolve a session's model_override policy into a model slug.
+
+    Shared by main dispatch turns (DispatchRunner) and routine dispatches —
+    both are user-visible conversation turns and follow the /model override.
+    Returns None when unset or unresolvable, so the LLM call uses the global
+    default and a broken override never blocks a turn. Background passes
+    (memory, patience, reflection) don't call this — they keep their
+    configured models by construction.
+    """
+    from bob_server.repositories.conversations import ConversationRepository
+    from bob_server.services import model_registry
+    try:
+        policy = await ConversationRepository(db).get_policy(session_key)
+    except Exception:
+        logger.warning("model override read failed for %s", session_key, exc_info=True)
+        return None
+    override = (policy.get("model_override") or "").strip()
+    if not override:
+        return None
+    slug = model_registry.resolve(override, settings.config_dir)
+    if (model_registry.provider_for(slug) == model_registry.PROVIDER_OPENROUTER
+            and not settings.openrouter.enabled):
+        logger.warning(
+            "model override %s → %s but OpenRouter is not configured; using default",
+            override, slug)
+        return None
+    return slug
 
 
 class DispatchRunner:
@@ -108,9 +160,12 @@ class DispatchRunner:
             if spec.transform_messages is not None:
                 messages = spec.transform_messages(messages)
 
+            model_arg = await self._resolve_model_override(session_key)
+
             try:
                 result = await LLMDispatchService(self.ctx).chat_with_tools(
                     messages, spec.tools,
+                    model=model_arg,
                     call_category=spec.call_category,
                     session_key=session_key,
                     dispatch_id=spec.dispatch_id,
@@ -133,20 +188,35 @@ class DispatchRunner:
                     return ""
                 raise
 
-            # Tap: if the LLM produced text but didn't use the send tool,
-            # give it a second chance with a reminder.
-            if not spec.message_was_sent[0] and result.strip():
-                from bob_server.services.tap import tap_dispatch, tap_enabled
-                if tap_enabled():
-                    result = await tap_dispatch(
-                        self.ctx, messages=messages, tools=spec.tools,
-                        session_key=session_key,
-                        send_tool_name=spec.send_tool_name,
-                        first_result=result,
-                        call_category=spec.call_category,
-                        dispatch_id=spec.dispatch_id,
-                        contact_id=spec.contact_id,
-                    )
+            # Rescue: the turn wrote a reply but never called its send tool.
+            # By the prompt contract ("your text output will NOT be sent…
+            # you MUST call this tool"), final-round text with no call is
+            # always a model-compliance failure, never an intent — patience-
+            # gated silence goes through the tool as NO_REPLY, which sets
+            # the sent flag. Deliver the text through the send tool itself,
+            # reusing its NO_REPLY semantics, citation stripping, and
+            # effects-outbox idempotency. (The old tap — a reminder retry —
+            # managed 0/20 and was removed.)
+            if (not spec.message_was_sent[0]
+                    and spec.send_tool_name
+                    and spec.call_category in _SEND_RESCUE_CATEGORIES
+                    and result.strip()
+                    and not is_no_reply(result)):
+                send_tool = next(
+                    (t for t in spec.tools if t.name == spec.send_tool_name), None)
+                if send_tool is not None:
+                    try:
+                        await send_tool.handler(result)
+                        logger.warning(
+                            "send-tool rescue: %s turn wrote a reply without "
+                            "calling %s; delivered by the runner "
+                            "(session=%s, dispatch=%s)",
+                            spec.call_category, spec.send_tool_name,
+                            session_key, spec.dispatch_id)
+                    except Exception:
+                        logger.exception(
+                            "send-tool rescue failed (session=%s, dispatch=%s)",
+                            session_key, spec.dispatch_id)
 
             await self._record_history(spec, session_svc, result)
 
@@ -161,6 +231,10 @@ class DispatchRunner:
                 topic, payload = spec.event
                 await self.ctx.event_bus.publish(topic, payload)
             return result
+
+    async def _resolve_model_override(self, session_key: str) -> str | None:
+        """Session model override for this dispatch turn (see resolve_session_model)."""
+        return await resolve_session_model(self.db, self.ctx.settings, session_key)
 
     async def _record_history(self, spec: DispatchSpec, session_svc: Any, result: str) -> None:
         if spec.history_policy == "delivered_only":
@@ -179,7 +253,7 @@ class DispatchRunner:
         assistant_text = "\n\n".join(parts) if parts else result
 
         if spec.history_policy == "merged_skip_no_reply":
-            if not spec.message_was_sent[0] and assistant_text.strip().upper().rstrip(".") in _NO_REPLY_VARIANTS:
+            if not spec.message_was_sent[0] and is_no_reply(assistant_text):
                 return
 
         await session_svc.add_message(
@@ -188,10 +262,19 @@ class DispatchRunner:
 
 
 def _is_quota_error(exc: Exception) -> bool:
-    """True if the exception looks like an OpenAI insufficient-quota failure.
+    """True if the exception looks like a provider credit/quota failure.
 
-    openai_service wraps the SDK's RateLimitError in a RuntimeError, so we
-    detect by message rather than by type.
+    openai_service wraps SDK errors in RuntimeErrors, so we detect by
+    message text. Covers OpenAI (insufficient_quota) and OpenRouter
+    (insufficient credits / HTTP 402) phrasings — without the OpenRouter
+    patterns, an out-of-credit failure raises instead of restoring the
+    claimed messages for retry.
     """
     msg = str(exc).lower()
-    return "insufficient_quota" in msg or ("429" in msg and "quota" in msg)
+    if "insufficient_quota" in msg or "credit_balance_exhausted" in msg:
+        return True
+    if "insufficient credits" in msg or "not enough credits" in msg:
+        return True
+    if "402" in msg and "credit" in msg:
+        return True
+    return "429" in msg and "quota" in msg
