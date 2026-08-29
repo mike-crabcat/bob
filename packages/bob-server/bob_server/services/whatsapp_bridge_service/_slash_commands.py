@@ -41,6 +41,13 @@ class SlashCommandsMixin:
             await self._cmd_silentmem(session_key, chat_id)
         elif command == "/autoplan":
             await self._cmd_autoplan(args, session_key, chat_id)
+        elif command == "/model":
+            await self._cmd_model(args, session_key, chat_id)
+        else:
+            await self.send_message(
+                chat_id,
+                f"{command} isn't a command — try /model, /patience, /relevance, "
+                f"/verbose, /silentmem, /autoplan, /who")
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -167,6 +174,53 @@ class SlashCommandsMixin:
         else:
             state = "ON" if current else "OFF"
             await self.send_message(chat_id, f"autoplan {state} for this chat")
+
+    async def _cmd_model(self, args: str, session_key: str, chat_id: str) -> None:
+        """Switch the model for this conversation (runtime, no restart).
+
+        Usage: /model [alias|model-slug|default]
+        No args → status. 'default' (or reset/off) clears the override.
+        Aliases come from {config_dir}/models.yaml, hot-reloaded — see
+        services/model_registry.py. Applies to this chat's main dispatch
+        turns only; memory/patience passes stay on their configured models.
+        """
+        from bob_server.repositories.conversations import ConversationRepository
+        from bob_server.services import model_registry
+
+        arg = args.strip()
+        settings = self.ctx.settings
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        alias_map = model_registry.aliases(settings.config_dir)
+        alias_list = ", ".join(f"{k} → {v}" for k, v in sorted(alias_map.items())) or "none configured"
+
+        if arg in ("", "status"):
+            policy = await repo.get_policy(session_key)
+            current = (policy.get("model_override") or "").strip()
+            if not current:
+                current_line = f"model: {settings.openai.default_model} (default)"
+            else:
+                resolved = model_registry.resolve(current, settings.config_dir)
+                shown = f"{current} → {resolved}" if current.lower() != resolved.lower() else current
+                current_line = f"model: {shown} (/model default to revert)"
+            await self.send_message(chat_id, f"{current_line}\naliases: {alias_list}")
+            return
+
+        if arg.lower() in ("default", "reset", "off"):
+            await repo.set_policy(session_key, {"model_override": ""})
+            logger.info("model override cleared for conversation %s", session_key)
+            await self.send_message(chat_id, f"model reverted to default ({settings.openai.default_model})")
+            return
+
+        ok, result = model_registry.validate(
+            arg, settings.config_dir, openrouter_enabled=settings.openrouter.enabled)
+        if not ok:
+            await self.send_message(chat_id, f"{result}\navailable aliases: {alias_list}")
+            return
+
+        await repo.set_policy(session_key, {"model_override": arg})
+        logger.info("model override %s → %s for conversation %s", arg, result, session_key)
+        await self.send_message(chat_id, f"model set to {arg} → {result} for this chat")
 
     async def _cmd_silentmem(self, session_key: str, chat_id: str) -> None:
         """Trigger a silent memory extraction turn on the current session now.

@@ -72,7 +72,7 @@ def make_voice_outreach_tools(
             session_key,
             voice=ctx.settings.openai_realtime.voice,
             goal=goal,
-            phone_number="+" + chat_id.split("@")[0],
+            phone_number="+" + chat_id.split("@")[0].split(":")[0],
         )
         url = created["url"]
 

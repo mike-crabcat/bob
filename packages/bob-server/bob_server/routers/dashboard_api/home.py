@@ -114,13 +114,19 @@ async def get_home(request: Request) -> dict[str, Any]:
                     "created_at": _utc(row["created_at"]),
                 })
 
-    # Estimated 24h costs by call category
+    # Estimated 24h costs by call category and provider
     cost_by_category: list[dict[str, Any]] = []
+    cost_by_provider: list[dict[str, Any]] = []
     total_cost_24h = 0.0
+    unpriced_calls = 0
     if log_exists:
+        from bob_server.services import model_registry
+        settings = getattr(request.app.state, "settings", None)
+        yaml_pricing = model_registry.pricing(settings.config_dir) if settings else {}
         cost_rows = await LlmCallLogRepository(db).cost_rollup_24h()
         # Pricing per 1M tokens (input, output). Cached input is billed at 10%
-        # of the input rate (OpenAI's 90% prompt-cache discount).
+        # of the input rate (OpenAI's 90% prompt-cache discount). models.yaml
+        # pricing overrides these rates — OpenRouter models are priced there.
         _PRICING: dict[str, tuple[float, float]] = {
             "gpt-5.4-mini": (0.75, 4.50),
             "gpt-5.5": (5.00, 30.00),
@@ -128,26 +134,47 @@ async def get_home(request: Request) -> dict[str, Any]:
             "gpt-5.6-terra": (2.50, 15.00),
             "gpt-5.6-luna": (1.00, 6.00),
         }
-        category_totals: dict[str, dict[str, Any]] = {}
+        category_totals: dict[tuple[str, str], dict[str, Any]] = {}
+        provider_totals: dict[str, dict[str, Any]] = {}
         for row in cost_rows:
             cat = row["call_category"] or "other"
             model = row["model"] or "gpt-5.4-mini"
+            provider = row["provider"] or model_registry.provider_for(model)
             prompt = row["total_prompt_tokens"] or 0
             completion = row["total_completion_tokens"] or 0
             cached = row["total_cached_tokens"] or 0
-            rate_in, rate_out = _PRICING.get(model, _PRICING.get("gpt-5.4-mini", (0.75, 4.50)))
+            rates = yaml_pricing.get(model) or _PRICING.get(model)
+            if rates is None and provider != model_registry.PROVIDER_OPENROUTER:
+                # Historic behaviour: unknown OpenAI models estimate at mini rates.
+                rates = _PRICING["gpt-5.4-mini"]
+            if rates is None:
+                # Unknown OpenRouter model — count the calls, don't guess a
+                # price (mini-rate fallback would overestimate GLM flash ~10x).
+                unpriced_calls += row["call_count"] or 0
+                rates = (0.0, 0.0)
+            rate_in, rate_out = rates
             cost = ((prompt - cached) * rate_in + cached * rate_in * 0.1 + completion * rate_out) / 1_000_000
             cost = max(cost, 0)
-            if cat not in category_totals:
-                category_totals[cat] = {"category": cat, "cost": 0.0, "call_count": 0, "prompt_tokens": 0, "completion_tokens": 0}
-            category_totals[cat]["cost"] += cost
-            category_totals[cat]["call_count"] += row["call_count"] or 0
-            category_totals[cat]["prompt_tokens"] += prompt
-            category_totals[cat]["completion_tokens"] += completion
+            cat_key = (cat, provider)
+            if cat_key not in category_totals:
+                category_totals[cat_key] = {
+                    "category": cat, "provider": provider, "cost": 0.0,
+                    "call_count": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            category_totals[cat_key]["cost"] += cost
+            category_totals[cat_key]["call_count"] += row["call_count"] or 0
+            category_totals[cat_key]["prompt_tokens"] += prompt
+            category_totals[cat_key]["completion_tokens"] += completion
+            if provider not in provider_totals:
+                provider_totals[provider] = {"provider": provider, "cost": 0.0, "call_count": 0}
+            provider_totals[provider]["cost"] += cost
+            provider_totals[provider]["call_count"] += row["call_count"] or 0
         cost_by_category = sorted(category_totals.values(), key=lambda x: x["cost"], reverse=True)
+        cost_by_provider = sorted(provider_totals.values(), key=lambda x: x["cost"], reverse=True)
         total_cost_24h = round(sum(c["cost"] for c in cost_by_category), 4)
         for c in cost_by_category:
             c["cost"] = round(c["cost"], 4)
+        for p in cost_by_provider:
+            p["cost"] = round(p["cost"], 4)
 
     return {
         "active_sessions": active_sessions,
@@ -156,6 +183,8 @@ async def get_home(request: Request) -> dict[str, Any]:
         "recent_memory": recent_memory,
         "entity_count": entity_count,
         "cost_by_category": cost_by_category,
+        "cost_by_provider": cost_by_provider,
+        "unpriced_calls": unpriced_calls,
         "total_cost_24h": total_cost_24h,
     }
 

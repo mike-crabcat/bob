@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from bob_server.services.base import utcnow
+from bob_server.services.dispatch_runner import is_no_reply
 from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone
 
 
@@ -235,7 +236,7 @@ class GroupEventsMixin:
             from bob_server.services.effects import emit_and_deliver
 
             message_was_sent[0] = True
-            if text.strip().upper() == "NO_REPLY":
+            if is_no_reply(text):
                 return "No reply sent."
             seq = send_seq[0]
             send_seq[0] += 1

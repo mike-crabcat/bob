@@ -65,6 +65,23 @@ class ApprovalRepository:
             "ORDER BY requested_at LIMIT ?", (limit,))
         return [dict(r) for r in rows] if rows else []
 
+    async def pending_of_type(
+        self, approval_type: str, *, entity_id: str | None = None, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Pending rows of one approval type, optionally one entity, oldest
+        first. Call-site dedupe for request paths whose effect idempotency key
+        is not deterministic (approval_request mints a uuid per call)."""
+        sql = ("SELECT * FROM approvals WHERE status = 'pending' "
+               "AND approval_type = ?")
+        params: list[Any] = [approval_type]
+        if entity_id is not None:
+            sql += " AND entity_id = ?"
+            params.append(entity_id)
+        sql += " ORDER BY requested_at LIMIT ?"
+        params.append(limit)
+        rows = await self.db.fetch_all(sql, tuple(params))
+        return [dict(r) for r in rows] if rows else []
+
     async def respond(
         self,
         approval_id: str,

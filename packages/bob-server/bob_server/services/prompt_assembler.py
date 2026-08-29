@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from bob_server.services.dispatch_runner import is_no_reply
 from bob_server.services.memory.claim_types import ENTITY_TYPES
 
 # Only the N most recent media attachments are base64-inlined into replayed
@@ -337,9 +338,7 @@ async def build_chat_messages(
             if not row["content"]:
                 continue
             # Skip stale NO_REPLY entries that poison future decisions
-            if row["role"] == "assistant" and row["content"].strip().upper().rstrip(".") in (
-                "NO_REPLY", "NO REPLY", "NOTHING TO SAY",
-            ):
+            if row["role"] == "assistant" and is_no_reply(row["content"]):
                 continue
             content = row["content"]
             if is_group and mention_names:

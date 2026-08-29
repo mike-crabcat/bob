@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from bob_server.context import AppContext
+from bob_server.services import model_registry
 from bob_server.services.base import BaseService
 from bob_server.services.tools import ImageInjection
 
@@ -262,22 +263,27 @@ class StreamResult:
 
 
 # Module-level client cache so httpx reuses TCP connections across requests.
-_cached_client: tuple[str, str, Any] | None = None  # (api_key, base_url, client)
+# Keyed (api_key, base_url) so multiple providers (OpenAI, OpenRouter) coexist
+# without recreating clients on every alternating call.
+_clients: dict[tuple[str, str], Any] = {}
 
 
-def _get_cached_client(api_key: str, base_url: str) -> Any:
-    global _cached_client
-    if _cached_client is not None and _cached_client[0] == api_key and _cached_client[1] == base_url:
-        return _cached_client[2]
+def _get_cached_client(
+    api_key: str, base_url: str, *, default_headers: dict[str, str] | None = None,
+) -> Any:
+    cache_key = (api_key, base_url)
+    if cache_key in _clients:
+        return _clients[cache_key]
     if AsyncOpenAI is None:
         raise RuntimeError("openai SDK is not installed. Install with: pip install bob-server[openai]")
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=base_url,
         timeout=Timeout(300.0, connect=30.0),
+        default_headers=default_headers,
     )
-    _cached_client = (api_key, base_url, client)
-    logger.info("OpenAI client created for base_url=%s", base_url)
+    _clients[cache_key] = client
+    logger.info("OpenAI-compatible client created for base_url=%s", base_url)
     return client
 
 
@@ -296,16 +302,38 @@ class OpenAIService(BaseService):
             raise RuntimeError("OpenAI is not configured. Set BOB_OPENAI_API_KEY.")
         return _get_cached_client(settings.api_key, settings.base_url)
 
+    def _client_for(self, model: str) -> Any:
+        """Return the API client serving this model — OpenRouter for
+        vendor-qualified slugs, direct OpenAI otherwise (model_registry)."""
+        if model_registry.provider_for(model) == model_registry.PROVIDER_OPENROUTER:
+            settings = self._get_settings().openrouter
+            if not settings.enabled:
+                raise RuntimeError(
+                    "OpenRouter is not configured. Create the API key file "
+                    "(BOB_OPENROUTER_API_KEY_FILE, default ~/config/openrouter_api_key).")
+            return _get_cached_client(
+                settings.api_key, settings.base_url,
+                default_headers={"X-Title": "bob"})
+        return self.client
+
     @property
     def _web_search_tool(self) -> dict[str, Any] | None:
         if self._get_settings().openai.web_search_enabled:
             return {"type": "web_search", "search_context_size": "medium"}
         return None
 
-    def _merge_tools(self, tools: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-        """Merge caller-provided tools with built-in tools like web_search."""
+    def _merge_tools(
+        self, tools: list[dict[str, Any]] | None = None, *, model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Merge caller-provided tools with built-in tools like web_search.
+
+        web_search is an OpenAI-native Responses built-in and is dropped for
+        OpenRouter-served models, which don't accept the tool type.
+        """
         merged: list[dict[str, Any]] = []
-        if self._web_search_tool:
+        resolved = model or self._get_settings().openai.default_model
+        if (self._web_search_tool
+                and model_registry.provider_for(resolved) == model_registry.PROVIDER_OPENAI):
             merged.append(self._web_search_tool)
         if tools:
             merged.extend(tools)
@@ -334,13 +362,13 @@ class OpenAIService(BaseService):
         if reasoning_effort is not None and _model_skips_temperature(resolved_model):
             kwargs["reasoning"] = {"effort": reasoning_effort}
 
-        tools = self._merge_tools()
+        tools = self._merge_tools(model=resolved_model)
         if tools:
             kwargs["tools"] = tools
 
         t0 = time.monotonic()
         try:
-            response = await self.client.responses.create(**kwargs)
+            response = await self._client_for(resolved_model).responses.create(**kwargs)
             elapsed = time.monotonic() - t0
             content = _response_text_with_citations(response)
             usage = getattr(response, "usage", None)
@@ -393,7 +421,7 @@ class OpenAIService(BaseService):
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
 
-        tools = self._merge_tools()
+        tools = self._merge_tools(model=resolved_model)
         if tools:
             kwargs["tools"] = tools
 
@@ -405,7 +433,7 @@ class OpenAIService(BaseService):
         response_id = None
 
         try:
-            response = await self.client.responses.create(**kwargs)
+            response = await self._client_for(resolved_model).responses.create(**kwargs)
             async for event in response:
                 if event.type == "response.output_text.delta":
                     delta = event.delta
@@ -467,14 +495,14 @@ class OpenAIService(BaseService):
         Returns the final text response.
         """
         resolved_model = model or self._get_settings().openai.default_model
-        merged_tools = self._merge_tools(tools)
+        merged_tools = self._merge_tools(tools, model=resolved_model)
         t0 = time.monotonic()
 
         total_input = total_output = total_total = 0
         total_cached = 0
 
         for iteration in range(max_iterations):
-            response = await self.client.responses.create(
+            response = await self._client_for(resolved_model).responses.create(
                 model=resolved_model,
                 input=messages,
                 tools=merged_tools,
@@ -660,7 +688,7 @@ class OpenAIService(BaseService):
         """Stream chat with tool calling. Runs tool calls non-streamingly,
         then streams the final text response for real-time consumption."""
         resolved_model = model or self._get_settings().openai.default_model
-        merged_tools = self._merge_tools(tools)
+        merged_tools = self._merge_tools(tools, model=resolved_model)
         t0 = time.monotonic()
 
         total_input = total_output = total_total = 0
@@ -677,7 +705,7 @@ class OpenAIService(BaseService):
 
         # Tool loop: non-streaming rounds until LLM gives a text response
         for iteration in range(max_iterations):
-            response = await self.client.responses.create(
+            response = await self._client_for(resolved_model).responses.create(
                 model=resolved_model,
                 input=messages,
                 tools=merged_tools,

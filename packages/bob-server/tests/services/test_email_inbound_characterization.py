@@ -126,7 +126,6 @@ async def _run_dispatch_and_capture(ctx, db, monkeypatch, *, trusted: int, resul
         "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
-    monkeypatch.setattr("bob_server.services.tap.tap_enabled", lambda: False)
 
     await svc._dispatch_to_llm(
         thread,
@@ -289,7 +288,6 @@ async def test_assistant_history_is_written_after_successful_email_reply_send(ct
         "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
-    monkeypatch.setattr("bob_server.services.tap.tap_enabled", lambda: False)
 
     await svc._dispatch_to_llm(thread, _message(sender='"Sender" <sender@example.com>'), inbox)
     await tasks[0]
@@ -323,7 +321,6 @@ async def test_failed_email_reply_is_not_marked_sent_but_error_text_is_recorded(
         "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
-    monkeypatch.setattr("bob_server.services.tap.tap_enabled", lambda: False)
 
     await svc._dispatch_to_llm(thread, _message(sender='"Sender" <sender@example.com>'), inbox)
     await tasks[0]

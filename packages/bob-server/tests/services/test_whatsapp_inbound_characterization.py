@@ -188,6 +188,39 @@ async def test_group_message_from_unknown_sender_auto_seeds_untrusted_contact(
     stub_memory.ensure_person_entry.assert_awaited_once()
 
 
+async def test_linked_device_dm_lands_in_base_conversation(
+        ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
+    """A DM sent from a linked device (JID <phone>:<device>@s.whatsapp.net)
+    must land in the same conversation as the primary phone — the device
+    suffix is WhatsApp's companion-device id, not a different person."""
+    _stub_workspace(monkeypatch)
+
+    async def behaviour(messages, tools):
+        send = next(t for t in tools if t.name == "send_whatsapp_message")
+        await send.handler("ok")
+        return "ok"
+    _stub_llm(monkeypatch, behaviour)
+
+    await _seed_contact(ctx.db, TRUSTED_PHONE)
+    svc = _make_service(ctx, tmp_path)
+    # First from the primary phone, then from linked device 5.
+    await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "from the phone"))
+    device_payload = _dm_payload(TRUSTED_PHONE, "from the desktop")
+    device_payload["chat_id"] = "614000000010:5@s.whatsapp.net"
+    device_payload["sender_jid"] = "614000000010:5@s.whatsapp.net"
+    await svc._handle_incoming_message(device_payload)
+
+    base = "agent:main:whatsapp:dm:614000000010"
+    users = await _user_messages(ctx.db, f"{base}%")
+    assert [r["conversation_id"] for r in users] == [base, base]
+    assistants = await _assistant_messages(ctx.db, f"{base}%")
+    assert [r["content"] for r in assistants] == ["ok", "ok"]
+    # No :5 variant conversation was ever created.
+    rows = await ctx.db.fetch_all(
+        "SELECT id FROM conversations WHERE id LIKE ?", (f"{base}:%",))
+    assert rows == []
+
+
 async def test_dm_name_backfill_when_contact_name_is_phone_number(
         ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
     _stub_workspace(monkeypatch)
@@ -297,12 +330,12 @@ async def test_assistant_history_is_delivered_only(
     assert [r["content"] for r in rows] == ["delivered reply"]
 
 
-async def test_text_output_without_send_tool_records_nothing(
+async def test_text_output_without_send_tool_is_rescued(
         ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
-    """If the model replies in plain text without calling the send tool
-    (tap disabled), nothing is delivered and nothing enters history."""
+    """If the model replies in plain text without calling the send tool,
+    the runner delivers the text through the send tool (GLM-5.3 skips the
+    final send call on ~20% of turns) and history records it as delivered."""
     _stub_workspace(monkeypatch)
-    monkeypatch.setattr("bob_server.services.tap.tap_enabled", lambda: False)
 
     async def behaviour(messages, tools):
         return "I forgot to call the tool"
@@ -311,6 +344,66 @@ async def test_text_output_without_send_tool_records_nothing(
     await _seed_contact(ctx.db, TRUSTED_PHONE)
     svc = _make_service(ctx, tmp_path)
     await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "hello"))
+
+    svc.send_message.assert_awaited_once()
+    assert "I forgot to call the tool" in str(svc.send_message.await_args)
+    rows = await _assistant_messages(ctx.db, "agent:main:whatsapp:dm:%")
+    assert [r["content"] for r in rows] == ["I forgot to call the tool"]
+
+
+async def test_bare_text_no_reply_is_not_rescued(
+        ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
+    """A non-compliant NO_REPLY (written as text instead of passed through
+    the tool) still means silence — the rescue must not deliver it."""
+    _stub_workspace(monkeypatch)
+
+    async def behaviour(messages, tools):
+        return "NO_REPLY."
+    _stub_llm(monkeypatch, behaviour)
+
+    await _seed_contact(ctx.db, TRUSTED_PHONE)
+    svc = _make_service(ctx, tmp_path)
+    await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "hello"))
+
+    svc.send_message.assert_not_awaited()
+    assert await _assistant_messages(ctx.db, "agent:main:whatsapp:dm:%") == []
+
+
+async def test_decorated_no_reply_through_tool_sends_nothing(
+        ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
+    """Decorated silence ('[NO_REPLY — reason]') passed through the send
+    tool is suppressed whole, not delivered (2026-08-28 group leak)."""
+    _stub_workspace(monkeypatch)
+
+    async def behaviour(messages, tools):
+        tool = await _get_tool(tools, "send_whatsapp_message")
+        out = await tool.handler(
+            text="[NO_REPLY — Simon asked for silence until it's useful.]")
+        assert out == "No reply sent."
+        return "[NO_REPLY — Simon asked for silence until it's useful.]"
+    _stub_llm(monkeypatch, behaviour)
+
+    await _seed_contact(ctx.db, TRUSTED_PHONE)
+    svc = _make_service(ctx, tmp_path)
+    await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "you there?"))
+
+    svc.send_message.assert_not_awaited()
+    assert await _assistant_messages(ctx.db, "agent:main:whatsapp:dm:%") == []
+
+
+async def test_decorated_no_reply_as_bare_text_is_not_rescued(
+        ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
+    """Same leak via the rescue path: bare-text '[NO_REPLY — …]' must not
+    be delivered by the send-tool rescue."""
+    _stub_workspace(monkeypatch)
+
+    async def behaviour(messages, tools):
+        return "[NO_REPLY — dance block still fetching; I'll speak when it's on air.]"
+    _stub_llm(monkeypatch, behaviour)
+
+    await _seed_contact(ctx.db, TRUSTED_PHONE)
+    svc = _make_service(ctx, tmp_path)
+    await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "status?"))
 
     svc.send_message.assert_not_awaited()
     assert await _assistant_messages(ctx.db, "agent:main:whatsapp:dm:%") == []
