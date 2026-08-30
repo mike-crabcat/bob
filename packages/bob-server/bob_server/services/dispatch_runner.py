@@ -22,6 +22,7 @@ Result-relay services are NOT replaced here (plan: Phase IV/V).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -84,6 +85,12 @@ class DispatchSpec:
     history_policy: str = "delivered_only"  # delivered_only | merged_always | merged_skip_no_reply
     message_was_sent: list = field(default_factory=lambda: [False])
     sent_texts: list = field(default_factory=list)
+    # Backburner (docs/backburner-plan.md). capture: shared with the send
+    # tool — flip to True at detach and post-detach sends are captured as
+    # the task result instead of delivered. hold_sender: sends the holding
+    # ack through the effects outbox; both are None on non-detachable specs.
+    backburner_capture: dict | None = None
+    hold_sender: Callable[[str], Awaitable[None]] | None = None
     quota_restore: bool = False
     on_quota_exhausted: Callable[[], Awaitable[None]] | None = None
     transform_messages: Callable[[list], list] | None = None
@@ -180,15 +187,87 @@ class DispatchRunner:
 
             model_arg = await self._resolve_model_override(session_key)
 
-            try:
-                result = await LLMDispatchService(self.ctx).chat_with_tools(
+            # Turn-lease heartbeat (bug fix alongside Backburner): a slow
+            # model can outrun the claim's 300s lease, after which the next
+            # claim treats this live turn as a zombie and releases its
+            # events mid-run. Renew every 60s; self-terminates once the
+            # turn leaves 'running'.
+            heartbeat_task = None
+            if turn is not None:
+                turn_id = turn["turn_id"]
+
+                async def _heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(60)
+                        try:
+                            from bob_server.repositories.turns import TurnRepository
+                            alive = await TurnRepository(self.db).heartbeat_lease(turn_id)
+                        except Exception:
+                            logger.warning("turn heartbeat failed", exc_info=True)
+                            return
+                        if not alive:
+                            return
+
+                heartbeat_task = asyncio.create_task(_heartbeat(), name=f"turn-heartbeat:{turn_id[:16]}")
+
+            # Wall-clock budget for main WhatsApp turns (bug fix): without
+            # one, a hung call holds the session lock forever. Enforced
+            # between iterations — the in-flight round always completes.
+            time_limit = (self.ctx.settings.backburner.max_run_seconds
+                          if spec.call_category == "whatsapp_incoming" else None)
+
+            async def _llm() -> str:
+                return await LLMDispatchService(self.ctx).chat_with_tools(
                     messages, spec.tools,
                     model=model_arg,
                     call_category=spec.call_category,
                     session_key=session_key,
                     dispatch_id=spec.dispatch_id,
                     contact_id=spec.contact_id,
+                    time_limit_seconds=time_limit,
                 )
+
+            from bob_server.services import backburner as backburner_mod
+            bb_applies = backburner_mod.applies(
+                self.ctx.settings, spec.call_category, session_key)
+            bb_mode = backburner_mod.mode(self.ctx.settings)
+
+            try:
+                if not bb_applies:
+                    result = await _llm()
+                else:
+                    llm_task = asyncio.create_task(_llm(), name=f"bb-llm:{spec.dispatch_id[:12]}")
+                    try:
+                        _, pending = await asyncio.wait(
+                            {llm_task},
+                            timeout=max(0.01, self.ctx.settings.backburner.detach_after_seconds),
+                        )
+                    except asyncio.CancelledError:
+                        if not llm_task.done():
+                            llm_task.cancel()
+                        raise
+                    if not pending:
+                        result = llm_task.result()  # may raise — handled below
+                    else:
+                        # Slow turn: shadow probes (log only), hold sends the
+                        # holding ack and waits, full detaches (run() returns
+                        # early; the supervisor owns the task).
+                        bb_svc = backburner_mod.BackburnerService(self.ctx)
+                        if bb_mode == "full":
+                            detached = await bb_svc.detach(
+                                spec=spec, turn=turn, session_svc=session_svc,
+                                llm_task=llm_task)
+                            if detached:
+                                return ""
+                            result = await llm_task
+                        elif bb_mode == "hold":
+                            await bb_svc.probe_and_maybe_ack(spec, send_ack=True)
+                            result = await llm_task
+                        else:  # shadow
+                            await bb_svc.probe_and_maybe_ack(spec, send_ack=False)
+                            result = await llm_task
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 if turn is not None:
                     try:
@@ -205,6 +284,14 @@ class DispatchRunner:
                         await spec.on_quota_exhausted()
                     return ""
                 raise
+            finally:
+                # Covers every exit — normal completion, the detach's early
+                # return, exceptions, and cancellation. A detached task's
+                # turn is already completed at this point, so the heartbeat
+                # is simply reaped; it also self-terminates once a turn
+                # leaves 'running'.
+                if heartbeat_task is not None and not heartbeat_task.done():
+                    heartbeat_task.cancel()
 
             # Rescue: the turn wrote a reply but never called its send tool.
             # By the prompt contract ("your text output will NOT be sent…

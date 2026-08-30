@@ -892,8 +892,19 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         message_was_sent = [False]
         sent_texts: list[str] = []
         send_seq = [0]
+        # Backburner capture mode (docs/backburner-plan.md D2): flipped by the
+        # detach sequence after this turn goes to the background — the send
+        # tool then captures replies as the task result instead of delivering.
+        backburner_capture: dict[str, Any] = {"enabled": False, "texts": []}
 
         async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+            # Detached turn: capture, don't deliver. The supervisor relays the
+            # result to the user via the wake path once the task finishes.
+            if backburner_capture["enabled"] and not is_no_reply(text):
+                backburner_capture["texts"].append(text)
+                return ("This turn was detached — your reply was captured and will be "
+                        "relayed to the user when this background task finishes. Do not "
+                        "attempt other send routes.")
             # Bob3 Phase IV: sends go through the effects outbox — recorded
             # durably, delivered inline, retried by the pump after a crash.
             # History (sent_texts) is written from delivery confirmation.
@@ -949,6 +960,20 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         dispatch_id = str(uuid4())
 
+        async def _send_holding_ack(text: str) -> None:
+            """Backburner holding ack — sent by the detach sequence while the
+            turn's own send tool is still mid-flight. Own idempotency key so a
+            retry can never duplicate a turn-send."""
+            from bob_server.services.effects import emit_and_deliver
+
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send",
+                idempotency_key=f"whatsapp_send:hold:{dispatch_id}",
+                payload={"chat_id": chat_id, "text": strip_citation_markers(text)})
+            if not result.get("ok"):
+                logger.warning("backburner: holding ack delivery failed (dispatch=%s): %s",
+                               dispatch_id, result.get("error"))
+
         from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
         async def _on_quota_exhausted() -> None:
@@ -967,6 +992,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             history_policy="delivered_only",
             message_was_sent=message_was_sent,
             sent_texts=sent_texts,
+            backburner_capture=backburner_capture,
+            hold_sender=_send_holding_ack,
             quota_restore=True,
             on_quota_exhausted=_on_quota_exhausted,
             event=("whatsapp.message.received", {

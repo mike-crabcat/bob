@@ -92,6 +92,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.debug("Subagent cleanup skipped (table may not exist yet)")
 
+        # Backburner restart recovery (docs/backburner-plan.md): detached
+        # tasks died with the process (rows failed above); settle their
+        # still-active goals so they stop riding every prompt, waking each
+        # conversation to own the loss.
+        try:
+            from bob_server.services.backburner import BackburnerService
+            await BackburnerService(app_ctx).recover_orphaned_goals()
+        except Exception:
+            logger.warning("Backburner recovery sweep failed", exc_info=True)
+
         # Clean up stale voice sessions (bridges are gone after restart)
         try:
             from bob_server.services.voice_session_service import VoiceSessionService

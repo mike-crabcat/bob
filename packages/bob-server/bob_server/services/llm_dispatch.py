@@ -657,11 +657,18 @@ class LLMDispatchService(BaseService):
                 logger.error("LLM dispatch tools failed: model=%s error=%s", resolved_model, exc)
             if dispatch_id:
                 _dispatch_tool_trace.pop(dispatch_id, None)
+            cancel_reason = "server restart"
+            if is_cancel and dispatch_id:
+                try:
+                    from bob_server.services import backburner as _bb
+                    cancel_reason = _bb.peek_cancel_reason(dispatch_id) or "server restart"
+                except Exception:
+                    pass
             await _record_log(self.db, log_id=log_id,
                 latency_seconds=elapsed,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
                 status="failed",
-                error_message=f"Cancelled — server restart" if is_cancel else str(exc),
+                error_message=f"Cancelled — {cancel_reason}" if is_cancel else str(exc),
             )
             await self._publish_call(
                 status="failed", session_key=session_key,
