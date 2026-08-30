@@ -127,6 +127,15 @@ class TurnRepository:
             (_iso(_utcnow() + timedelta(seconds=lease_seconds)), turn_id))
         return n > 0
 
+    async def nonterminal_ids(self) -> list[str]:
+        """Ids of turns still pending/running — at boot every one is a zombie
+        (its process died). Callers restore the claimed messages
+        (HistoryRepository.restore_messages_for_turn) BEFORE failing the
+        turn, since fail() releases the turn_events the restore joins on."""
+        rows = await self.db.fetch_all(
+            "SELECT id FROM turns WHERE status IN ('pending', 'running')")
+        return [r["id"] for r in rows] if rows else []
+
     async def stuck(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Turns still 'running' with an expired lease — a crash or hang."""
         rows = await self.db.fetch_all(

@@ -79,6 +79,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.warning("llm_call_log boot sweep failed", exc_info=True)
 
+        # Restart mid-turn recovery: turns still pending/running died with
+        # the process, and the messages they claimed were consumed but never
+        # answered — the crash-recovery sweep only re-arms *undispatched*
+        # messages, so without this a deploy restart mid-LLM silently eats
+        # them (2026-08-30: a restart ate an in-flight Dylan question; it
+        # sat unanswered until an unrelated nudge 10 minutes later). Restore
+        # the claims, then fail the turn; the WhatsApp +10s sweep re-arms.
+        try:
+            from bob_server.repositories.history import HistoryRepository
+            from bob_server.repositories.turns import TurnRepository
+            turn_repo = TurnRepository(database)
+            zombie_ids = await turn_repo.nonterminal_ids()
+            restored = 0
+            for tid in zombie_ids:
+                restored += await HistoryRepository(database).restore_messages_for_turn(tid)
+                await turn_repo.fail(tid, "process restart")
+            if zombie_ids:
+                logger.info("Boot sweep recovered %d zombie turn(s), restored "
+                            "%d claimed message(s) for re-dispatch",
+                            len(zombie_ids), restored)
+        except Exception:
+            logger.warning("zombie-turn boot sweep failed", exc_info=True)
+
         database.settings = resolved_settings
         app.state.settings = resolved_settings
         app.state.db = database
