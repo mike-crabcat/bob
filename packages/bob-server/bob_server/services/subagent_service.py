@@ -380,11 +380,36 @@ class SubagentService(BaseService):
     async def kill_subagent(self, subagent_id: str, *,
                             parent_session_key: str = "") -> dict[str, Any]:
         row = await self._repo().get(subagent_id)
+        if row is None and len(subagent_id.strip()) >= 6:
+            # The prompt renders 8-char task ids — accept a prefix, restricted
+            # to detached_turn so a prefix can never reach another type's task.
+            row = await self._repo().get_by_prefix(
+                subagent_id.strip(), agent_type="detached_turn")
         if row is None:
             return {"ok": False, "error": "Subagent not found"}
         if parent_session_key and row["parent_session_key"] != parent_session_key:
             # Don't confirm the existence of another session's subagent.
             return {"ok": False, "error": "Subagent not found"}
+
+        # Backburner detached turn: the live in-process task is cancelled via
+        # the backburner registry; its supervisor does the terminal
+        # bookkeeping (killed status, quiet goal settle, capture snapshot) on
+        # observing the CancelledError. An already-finished task is an error
+        # so the model relays the result instead of claiming a kill — the
+        # likely "cancel it arrived just as the task finished" race.
+        if row["agent_type"] == "detached_turn":
+            if row["status"] != "running":
+                return {"ok": False,
+                        "error": f"Task already {row['status']} — nothing to cancel. "
+                                 "Check its result instead (check_subagent)."}
+            from bob_server.services import backburner as _bb
+            res = _bb.request_kill(row["id"])
+            if not res.get("ok"):
+                return {"ok": False,
+                        "error": f"{res.get('error', 'not running')} — nothing to cancel. "
+                                 "Check its result instead (check_subagent)."}
+            logger.info("Subagent %s (detached_turn) kill requested", row["id"][:8])
+            return {"ok": True, "subagent_id": row["id"], "status": "cancelling"}
 
         task = _running_tasks.pop(subagent_id, None)
         if task and not task.done():

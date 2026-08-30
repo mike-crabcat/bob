@@ -310,6 +310,27 @@ class PatienceSettings:
 
 
 @dataclass(slots=True)
+class BackburnerSettings:
+    """Detaching slow dispatch turns to the background (docs/backburner-plan.md).
+
+    mode: off | shadow | hold | full.
+      - off:    no watchdog at all
+      - shadow: watchdog + detach_probe run, results logged only
+      - hold:   holding ack is sent, the turn keeps waiting (no detach)
+      - full:   holding ack + detach (work continues as a detached_turn
+                subagent/goal; result delivered via the wake path)
+    sessions: comma-separated session-key allowlist; empty = all conversations.
+    """
+
+    mode: str = "full"
+    detach_after_seconds: float = 30.0
+    probe_timeout_seconds: float = 8.0
+    max_run_seconds: float = 600.0
+    sessions: str = ""
+    probe_model: str = ""  # empty → patience.model
+
+
+@dataclass(slots=True)
 class ReconciliationSettings:
     """Configuration for memory reconciliation model selection.
 
@@ -407,6 +428,7 @@ class Settings:
     harness: HarnessSettings = field(default_factory=HarnessSettings)
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     patience: PatienceSettings = field(default_factory=PatienceSettings)
+    backburner: BackburnerSettings = field(default_factory=BackburnerSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
@@ -722,6 +744,14 @@ class Settings:
             harness=harness,
             whatsapp_bridge=whatsapp_bridge,
             patience=patience,
+            backburner=BackburnerSettings(
+                mode=os.getenv("BOB_BACKBURNER_MODE", "full").strip().lower() or "full",
+                detach_after_seconds=float(os.getenv("BOB_BACKBURNER_DETACH_AFTER_S", "30")),
+                probe_timeout_seconds=float(os.getenv("BOB_BACKBURNER_PROBE_TIMEOUT_S", "8")),
+                max_run_seconds=float(os.getenv("BOB_BACKBURNER_MAX_RUN_S", "600")),
+                sessions=os.getenv("BOB_BACKBURNER_SESSIONS", ""),
+                probe_model=os.getenv("BOB_BACKBURNER_PROBE_MODEL", ""),
+            ),
             reconciliation=reconciliation,
             dream=dream,
             goals=GoalsSettings(

@@ -123,6 +123,16 @@ class LlmCallLogRepository:
             (call_id,))
         return dict(row) if row else None
 
+    async def get_running_by_dispatch(self, dispatch_id: str) -> dict[str, Any] | None:
+        """The live in-flight call for a dispatch (Backburner probe input —
+        messages_json is updated every iteration while status='running')."""
+        row = await self.db.fetch_one(
+            "SELECT id, created_at, model, call_category, messages_json, status "
+            "FROM llm_call_log WHERE dispatch_id = ? AND status = 'running' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (dispatch_id,))
+        return dict(row) if row else None
+
     async def probe_decisions(
         self, session_keys: list[str], *, limit: int = 50,
     ) -> list[dict[str, Any]]:

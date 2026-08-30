@@ -72,6 +72,28 @@ class SubagentRepository:
             "SELECT * FROM subagents ORDER BY created_at DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows] if rows else []
 
+    async def get_by_prefix(self, prefix: str, *, agent_type: str) -> dict[str, Any] | None:
+        """Resolve a short id prefix (the LLM passes 8-char ids it saw in a
+        prompt) to a row, restricted to the given agent_type so a prefix can
+        never reach another type's task."""
+        row = await self.db.fetch_one(
+            "SELECT * FROM subagents WHERE id LIKE ? AND agent_type = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (prefix + "%", agent_type))
+        return dict(row) if row else None
+
+    async def list_by_type(self, *, agent_type: str, status: str | None = None,
+                           limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM subagents WHERE agent_type = ?"
+        params: list[Any] = [agent_type]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = await self.db.fetch_all(query, tuple(params))
+        return [dict(r) for r in rows] if rows else []
+
     # ---------------------------------------------------------- lifecycle
 
     async def set_status(
@@ -110,6 +132,21 @@ class SubagentRepository:
                SET status = 'completed', result = ?, updated_at = datetime('now')
                WHERE id = ?""",
             (result_text, subagent_id))
+
+    async def store_terminal(self, subagent_id: str, *, status: str, result: str,
+                             now_iso: str, error: str | None = None) -> None:
+        """Backburner detached_turn terminal write — status, result and
+        optional error in one statement (the supervisor is the only writer)."""
+        if error:
+            await self.db.execute(
+                """UPDATE subagents
+                   SET status = ?, result = ?, error_message = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, result, error, now_iso, subagent_id))
+        else:
+            await self.db.execute(
+                "UPDATE subagents SET status = ?, result = ?, updated_at = ? WHERE id = ?",
+                (status, result, now_iso, subagent_id))
 
     async def fail_stale(self, now_iso: str) -> int:
         """Fail created/running subagents on restart (their asyncio tasks
