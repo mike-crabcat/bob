@@ -134,6 +134,25 @@ async def test_probe_falls_back_to_templates_on_failure(ctx, bb, monkeypatch):
     assert info["holding_text"]
 
 
+async def test_probe_is_logged_against_the_session(ctx, bb, monkeypatch):
+    """detach_probe rows must carry session_key/contact_id or they never
+    show in the conversation's calls view (found live 2026-08-30: the first
+    15 probe rows were invisible — session_key NULL)."""
+    from bob_server.services.llm_dispatch import LLMDispatchService
+    seen: dict = {}
+
+    async def _chat(self, messages, **kwargs):
+        seen.update(kwargs)
+        return '{"summary": "s", "holding_text": "h"}'
+
+    monkeypatch.setattr(LLMDispatchService, "chat", _chat)
+    spec = _spec(dispatch_id="disp-logged")
+    spec.contact_id = "contact-1"
+    await BackburnerService(ctx).probe_and_maybe_ack(spec, send_ack=False)
+    assert seen.get("session_key") == DM_KEY
+    assert seen.get("contact_id") == "contact-1"
+
+
 # ------------------------------------------------------- full detach flow
 
 @pytest.fixture

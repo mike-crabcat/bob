@@ -219,11 +219,14 @@ def _parse_probe_output(raw: str | None) -> dict[str, str] | None:
     return {"summary": summary[:300], "holding_text": holding[:300]}
 
 
-async def run_probe(ctx: Any, dispatch_id: str) -> dict[str, str]:
+async def run_probe(ctx: Any, dispatch_id: str, *,
+                    session_key: str | None = None, contact_id: str | None = None) -> dict[str, str]:
     """Inspect the in-flight turn and produce summary + holding ack.
 
     Always returns usable values — probe failure degrades to templates
-    (D7). Timeboxed so a slow probe model can't stall the detach.
+    (D7). Timeboxed so a slow probe model can't stall the detach. The call
+    is logged with the conversation's session_key/contact_id so probes are
+    visible in the session's calls view (like attention_probe rows).
     """
     settings = ctx.settings
     fallback = {"summary": TEMPLATE_SUMMARY, "holding_text": TEMPLATE_HOLDING, "source": "template"}
@@ -259,6 +262,8 @@ async def run_probe(ctx: Any, dispatch_id: str) -> dict[str, str]:
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             model=probe_model(settings),
             call_category="detach_probe",
+            session_key=session_key,
+            contact_id=contact_id,
             max_tokens=250,
             temperature=0.5,
         ))
@@ -291,7 +296,8 @@ class BackburnerService(BaseService):
     async def probe_and_maybe_ack(self, spec: Any, *, send_ack: bool) -> dict[str, str] | None:
         """shadow/hold modes: run the probe, log it, optionally send the
         holding ack — the turn keeps waiting inline (no detach)."""
-        info = await run_probe(self.ctx, spec.dispatch_id)
+        info = await run_probe(self.ctx, spec.dispatch_id,
+                               session_key=spec.session_key, contact_id=spec.contact_id)
         logger.info(
             "backburner[%s]: slow turn probe (session=%s, dispatch=%s) "
             "summary=%r holding=%r source=%s",
@@ -316,7 +322,8 @@ class BackburnerService(BaseService):
         if spec.backburner_capture is None or spec.hold_sender is None:
             return False
 
-        info = await run_probe(self.ctx, spec.dispatch_id)
+        info = await run_probe(self.ctx, spec.dispatch_id,
+                               session_key=spec.session_key, contact_id=spec.contact_id)
 
         try:
             # b. History snapshot for sends so far (D4: the detached path
