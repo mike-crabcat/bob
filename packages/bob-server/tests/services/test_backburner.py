@@ -188,6 +188,32 @@ async def _pending_message(ctx, key=DM_KEY):
                                           channel="whatsapp", dispatched=0)
 
 
+async def test_nudge_and_routine_turns_do_not_detach(ctx, bb, stub_llm, stub_history):
+    """Only human-stimulus turns detach (AI doom group, 2026-08-30): a slow
+    turn claimed solely by a wake nudge or a routine delivery must not send
+    a holding ack or register a background task — it's internal/proactive
+    work, and detaching relay turns amplifies (task → relay nudge → slow
+    relay turn → task → …)."""
+    from bob_server.services.session_service import SessionService
+
+    for provenance in ("wake_nudge", "routine"):
+        await SessionService(ctx).add_message(
+            DM_KEY, "user", f"## {provenance} payload", channel="whatsapp",
+            dispatched=0, provenance=provenance)
+        acks: list[str] = []
+
+        async def _hold(text: str) -> None:
+            acks.append(text)
+
+        spec = _spec(hold=_hold, dispatch_id=f"disp-{provenance}")
+        # slow stub (0.3s > 0.05s watchdog) — the turn must simply wait
+        result = await DispatchRunner(ctx).run(spec)
+
+        assert result == stub_llm["result"]
+        assert acks == [], f"{provenance}-only turn must not be acked"
+        assert await _subagent_rows(ctx) == [], f"{provenance}-only turn must not detach"
+
+
 async def _subagent_rows(ctx):
     return await ctx.db.fetch_all(
         "SELECT * FROM subagents WHERE agent_type = 'detached_turn'")

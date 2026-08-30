@@ -59,6 +59,14 @@ _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 # fold summary), and rescuing it mails internal monologue to the chat.
 _SILENCE_OK_PROVENANCES = {"wake_nudge"}
 
+# Backburner (docs/backburner-plan.md): only turns with a HUMAN stimulus
+# detach. Turns claimed solely by system nudges (goal folds, background-task
+# relays) or routine deliveries aren't conversations — a holding ack for
+# them is uninvited speech (the "Folded:…" leak class, 2026-08-29), and
+# detaching relay turns amplifies: task → relay nudge → slow relay turn →
+# detached task → relay nudge → … (observed in the AI doom group, 2026-08-30).
+_DETACH_QUIET_PROVENANCES = {"wake_nudge", "routine"}
+
 _LEASE_OWNER: str | None = None
 
 
@@ -156,6 +164,7 @@ class DispatchRunner:
             # rescue (the human message still deserves a reply).
             provenances = await history_repo.claimed_provenances(claimed_ids)
             expect_send = any(p not in _SILENCE_OK_PROVENANCES for p in provenances)
+            human_stimulus = any(p not in _DETACH_QUIET_PROVENANCES for p in provenances)
             await session_svc.mark_dispatched(session_key)
 
             # Durable turn (Bob3 invariants 4-6): claim this conversation's
@@ -228,8 +237,8 @@ class DispatchRunner:
                 )
 
             from bob_server.services import backburner as backburner_mod
-            bb_applies = backburner_mod.applies(
-                self.ctx.settings, spec.call_category, session_key)
+            bb_applies = (human_stimulus and backburner_mod.applies(
+                self.ctx.settings, spec.call_category, session_key))
             bb_mode = backburner_mod.mode(self.ctx.settings)
 
             try:
