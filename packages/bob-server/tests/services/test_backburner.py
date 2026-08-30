@@ -108,6 +108,38 @@ def test_build_transcript_skips_system_and_pairs_tools():
     assert "3 entries found" in transcript
 
 
+def test_build_transcript_ignores_prior_turn_history():
+    """Live 2026-08-30: a group turn 32s in with zero tool calls of its own
+    showed the probe a full tail of the previous turns' work (merg ledger
+    checks, the 257 answer) — the probe nearly summarised the wrong turn.
+    History chat items AND history tool items before the last user message
+    must be excluded."""
+    items = [
+        {"role": "system", "content": "SECRET SYSTEM PROMPT"},
+        {"role": "user", "content": "[Mike] what's a 257?"},
+        {"type": "function_call", "name": "search_notes", "arguments": '{"q":"257"}'},
+        {"type": "function_call_output", "call_id": "1", "output": "no marker found"},
+        {"role": "assistant", "content": "It's in none of my books."},
+        {"role": "user", "content": "[Sylvain] I need to change my symbolic number"},
+    ]
+    transcript = build_transcript(json.dumps(items))
+    assert "symbolic number" in transcript
+    assert "257" not in transcript            # prior turn's trigger
+    assert "search_notes" not in transcript   # prior turn's tool work
+    assert "none of my books" not in transcript
+    assert "still on the first response" in transcript  # own work: none yet
+
+
+def test_build_transcript_no_user_item_returns_empty():
+    """Unexpected shape with no user message at all — no reliable boundary,
+    so show nothing (run_probe falls back to its generic placeholder)."""
+    items = [
+        {"role": "system", "content": "SECRET SYSTEM PROMPT"},
+        {"type": "function_call", "name": "x", "arguments": "{}"},
+    ]
+    assert build_transcript(json.dumps(items)) == ""
+
+
 def test_parse_probe_output_variants():
     good = _parse_probe_output('{"summary": "checking bookings", "holding_text": "on it"}')
     assert good == {"summary": "checking bookings", "holding_text": "on it"}
@@ -190,13 +222,14 @@ async def _pending_message(ctx, key=DM_KEY):
 
 async def test_nudge_and_routine_turns_do_not_detach(ctx, bb, stub_llm, stub_history):
     """Only human-stimulus turns detach (AI doom group, 2026-08-30): a slow
-    turn claimed solely by a wake nudge or a routine delivery must not send
-    a holding ack or register a background task — it's internal/proactive
-    work, and detaching relay turns amplifies (task → relay nudge → slow
-    relay turn → task → …)."""
+    turn claimed solely by a wake nudge, a routine delivery, or a background
+    task relay must not send a holding ack or register a background task —
+    it's internal/proactive work, and detaching relay turns amplifies
+    (task → relay nudge → slow relay turn → task → …). task_relay is
+    rescue-eligible but still detach-quiet (dispatch_runner set split)."""
     from bob_server.services.session_service import SessionService
 
-    for provenance in ("wake_nudge", "routine"):
+    for provenance in ("wake_nudge", "routine", "task_relay"):
         await SessionService(ctx).add_message(
             DM_KEY, "user", f"## {provenance} payload", channel="whatsapp",
             dispatched=0, provenance=provenance)
@@ -221,7 +254,8 @@ async def _subagent_rows(ctx):
 
 async def _messages(ctx, key=DM_KEY):
     return await ctx.db.fetch_all(
-        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id",
+        "SELECT role, content, provenance FROM messages "
+        "WHERE conversation_id = ? ORDER BY id",
         (key,))
 
 
@@ -271,6 +305,9 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     msgs = await _messages(ctx)
     wake = [m for m in msgs if "Background task" in m["content"]]
     assert wake, "settle wake should have stored a relay message"
+    assert wake[0]["provenance"] == "task_relay", (
+        "relay wakes must be speak-expected so the send-tool rescue covers "
+        "them (2026-08-30 silent-drop incident)")
 
 
 async def test_fast_turn_never_detaches(ctx, bb, stub_history, monkeypatch):
@@ -306,7 +343,8 @@ async def test_capture_mode_intercepts_sends(ctx, bb):
     try:
         spec = await svc._build_inbound_dispatch_spec(
             session_key=DM_KEY, chat_id="61400000000@s.whatsapp.net",
-            chat_kind="dm", contact_id=contact, is_trusted=False)
+            chat_kind="dm", contact_id=contact, is_trusted=False,
+            human_initiated=False)
     except Exception:
         pytest.skip("builder needs a fuller environment")
 
@@ -398,6 +436,8 @@ async def test_recovery_settles_orphaned_goals(ctx, bb):
     assert row["status"] == "failed"
     msgs = await _messages(ctx)
     assert any("lost this background task" in m["content"] for m in msgs)
+    assert any(m["provenance"] == "task_relay" for m in msgs), (
+        "restart-loss relays must be speak-expected too")
 
     # idempotent: nothing left to move
     assert await BackburnerService(ctx).recover_orphaned_goals() == 0

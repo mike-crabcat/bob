@@ -221,6 +221,11 @@ member; rate-limited per group per hour; every send records `goal_id`
 provenance; disabled by default per group until allowed via
 `conversation_policy` (migration 452 machinery). Reminder scheduling (§3.3) is
 expressed as **child goals with deadlines** — no separate routine tool needed.
+2026-08-31 amendment: the tool attaches **only on autonomous (wake-path)
+turns** — human-started turns carry `steer_conversation` instead
+(docs/steering-plan.md), so inline §3.1/§3.4 asks route through steering
+while deadline-driven §3.3 reminders keep this tool, its caps and its
+goal attribution.
 
 **Tests:** repo CRUD + CAS-retry; settle roll-up via *each* settle caller
 (tool, finish_outreach, subagent, phone-result, dashboard); wake-matrix
