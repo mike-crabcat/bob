@@ -70,13 +70,14 @@ def _spec(capture=None, hold=None, send_tool=None, session_key=DM_KEY,
 
 # ------------------------------------------------------------------ gating
 
-async def test_gating_dm_whatsapp_only(ctx, bb):
+async def test_gating_whatsapp_only(ctx, bb):
     assert mode(ctx.settings) == "full"
     assert applies(ctx.settings, "whatsapp_incoming", DM_KEY)
-    # groups excluded (plan D6)
-    assert not applies(ctx.settings, "whatsapp_incoming", GROUP_KEY)
-    # other categories excluded
+    # groups included (D6 widened 2026-08-30 — live slow traffic is group-heavy)
+    assert applies(ctx.settings, "whatsapp_incoming", GROUP_KEY)
+    # other channels/categories excluded
     assert not applies(ctx.settings, "email_incoming", DM_KEY)
+    assert not applies(ctx.settings, "whatsapp_group_member_change", GROUP_KEY)
 
     bb.mode = "off"
     assert not applies(ctx.settings, "whatsapp_incoming", DM_KEY)

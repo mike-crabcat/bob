@@ -82,13 +82,16 @@ def mode(settings: Any) -> str:
 
 
 def applies(settings: Any, call_category: str, session_key: str) -> bool:
-    """Detach candidates: WHATSAPP_INCOMING DM turns (plan D6 — groups are a
-    later phase; holding acks in groups are noise)."""
+    """Detach candidates: WHATSAPP_INCOMING turns on any WhatsApp session
+    (DMs and groups). Plan D6 scoped v1 to DMs; widened to groups 2026-08-30
+    at deploy — live traffic is group-heavy (all 7 slow turns in the first
+    half-hour were groups), and Mike asked for all conversations. Group
+    member-change turns are a different call_category and stay excluded."""
     if mode(settings) == "off":
         return False
     if call_category != "whatsapp_incoming":
         return False
-    if ":whatsapp:dm:" not in session_key:
+    if ":whatsapp:" not in session_key:
         return False
     allowlist = {s.strip() for s in (settings.backburner.sessions or "").split(",") if s.strip()}
     if allowlist and session_key not in allowlist:
