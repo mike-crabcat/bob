@@ -299,7 +299,10 @@ class PatienceSettings:
     """Configuration for the patience dispatch system."""
 
     enabled: bool = False
-    model: str = "gpt-5.6-luna"
+    # Empty → openai memory model (get_memory_model()), so the attention
+    # probe follows the configured model chain instead of pinning a vendor
+    # default that silently survives a /model or .env migration.
+    model: str = ""
     bot_name: str = "Bot"
     max_pending_items: int = 20
     max_context_messages: int = 10
@@ -676,7 +679,7 @@ class Settings:
 
         patience = PatienceSettings(
             enabled=os.getenv("BOB_PATIENCE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
-            model=os.getenv("BOB_PATIENCE_MODEL", "gpt-5.6-luna"),
+            model=os.getenv("BOB_PATIENCE_MODEL", ""),
             bot_name=os.getenv("BOB_SELF_NAME", "Bob"),
             max_pending_items=int(os.getenv("BOB_PATIENCE_MAX_PENDING", "20")),
             max_context_messages=int(os.getenv("BOB_PATIENCE_MAX_CONTEXT", "10")),
