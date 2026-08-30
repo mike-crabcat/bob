@@ -57,6 +57,8 @@ _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 # inbound a human wrote. A turn claimed by ONLY these isn't expected to
 # speak — its un-sent final text is internal bookkeeping (e.g. a goal-state
 # fold summary), and rescuing it mails internal monologue to the chat.
+# task_relay (background-task results) is deliberately NOT here: those turns
+# exist to speak, so the send-tool rescue covers them.
 _SILENCE_OK_PROVENANCES = {"wake_nudge"}
 
 # Backburner (docs/backburner-plan.md): only turns with a HUMAN stimulus
@@ -65,7 +67,9 @@ _SILENCE_OK_PROVENANCES = {"wake_nudge"}
 # them is uninvited speech (the "Folded:…" leak class, 2026-08-29), and
 # detaching relay turns amplifies: task → relay nudge → slow relay turn →
 # detached task → relay nudge → … (observed in the AI doom group, 2026-08-30).
-_DETACH_QUIET_PROVENANCES = {"wake_nudge", "routine"}
+# task_relay rides here too: relays must not detach, but — unlike wake_nudge
+# — they stay rescue-eligible (see _SILENCE_OK_PROVENANCES).
+_DETACH_QUIET_PROVENANCES = {"wake_nudge", "routine", "task_relay"}
 
 _LEASE_OWNER: str | None = None
 
@@ -337,10 +341,21 @@ class DispatchRunner:
             elif (spec.call_category in _SEND_RESCUE_CATEGORIES
                     and not spec.message_was_sent[0] and result.strip()
                     and not is_no_reply(result) and not expect_send):
-                logger.debug(
-                    "send-tool rescue skipped: nudge-only turn, un-sent text "
-                    "is internal (session=%s, dispatch=%s)",
-                    session_key, spec.dispatch_id)
+                # Internal by policy — but a substantial un-sent reply that
+                # nobody will ever see is worth a trace in the journal: the
+                # 2026-08-30 relay drop was invisible at debug level.
+                if len(result.strip()) >= 200:
+                    logger.warning(
+                        "send-tool rescue skipped: nudge-only turn dropped "
+                        "%d chars of un-sent text (session=%s, dispatch=%s, "
+                        "head=%r)",
+                        len(result.strip()), session_key, spec.dispatch_id,
+                        result.strip()[:120])
+                else:
+                    logger.debug(
+                        "send-tool rescue skipped: nudge-only turn, un-sent text "
+                        "is internal (session=%s, dispatch=%s)",
+                        session_key, spec.dispatch_id)
 
             await self._record_history(spec, session_svc, result)
 

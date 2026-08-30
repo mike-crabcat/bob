@@ -95,6 +95,7 @@ async def settle_goal(
     note: str | None = None,
     wake_content: str | None = None,
     wake_category: str | None = None,
+    wake_provenance: str = "wake_nudge",
 ) -> bool:
     """Terminal transition (completed/failed/cancelled). Exactly one settler
     wins the CAS; the winner cancels wakeups, appends the goal event, and
@@ -107,6 +108,14 @@ async def settle_goal(
       whether the parent's working conversation gets a ``goal_progress`` wake.
     - root goal: wakes the origin (today's behaviour), with optional caller
       overrides for content/category (e.g. call results).
+
+    ``wake_provenance`` labels the stored wake row. Default ``wake_nudge``
+    reads as silence-expected (dispatch_runner skips the send-tool rescue for
+    nudge-only turns); callers whose wake MUST speak user-facing output —
+    background-task relays (backburner), which exist to deliver a result —
+    pass ``task_relay`` so the rescue applies when the model skips its send
+    call (2026-08-30: a detached AFL turn's finished relay was silently
+    dropped this way).
     """
     repo = GoalRepository(ctx.db)
     moved = await repo.transition(goal_id, to_status=status, result=result, note=note)
@@ -138,6 +147,7 @@ async def settle_goal(
                 ctx, origin, content,
                 call_category=wake_category or "goal_result",
                 metadata={"goal_id": goal_id, "goal_kind": goal["kind"]},
+                provenance=wake_provenance,
             )
         except Exception:
             logger.exception("goal %s: failed to wake origin %s", goal_id, origin)
@@ -250,7 +260,7 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
     if wakeup["goal_id"]:
         goal = await GoalRepository(ctx.db).get(wakeup["goal_id"])
         if goal and goal["status"] != "active":
-            return  # goal already settled; wakeup is moot
+            return True  # goal already settled; wakeup is moot
 
     if goal:
         content = (

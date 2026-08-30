@@ -32,6 +32,7 @@ MAX_INLINE_MEDIA = 3
 NEW_MARKER = "[NEW — awaiting your reply] "
 SYSTEM_NOTE_MARKER = "[system notification — not from the human] "
 GROUP_EVENT_MARKER = "[Group event] "
+STEER_MARKER = "[system relay — steering request] "
 
 # Appended after the replay when the turn's claims are nudges only: these
 # turns fold state silently (mirrors _SILENCE_OK_PROVENANCES in
@@ -317,8 +318,8 @@ async def build_chat_messages(
 
     ``claimed_ids`` are the message ids this dispatch turn claimed from pending
     (DispatchRunner). When set, claimed human/group-event rows are marked
-    [NEW — awaiting your reply], system-generated rows (wake_nudge, group_event
-    provenances) are labelled so they never read as human speech, and — when the
+    [NEW — awaiting your reply], system-generated rows (wake_nudge, group_event,
+    steer provenances) are labelled so they never read as human speech, and — when the
     replay ends with the prior turn's reply (mid-turn-arrival shape) — a trailing
     user turn re-presents the new stimulus so the input ends user-final. Turns
     claimed by nudges alone get a system directive to fold silently instead.
@@ -423,6 +424,13 @@ async def build_chat_messages(
                     content = GROUP_EVENT_MARKER + content
                     if is_claimed:
                         group_event_claimed = True
+                elif prov == "steer":
+                    # Steering requests (services/steering.py): attributed in
+                    # their own content header, marked here as a system relay
+                    # so they never read as someone speaking in this chat.
+                    # Claimed rows fall through to the NEW marker below — a
+                    # steer IS this turn's stimulus, not a fold-silently nudge.
+                    content = STEER_MARKER + content
                 if is_claimed and prov != "wake_nudge":
                     content = NEW_MARKER + content
                     sender_prefix = ""

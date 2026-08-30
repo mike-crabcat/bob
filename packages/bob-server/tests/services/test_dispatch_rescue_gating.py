@@ -9,6 +9,10 @@ Pinned here, at the DispatchRunner seam:
 - wake_nudge-only turn + un-sent text → NOT delivered, NOT recorded
 - real inbound message + un-sent text → rescued (existing behaviour kept)
 - mixed pending (nudge + real inbound) → rescued (a human is owed a reply)
+- task_relay-only turn (background-task result) + un-sent text → rescued:
+  relay turns exist to speak, so the send-skip quirk must not swallow the
+  result (live 2026-08-30: a detached AFL turn's finished relay — holding
+  ack sent, outcome never delivered — was silently dropped this way)
 """
 
 from __future__ import annotations
@@ -44,13 +48,14 @@ def _spec(session_key: str, send_tool: _FakeSendTool) -> DispatchSpec:
 
 @pytest.fixture
 def stub_llm(monkeypatch):
-    """chat_with_tools returns un-sent text; captures the built messages."""
+    """chat_with_tools returns un-sent text; captures the built messages.
+    Swap the canned reply via ``stub_llm["reply"] = …``."""
     from bob_server.services.llm_dispatch import LLMDispatchService
-    seen: dict = {}
+    seen: dict = {"reply": "Folded. Blair's preferences recorded; no group post."}
 
     async def _chat_with_tools(self, messages, tools, **kwargs):
         seen["messages"] = messages
-        return "Folded. Blair's preferences recorded; no group post."
+        return seen["reply"]
 
     monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat_with_tools)
     return seen
@@ -111,3 +116,23 @@ async def test_mixed_nudge_and_inbound_is_rescued(
     await DispatchRunner(ctx).run(_spec(key, send_tool))
 
     assert len(send_tool.delivered) == 1
+
+
+async def test_task_relay_only_turn_unsent_text_is_rescued(
+        ctx, db, stub_llm, stub_history):
+    """A background-task relay is a system nudge that MUST speak — the
+    rescue covers it when the model writes the relay as un-sent text."""
+    key = "test:rescue:task-relay"
+    svc = SessionService(ctx)
+    await svc.add_message(
+        key, "user",
+        "[Background task abcd1234] The Grand has rooms Thursday.\n\n"
+        "Relay the result to the user with a short summary in your own voice.",
+        dispatched=0, provenance="task_relay")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = ("Honest answer: 5 of 12 tracks are in, the matcher "
+                         "is sulking on the rest.")
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == [stub_llm["reply"]]

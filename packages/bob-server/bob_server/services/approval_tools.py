@@ -134,12 +134,12 @@ def _register_approval_executors() -> None:
     effects_svc.register_executor("approval_request", _exec_request)
     effects_svc.register_executor("approval_respond", _exec_respond)
 
-    # Platform-native follow-through (WhatsApp group send). Registered in the
-    # same breath as the executors above, so the pump can never deliver an
+    # Platform-native follow-through (steering wake). Registered in the same
+    # breath as the executors above, so the pump can never deliver an
     # approval_respond with the hook missing — the lazy-registration quirk
     # that affects kinds registered in tool-assembly functions cannot bite.
-    from bob_server.services import group_send_approval as _group_send
-    _group_send.register()
+    from bob_server.services import steering as _steering
+    _steering.register()
 
 
 _register_approval_executors()
@@ -205,12 +205,12 @@ def make_approval_tools(ctx: AppContext, session_key: str) -> list:
                     item["summary"] = proposal.get("summary")
                 except (TypeError, ValueError):
                     pass
-            if r["approval_type"] == "group_send" and r["proposal_data"]:
+            if r["approval_type"] == "conversation_steer" and r["proposal_data"]:
                 try:
                     proposal = json.loads(r["proposal_data"])
-                    item["group_name"] = proposal.get("group_name")
-                    item["group_id"] = proposal.get("group_id")
-                    item["message"] = proposal.get("message")
+                    item["target"] = proposal.get("target_label")
+                    item["target_key"] = proposal.get("target_key")
+                    item["instruction"] = proposal.get("instruction")
                 except (TypeError, ValueError):
                     pass
             out.append(item)
