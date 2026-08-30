@@ -191,7 +191,7 @@ turn's stimulus; killed → settled, gone.
 |---|---|
 | Turn finishes at 30.1s → spurious holding ack | `asyncio.wait`, never sleep-then-check; the watchdog races the *task*, not a clock |
 | Background task GC'd mid-flight | strong-ref set, supervisor coroutine (wake_service pattern) |
-| Server restart orphans active goals (task dead, goal forever in every prompt) | startup sweep: `detached_turn` subagents still `running` → mark failed + optionally wake "I lost that when I restarted — want me to redo it?" (mirrors `resume_pending_sessions`) |
+| Server restart orphans active goals (task dead, goal forever in every prompt) | startup sweep: `detached_turn` subagents still `running` → mark failed + optionally wake "I lost that when I restarted — want me to redo it?" (mirrors `resume_pending_sessions`) — **verified live 2026-08-30: 2 orphaned goals settled at boot, conversations re-armed by the +10s sweep** |
 | Two detached tasks + goals crowd the prompt | `goals_held_by` caps at 5, newest first — fine at realistic volumes; note for later |
 | Probe hangs (flash is slow) | 8s timebox + template fallback (D7) |
 | Double holding ack | outbox idempotency key `whatsapp_send:hold:{dispatch_id}` |
@@ -204,9 +204,18 @@ turn's stimulus; killed → settled, gone.
    mid-run; the next `claim()` then fails the "zombie" turn and releases its
    events *while it's still executing* (`repositories/turns.py:70-78`). With
    glm-5.3-flash this is no longer hypothetical. Fix: heartbeat from the
-   dispatch loop (per tool iteration is natural).
+   dispatch loop (per tool iteration is natural). *(Fixed with the deploy.)*
 2. **No wall-clock limit on main dispatches** — `time_limit_seconds` is only
    used by `routine_service`. A hung turn holds the session lock forever.
+   *(Fixed with the deploy: whatsapp_incoming turns get max_run_seconds.)*
+3. **Restart mid-LLM permanently consumed the dying turn's claimed messages**
+   (found live 2026-08-30: a deploy restart ate an in-flight question — the
+   "10-minute delay" incident; the crash-recovery sweep only re-arms
+   *undispatched* messages). *(Fixed post-deploy: boot sweep restores claims
+   via `restore_messages_for_turn` before failing zombie turns —
+   `tests/services/test_turn_boot_recovery.py`. Residual variant: a turn
+   whose lease already expired and was failed by a later claim before boot
+   is not restored — its events release but its dispatched flags stay set.)*
 
 ## Rollout (careful-rollouts convention)
 
