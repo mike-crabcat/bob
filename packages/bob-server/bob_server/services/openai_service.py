@@ -292,6 +292,19 @@ def _model_skips_temperature(model: str) -> bool:
     return any(model.startswith(p) for p in ("gpt-5.5", "gpt-5.6", "o1", "o3", "o4"))
 
 
+def _accepts_reasoning_effort(model: str) -> bool:
+    """True for models that take the reasoning-effort hint.
+
+    OpenAI reasoning models (gpt-5.x, o-series) and anything served through
+    OpenRouter, whose gateway maps the unified effort param per provider.
+    Without the hint a thinking model (GLM-5.3 via OpenRouter) reasons at
+    full budget, which alone can exhaust a small max_output_tokens cap and
+    return empty content.
+    """
+    return (_model_skips_temperature(model)
+            or model_registry.provider_for(model) == model_registry.PROVIDER_OPENROUTER)
+
+
 class OpenAIService(BaseService):
     """LLM reasoning through OpenAI Responses API."""
 
@@ -359,7 +372,7 @@ class OpenAIService(BaseService):
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
-        if reasoning_effort is not None and _model_skips_temperature(resolved_model):
+        if reasoning_effort is not None and _accepts_reasoning_effort(resolved_model):
             kwargs["reasoning"] = {"effort": reasoning_effort}
 
         tools = self._merge_tools(model=resolved_model)
@@ -482,6 +495,7 @@ class OpenAIService(BaseService):
         *,
         model: str | None = None,
         max_iterations: int = 100,
+        time_limit_seconds: float | None = None,
         stream_result: StreamResult | None = None,
         on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
         on_iteration_complete: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
@@ -492,16 +506,29 @@ class OpenAIService(BaseService):
         """Multi-turn chat with tool calling via Responses API.
 
         Loops: send input → check for function_call items → execute → feed back.
-        Returns the final text response.
+        Returns the final text response. ``time_limit_seconds`` is a wall-clock
+        budget checked before each iteration (an in-flight LLM call and the
+        tool round that started it always complete) — used by routine
+        dispatches so an hourly bulletin can't become a 10-minute tool odyssey.
         """
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools, model=resolved_model)
         t0 = time.monotonic()
+        deadline = t0 + time_limit_seconds if time_limit_seconds is not None else None
 
         total_input = total_output = total_total = 0
         total_cached = 0
 
         for iteration in range(max_iterations):
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    "OpenAI tool call hit wall-clock limit: model=%s limit=%ss "
+                    "iterations=%d elapsed=%.1fs dispatch_id=%s session_key=%s",
+                    resolved_model, time_limit_seconds, iteration,
+                    time.monotonic() - t0, dispatch_id, session_key)
+                return ("Stopped at the turn's wall-clock budget — work done so "
+                        "far is complete, remaining steps were skipped.")
+
             response = await self._client_for(resolved_model).responses.create(
                 model=resolved_model,
                 input=messages,

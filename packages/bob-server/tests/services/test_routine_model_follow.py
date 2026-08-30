@@ -110,6 +110,20 @@ async def test_routine_uses_override_model(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_routine_carries_wall_clock_budget(db, tmp_path, monkeypatch):
+    """Routine dispatches must pass the wall-clock budget — an hourly
+    bulletin can't be allowed to become a 10-minute tool odyssey
+    (2026-08-29: recovery turn + two routines ran 10.6 min on the radio
+    group)."""
+    from bob_server.services.routine_service import ROUTINE_WALL_CLOCK_SECONDS
+
+    captured: dict = {}
+    await _fire(db, tmp_path, monkeypatch, captured)
+    assert captured.get("time_limit_seconds") == ROUTINE_WALL_CLOCK_SECONDS
+    assert ROUTINE_WALL_CLOCK_SECONDS == 120.0
+
+
+@pytest.mark.asyncio
 async def test_routine_without_override_uses_default(db, tmp_path, monkeypatch):
     from bob_server.repositories.conversations import ConversationRepository
     await ConversationRepository(db).ensure("wa:123")

@@ -19,11 +19,20 @@ from typing import Any
 _DIALOGUE_ROLES = "('user', 'assistant')"
 
 # Internal bookkeeping rows excluded from replayed context by default.
-# wake_nudge and routine provenance ARE replayed — they are the actual
-# conversational stimulus for their turns.
+# wake_nudge provenance IS replayed — it is the actual conversational
+# stimulus for its turn. Routine REPLIES replay (the group saw them, so
+# later turns must know what was posted); routine PROMPTS never do —
+# routine turns build self-contained context (routine_service passes
+# session_key="") and the prompt rows otherwise leak the routine's to-do
+# list into other turns' context (2026-08-29: a recovery turn adopted two
+# routine agendas and ran a 10-minute tool odyssey).
 _INTERNAL_FILTER = (
     " AND (provenance IS NULL OR provenance NOT IN "
     "('extraction_marker', 'dream_announcement')) "
+    # IS NOT is NULL-safe equality: plain user rows have NULL provenance,
+    # and `NOT (provenance = 'routine' AND role = 'user')` would evaluate
+    # to NULL for them and silently drop them from replay.
+    " AND (provenance IS NOT 'routine' OR role IS NOT 'user') "
 )
 
 
@@ -64,13 +73,16 @@ class HistoryRepository:
         if pending_only:
             since_clause += " AND dispatched = 0 AND role = 'user' "
         params.append(limit)
+        # rowid breaks created_at ties (second granularity) by insertion
+        # order — batched same-second arrivals must replay in the order they
+        # arrived, or prompt assembly sees them scrambled.
         return await self.db.fetch_all(
             f"SELECT * FROM messages "
             f"WHERE conversation_id = ? AND role IN {_DIALOGUE_ROLES} "
             f"AND rowid IN (SELECT rowid FROM messages "
             f"WHERE conversation_id = ? AND role IN {_DIALOGUE_ROLES} "
-            f"{internal}{since_clause} ORDER BY created_at DESC LIMIT ?) "
-            f"ORDER BY created_at ASC",
+            f"{internal}{since_clause} ORDER BY created_at DESC, rowid DESC LIMIT ?) "
+            f"ORDER BY created_at ASC, rowid ASC",
             tuple(params),
         )
 
@@ -196,6 +208,21 @@ class HistoryRepository:
             "WHERE conversation_id = ? AND role = 'user' AND dispatched = 0",
             (await self._cid(session_key),))
         return [r["id"] for r in rows]
+
+    async def claimed_provenances(self, message_ids: list[str]) -> list[str]:
+        """Provenance values of the messages a dispatch claimed (NULL → "").
+
+        The send-tool rescue reads this to tell turns triggered by a real
+        inbound message (expected to speak) from system-nudge-only turns
+        (silence is a legitimate outcome).
+        """
+        if not message_ids:
+            return []
+        marks = ",".join("?" for _ in message_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT provenance FROM messages WHERE id IN ({marks})",
+            tuple(message_ids))
+        return [str(r["provenance"] or "") for r in rows]
 
     async def restore_pending(self, message_ids: list[str]) -> None:
         """Undo a dispatch claim (e.g. after LLM quota failure)."""

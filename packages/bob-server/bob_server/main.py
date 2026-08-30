@@ -67,6 +67,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         await database.connect()
         await database.apply_migrations()
+
+        # Boot sweep: any 'running' llm_call_log row is a zombie from the
+        # previous process — nothing survives a restart. Fail them now so
+        # the dashboard never shows dead calls as live.
+        try:
+            from bob_server.repositories.llm_call_log import LlmCallLogRepository
+            swept = await LlmCallLogRepository(database).cancel_running()
+            if swept:
+                logger.info("Boot sweep cancelled %d zombie LLM call(s)", swept)
+        except Exception:
+            logger.warning("llm_call_log boot sweep failed", exc_info=True)
+
         database.settings = resolved_settings
         app.state.settings = resolved_settings
         app.state.db = database
@@ -120,7 +132,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(EventLogReconciliationTask())
         runner.register(AttentionShadowAgreementTask())
         runner.register(EffectPumpTask())
-        runner.register(WakeupPumpTask())
         runner.register(ClaimRouterSweepTask())
         runner.register(OutreachDetectorSweepTask())
         runner.register(GoalReviewTask())
@@ -132,16 +143,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(MemoryReconciliationTask())
         runner.register(DreamTask())
         heartbeat_worker = asyncio.create_task(runner.run_loop(stop_event))
+
+        # Wakeup pump on its own short loop: it is the time-critical
+        # scheduler (routine fire-times, goal deadlines) and must never sit
+        # behind a slow heartbeat task. 2026-08-29: a gate-blocked idle
+        # summary stalled the sequential cycle 28 min and a 17:00 feature
+        # set aired late. claim_due is CAS, so a fast loop can't double-fire.
+        async def _wakeup_pump_loop() -> None:
+            pump = WakeupPumpTask()
+            while not stop_event.is_set():
+                try:
+                    await pump.run(app_ctx)
+                except Exception:
+                    logger.exception("wakeup pump cycle failed")
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    pass
+
+        wakeup_pump_worker = asyncio.create_task(_wakeup_pump_loop())
         try:
             yield
         finally:
             stop_event.set()
 
             heartbeat_worker.cancel()
-            try:
-                await heartbeat_worker
-            except asyncio.CancelledError:
-                pass
+            wakeup_pump_worker.cancel()
+            for worker in (heartbeat_worker, wakeup_pump_worker):
+                try:
+                    await worker
+                except asyncio.CancelledError:
+                    pass
 
             if wa_bridge_service is not None:
                 await wa_bridge_service.stop()

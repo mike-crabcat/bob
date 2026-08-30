@@ -19,6 +19,31 @@ from bob_server.services.memory.claim_types import ENTITY_TYPES
 # history; older ones are text stubs (path only) to keep prompt size bounded.
 MAX_INLINE_MEDIA = 3
 
+# Dispatch-state markers (2026-08-30 GLM duplication fix). A turn's LLM input
+# must make three things visible that plain history replay hides:
+# - which user rows are THIS turn's stimulus (claimed from pending) — the
+#   model otherwise re-answers messages a prior request already handled;
+# - which rows are system notifications, not human speech — goal results,
+#   subagent relays etc. masquerade as user messages otherwise;
+# - when the replay ends with the prior turn's reply (a message arrived
+#   mid-turn and the leftover sweep re-armed), the input must end user-final
+#   again — assistant-final inputs make weak models (GLM-5.3-flash, ~11% of
+#   turns) regenerate their own last reply verbatim.
+NEW_MARKER = "[NEW — awaiting your reply] "
+SYSTEM_NOTE_MARKER = "[system notification — not from the human] "
+GROUP_EVENT_MARKER = "[Group event] "
+
+# Appended after the replay when the turn's claims are nudges only: these
+# turns fold state silently (mirrors _SILENCE_OK_PROVENANCES in
+# dispatch_runner) and must not be lured into speaking by their own trailer.
+_NUDGE_ONLY_DIRECTIVE = (
+    "This turn was triggered by an internal system notification marked "
+    "[system notification] above — not by a message from the human. Process "
+    "it silently: fold the information into your state or tools. Do not send "
+    "a user-visible reply unless a human message above still needs one — if "
+    "none does, call {send_tool} with the text NO_REPLY."
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -204,6 +229,23 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
         "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
     )
+    parts.append(
+        "## Modifying Skills and Code — Propose First\n"
+        "Changes to anything under `skills/` or to any code or config file are easy to get "
+        "wrong from a half-described idea, so propose before you edit:\n"
+        "- When a request would create or modify a skill, script, or any code file — with "
+        "any tool, including bash — do NOT make the change in the same turn. First send a "
+        "short plan (which files, what change, anything you're unsure about) and wait for "
+        "a go-ahead.\n"
+        "- Once the user confirms the plan, or explicitly says to just do it, act normally "
+        "— do not re-confirm.\n"
+        "- Investigating is always fine and encouraged: read files, run read-only "
+        "commands, check memory — gather what you need to write a good plan.\n"
+        "- If a message reads like the start of a longer description (\"I've been thinking "
+        "about...\", \"can the redbark skill...\") it is not yet a request to build. Ask "
+        "what they have in mind before proposing anything.\n"
+        "- If you are unsure whether a file counts as code, propose first.\n"
+    )
 
     workspace_resolved = workspace_dir.expanduser().resolve()
     parts.append(
@@ -268,8 +310,20 @@ async def build_chat_messages(
     system_content: str = "",
     voice_instructions: str = "",
     max_history: int = 20,
+    claimed_ids: set[str] | frozenset[str] | None = None,
+    send_tool_name: str = "",
 ) -> list[dict[str, Any]]:
-    """Build a messages array: system prompt + session history + optional user message."""
+    """Build a messages array: system prompt + session history + optional user message.
+
+    ``claimed_ids`` are the message ids this dispatch turn claimed from pending
+    (DispatchRunner). When set, claimed human/group-event rows are marked
+    [NEW — awaiting your reply], system-generated rows (wake_nudge, group_event
+    provenances) are labelled so they never read as human speech, and — when the
+    replay ends with the prior turn's reply (mid-turn-arrival shape) — a trailing
+    user turn re-presents the new stimulus so the input ends user-final. Turns
+    claimed by nudges alone get a system directive to fold silently instead.
+    ``send_tool_name`` names the turn's delivery tool in those trailers.
+    """
     system_parts: list[str] = []
     if system_content:
         system_parts.append(system_content)
@@ -279,6 +333,13 @@ async def build_chat_messages(
     messages: list[dict[str, Any]] = []
     if system_parts:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
+    # Dispatch-state bookkeeping for this turn's trailers (claimed_ids set
+    # means a dispatch turn): the display lines of claimed human/group-event
+    # rows, and whether any claim was a system nudge.
+    lifted: list[str] = []
+    nudge_claimed = False
+    group_event_claimed = False
 
     if session_key and db is not None:
         is_group = ":group:" in session_key
@@ -343,6 +404,33 @@ async def build_chat_messages(
             content = row["content"]
             if is_group and mention_names:
                 content = _resolve_mentions(content, mention_names)
+
+            # Dispatch-state markers, dispatch turns only (claimed_ids set —
+            # non-dispatch callers keep the byte-for-byte old replay shape).
+            # Claimed non-nudge rows are this turn's stimulus; system-generated
+            # rows are labelled whether or not they are the stimulus, so
+            # historical nudges never read as human speech. NEW is prepended
+            # last so it reads outermost: "[NEW] [Group event] …".
+            if claimed_ids is not None:
+                prov = row.get("provenance") or ""
+                is_claimed = (row["role"] == "user"
+                              and row.get("id") in claimed_ids)
+                if prov == "wake_nudge":
+                    content = SYSTEM_NOTE_MARKER + content
+                    if is_claimed:
+                        nudge_claimed = True
+                elif prov == "group_event":
+                    content = GROUP_EVENT_MARKER + content
+                    if is_claimed:
+                        group_event_claimed = True
+                if is_claimed and prov != "wake_nudge":
+                    content = NEW_MARKER + content
+                    sender_prefix = ""
+                    if is_group and row["sender_id"]:
+                        name = sender_names.get(row["sender_id"])
+                        if name:
+                            sender_prefix = f"[{name}] "
+                    lifted.append(f"{sender_prefix}{content}")
 
             # Check for image metadata and reconstruct multimodal content
             meta: dict[str, Any] = {}
@@ -440,4 +528,55 @@ async def build_chat_messages(
 
     if user_message is not None:
         messages.append({"role": "user", "content": user_message})
+
+    # -- dispatch trailers ------------------------------------------------
+    # Only for dispatch turns (claimed_ids set). See module docstring: the
+    # model must never face an input whose last item is its own prior reply
+    # with the new stimulus buried unmarked mid-replay.
+    if claimed_ids is not None:
+        no_reply_ref = (
+            f"call {send_tool_name} with the text NO_REPLY"
+            if send_tool_name else "reply NO_REPLY via your send tool"
+        )
+        if lifted and _ends_with_assistant_side(messages):
+            lines = "\n".join(f"- {t}" for t in lifted)
+            group_event_hint = (
+                "\nGroup events don't always need a reply — greet a new member "
+                "or acknowledge a notable departure when it fits; otherwise "
+                f"{no_reply_ref} is fine."
+                if group_event_claimed else ""
+            )
+            messages.append({
+                "role": "user",
+                "content": (
+                    "New message(s) received since your last reply (also marked "
+                    f"[NEW] above):\n{lines}\n\n"
+                    "Your earlier replies in this conversation were already "
+                    "delivered. Respond only to the new message(s) above and do "
+                    "not repeat or restate anything you have already sent. Rows "
+                    "marked [system notification] are internal bookkeeping, not "
+                    f"messages from the human. If the new message(s) are already "
+                    f"fully answered by your last reply, {no_reply_ref}."
+                    f"{group_event_hint}"
+                ),
+            })
+        elif nudge_claimed and not lifted:
+            messages.append({
+                "role": "system",
+                "content": _NUDGE_ONLY_DIRECTIVE.format(
+                    send_tool=send_tool_name or "your send tool"),
+            })
     return messages
+
+
+def _ends_with_assistant_side(messages: list[dict[str, Any]]) -> bool:
+    """True when the last item belongs to an assistant turn — an assistant
+    text message or replayed tool-trace items (function_call /
+    function_call_output / reasoning). Used to decide whether a trailing
+    user turn must re-present the current turn's stimulus."""
+    if not messages:
+        return False
+    last = messages[-1]
+    if last.get("role") == "assistant":
+        return True
+    return last.get("type") in ("function_call", "function_call_output", "reasoning")

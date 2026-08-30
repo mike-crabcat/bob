@@ -224,7 +224,10 @@ async def _call_reviser(
                 messages,
                 model=model,
                 temperature=0.0,
-                max_tokens=900,
+                # Must cover reasoning + content: thinking models share one
+                # output budget, and a 900 cap returned empty text (all
+                # reasoning) on GLM-5.3-flash.
+                max_tokens=ctx.settings.goals.reviser_max_tokens,
                 reasoning_effort="low",
                 call_category="goal_revise",
                 session_key=goal["conversation_id"],

@@ -286,7 +286,10 @@ async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
             model=ctx.settings.goals.reviser_model
                 or ctx.settings.openai.get_memory_model(),
             temperature=0.0,
-            max_tokens=60,
+            # Headroom for low-effort reasoning — the verdict itself is ~16
+            # tokens, but thinking models spend reasoning from the same
+            # budget and 60 left none (empty output, fail-open).
+            max_tokens=300,
             reasoning_effort="low",
             call_category="claim_router_probe",
             session_key=goal["conversation_id"],

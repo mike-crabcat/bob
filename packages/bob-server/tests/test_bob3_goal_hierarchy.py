@@ -47,13 +47,16 @@ def mock_wake(monkeypatch):
 
 @pytest.fixture
 def reviser(monkeypatch):
-    """Mock the reviser LLM call; tests set `.response` (a JSON string)."""
+    """Mock the reviser LLM call; tests set `.response` (a JSON string).
+    `.calls` records each call's kwargs (max_tokens, reasoning_effort…)."""
     from bob_server.services.llm_dispatch import LLMDispatchService
 
     mock = AsyncMock()
     mock.response = _reviser_json({"plan": "updated", "known": ["alice confirmed"]})
+    mock.calls = []
 
     async def _chat(self, messages, **kwargs):
+        mock.calls.append(kwargs)
         return mock.response
 
     monkeypatch.setattr(LLMDispatchService, "chat", _chat)
@@ -194,6 +197,24 @@ async def test_settled_child_wakeup_cancelled(ctx, db, mock_wake, reviser):
 # ---------------------------------------------------------------------------
 # revise_goal_state contract
 # ---------------------------------------------------------------------------
+
+async def test_reviser_token_budget_accommodates_thinking_models(
+        ctx, db, mock_wake, reviser):
+    """max_output_tokens caps reasoning AND content together on thinking
+    models — the old 900 cap let GLM-5.3-flash burn the whole budget on
+    reasoning and return empty text (every call degraded to wake,
+    2026-08-29). The call must use the settings ceiling (default 4000)."""
+    root, _ = await _make_tree(ctx)
+
+    from bob_server.services.goal_state_service import revise_goal_state
+    await revise_goal_state(ctx, root["id"], "stimulus", stimulus_id="test:cap")
+
+    assert reviser.calls, "reviser was called"
+    assert all(c["max_tokens"] == ctx.settings.goals.reviser_max_tokens
+               for c in reviser.calls)
+    assert ctx.settings.goals.reviser_max_tokens >= 4000
+    assert all(c["reasoning_effort"] == "low" for c in reviser.calls)
+
 
 async def test_reviser_malformed_output_degrades_to_wake(ctx, db, mock_wake, reviser):
     root, _ = await _make_tree(ctx)

@@ -52,6 +52,12 @@ def is_no_reply(text: str | None) -> bool:
 # rescue must not mail out.
 _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 
+# Provenances that mark a pending message as a system nudge rather than
+# inbound a human wrote. A turn claimed by ONLY these isn't expected to
+# speak — its un-sent final text is internal bookkeeping (e.g. a goal-state
+# fold summary), and rescuing it mails internal monologue to the chat.
+_SILENCE_OK_PROVENANCES = {"wake_nudge"}
+
 _LEASE_OWNER: str | None = None
 
 
@@ -137,6 +143,12 @@ class DispatchRunner:
             claimed_ids = await history_repo.pending_user_ids(session_key)
             if not claimed_ids:
                 return ""
+            # Rescue eligibility: a turn triggered solely by system nudges
+            # isn't expected to speak. Computed from what this turn actually
+            # claimed, so a nudge racing a real inbound message keeps the
+            # rescue (the human message still deserves a reply).
+            provenances = await history_repo.claimed_provenances(claimed_ids)
+            expect_send = any(p not in _SILENCE_OK_PROVENANCES for p in provenances)
             await session_svc.mark_dispatched(session_key)
 
             # Durable turn (Bob3 invariants 4-6): claim this conversation's
@@ -156,6 +168,12 @@ class DispatchRunner:
                 db=self.db,
                 system_content=spec.system_content,
                 max_history=spec.max_history,
+                # The claims this turn is answering: marks the new stimulus,
+                # keeps system nudges from reading as human speech, and
+                # re-presents the stimulus as a trailing user turn when the
+                # replay ends with a prior turn's reply (see prompt_assembler).
+                claimed_ids=set(claimed_ids),
+                send_tool_name=spec.send_tool_name,
             )
             if spec.transform_messages is not None:
                 messages = spec.transform_messages(messages)
@@ -190,16 +208,19 @@ class DispatchRunner:
 
             # Rescue: the turn wrote a reply but never called its send tool.
             # By the prompt contract ("your text output will NOT be sent…
-            # you MUST call this tool"), final-round text with no call is
-            # always a model-compliance failure, never an intent — patience-
-            # gated silence goes through the tool as NO_REPLY, which sets
-            # the sent flag. Deliver the text through the send tool itself,
-            # reusing its NO_REPLY semantics, citation stripping, and
-            # effects-outbox idempotency. (The old tap — a reminder retry —
-            # managed 0/20 and was removed.)
+            # you MUST call this tool"), final-round text with no call is a
+            # model-compliance failure, never an intent — patience-gated
+            # silence goes through the tool as NO_REPLY, which sets the sent
+            # flag. EXCEPTION: turns claimed by system nudges only
+            # (expect_send=False) may legitimately end with un-sent text —
+            # e.g. a goal-state fold summary — so they are not rescued.
+            # Deliver through the send tool itself, reusing its NO_REPLY
+            # semantics, citation stripping, and effects-outbox idempotency.
+            # (The old tap — a reminder retry — managed 0/20 and was removed.)
             if (not spec.message_was_sent[0]
                     and spec.send_tool_name
                     and spec.call_category in _SEND_RESCUE_CATEGORIES
+                    and expect_send
                     and result.strip()
                     and not is_no_reply(result)):
                 send_tool = next(
@@ -217,6 +238,13 @@ class DispatchRunner:
                         logger.exception(
                             "send-tool rescue failed (session=%s, dispatch=%s)",
                             session_key, spec.dispatch_id)
+            elif (spec.call_category in _SEND_RESCUE_CATEGORIES
+                    and not spec.message_was_sent[0] and result.strip()
+                    and not is_no_reply(result) and not expect_send):
+                logger.debug(
+                    "send-tool rescue skipped: nudge-only turn, un-sent text "
+                    "is internal (session=%s, dispatch=%s)",
+                    session_key, spec.dispatch_id)
 
             await self._record_history(spec, session_svc, result)
 

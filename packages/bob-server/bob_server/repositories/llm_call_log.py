@@ -100,6 +100,16 @@ class LlmCallLogRepository:
             "WHERE status = 'running' AND created_at < datetime('now', ?)",
             (f"-{stale_minutes} minutes",))
 
+    async def cancel_running(self) -> int:
+        """Boot sweep: at startup every 'running' row is a zombie — nothing
+        from the previous process can still be executing. Mark them
+        cancelled so the dashboard never shows dead calls as live (message
+        matches the manual convention used 2026-08-28)."""
+        return await self.db.execute(
+            "UPDATE llm_call_log SET status = 'cancelled', "
+            "error_message = 'Cancelled — server restart' "
+            "WHERE status = 'running'")
+
     # ------------------------------------------------------------- reads
 
     async def get(self, call_id: str) -> dict[str, Any] | None:

@@ -134,32 +134,46 @@ function CallDetailPage() {
   const { data: call } = useQuery<CallDetail>({
     queryKey: ["call-detail", callId],
     queryFn: () => fetchAPI<CallDetail>(`/calls/${callId}`),
+    // while running, messages_json gains each finished iteration's tool
+    // calls server-side — poll so the page shows tools from BEFORE the
+    // page was opened, not just events arriving live
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? 5000 : false,
   });
 
   const liveTools = useRef<Map<string, { name: string; args?: string; output?: string }>>(new Map());
+  const liveSeq = useRef(0);
+  const processedEvents = useRef<Set<unknown>>(new Set());
   const wsEvents = useWSEvents();
-  const _lastEvent = wsEvents[0];
 
   const isRunning = call?.status === "running";
 
-  if (isRunning && _lastEvent) {
-    const evt = _lastEvent;
-    const evtLogId = evt.payload?.log_id as string | undefined;
-    if (evtLogId === callId && evt.type === "llm.call.tool_completed") {
-      const toolName = evt.payload.tool_name as string;
-      const toolArgs = evt.payload.tool_args as Record<string, unknown> | undefined;
-      const toolOutput = evt.payload.tool_output as string | undefined;
-      liveTools.current.set(`${toolName}-${liveTools.current.size}`, {
-        name: toolName,
-        args: toolArgs ? JSON.stringify(toolArgs) : undefined,
-        output: toolOutput,
-      });
-    }
-    if (evt.type === "llm.call.completed" || evt.type === "llm.call.failed") {
-      if (liveTools.current.size > 0) {
-        liveTools.current.clear();
-        queryClient.invalidateQueries({ queryKey: ["call-detail", callId] });
-        queryClient.invalidateQueries({ queryKey: ["session-detail", sessionKey] });
+  // Process EVERY unseen buffered event (bursts of parallel tool calls
+  // would be dropped by looking at the newest only), and only events that
+  // belong to THIS call — other calls' completements used to clear the
+  // live tool list.
+  if (isRunning) {
+    for (const evt of wsEvents) {
+      if (processedEvents.current.has(evt)) continue;
+      processedEvents.current.add(evt);
+      const evtLogId = evt.payload?.log_id as string | undefined;
+      if (evtLogId !== callId) continue;
+      if (evt.type === "llm.call.tool_completed") {
+        const toolName = evt.payload.tool_name as string;
+        const toolArgs = evt.payload.tool_args as Record<string, unknown> | undefined;
+        const toolOutput = evt.payload.tool_output as string | undefined;
+        liveTools.current.set(`${liveSeq.current++}`, {
+          name: toolName,
+          args: toolArgs ? JSON.stringify(toolArgs) : undefined,
+          output: toolOutput,
+        });
+      }
+      if (evt.type === "llm.call.completed" || evt.type === "llm.call.failed") {
+        if (liveTools.current.size > 0) {
+          liveTools.current.clear();
+          queryClient.invalidateQueries({ queryKey: ["call-detail", callId] });
+          queryClient.invalidateQueries({ queryKey: ["session-detail", sessionKey] });
+        }
       }
     }
   }
@@ -181,11 +195,21 @@ function CallDetailPage() {
 
   const allMsgs = call.messages ?? [];
   const priorMessages = allMsgs.filter((m) => isChat(m) && m.role !== "system").slice(0, -1) as ChatMessage[];
-  const toolItems = call.tool_calls ?? [];
+  // completed calls carry the final tool_blocks; running calls update
+  // messages_json per iteration server-side, so the accumulated tool calls
+  // of finished iterations are already in allMsgs
+  const toolItems = call.tool_calls ?? allMsgs;
   const toolCalls = toolItems.filter(isToolCall);
   const toolOutputs = toolItems.filter(isToolOutput);
   const webSearches = allMsgs.filter(isWebSearch);
-  const liveToolEntries = [...liveTools.current.values()];
+  // a live card whose iteration has finished also arrives via messages —
+  // hide the live copy (key order differs, so normalize through parse)
+  const normArgs = (a?: string) => {
+    try { return JSON.stringify(JSON.parse(a ?? "")); } catch { return a ?? ""; }
+  };
+  const msgToolKeys = new Set(toolCalls.map((tc) => `${tc.name}||${normArgs(tc.arguments)}`));
+  const liveToolEntries = [...liveTools.current.values()].filter(
+    (lt) => !msgToolKeys.has(`${lt.name}||${normArgs(lt.args)}`));
 
   return (
     <div className="flex flex-col gap-3 p-3">

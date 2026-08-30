@@ -195,14 +195,24 @@ class GroupEventsMixin:
 
         from bob_server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
+        # Stored with provenance + a self-describing frame so later replays
+        # show WHAT happened without the reply guidance (that is turn-scoped,
+        # in system_content below — it must not pollute history forever).
+        notification_row = (
+            "## Group Member Change\n"
+            f"Group: {group_name or group_jid}\n"
+            f"Changed by: {sender_name or sender_jid or 'unknown'}\n\n"
+            f"{notification_text}"
+        )
         await session_svc.add_message(
-            session_key, "user", notification_text,
+            session_key, "user", notification_row,
             channel="whatsapp", sender_id=None, dispatched=0,
+            provenance="group_event",
         )
 
         # Build system prompt
         from bob_server.services.session_agenda_service import SessionAgendaService
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+        from bob_server.services.prompt_assembler import load_workspace_prompt
 
         agenda_svc = SessionAgendaService(self.ctx)
         agenda = await agenda_svc.get_effective_agenda(
@@ -213,8 +223,20 @@ class GroupEventsMixin:
         from bob_server.services.context_assembler import ContextAssembler
         participants_prompt = await ContextAssembler(self.ctx).participants_prompt(session_key)
 
+        # Turn-scoped handling note: greets are the point of this trigger, but
+        # irrelevant changes may stay silent. Previously injected by overriding
+        # the last user message — which could clobber a human message and is
+        # superseded by the [Group event] marker + trailing presentation.
+        handling_note = (
+            "## Group Member Change Handling\n"
+            "This turn was triggered by a group membership change (marked "
+            "[Group event] in the conversation). You do not need to reply unless "
+            "the change is contextually relevant — greeting a new member, "
+            "acknowledging a key person leaving. If no response is needed, call "
+            "send_whatsapp_message with 'NO_REPLY'."
+        )
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, agenda, handling_note) if p
         )
 
         # Build tools
@@ -262,26 +284,6 @@ class GroupEventsMixin:
 
         dispatch_id = str(uuid4())
 
-        user_content = "\n".join([
-            "## Group Member Change Notification",
-            f"Group: {group_name or group_jid}",
-            f"Changed by: {sender_name or sender_jid or 'unknown'}",
-            "",
-            notification_text,
-            "",
-            "This is a system notification. You do not need to reply unless the member change "
-            "is contextually relevant (e.g., greeting a new member, acknowledging a key person leaving). "
-            "If no response is needed, call send_whatsapp_message with 'NO_REPLY'.",
-        ])
-        if agenda:
-            user_content = agenda + "\n\n" + user_content
-
-        def _override_last_user_message(messages: list) -> list:
-            # Override the last user message with our notification
-            if messages and messages[-1].get("role") == "user":
-                messages[-1]["content"] = user_content
-            return messages
-
         from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
         dispatch_spec = DispatchSpec(
@@ -297,7 +299,6 @@ class GroupEventsMixin:
             history_policy="merged_skip_no_reply",
             message_was_sent=message_was_sent,
             sent_texts=sent_texts,
-            transform_messages=_override_last_user_message,
         )
 
         asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))

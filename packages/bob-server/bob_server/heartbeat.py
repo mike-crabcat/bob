@@ -119,9 +119,20 @@ _last_call_cleanup: datetime | None = None
 
 
 class SessionIdleSummaryTask:
-    """Detect idle sessions and trigger silent-turn memory extraction."""
+    """Detect idle sessions and trigger silent-turn memory extraction.
+
+    Extractions run DETACHED: a silent turn waits on the session's dispatch
+    gate, and awaiting that inline stalled the whole sequential heartbeat
+    cycle (2026-08-29: a 32-min group turn held a gate; the wakeup pump sat
+    behind it 28 min and a scheduled feature set aired late). One in-flight
+    extraction per session — the idle-candidates query only marks a session
+    done once its turn actually runs, so ticks would otherwise stack
+    duplicates behind the same gate."""
 
     name = "session_idle_summary"
+
+    _extraction_tasks: set[asyncio.Task] = set()
+    _pending_sessions: set[str] = set()
 
     async def _find_idle_sessions(
         self, db: Database, idle_threshold_minutes: float
@@ -132,29 +143,36 @@ class SessionIdleSummaryTask:
         return rows
 
     async def run(self, ctx: AppContext) -> None:
-        from bob_server.services.memory import MemoryService
-
         idle_threshold = ctx.settings.session_summary_idle_minutes
         idle_sessions = await self._find_idle_sessions(ctx.db, idle_threshold)
-        if not idle_sessions:
-            return
-
-        svc = MemoryService(ctx)
 
         for session in idle_sessions:
             session_key = session["session_key"]
-            try:
-                result = await svc.run_silent_turn_extraction(session_key)
-                logger.info(
-                    "Silent extraction %s for session %s: %s claim(s)",
-                    result.get("status"), session_key,
-                    result.get("claims_created", 0),
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to process session %s",
-                    session_key,
-                )
+            if session_key in self._pending_sessions:
+                continue
+            self._pending_sessions.add(session_key)
+            task = asyncio.create_task(self._extract_one(ctx, session_key))
+            self._extraction_tasks.add(task)  # strong ref: no silent GC
+            task.add_done_callback(self._extraction_tasks.discard)
+
+    async def _extract_one(self, ctx: AppContext, session_key: str) -> None:
+        from bob_server.services.memory import MemoryService
+
+        try:
+            result = await MemoryService(ctx).run_silent_turn_extraction(
+                session_key)
+            logger.info(
+                "Silent extraction %s for session %s: %s claim(s)",
+                result.get("status"), session_key,
+                result.get("claims_created", 0),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to process session %s",
+                session_key,
+            )
+        finally:
+            self._pending_sessions.discard(session_key)
 
 
 class CallCleanupTask:

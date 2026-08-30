@@ -19,6 +19,12 @@ from bob_server.services.base import BaseService
 
 logger = logging.getLogger(__name__)
 
+# Wall-clock budget for one routine dispatch (LLM iterations + tool rounds).
+# Routines are background bulletins, not work sessions — if a routine can't
+# do its job in two minutes, the fix is a better-scoped routine prompt (or a
+# background task it polls next run), not a longer turn.
+ROUTINE_WALL_CLOCK_SECONDS = 120.0
+
 _ROUTINE_COLUMNS = (
     "id, session_key, name, schedule, prompt, enabled, next_run_at, last_run_at, "
     "timezone, valid_from, valid_until, created_at, updated_at"
@@ -278,8 +284,11 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
             tools.append(Tool(
                 name="send_whatsapp_message",
                 description=(
-                    "Send a reply to the current WhatsApp conversation. "
-                    "You MUST call this tool to deliver your response — your text output will NOT be sent."
+                    "Post a message to the group chat. Only call this when the routine's "
+                    "instructions explicitly say to post to the chat. For one-line "
+                    "confirmations or anything marked 'in this session only', do NOT call "
+                    "it — your final text output is the reply and is logged to the "
+                    "conversation transcript without it."
                 ),
                 parameters={
                     "text": {"type": "string", "description": "The message text to send."},
@@ -295,6 +304,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         response = await LLMDispatchService(ctx).chat_with_tools(
             messages, tools,
             model=model_arg,
+            time_limit_seconds=ROUTINE_WALL_CLOCK_SECONDS,
             call_category="routine",
             session_key=session_key,
             dispatch_id=dispatch_id,

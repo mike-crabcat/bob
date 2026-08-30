@@ -58,3 +58,33 @@ async def test_throttles_to_daily(ctx):
 
     await task.run(ctx)
     assert heartbeat._last_llm_log_redaction == first_run, "second run within 24h must be a no-op"
+
+
+@pytest.mark.asyncio
+async def test_boot_sweep_cancels_zombie_running_rows(ctx):
+    """At startup every 'running' row is a zombie (nothing from the previous
+    process survives a restart). The sweep cancels exactly those — completed
+    and failed rows untouched, including the staleness task's own 'failed'."""
+    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+
+    now = datetime.now(timezone.utc)
+    await _insert_call(ctx.db, "zombie-call", now.strftime("%Y-%m-%d %H:%M:%S"))
+    await db_set_status(ctx.db, "zombie-call", "running")
+    await _insert_call(ctx.db, "done-call", now.strftime("%Y-%m-%d %H:%M:%S"))
+    await db_set_status(ctx.db, "done-call", "completed")
+
+    swept = await LlmCallLogRepository(ctx.db).cancel_running()
+    assert swept == 1
+
+    zombie = await ctx.db.fetch_one(
+        "SELECT status, error_message FROM llm_call_log WHERE id = 'zombie-call'")
+    assert zombie["status"] == "cancelled"
+    assert zombie["error_message"] == "Cancelled — server restart"
+    done = await ctx.db.fetch_one(
+        "SELECT status FROM llm_call_log WHERE id = 'done-call'")
+    assert done["status"] == "completed"
+
+
+async def db_set_status(db, call_id: str, status: str) -> None:
+    await db.execute(
+        "UPDATE llm_call_log SET status = ? WHERE id = ?", (status, call_id))
