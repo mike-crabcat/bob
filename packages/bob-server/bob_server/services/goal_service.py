@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,30 @@ from bob_server.repositories.goals import GoalRepository
 from bob_server.repositories.wakeups import WakeupRepository
 
 logger = logging.getLogger(__name__)
+
+# Lenient due extraction: reviser/model-written dues carry prose padding
+# ("Before 2026-09-01T10:00:00+08:00" seen live) around an ISO instant.
+_DUE_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?")
+
+
+def extract_due_instant(due: str | None) -> datetime | None:
+    """Pull a timezone-aware instant out of a next_action ``due`` string.
+    Naive timestamps are read as UTC (the reviser contract asks for ISO with
+    offset; prose like 'tomorrow' returns None — no false triggers)."""
+    if not due:
+        return None
+    match = _DUE_PATTERN.search(str(due))
+    if not match:
+        return None
+    raw = match.group(0).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 async def create_goal(
@@ -234,11 +259,13 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
     should be rescheduled, False to let the series lapse.
 
     Kinds:
-      routine — look up the routine definition and dispatch it (detached, so
-                a slow LLM run never blocks the pump). Deleted/disabled
-                routines end their series; a validity-window miss skips the
-                run but keeps the series alive.
-      wake    — goal-deadline or plain scheduled wake for a conversation.
+      routine     — look up the routine definition and dispatch it (detached,
+                    so a slow LLM run never blocks the pump). Deleted/disabled
+                    routines end their series; a validity-window miss skips
+                    the run but keeps the series alive.
+      action_due  — a goal next_action entering its due window (scheduled by
+                    schedule_due_action_wakes; payload carries the action).
+      wake        — goal-deadline or plain scheduled wake for a conversation.
     """
     from bob_server.services.wake_service import wake_conversation
 
@@ -262,7 +289,20 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
         if goal and goal["status"] != "active":
             return True  # goal already settled; wakeup is moot
 
-    if goal:
+    if wakeup.get("kind") == "action_due":
+        payload = json.loads(wakeup.get("payload_json") or "{}")
+        content = (
+            "## Goal action due\n"
+            f"Objective: {goal['objective'] if goal else '(goal gone)'}\n"
+            f"Due by {payload.get('due', '(unknown)')}: "
+            f"{payload.get('action', '(action not recorded)')}\n\n"
+            "Do it now, or — when the timing must be precise, or acting now "
+            "would land at an awkward hour — schedule a one-shot routine for "
+            "the right moment instead of sending immediately. Then update the "
+            "goal state so the action is not chased again."
+        )
+        category = "goal_action_due"
+    elif goal:
         content = (
             f"## Goal deadline reached\n"
             f"Objective: {goal['objective']}\n"
@@ -335,3 +375,54 @@ async def pump_due_wakeups(ctx: AppContext, *, limit: int = 20) -> int:
                 payload=payload,
             )
     return len(claimed)
+
+
+async def schedule_due_action_wakes(
+    ctx: AppContext, *,
+    lookahead_hours: float = 12.0,
+    overdue_hours: float = 24.0,
+    limit: int = 5,
+) -> int:
+    """Turn next_action dues into actual triggers (the 2026-08-31 coffee gap:
+    the reminder action sat in state with ``due: before 10am`` and nothing in
+    the system ever read it).
+
+    For every active goal, each next_action whose due instant falls in
+    (now - overdue_hours, now + lookahead_hours] gets ONE wakeup, firing at
+    due-minus-lookahead (the evening before for a morning due) so the woken
+    turn can act early or schedule a precise one-shot. Idempotent per
+    (goal, normalized due) across scheduled AND fired rows; dues older than
+    the overdue window are left to GoalReviewTask's stall escalation."""
+    from bob_server.services.goal_state_service import parse_strategy
+
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(hours=overdue_hours)
+    window_end = now + timedelta(hours=lookahead_hours)
+    repo = GoalRepository(ctx.db)
+    wake_repo = WakeupRepository(ctx.db)
+    scheduled = 0
+    for goal in await repo.list_active(limit=200):
+        for action in parse_strategy(goal).next_actions:
+            due_at = extract_due_instant(action.due)
+            if due_at is None or not (window_start < due_at <= window_end):
+                continue
+            due_key = due_at.astimezone(timezone.utc).isoformat()
+            if await wake_repo.action_due_scheduled(goal["id"], due_key):
+                continue
+            # Fire as the due enters the window (due-minus-lookahead, clamped
+            # to now for already-overdue dues) — the evening before for a
+            # morning due, so the woken turn can act early or schedule a
+            # precise one-shot. Wakes the WORKING conversation (§1.2 wake
+            # matrix — same target as reviser wakes, not the origin).
+            fire_at = max(due_at - timedelta(hours=lookahead_hours), now)
+            await wake_repo.schedule(
+                conversation_id=goal["conversation_id"],
+                not_before=fire_at.astimezone(timezone.utc).isoformat(),
+                goal_id=goal["id"],
+                kind="action_due",
+                payload={"due": due_key, "action": action.action[:400]},
+            )
+            scheduled += 1
+            if scheduled >= limit:
+                return scheduled
+    return scheduled
