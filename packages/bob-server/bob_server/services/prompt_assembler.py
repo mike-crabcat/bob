@@ -84,6 +84,25 @@ _cached_prompt: tuple[Any, str] | None = None  # (mtime_hash, content)
 _cached_mtime: dict[str, float] = {}
 
 
+def local_now_prompt_line() -> str:
+    """Turn-scoped clock line (live 2026-09-01: the system prompt carried a
+    static 'Timezone: Australia/Perth' but no current time — the model had
+    no grounding for date-relative reasoning, and computed UTC cron hours
+    into a local-hours routine contract). The stamp is the turn's START:
+    turns can run minutes, so precise/mid-turn times must be re-checked."""
+    from datetime import datetime
+    now = datetime.now().astimezone()
+    tz_name = now.tzname() or "server-local"
+    off = now.strftime("%z") or "+0000"
+    return (
+        f"Local time now: {now.strftime('%A %d %B %Y, %H:%M')} "
+        f"({tz_name}, UTC{off[:3]}:{off[3:]}) — taken at this turn's start. "
+        "For precise or mid-turn times, check with bash: "
+        "date '+%A %d %B %Y %H:%M %Z' — and always quote the timezone it "
+        "prints when stating times."
+    )
+
+
 async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     """Load and concatenate workspace files. Cached until any file changes."""
     global _cached_prompt, _cached_mtime
