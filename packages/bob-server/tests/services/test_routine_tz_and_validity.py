@@ -13,6 +13,36 @@ from bob_server.services.routine_service import (
     _format_routine_now,
     _outside_validity_window,
 )
+from bob_server.services.routine_tools import _routine_to_yaml
+
+
+def test_routine_yaml_echoes_next_fire_in_local_wall_clock():
+    """Live 2026-09-01 (Crypto-Bob group): three routines were written with
+    UTC cron hours against the documented local-hours contract and fired at
+    1am/4am. The tool response only ever showed raw UTC next_run_at, so the
+    writer never saw the wall-clock mismatch. The YAML must echo the next
+    fire as local wall-clock — the number to sanity-check against intent."""
+    routine = {
+        "name": "crypto-morning-trade",
+        "schedule": "0 9 * * *",
+        "prompt": "do the thing",
+        "enabled": 1,
+        "timezone": "Australia/Perth",
+        "next_run_at": "2026-09-01T01:00:00+00:00",  # 9am Perth
+    }
+    yaml = _routine_to_yaml(routine)
+    assert "next_fire_local" in yaml
+    assert "2026-09-01 09:00" in yaml  # AWST, not the UTC 01:00
+
+    # no timezone set -> still rendered, in the server's local zone
+    no_tz = dict(routine)
+    no_tz["timezone"] = None
+    assert "next_fire_local" in _routine_to_yaml(no_tz)
+
+    # no next_run (disabled/fresh) -> nothing echoed, no crash
+    fresh = dict(routine)
+    fresh["next_run_at"] = None
+    assert "next_fire_local" not in _routine_to_yaml(fresh)
 
 
 # ---------------------------------------------------------------------------

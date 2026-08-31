@@ -32,6 +32,31 @@ _ROUTINE_SELF_MANAGEMENT_RE = re.compile(
 )
 
 
+def _next_fire_local(routine: dict) -> str:
+    """Next fire as a human wall-clock in the routine's own timezone — the
+    number to sanity-check against intent. Live 2026-09-01: three crypto
+    routines were written with UTC cron hours against the documented
+    local-hours contract and fired at 1am/4am; the model only ever saw the
+    raw UTC next_run_at and never noticed."""
+    raw = routine.get("next_run_at")
+    if not raw:
+        return ""
+    try:
+        when = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return ""
+    tz = None
+    if routine.get("timezone"):
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(routine["timezone"])
+        except Exception:
+            tz = None
+    if tz is None:
+        tz = datetime.now().astimezone().tzinfo
+    return when.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
 def _routine_to_yaml(routine: dict) -> str:
     payload: dict = {
         "name": routine["name"],
@@ -45,6 +70,9 @@ def _routine_to_yaml(routine: dict) -> str:
         payload["valid_from"] = routine["valid_from"]
     if routine.get("valid_until"):
         payload["valid_until"] = routine["valid_until"]
+    local = _next_fire_local(routine)
+    if local:
+        payload["next_fire_local"] = local
     return yaml.dump(payload, default_flow_style=False)
 
 
