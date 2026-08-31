@@ -71,8 +71,17 @@ async def wake_conversation(
     *,
     call_category: str = "wakeup",
     metadata: dict[str, Any] | None = None,
+    provenance: str = "wake_nudge",
 ) -> bool:
     """Wake ``session_key`` with ``content`` as new context and run a turn.
+
+    ``provenance`` labels the stored row: ``steer`` rows (steering requests,
+    services/steering.py) carry requester attribution in their content and
+    count as a human stimulus for the dispatch runner's detach/silence
+    policies; ``task_relay`` rows (background-task results, backburner via
+    settle_goal) exist to speak — they stay rescue-eligible when the model
+    skips its send call, but never detach (relay detaching amplifies);
+    everything else stays a ``wake_nudge``.
 
     Returns True when a dispatch was armed, False when the content was stored
     but no dispatcher was available (it stays undispatched for recovery).
@@ -83,7 +92,7 @@ async def wake_conversation(
     await SessionService(ctx).add_message(
         session_key, "user", content,
         channel=channel, metadata=metadata, dispatched=0,
-        provenance="wake_nudge",
+        provenance=provenance,
     )
 
     if channel == "whatsapp":

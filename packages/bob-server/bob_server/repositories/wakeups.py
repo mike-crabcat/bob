@@ -20,6 +20,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_instant(value: str) -> datetime | None:
+    """Parse an ISO instant from a not_before/deadline string, tolerating a
+    trailing 'Z'. Returns None when unparseable."""
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 class WakeupRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -75,26 +84,50 @@ class WakeupRepository:
 
     async def claim_due(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Claim due wakeups by CAS scheduled→fired one at a time; only rows
-        this caller flipped are returned, so two pumps never double-fire."""
-        now = _now_iso()
-        due = await self.db.fetch_all(
-            """SELECT id FROM wakeups
-               WHERE status = 'scheduled' AND not_before <= ?
-               ORDER BY not_before LIMIT ?""",
-            (now, limit),
+        this caller flipped are returned, so two pumps never double-fire.
+
+        ``not_before`` values are compared as parsed instants, not strings:
+        goal-deadline wakeups carry whatever offset the deadline was written
+        with (e.g. ``+08:00``), which sorts ~8h late against the UTC ``now``
+        string (found live 2026-08-31 — the coffee goal's deadline wake)."""
+        now = datetime.now(timezone.utc)
+        candidates = await self.db.fetch_all(
+            """SELECT id, not_before FROM wakeups
+               WHERE status = 'scheduled'
+               ORDER BY not_before LIMIT 200""",
         )
+        due: list[str] = []
+        for row in candidates:
+            when = _parse_instant(row["not_before"])
+            if when is None or when <= now:
+                due.append(row["id"])   # unparseable: fire it (never otherwise due)
+            if len(due) >= limit:
+                break
         claimed: list[dict[str, Any]] = []
-        for row in due:
+        for wid in due:
             count = await self.db.execute(
                 "UPDATE wakeups SET status = 'fired' "
                 "WHERE id = ? AND status = 'scheduled'",
-                (row["id"],),
+                (wid,),
             )
             if count:
-                wakeup = await self.get(row["id"])
+                wakeup = await self.get(wid)
                 if wakeup:
                     claimed.append(wakeup)
         return claimed
+
+    async def action_due_scheduled(self, goal_id: str, due_key: str) -> bool:
+        """Dedup for the due-action sweep: has this (goal, due) already been
+        woken — scheduled OR already fired? Fired rows must count, or the next
+        sweep would re-create the wake forever."""
+        row = await self.db.fetch_one(
+            """SELECT 1 FROM wakeups
+               WHERE goal_id = ? AND kind = 'action_due'
+               AND json_extract(payload_json, '$.due') = ?
+               AND status IN ('scheduled', 'fired') LIMIT 1""",
+            (goal_id, due_key),
+        )
+        return row is not None
 
     async def list_all_scheduled(self, *, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(

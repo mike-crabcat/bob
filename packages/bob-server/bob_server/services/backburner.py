@@ -100,7 +100,9 @@ def applies(settings: Any, call_category: str, session_key: str) -> bool:
 
 
 def probe_model(settings: Any) -> str:
-    return settings.backburner.probe_model or settings.patience.model
+    return (settings.backburner.probe_model
+            or settings.patience.model
+            or settings.openai.get_memory_model())
 
 
 # ------------------------------------------------------- cancel plumbing
@@ -142,12 +144,18 @@ def request_kill(subagent_id: str) -> dict[str, Any]:
 # ------------------------------------------------------------------ probe
 
 def build_transcript(messages_json: str | None, *, max_tail: int = 20, item_cap: int = 240) -> str:
-    """Compact rendering of an in-flight chat_with_tools messages array.
+    """Compact rendering of the current turn's half of an in-flight
+    chat_with_tools messages array.
 
-    The probe sees the triggering user message plus recent tool activity —
-    never the system prompt (plan: detach_probe input column). Handles both
-    shapes the array contains: chat messages (``role``) and Responses-API
-    items (``type`` function_call / function_call_output).
+    The probe sees the triggering user message plus this turn's own tool
+    activity — never the system prompt, never earlier turns' history (plan:
+    detach_probe input column). The boundary is the last user message: the
+    array carries prior-turn chat history AND prior-turn tool items, and a
+    slow first response must not make the probe summarise stale work (found
+    live 2026-08-30: a group turn 32s in with zero tool calls of its own
+    showed the probe a full tail of the previous turns' merch/257 activity).
+    Handles both shapes the array contains: chat messages (``role``) and
+    Responses-API items (``type`` function_call / function_call_output).
     """
     from bob_server.services.llm_dispatch import _truncate_str
 
@@ -158,40 +166,45 @@ def build_transcript(messages_json: str | None, *, max_tail: int = 20, item_cap:
     if not isinstance(items, list):
         return ""
 
-    last_user = ""
+    # The triggering message is the last user item; the turn's own work is
+    # everything after it. No user item at all → unexpected shape, show nothing.
+    boundary = -1
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and it.get("role") == "user":
+            boundary = i
+    if boundary < 0:
+        return ""
+
+    content = items[boundary].get("content", "")
+    if isinstance(content, list):
+        content = " ".join(
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and p.get("type") != "input_image")
+    last_user = _truncate_str(content, item_cap)
+
     tail: list[str] = []
-    for it in items:
+    for it in items[boundary + 1:]:
         if not isinstance(it, dict):
             continue
-        role = it.get("role")
         itype = it.get("type")
         if itype == "function_call":
             args = _truncate_str(it.get("arguments", ""), 100)
             tail.append(f"-> calls {it.get('name', '?')}({args})")
         elif itype == "function_call_output":
             tail.append(f"   <- {_truncate_str(it.get('output', ''), item_cap)}")
-        elif role == "user":
-            content = it.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content
-                    if isinstance(p, dict) and p.get("type") != "input_image")
-            text = _truncate_str(content, item_cap)
-            if text.strip():
-                last_user = text
-        elif role == "assistant":
-            content = it.get("content", "")
-            text = _truncate_str(content, 160) if isinstance(content, str) else ""
+        elif it.get("role") == "assistant":
+            text = it.get("content", "")
+            text = _truncate_str(text, 160) if isinstance(text, str) else ""
             if text.strip():
                 tail.append(f"bob: {text}")
-        # role == "system": deliberately skipped
+        # role == "system": never present after the boundary
 
-    lines = []
-    if last_user:
-        lines.append(f"USER'S MESSAGE: {last_user}")
+    lines = [f"USER'S MESSAGE: {last_user}"]
     if tail:
         lines.append("WORK SO FAR:")
         lines.extend(tail[-max_tail:])
+    else:
+        lines.append("WORK SO FAR: (nothing yet — still on the first response)")
     return "\n".join(lines)
 
 
@@ -325,6 +338,16 @@ class BackburnerService(BaseService):
         info = await run_probe(self.ctx, spec.dispatch_id,
                                session_key=spec.session_key, contact_id=spec.contact_id)
 
+        # Race guard (live 2026-08-31, AI doom group): a finishing turn's
+        # send can land while the probe runs — the reply reached the group
+        # 2s before detach completed, then _terminal relayed the
+        # already-heard text back and the group got a duplicate. A turn
+        # that already spoke (or has finished) gains nothing from
+        # detaching — wait inline instead (the rare intermediate-send
+        # turn degrades the same way, bounded by max_run_seconds).
+        if llm_task.done() or spec.message_was_sent[0]:
+            return False
+
         try:
             # b. History snapshot for sends so far (D4: the detached path
             #    never writes conversation history again).
@@ -442,25 +465,25 @@ class BackburnerService(BaseService):
             try:
                 result = await llm_task
                 await self._terminal(
-                    subagent_id, goal_id, capture,
+                    subagent_id, goal_id, capture, spec,
                     status="completed", result_text=result)
                 return
             except asyncio.CancelledError:
                 reason = _cancel_reasons.pop(spec.dispatch_id, None) or _CANCEL_REASON_KILLED
                 if "user" in reason.lower():
                     await self._terminal(
-                        subagent_id, goal_id, capture,
+                        subagent_id, goal_id, capture, spec,
                         status="killed", result_text="")
                 else:
                     await self._terminal(
-                        subagent_id, goal_id, capture,
+                        subagent_id, goal_id, capture, spec,
                         status="failed",
                         result_text="the background work was stopped: it exceeded "
                                     "its wall-clock budget")
                 return
             except Exception as exc:
                 await self._terminal(
-                    subagent_id, goal_id, capture,
+                    subagent_id, goal_id, capture, spec,
                     status="failed", result_text=f"the background work failed: {exc}")
                 return
         except Exception:
@@ -470,9 +493,16 @@ class BackburnerService(BaseService):
             _dispatch_ids.pop(subagent_id, None)
 
     async def _terminal(self, subagent_id: str, goal_id: str,
-                        capture: dict, *, status: str, result_text: str) -> None:
+                        capture: dict, spec: Any, *, status: str,
+                        result_text: str) -> None:
         """Terminal transition: subagent row, goal settle (+ wake), captured
-        sends snapshotted into the result. Never raises."""
+        sends snapshotted into the result. Never raises.
+
+        Speak-expected wakes carry provenance ``task_relay``: relay turns
+        exist to deliver user-facing output, so dispatch_runner's send-tool
+        rescue must cover them when the model skips its send call (a
+        wake_nudge-labelled relay was silently dropped this way live,
+        2026-08-30 — the group never heard the task's outcome)."""
         from bob_server.services.dispatch_runner import is_no_reply
         from bob_server.repositories.subagents import SubagentRepository
         from bob_server.services.goal_service import settle_goal
@@ -486,7 +516,15 @@ class BackburnerService(BaseService):
 
         try:
             if status == "completed":
-                quiet = (not combined) or is_no_reply(combined)
+                # Backstop for the detach race (live 2026-08-31, AI doom
+                # group): the send can land between detach's guard and
+                # capture mode — nothing captured, and result_text is what
+                # the group already heard via spec.sent_texts. Relaying it
+                # would duplicate the reply, so settle quietly.
+                pre_sent = [t.strip() for t in (spec.sent_texts or []) if t.strip()]
+                already_delivered = not captured and combined in pre_sent
+                quiet = ((not combined) or is_no_reply(combined)
+                         or already_delivered)
                 await SubagentRepository(self.db).store_terminal(
                     subagent_id, status="completed",
                     result=combined or "(finished with no output)", now_iso=now)
@@ -502,7 +540,8 @@ class BackburnerService(BaseService):
                         "user with a short summary in your own voice. If part of it "
                         "failed, say so plainly.")
                     await settle_goal(self.ctx, goal_id, status="completed",
-                                      result=content, wake_content=content)
+                                      result=content, wake_content=content,
+                                      wake_provenance="task_relay")
             elif status == "killed":
                 await SubagentRepository(self.db).store_terminal(
                     subagent_id, status="killed",
@@ -520,7 +559,8 @@ class BackburnerService(BaseService):
                     "This background task failed. Tell the user plainly what happened "
                     "and decide whether it's worth retrying.")
                 await settle_goal(self.ctx, goal_id, status="failed",
-                                  result=content, wake_content=content)
+                                  result=content, wake_content=content,
+                                  wake_provenance="task_relay")
             logger.info("backburner: task %s -> %s", short, status)
         except Exception:
             logger.exception("backburner: terminal bookkeeping failed for %s", short)
@@ -554,7 +594,8 @@ class BackburnerService(BaseService):
                 "Tell the user it was interrupted and ask whether to redo it.")
             try:
                 if await settle_goal(self.ctx, goal["id"], status="failed",
-                                     result=content, wake_content=content):
+                                     result=content, wake_content=content,
+                                     wake_provenance="task_relay"):
                     moved += 1
             except Exception:
                 logger.warning("backburner: orphan settle failed for %s",

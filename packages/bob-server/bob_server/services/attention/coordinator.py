@@ -107,7 +107,7 @@ class AttentionCoordinator:
         sender_name: str = "",
         is_trusted: bool = False,
         probe_enabled: bool = False,
-        probe_model: str = "gpt-5.6-luna",
+        probe_model: str = "",
         event_id: str | None = None,
     ) -> None:
         """Register a message stimulus and (re)arm the session's window."""

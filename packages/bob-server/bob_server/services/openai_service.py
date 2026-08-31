@@ -305,6 +305,24 @@ def _accepts_reasoning_effort(model: str) -> bool:
             or model_registry.provider_for(model) == model_registry.PROVIDER_OPENROUTER)
 
 
+def _effective_reasoning_effort(model: str, explicit: str | None, settings: Any) -> str | None:
+    """Merge the per-call effort hint with the models.yaml per-model default.
+
+    An explicit caller hint wins (background passes pin their own); otherwise
+    the ``effort:`` map in models.yaml supplies the default, so thinking
+    models can be dialled down globally without touching call sites. Both
+    paths are gated on the model accepting the hint.
+    """
+    if not _accepts_reasoning_effort(model):
+        return None
+    if explicit is not None:
+        return explicit
+    config_dir = getattr(settings, "config_dir", None)
+    if config_dir is None:
+        return None
+    return model_registry.effort_defaults(config_dir).get(model)
+
+
 class OpenAIService(BaseService):
     """LLM reasoning through OpenAI Responses API."""
 
@@ -372,8 +390,10 @@ class OpenAIService(BaseService):
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
-        if reasoning_effort is not None and _accepts_reasoning_effort(resolved_model):
-            kwargs["reasoning"] = {"effort": reasoning_effort}
+        effort = _effective_reasoning_effort(
+            resolved_model, reasoning_effort, self._get_settings())
+        if effort is not None:
+            kwargs["reasoning"] = {"effort": effort}
 
         tools = self._merge_tools(model=resolved_model)
         if tools:
@@ -433,6 +453,10 @@ class OpenAIService(BaseService):
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
+        effort = _effective_reasoning_effort(
+            resolved_model, None, self._get_settings())
+        if effort is not None:
+            kwargs["reasoning"] = {"effort": effort}
 
         tools = self._merge_tools(model=resolved_model)
         if tools:
@@ -513,6 +537,14 @@ class OpenAIService(BaseService):
         """
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools, model=resolved_model)
+        request_kwargs: dict[str, Any] = {
+            "model": resolved_model,
+            "tools": merged_tools,
+        }
+        effort = _effective_reasoning_effort(
+            resolved_model, None, self._get_settings())
+        if effort is not None:
+            request_kwargs["reasoning"] = {"effort": effort}
         t0 = time.monotonic()
         deadline = t0 + time_limit_seconds if time_limit_seconds is not None else None
 
@@ -530,9 +562,8 @@ class OpenAIService(BaseService):
                         "far is complete, remaining steps were skipped.")
 
             response = await self._client_for(resolved_model).responses.create(
-                model=resolved_model,
                 input=messages,
-                tools=merged_tools,
+                **request_kwargs,
             )
 
             usage = getattr(response, "usage", None)
@@ -716,6 +747,14 @@ class OpenAIService(BaseService):
         then streams the final text response for real-time consumption."""
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools, model=resolved_model)
+        request_kwargs: dict[str, Any] = {
+            "model": resolved_model,
+            "tools": merged_tools,
+        }
+        effort = _effective_reasoning_effort(
+            resolved_model, None, self._get_settings())
+        if effort is not None:
+            request_kwargs["reasoning"] = {"effort": effort}
         t0 = time.monotonic()
 
         total_input = total_output = total_total = 0
@@ -733,9 +772,8 @@ class OpenAIService(BaseService):
         # Tool loop: non-streaming rounds until LLM gives a text response
         for iteration in range(max_iterations):
             response = await self._client_for(resolved_model).responses.create(
-                model=resolved_model,
                 input=messages,
-                tools=merged_tools,
+                **request_kwargs,
             )
 
             usage = getattr(response, "usage", None)

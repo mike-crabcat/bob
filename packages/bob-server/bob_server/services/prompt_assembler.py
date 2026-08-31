@@ -32,6 +32,7 @@ MAX_INLINE_MEDIA = 3
 NEW_MARKER = "[NEW — awaiting your reply] "
 SYSTEM_NOTE_MARKER = "[system notification — not from the human] "
 GROUP_EVENT_MARKER = "[Group event] "
+STEER_MARKER = "[system relay — steering request] "
 
 # Appended after the replay when the turn's claims are nudges only: these
 # turns fold state silently (mirrors _SILENCE_OK_PROVENANCES in
@@ -81,6 +82,25 @@ _DEPRECATED_WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md")
 # Module-level cache for workspace file content.
 _cached_prompt: tuple[Any, str] | None = None  # (mtime_hash, content)
 _cached_mtime: dict[str, float] = {}
+
+
+def local_now_prompt_line() -> str:
+    """Turn-scoped clock line (live 2026-09-01: the system prompt carried a
+    static 'Timezone: Australia/Perth' but no current time — the model had
+    no grounding for date-relative reasoning, and computed UTC cron hours
+    into a local-hours routine contract). The stamp is the turn's START:
+    turns can run minutes, so precise/mid-turn times must be re-checked."""
+    from datetime import datetime
+    now = datetime.now().astimezone()
+    tz_name = now.tzname() or "server-local"
+    off = now.strftime("%z") or "+0000"
+    return (
+        f"Local time now: {now.strftime('%A %d %B %Y, %H:%M')} "
+        f"({tz_name}, UTC{off[:3]}:{off[3:]}) — taken at this turn's start. "
+        "For precise or mid-turn times, check with bash: "
+        "date '+%A %d %B %Y %H:%M %Z' — and always quote the timezone it "
+        "prints when stating times."
+    )
 
 
 async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
@@ -317,8 +337,8 @@ async def build_chat_messages(
 
     ``claimed_ids`` are the message ids this dispatch turn claimed from pending
     (DispatchRunner). When set, claimed human/group-event rows are marked
-    [NEW — awaiting your reply], system-generated rows (wake_nudge, group_event
-    provenances) are labelled so they never read as human speech, and — when the
+    [NEW — awaiting your reply], system-generated rows (wake_nudge, group_event,
+    steer provenances) are labelled so they never read as human speech, and — when the
     replay ends with the prior turn's reply (mid-turn-arrival shape) — a trailing
     user turn re-presents the new stimulus so the input ends user-final. Turns
     claimed by nudges alone get a system directive to fold silently instead.
@@ -423,6 +443,13 @@ async def build_chat_messages(
                     content = GROUP_EVENT_MARKER + content
                     if is_claimed:
                         group_event_claimed = True
+                elif prov == "steer":
+                    # Steering requests (services/steering.py): attributed in
+                    # their own content header, marked here as a system relay
+                    # so they never read as someone speaking in this chat.
+                    # Claimed rows fall through to the NEW marker below — a
+                    # steer IS this turn's stimulus, not a fold-silently nudge.
+                    content = STEER_MARKER + content
                 if is_claimed and prov != "wake_nudge":
                     content = NEW_MARKER + content
                     sender_prefix = ""

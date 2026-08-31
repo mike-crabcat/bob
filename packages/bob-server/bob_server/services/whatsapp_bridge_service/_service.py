@@ -745,6 +745,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             chat_kind=chat_kind,
             contact_id=contact_id,
             is_trusted=is_trusted,
+            human_initiated=True,
             sender_name=sender_name,
             text_preview=text[:100],
         )
@@ -785,7 +786,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             sender_name=sender_name or "",
             is_trusted=is_trusted,
             probe_enabled=probe_enabled,
-            probe_model=settings.patience.model,
+            probe_model=settings.patience.model or settings.openai.get_memory_model(),
             event_id=ingress_event_id,
         )
 
@@ -803,12 +804,18 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         chat_kind: str,
         contact_id: str | None,
         is_trusted: bool,
+        human_initiated: bool,
         sender_name: str = "",
         text_preview: str = "",
     ) -> "DispatchSpec":
         """Assemble the full inbound-WhatsApp DispatchSpec (system prompt,
         tools, send tool, quota handling). Shared by the live inbound path
-        and the crash-recovery sweep (`resume_pending_sessions`)."""
+        (human_initiated=True), the wake path and the crash-recovery sweep
+        (`wake_session`, which derives the flag from the undispatched rows).
+
+        human_initiated splits the cross-conversation messaging tools so the
+        model can't pick wrong: human-started turns get steer_conversation
+        only, autonomous wake turns get send_whatsapp_group_message only."""
         from bob_server.services.context_assembler import ContextAssembler
         from bob_server.services.prompt_assembler import load_workspace_prompt
 
@@ -832,8 +839,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # the old outreach block; outreach state rides in the goal itself.
         goals_prompt = await assembler.goals_block(session_key)
 
+        # Turn-start clock first: date-relative reasoning ("tomorrow",
+        # "this week") and local-vs-UTC arithmetic need a grounded now
+        # (2026-09-01 routine-misfire follow-up).
+        from bob_server.services.prompt_assembler import local_now_prompt_line
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
+            p for p in (local_now_prompt_line(), workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
         )
 
         from bob_server.services.llm_dispatch import LLMDispatchService
@@ -855,15 +866,26 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
-        # Bob Events §1.5: proactive group send — trusted only; each target
-        # group must also enable it via conversation policy (off by default).
-        # Also carries request_group_message (per-message approval for
-        # human-requested cross-group sends); requester_contact_id is the
-        # dispatching sender's contact — group bindings carry none themselves.
-        if is_trusted:
+        # Bob Events §1.5: proactive group send — autonomous wake-path turns
+        # only (goal deadlines, reviser wakes, nudges), trusted only; each
+        # target group must also enable it via conversation policy (off by
+        # default). Human-started turns get steer_conversation instead:
+        # attaching both let the model route user-requested messaging through
+        # the verbatim direct send (2026-08-30 AI-doom double-post), so the
+        # split is structural now.
+        if is_trusted and not human_initiated:
             from bob_server.services.whatsapp_outreach_tools import make_group_send_tools
-            tools.extend(make_group_send_tools(
-                self.ctx, self, session_key, requester_contact_id=contact_id))
+            tools.extend(make_group_send_tools(self.ctx, self, session_key))
+
+        # Steering (docs/steering-plan.md): any turn a human contact started
+        # can request a steer — owner requests fire directly, everyone
+        # else's routes through owner approval. Wake-path turns never steer
+        # (no nested steering): they may carry the route's contact id, but
+        # no human dispatched them, so the gate is the dispatch origin, not
+        # contact resolution.
+        if contact_id and human_initiated:
+            from bob_server.services.steering import make_steering_tools
+            tools.extend(make_steering_tools(self.ctx, session_key, contact_id))
 
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:
@@ -1032,9 +1054,15 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         completions, subagent results, deadline wakeups): the caller stores
         an undispatched user message, then this runs a turn through the full
         inbound pipeline (attention coordinator, turn claims, effect sends).
+
+        The turn counts as human-initiated when any undispatched row is a
+        raw inbound message (no provenance label) — e.g. post-call occupancy
+        drain of queued human texts, or crash recovery of a never-dispatched
+        inbound. Pure wake-content rows keep the turn autonomous.
         """
         from bob_server.repositories.conversations import (
             ConversationRepository, wa_send_jid)
+        from bob_server.repositories.history import HistoryRepository
         route = await ConversationRepository(self.db).route_for(session_key)
         jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
         if not jid:
@@ -1053,6 +1081,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             chat_kind=chat_kind,
             contact_id=contact_id,
             is_trusted=is_trusted,
+            human_initiated=await HistoryRepository(self.db).has_undispatched_inbound(
+                session_key),
         )
 
         from bob_server.services.attention import AttentionCoordinator

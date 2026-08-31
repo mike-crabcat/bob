@@ -299,7 +299,10 @@ class PatienceSettings:
     """Configuration for the patience dispatch system."""
 
     enabled: bool = False
-    model: str = "gpt-5.6-luna"
+    # Empty → openai memory model (get_memory_model()), so the attention
+    # probe follows the configured model chain instead of pinning a vendor
+    # default that silently survives a /model or .env migration.
+    model: str = ""
     bot_name: str = "Bot"
     max_pending_items: int = 20
     max_context_messages: int = 10
@@ -391,9 +394,12 @@ class GoalsSettings:
     # Output-token ceiling for one reviser pass. max_output_tokens caps
     # reasoning AND content together on thinking models — 900 let GLM burn
     # the whole budget on reasoning and return empty text (every call
-    # degraded to wake until 2026-08-29). 4000 leaves room for low-effort
-    # reasoning plus the state JSON.
-    reviser_max_tokens: int = 4000
+    # degraded to wake until 2026-08-29). 4000 turned out to fit the state
+    # JSON alone and nothing else: live goal states run ~16k chars (~4.2k
+    # tokens), so 2026-08-31 logs showed exactly-4000 outputs truncating
+    # mid-JSON on every fold. 16000 = today's content + low-effort
+    # reasoning + growth headroom; unused budget costs nothing.
+    reviser_max_tokens: int = 16000
     max_concurrent_revisions: int = 3
     max_cas_retries: int = 3
     # Progress-review loop (§4.1); BOB_GOAL_REVIEW_DISABLED is the runtime
@@ -676,7 +682,7 @@ class Settings:
 
         patience = PatienceSettings(
             enabled=os.getenv("BOB_PATIENCE_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
-            model=os.getenv("BOB_PATIENCE_MODEL", "gpt-5.6-luna"),
+            model=os.getenv("BOB_PATIENCE_MODEL", ""),
             bot_name=os.getenv("BOB_SELF_NAME", "Bob"),
             max_pending_items=int(os.getenv("BOB_PATIENCE_MAX_PENDING", "20")),
             max_context_messages=int(os.getenv("BOB_PATIENCE_MAX_CONTEXT", "10")),
@@ -756,7 +762,7 @@ class Settings:
             dream=dream,
             goals=GoalsSettings(
                 reviser_model=os.getenv("BOB_GOALS_REVISER_MODEL", ""),
-                reviser_max_tokens=int(os.getenv("BOB_GOALS_REVISER_MAX_TOKENS", "4000")),
+                reviser_max_tokens=int(os.getenv("BOB_GOALS_REVISER_MAX_TOKENS", "16000")),
                 max_concurrent_revisions=int(os.getenv("BOB_GOALS_MAX_CONCURRENT_REVISIONS", "3")),
                 max_cas_retries=int(os.getenv("BOB_GOALS_MAX_CAS_RETRIES", "3")),
                 review_threshold_hours=float(os.getenv("BOB_GOAL_REVIEW_THRESHOLD_HOURS", "24")),

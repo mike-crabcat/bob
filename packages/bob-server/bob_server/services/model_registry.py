@@ -16,6 +16,8 @@ restart):
       chinese: z-ai/glm-5.3-flash
     pricing:            # USD per 1M tokens: [input, output]
       z-ai/glm-5.3-flash: [0.075, 0.25]
+    effort:             # reasoning-effort hint, applied when a caller pins none
+      z-ai/glm-5.3-flash: medium
 """
 
 from __future__ import annotations
@@ -89,6 +91,34 @@ def pricing(config_dir: Path) -> dict[str, tuple[float, float]]:
                     out[slug.strip()] = (float(rates[0]), float(rates[1]))
                 except (TypeError, ValueError):
                     logger.warning("models.yaml pricing for %s is not numeric — ignored", slug)
+    return out
+
+
+# Reasoning-effort levels the OpenAI Responses API and OpenRouter's gateway
+# both understand. Anything else in models.yaml is a typo that would 400
+# every main turn, so it's warned about and ignored instead.
+_VALID_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+
+
+def effort_defaults(config_dir: Path) -> dict[str, str]:
+    """Model slug → reasoning-effort hint, from models.yaml's ``effort:`` map.
+
+    Applied by openai_service when a caller doesn't pin its own effort
+    (main turns pin none): a thinking model at default effort reasons at full
+    budget — ~95% of GLM-5.3-flash output tokens — which dominates turn
+    latency. Levels are normalised lowercased; unknown values are ignored.
+    """
+    raw = _load_models(config_dir).get("effort") or {}
+    out: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for slug, effort in raw.items():
+            if not (isinstance(slug, str) and isinstance(effort, str)):
+                continue
+            level = effort.strip().lower()
+            if level not in _VALID_EFFORTS:
+                logger.warning("models.yaml effort for %s is not a known level (%r) — ignored", slug, effort)
+                continue
+            out[slug.strip()] = level
     return out
 
 

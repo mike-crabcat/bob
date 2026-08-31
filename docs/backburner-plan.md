@@ -132,7 +132,7 @@ Ordered — b/c/d/f/g happen while the gate is still held, then `run()` returns:
 |---|---|
 | `call_category` | `detach_probe` (joins the existing `_probe` family: `attention_probe`, `claim_router_probe`, `outreach_probe`) |
 | Model | `settings.patience.model` (the Tier-2 probe model — already configured, already cheap) |
-| Input | running row's `messages_json` (the user message + tool calls/results so far), capped (reuse `_cap_item`-style truncation, last-N items); never the raw system prompt |
+| Input | running row's `messages_json` (the user message + tool calls/results so far), capped (reuse `_cap_item`-style truncation, last-N items); never the raw system prompt. **Live fix 2026-08-30:** the messages array carries prior-turn history *including* prior-turn tool items — the probe transcript is now cut at the last user message (trigger = its content, work = only items after it). Found live: a group turn 32s in with zero tool calls of its own showed the probe a full tail of the previous turns' merch/257 work; the summary survived on the user message alone, but the probe could have summarised the wrong turn. |
 | Output | JSON `{summary, holding_text}` — summary one or two lines ("what this turn is doing"); holding ack short, in Bob's voice, honest |
 | Timebox | ~8s `asyncio.wait`; on timeout/error → templates: summary "working on the last request" / ack "Still working on that — I'll get back to you shortly." |
 | Locks | none — plain `chat()` call, no session gate, no claims |

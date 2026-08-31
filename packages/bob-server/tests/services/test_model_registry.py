@@ -14,6 +14,8 @@ aliases:
   Chinese: z-ai/glm-5.3-flash
 pricing:
   z-ai/glm-5.3-flash: [0.075, 0.25]
+effort:
+  z-ai/glm-5.3-flash: Medium
 """
 
 
@@ -82,6 +84,28 @@ def test_malformed_yaml_is_tolerated(tmp_path):
 
 def test_pricing_load(cfg):
     assert model_registry.pricing(cfg) == {"z-ai/glm-5.3-flash": (0.075, 0.25)}
+
+
+def test_effort_defaults_normalise_and_skip_unknown(cfg):
+    assert model_registry.effort_defaults(cfg) == {"z-ai/glm-5.3-flash": "medium"}
+    (cfg / "models.yaml").write_text(
+        "effort:\n  z-ai/glm-5.3-flash: mdium\n  z-ai/glm-5.3: HIGH\n",
+        encoding="utf-8")
+    st = (cfg / "models.yaml").stat()
+    import os
+    os.utime(cfg / "models.yaml", ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    # A typo is dropped, not passed through to the API; valid levels normalise.
+    assert model_registry.effort_defaults(cfg) == {"z-ai/glm-5.3": "high"}
+
+
+def test_effort_defaults_absent_keys(cfg):
+    assert model_registry.effort_defaults(cfg).get("gpt-5.6-sol") is None
+    model_registry._models_cache = None
+    (cfg / "models.yaml").write_text("aliases:\n", encoding="utf-8")
+    try:
+        assert model_registry.effort_defaults(cfg) == {}
+    finally:
+        model_registry._models_cache = None
 
 
 def test_mtime_reload(cfg):

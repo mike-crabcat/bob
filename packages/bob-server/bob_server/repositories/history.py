@@ -209,6 +209,23 @@ class HistoryRepository:
             (await self._cid(session_key),))
         return [r["id"] for r in rows]
 
+    async def has_undispatched_inbound(self, session_key: str) -> bool:
+        """Whether any undispatched user row is a raw human message.
+
+        Inbound WhatsApp rows are stored with no provenance label; wake-path
+        rows always carry one (wake_nudge / steer / task_relay). The bridge's
+        tool assembly reads this to tell turns a human started (get
+        steer_conversation) from autonomous wake turns (get the proactive
+        group-send tool) — same NULL-vs-labelled distinction the send-tool
+        rescue uses via claimed_provenances.
+        """
+        row = await self.db.fetch_one(
+            "SELECT 1 FROM messages "
+            "WHERE conversation_id = ? AND role = 'user' AND dispatched = 0 "
+            "AND provenance IS NULL LIMIT 1",
+            (await self._cid(session_key),))
+        return row is not None
+
     async def claimed_provenances(self, message_ids: list[str]) -> list[str]:
         """Provenance values of the messages a dispatch claimed (NULL → "").
 

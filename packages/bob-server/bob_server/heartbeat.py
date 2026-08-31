@@ -668,6 +668,42 @@ class GoalReviewTask:
                         reviewed, escalated)
 
 
+_last_due_sweep: datetime | None = None
+
+
+class GoalDueTask:
+    """Due-action scheduler (2026-08-31 coffee gap): next_action dues were
+    dead weight — correct in state, read by nothing. This sweep turns each
+    due entering a 12h window into ONE goal wake (fires at due-minus-12h, so
+    a morning due surfaces the evening before), letting the woken turn act
+    or schedule a precise one-shot. Overdue-beyond-24h dues stay with
+    GoalReviewTask's stall escalation. Kill switch:
+    ``BOB_GOAL_DUE_DISABLED=1``."""
+
+    name = "goal_due_sweep"
+    _THROTTLE = timedelta(minutes=15)
+
+    async def run(self, ctx: AppContext) -> None:
+        global _last_due_sweep
+        import os as _os
+        if _os.getenv("BOB_GOAL_DUE_DISABLED", "").strip().lower() in (
+                "1", "true", "yes", "on"):
+            return
+        now = datetime.now(timezone.utc)
+        if _last_due_sweep and (now - _last_due_sweep) < self._THROTTLE:
+            return
+        _last_due_sweep = now
+
+        from bob_server.services.goal_service import schedule_due_action_wakes
+        try:
+            scheduled = await schedule_due_action_wakes(ctx)
+        except Exception:
+            logger.exception("goal due sweep failed")
+            return
+        if scheduled:
+            logger.info("goal due sweep: %d action wake(s) scheduled", scheduled)
+
+
 _last_deletion_propagation: datetime | None = None
 
 

@@ -171,6 +171,14 @@ Rules:
   satisfied — or decide_by has passed — set next_actions to decide/settle
   (e.g. "settle this goal: quorum reached", "decide now with what you have")
   and wake_needed=true. Do not settle anything yourself; the woken model does.
+- Time-bound goals: when a concrete date-time is agreed (meetup, launch,
+  call), encode follow-through as next_actions with explicit ISO `due`
+  timestamps INCLUDING their UTC offset (e.g. the reminder due the evening
+  before, recording the outcome due just after) — not prose like "before the
+  meetup". A scheduler wakes the assistant when a due enters its window, so
+  only a real timestamp triggers follow-through; prose dues never fire. When
+  the event instant differs from the goal's deadline, note in `known` that
+  the deadline should be the event time (the main model owns setting it).
 
 Respond with ONLY a JSON object:
 {"state": {"v": 2, "plan": "...", "known": ["..."], "open_questions": ["..."],

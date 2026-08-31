@@ -32,6 +32,7 @@ from bob_server.heartbeat import (
     ClaimRouterSweepTask,
     OutreachDetectorSweepTask,
     GoalReviewTask,
+    GoalDueTask,
     WakeupPumpTask,
     DeletionPropagationTask,
     GrowthMonitoringTask,
@@ -168,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(ClaimRouterSweepTask())
         runner.register(OutreachDetectorSweepTask())
         runner.register(GoalReviewTask())
+        runner.register(GoalDueTask())
         runner.register(DeletionPropagationTask())
         runner.register(GrowthMonitoringTask())
         runner.register(SessionIdleSummaryTask())

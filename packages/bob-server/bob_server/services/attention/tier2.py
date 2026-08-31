@@ -67,7 +67,7 @@ async def probe_actionability(
     session_key: str,
     *,
     bot_name: str = "Bob",
-    model: str = "gpt-5.6-luna",
+    model: str = "",
     max_context_messages: int = 10,
 ) -> str:
     try:
@@ -87,7 +87,7 @@ async def probe_decide(
     context_text: str,
     *,
     bot_name: str = "Bob",
-    model: str = "gpt-5.6-luna",
+    model: str = "",
     session_key: str = "",
 ) -> str:
     """Run the Tier 2 probe on an already-built context. Shared by the live
@@ -102,7 +102,11 @@ async def probe_decide(
              {"role": "user", "content": context_text}],
             model=model,
             temperature=0.0,
-            max_tokens=200,
+            # Headroom for low-effort reasoning — the verdict JSON is ~40
+            # tokens, but thinking models spend reasoning from the same
+            # budget (claim_router probe hit this at 60). Empty model
+            # resolves through llm_dispatch to the configured default.
+            max_tokens=300,
             reasoning_effort="low",
             call_category="attention_probe",
             session_key=session_key,

@@ -92,24 +92,20 @@ def make_group_send_tools(
     ctx: AppContext,
     wa_service: WhatsAppBridgeService,
     current_session_key: str,
-    *,
-    requester_contact_id: str | None = None,
 ) -> list:
-    """Group-send tools (Bob Events §1.5 + the approval-gated extension).
+    """Proactive group send (Bob Events §1.5).
 
-    Two paths, one primitive (``_deliver_group_send``):
+    ``send_whatsapp_group_message`` — Bob-initiated sends on autonomous
+    (wake-path) turns only, gated per group on conversation policy
+    ``group_outbound_enabled`` (off by default; the migration-452 policy_json
+    machinery), requiring an active group binding (membership) and
+    rate-limited per group.
 
-    - ``send_whatsapp_group_message`` — Bob-initiated proactive sends, gated
-      per group on conversation policy ``group_outbound_enabled`` (off by
-      default; the migration-452 policy_json machinery).
-    - ``request_group_message`` — human-requested sends to any group Bob is
-      a member of, gated on per-message approval by the owner (routed to
-      their DM); requests from the owner go straight through.
-
-    Both require an active group binding (membership) and are rate-limited
-    per group; ``requester_contact_id`` is the dispatching sender's contact
-    (group bindings carry none themselves — it must be threaded in by the
-    caller, and stays None on wake-path turns)."""
+    Human-requested cross-conversation messaging is steering
+    (services/steering.py) — the old verbatim relay (request_group_message +
+    the group_send approval) was retired with it, and human-started turns
+    now carry steer_conversation instead of this tool, so the two paths never
+    compete for the same turn."""
 
     @tool
     async def send_whatsapp_group_message(
@@ -118,9 +114,12 @@ def make_group_send_tools(
         goal_id: str = "",
     ) -> str:
         """Send a proactive message to a WhatsApp group you are a member of
-        (group_id is the raw group id, no @g.us). Use for polls, updates, and
-        reminders tied to a plan; pass goal_id when the send serves a goal so
-        the send is attributable. Requires the group to allow outbound sends."""
+        (group_id is the raw group id, no @g.us). For Bob-initiated posts —
+        polls, updates, reminders tied to a plan — and only to groups with
+        outbound sends enabled; pass goal_id when the send serves a goal so
+        it's attributable. User-requested messaging is not this tool: turns
+        a human started carry steer_conversation instead (any conversation
+        they belong to, no policy flag, can carry images)."""
         import time
 
         from bob_server.repositories.conversations import ConversationRepository
@@ -157,46 +156,7 @@ def make_group_send_tools(
 
         return json.dumps({"ok": True, "chat_id": f"{group_id}@g.us"})
 
-    @tool
-    async def request_group_message(
-        group_id: str,
-        message: str,
-        note: str = "",
-    ) -> str:
-        """Send a message to a different WhatsApp group Bob is a member of (group_id is the raw group id, no @g.us — get it from find_session). Each request is approved per message by the owner in their DM; the exact text you pass is what gets delivered, unchanged."""
-        import time
-
-        from bob_server.repositories.conversations import ConversationRepository
-
-        if not wa_service.connected:
-            return json.dumps({"ok": False, "error": "WhatsApp bridge is not connected"})
-
-        group_key = f"agent:main:whatsapp:group:{group_id}"
-        conv_repo = ConversationRepository(ctx.db)
-
-        # Membership: an active group binding must exist for this group.
-        binding = await conv_repo.active_binding(group_key)
-        if not binding or binding.get("endpoint_kind") != "group":
-            return json.dumps({"ok": False,
-                               "error": "Not a member of that group (no active group binding)"})
-
-        from bob_server.repositories.groups import GroupRepository
-        group = await GroupRepository(ctx.db).get_by_jid(f"{group_id}@g.us")
-        group_name = group["name"] if group else None
-
-        # Advisory pre-check only — the rate-limit slot is consumed on
-        # delivery, so rejected requests don't burn budget.
-        if not _group_send_allowed(group_key, time.monotonic()):
-            return json.dumps({"ok": False, "error": "Group send rate limit reached; retry later"})
-
-        from bob_server.services.group_send_approval import create_request
-        result = await create_request(
-            ctx, group_id=group_id, group_key=group_key, group_name=group_name,
-            message=message, note=note, origin_session_key=current_session_key,
-            requester_contact_id=requester_contact_id)
-        return json.dumps(result)
-
-    return [send_whatsapp_group_message, request_group_message]
+    return [send_whatsapp_group_message]
 
 
 def make_whatsapp_outreach_tools(
