@@ -373,3 +373,26 @@ async def test_replay_after_inline_delivery_is_idempotent(ctx, db, mock_wake,
     effects_after = await db.fetch_one(
         "SELECT COUNT(*) AS n FROM effects WHERE kind = 'goal_revise_state'")
     assert effects_before["n"] == effects_after["n"] == 1
+
+
+async def test_routed_event_is_awaited_on_the_bus(ctx, db, mock_wake, llm_chat):
+    """The telemetry publish is a coroutine and must be awaited — it was a
+    bare call until 2026-08-31, so every routing sweep logged 'coroutine
+    EventBus.publish was never awaited' and no event ever reached the bus."""
+    await _seed_goal_with_entity_ref(ctx, "event-team-lunch")
+    await _seed_entity(db, "event-team-lunch")
+    await _seed_entity(db, "person-alice", "person")
+    await _seed_message(db, "msg-extr-m9", GROUP_KEY)
+    await _seed_claim(db, "claim-r9", "event-team-lunch", "attendee",
+                      object_id="person-alice", message_ids=["msg-extr-m9"])
+
+    published: list[tuple[str, dict]] = []
+
+    class _Bus:
+        async def publish(self, event_type, payload):
+            published.append((event_type, payload))
+
+    ctx.event_bus = _Bus()
+    await _run_batch(ctx, marker="msg-extr-m9")
+    assert [(t, p["claims"]) for t, p in published] == \
+        [("memory.claims_created", 1)]

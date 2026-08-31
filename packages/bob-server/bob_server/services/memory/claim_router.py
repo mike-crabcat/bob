@@ -192,7 +192,7 @@ async def handle_extraction_batch(
     bus = getattr(ctx, "event_bus", None)
     if bus is not None and event_id:
         try:
-            bus.publish(ROUTED_EVENT_TYPE, {
+            await bus.publish(ROUTED_EVENT_TYPE, {
                 "session_key": session_key, "event_id": event_id,
                 "claims": len(batch["claim_ids"]),
             })
