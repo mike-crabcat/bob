@@ -10,7 +10,13 @@ Pinned here:
 - capture mode: post-detach sends are captured, never delivered
 - kill: live task cancels and settles quietly (no wake); already-finished is
   an error so the model relays the result instead
-- watchdog boundary: a turn that finishes inside the threshold never detaches
+- watchdog boundary: a turn that finishes inside the threshold never detaches;
+  a turn that speaks or finishes while the detach probe runs never detaches
+  either (the 2026-08-31 AI doom duplicate: reply delivered mid-probe, then
+  relayed back as a speak-expected task_relay)
+- _terminal backstop: a result byte-identical to an already-delivered send
+  settles quietly; a genuinely new result after an intermediate send still
+  wakes as task_relay
 - restart recovery: orphaned goals settle + wake, idempotently
 """
 
@@ -333,6 +339,76 @@ async def test_fast_turn_never_detaches(ctx, bb, stub_history, monkeypatch):
     assert await _subagent_rows(ctx) == []
 
 
+# ------------------------------------------------- the mid-probe race
+
+async def test_turn_that_spokes_during_probe_never_detaches(ctx, bb, stub_history, monkeypatch):
+    """Live 2026-08-31, AI doom group: the turn crossed the 30s threshold,
+    its send landed while the detach probe was in flight, and detach
+    proceeded anyway — _terminal then relayed the already-delivered reply
+    back as a speak-expected task_relay and the group got a duplicate. A
+    turn that already spoke must fall through to the inline wait."""
+    from bob_server.services.llm_dispatch import LLMDispatchService
+
+    FINAL = "Scanned it. The profile's history holds about 21 distinct hosts."
+
+    async def _slow_probe(self, messages, **kwargs):
+        await asyncio.sleep(0.1)   # probe in flight while the send lands
+        return '{"summary": "scanning browser history", "holding_text": "still counting"}'
+
+    sent_flag = [False]
+    sent_texts: list[str] = []
+
+    async def _racing_turn(self, messages, tools, **kwargs):
+        await asyncio.sleep(0.08)  # watchdog (0.05s) fires, probe starts…
+        sent_flag[0] = True        # …then the send lands mid-probe
+        sent_texts.append(FINAL)
+        await asyncio.sleep(0.1)
+        return FINAL
+
+    monkeypatch.setattr(LLMDispatchService, "chat", _slow_probe)
+    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _racing_turn)
+
+    await _pending_message(ctx)
+    acks: list[str] = []
+    capture = {"enabled": False, "texts": []}
+
+    async def _hold(text: str) -> None:
+        acks.append(text)
+
+    spec = _spec(capture=capture, hold=_hold, dispatch_id="disp-race")
+    spec.message_was_sent = sent_flag
+    spec.sent_texts = sent_texts
+    result = await DispatchRunner(ctx).run(spec)
+
+    assert result == FINAL, "run() must wait inline, not return early on detach"
+    assert acks == []
+    assert capture["enabled"] is False
+    assert await _subagent_rows(ctx) == []
+    msgs = await _messages(ctx)
+    assert not [m for m in msgs if "Background task" in m["content"]], (
+        "an already-delivered result must not be relayed back")
+
+
+async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
+    """The other half of the guard: the llm task completing while the probe
+    runs is the same race with the flag never flipped — detach must abort
+    before registering anything."""
+    from bob_server.services.llm_dispatch import LLMDispatchService
+
+    async def _slow_probe(self, messages, **kwargs):
+        await asyncio.sleep(0.1)
+        return '{"summary": "s", "holding_text": "h"}'
+
+    monkeypatch.setattr(LLMDispatchService, "chat", _slow_probe)
+
+    done_task = asyncio.create_task(asyncio.sleep(0))
+    await done_task
+    spec = _spec(dispatch_id="disp-done")
+    assert await BackburnerService(ctx).detach(
+        spec=spec, turn=None, session_svc=None, llm_task=done_task) is False
+    assert await _subagent_rows(ctx) == []
+
+
 async def test_capture_mode_intercepts_sends(ctx, bb):
     """The bridge's send tool: once capture mode flips, sends are captured as
     result and no effect is emitted."""
@@ -358,6 +434,67 @@ async def test_capture_mode_intercepts_sends(ctx, bb):
     assert spec.backburner_capture["texts"] == ["here is the answer you asked for"]
     after = await ctx.db.fetch_one("SELECT COUNT(*) AS n FROM effects")
     assert after["n"] == before["n"], "capture mode must not emit a send effect"
+
+
+# ------------------------------------------------- _terminal backstop
+
+async def _settled_detached_task(ctx, *, sent_texts: list[str], result_text: str):
+    """Register a detached_turn + goal the way detach() does, run _terminal
+    on it, and return (goal_id, subagent_id)."""
+    from bob_server.repositories.subagents import SubagentRepository
+    from bob_server.services.goal_service import create_goal
+
+    subagent_id = "aaaabbbb"
+    await SubagentRepository(ctx.db).insert(
+        subagent_id=subagent_id, parent_session_key=DM_KEY,
+        session_key=f"subagent:{DM_KEY}:{subagent_id}",
+        task=f"[task {subagent_id[:8]}] scanning browser history",
+        agent_type="detached_turn", persona=0, model="",
+        contact_id=None, modality="", now_iso="2026-08-31T00:00:00Z")
+    goal = await create_goal(
+        ctx, conversation_id=f"subagent:{DM_KEY}:{subagent_id}",
+        objective=f"[task {subagent_id[:8]}] scanning browser history",
+        origin_conversation_id=DM_KEY, kind="subagent",
+        external_ref=subagent_id)
+
+    spec = _spec()
+    spec.sent_texts = list(sent_texts)
+    await BackburnerService(ctx)._terminal(
+        subagent_id, str(goal["id"]), {"enabled": True, "texts": []}, spec,
+        status="completed", result_text=result_text)
+    return goal
+
+
+async def test_terminal_settles_quietly_when_result_already_delivered(ctx, bb):
+    """Backstop for the mid-probe race (AI doom group, 2026-08-31): nothing
+    captured post-detach and the result text is byte-identical to the
+    pre-detach send — the group already heard it, so no relay wake."""
+    goal = await _settled_detached_task(
+        ctx,
+        sent_texts=["Scanned it. The profile's history holds about 21 distinct hosts."],
+        result_text="Scanned it. The profile's history holds about 21 distinct hosts.")
+
+    row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
+    assert row["status"] == "completed"
+    msgs = await _messages(ctx)
+    assert not [m for m in msgs if "Background task" in m["content"]], (
+        "already-delivered results must not be relayed back as task_relay")
+
+
+async def test_terminal_still_relays_new_result_after_intermediate_send(ctx, bb):
+    """The backstop must not over-suppress: an intermediate pre-detach send
+    ("on it") with a genuinely new final result still wakes the conversation
+    as a speak-expected relay — the group hasn't heard the outcome."""
+    goal = await _settled_detached_task(
+        ctx, sent_texts=["on it, still scanning"],
+        result_text="Scanned it. The profile's history holds about 21 distinct hosts.")
+
+    row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
+    assert row["status"] == "completed"
+    msgs = await _messages(ctx)
+    wake = [m for m in msgs if "Background task" in m["content"]]
+    assert wake, "a new result must still be relayed"
+    assert wake[0]["provenance"] == "task_relay"
 
 
 # ------------------------------------------------------------- kill path

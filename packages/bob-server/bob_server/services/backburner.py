@@ -338,6 +338,16 @@ class BackburnerService(BaseService):
         info = await run_probe(self.ctx, spec.dispatch_id,
                                session_key=spec.session_key, contact_id=spec.contact_id)
 
+        # Race guard (live 2026-08-31, AI doom group): a finishing turn's
+        # send can land while the probe runs — the reply reached the group
+        # 2s before detach completed, then _terminal relayed the
+        # already-heard text back and the group got a duplicate. A turn
+        # that already spoke (or has finished) gains nothing from
+        # detaching — wait inline instead (the rare intermediate-send
+        # turn degrades the same way, bounded by max_run_seconds).
+        if llm_task.done() or spec.message_was_sent[0]:
+            return False
+
         try:
             # b. History snapshot for sends so far (D4: the detached path
             #    never writes conversation history again).
@@ -455,25 +465,25 @@ class BackburnerService(BaseService):
             try:
                 result = await llm_task
                 await self._terminal(
-                    subagent_id, goal_id, capture,
+                    subagent_id, goal_id, capture, spec,
                     status="completed", result_text=result)
                 return
             except asyncio.CancelledError:
                 reason = _cancel_reasons.pop(spec.dispatch_id, None) or _CANCEL_REASON_KILLED
                 if "user" in reason.lower():
                     await self._terminal(
-                        subagent_id, goal_id, capture,
+                        subagent_id, goal_id, capture, spec,
                         status="killed", result_text="")
                 else:
                     await self._terminal(
-                        subagent_id, goal_id, capture,
+                        subagent_id, goal_id, capture, spec,
                         status="failed",
                         result_text="the background work was stopped: it exceeded "
                                     "its wall-clock budget")
                 return
             except Exception as exc:
                 await self._terminal(
-                    subagent_id, goal_id, capture,
+                    subagent_id, goal_id, capture, spec,
                     status="failed", result_text=f"the background work failed: {exc}")
                 return
         except Exception:
@@ -483,7 +493,8 @@ class BackburnerService(BaseService):
             _dispatch_ids.pop(subagent_id, None)
 
     async def _terminal(self, subagent_id: str, goal_id: str,
-                        capture: dict, *, status: str, result_text: str) -> None:
+                        capture: dict, spec: Any, *, status: str,
+                        result_text: str) -> None:
         """Terminal transition: subagent row, goal settle (+ wake), captured
         sends snapshotted into the result. Never raises.
 
@@ -505,7 +516,15 @@ class BackburnerService(BaseService):
 
         try:
             if status == "completed":
-                quiet = (not combined) or is_no_reply(combined)
+                # Backstop for the detach race (live 2026-08-31, AI doom
+                # group): the send can land between detach's guard and
+                # capture mode — nothing captured, and result_text is what
+                # the group already heard via spec.sent_texts. Relaying it
+                # would duplicate the reply, so settle quietly.
+                pre_sent = [t.strip() for t in (spec.sent_texts or []) if t.strip()]
+                already_delivered = not captured and combined in pre_sent
+                quiet = ((not combined) or is_no_reply(combined)
+                         or already_delivered)
                 await SubagentRepository(self.db).store_terminal(
                     subagent_id, status="completed",
                     result=combined or "(finished with no output)", now_iso=now)
