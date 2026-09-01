@@ -32,6 +32,8 @@ def _service(tmp_path, captured):
             default_model="gpt-test", memory_model="",
             web_search_enabled=False),
         openrouter=SimpleNamespace(enabled=True),
+        self_wrap=SimpleNamespace(
+            enabled=True, duration_fraction=0.75, iteration_margin=3),
     )
     svc._get_settings = lambda: settings
 

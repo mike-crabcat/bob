@@ -250,6 +250,33 @@ def strip_citation_markers(text: str) -> str:
     return _render_citations(text, {})
 
 
+# Self-wrap budget nudges (settings.self_wrap). Soft nudge as the turn nears
+# its time or iteration budget, final instruction on the forced wrap-up round.
+# Both are stripped from the messages list before chat_with_tools returns so
+# they never persist into conversation history.
+_SELF_WRAP_NUDGE = (
+    "You are close to this turn's budget (time or tool calls). Stop starting "
+    "new work: finish the current step, then reply to the user now with what "
+    "you have, noting anything left unfinished.")
+_SELF_WRAP_FINAL = (
+    "This turn's budget is exhausted. Do not call any more tools. Reply to "
+    "the user right now with a short summary of what you found or did, and "
+    "say plainly what is left undone.")
+_LEGACY_TIME_STOP = (
+    "Stopped at the turn's wall-clock budget — work done so far is complete, "
+    "remaining steps were skipped.")
+_LEGACY_ITER_STOP = "Max tool call iterations reached."
+
+
+def _strip_wrap_nudges(messages: list[dict[str, Any]]) -> None:
+    """Remove injected budget nudges in place (turn-scoped, never persisted)."""
+    messages[:] = [
+        m for m in messages
+        if not (isinstance(m, dict)
+                and m.get("content") in (_SELF_WRAP_NUDGE, _SELF_WRAP_FINAL))
+    ]
+
+
 @dataclass
 class StreamResult:
     """Stats from a completed streaming call."""
@@ -534,6 +561,12 @@ class OpenAIService(BaseService):
         budget checked before each iteration (an in-flight LLM call and the
         tool round that started it always complete) — used by routine
         dispatches so an hourly bulletin can't become a 10-minute tool odyssey.
+
+        Budget exhaustion is a two-stage self-wrap (settings.self_wrap): a
+        soft one-shot nudge injected near the budget (duration fraction or
+        iteration margin) asking the model to wrap up in its own words, then
+        a forced final round with tools stripped at the deadline/iteration
+        cap. With self_wrap disabled the legacy canned-string stop applies.
         """
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools, model=resolved_model)
@@ -548,185 +581,245 @@ class OpenAIService(BaseService):
         t0 = time.monotonic()
         deadline = t0 + time_limit_seconds if time_limit_seconds is not None else None
 
+        wrap = self._get_settings().self_wrap
+        nudge_at = (t0 + time_limit_seconds * wrap.duration_fraction
+                    if time_limit_seconds is not None else None)
+        nudged = False
+
         total_input = total_output = total_total = 0
         total_cached = 0
 
-        for iteration in range(max_iterations):
-            if deadline is not None and time.monotonic() >= deadline:
-                logger.warning(
-                    "OpenAI tool call hit wall-clock limit: model=%s limit=%ss "
-                    "iterations=%d elapsed=%.1fs dispatch_id=%s session_key=%s",
-                    resolved_model, time_limit_seconds, iteration,
-                    time.monotonic() - t0, dispatch_id, session_key)
-                return ("Stopped at the turn's wall-clock budget — work done so "
-                        "far is complete, remaining steps were skipped.")
+        try:
+            for iteration in range(max_iterations):
+                now = time.monotonic()
+                if (wrap.enabled and not nudged
+                        and ((nudge_at is not None and now >= nudge_at)
+                             or iteration >= max_iterations - wrap.iteration_margin)):
+                    messages.append({"role": "system", "content": _SELF_WRAP_NUDGE})
+                    nudged = True
+                    logger.info(
+                        "OpenAI self-wrap nudge: model=%s iteration=%d "
+                        "elapsed=%.1fs budget=%s dispatch_id=%s session_key=%s",
+                        resolved_model, iteration, now - t0,
+                        f"{time_limit_seconds}s" if time_limit_seconds else
+                        f"{max_iterations} iters", dispatch_id, session_key)
 
-            response = await self._client_for(resolved_model).responses.create(
-                input=messages,
-                **request_kwargs,
-            )
+                if deadline is not None and now >= deadline:
+                    logger.warning(
+                        "OpenAI tool call hit wall-clock limit: model=%s limit=%ss "
+                        "iterations=%d elapsed=%.1fs dispatch_id=%s session_key=%s",
+                        resolved_model, time_limit_seconds, iteration,
+                        now - t0, dispatch_id, session_key)
+                    if not wrap.enabled:
+                        return _LEGACY_TIME_STOP
+                    return await self._forced_wrapup(
+                        messages, resolved_model, request_kwargs,
+                        dispatch_id=dispatch_id, session_key=session_key,
+                        fallback=_LEGACY_TIME_STOP)
 
-            usage = getattr(response, "usage", None)
-            if usage:
-                total_input  += usage.input_tokens or 0
-                total_output += usage.output_tokens or 0
-                total_total  += usage.total_tokens or 0
-                total_cached += self._extract_cached_tokens(usage) or 0
+                response = await self._client_for(resolved_model).responses.create(
+                    input=messages,
+                    **request_kwargs,
+                )
 
-            # Check for function calls in output
-            function_calls = [
-                item for item in response.output
-                if getattr(item, "type", None) == "function_call"
-            ]
+                usage = getattr(response, "usage", None)
+                if usage:
+                    total_input  += usage.input_tokens or 0
+                    total_output += usage.output_tokens or 0
+                    total_total  += usage.total_tokens or 0
+                    total_cached += self._extract_cached_tokens(usage) or 0
 
-            if not function_calls:
-                elapsed = time.monotonic() - t0
-                content = _response_text_with_citations(response)
-                if not content:
-                    # After tool iterations an empty final message is the
-                    # normal shape (reply was delivered via send_message
-                    # etc.) — only a turn with NO tool calls going silent
-                    # is noteworthy.
-                    _empty_log = logger.debug if iteration > 0 else logger.warning
-                    _empty_log(
-                        "OpenAI empty response: model=%s status=%s output_types=%s refusal=%s",
-                        resolved_model,
-                        getattr(response, "status", None),
-                        [getattr(item, "type", None) for item in (response.output or [])],
-                        getattr(response, "refusal", None) or next(
-                            (getattr(item, "refusal", None) for item in (response.output or [])
-                             if getattr(item, "type", None) == "message"), None
-                        ),
-                    )
-                # Recover Hermes-style <tool_call> XML the model emitted as text
-                # instead of using the native function_call API. Parse, execute,
-                # and return the residual text so the user-visible reply isn't
-                # lost and the XML doesn't get persisted into future turns.
-                hermes_calls = _parse_hermes_tool_calls(content) if content else []
-                if hermes_calls:
-                    recovered_names: list[str] = []
-                    for hc_name, hc_args in hermes_calls:
-                        handler = tool_handlers.get(hc_name)
-                        if handler is None:
-                            logger.warning(
-                                "Hermes tool call referenced unknown tool: tool=%s "
-                                "dispatch_id=%s session_key=%s log_id=%s",
-                                hc_name, dispatch_id, session_key, log_id,
+                # Check for function calls in output
+                function_calls = [
+                    item for item in response.output
+                    if getattr(item, "type", None) == "function_call"
+                ]
+
+                if not function_calls:
+                    elapsed = time.monotonic() - t0
+                    content = _response_text_with_citations(response)
+                    if not content:
+                        # After tool iterations an empty final message is the
+                        # normal shape (reply was delivered via send_message
+                        # etc.) — only a turn with NO tool calls going silent
+                        # is noteworthy.
+                        _empty_log = logger.debug if iteration > 0 else logger.warning
+                        _empty_log(
+                            "OpenAI empty response: model=%s status=%s output_types=%s refusal=%s",
+                            resolved_model,
+                            getattr(response, "status", None),
+                            [getattr(item, "type", None) for item in (response.output or [])],
+                            getattr(response, "refusal", None) or next(
+                                (getattr(item, "refusal", None) for item in (response.output or [])
+                                 if getattr(item, "type", None) == "message"), None
+                            ),
+                        )
+                    # Recover Hermes-style <tool_call> XML the model emitted as text
+                    # instead of using the native function_call API. Parse, execute,
+                    # and return the residual text so the user-visible reply isn't
+                    # lost and the XML doesn't get persisted into future turns.
+                    hermes_calls = _parse_hermes_tool_calls(content) if content else []
+                    if hermes_calls:
+                        recovered_names: list[str] = []
+                        for hc_name, hc_args in hermes_calls:
+                            handler = tool_handlers.get(hc_name)
+                            if handler is None:
+                                logger.warning(
+                                    "Hermes tool call referenced unknown tool: tool=%s "
+                                    "dispatch_id=%s session_key=%s log_id=%s",
+                                    hc_name, dispatch_id, session_key, log_id,
+                                )
+                                continue
+                            try:
+                                hc_result = await handler(**hc_args)
+                                recovered_names.append(hc_name)
+                                if on_tool_call:
+                                    try:
+                                        summary = (
+                                            hc_result.text[:200]
+                                            if isinstance(hc_result, ImageInjection)
+                                            else hc_result[:200]
+                                        )
+                                        await on_tool_call(hc_name, hc_args, summary)
+                                    except Exception:
+                                        pass
+                            except Exception as hc_exc:
+                                logger.error(
+                                    "Hermes tool call failed: tool=%s dispatch_id=%s "
+                                    "session_key=%s args=%s error=%s",
+                                    hc_name, dispatch_id, session_key,
+                                    json.dumps(hc_args, default=str)[:500], hc_exc,
+                                    exc_info=True,
+                                )
+                        if recovered_names:
+                            logger.info(
+                                "Recovered %d Hermes tool call(s) from text: model=%s "
+                                "dispatch_id=%s session_key=%s tools=%s",
+                                len(recovered_names), resolved_model, dispatch_id,
+                                session_key, recovered_names,
                             )
-                            continue
+                            content = _strip_hermes_tool_calls(content)
+                    logger.info(
+                        "OpenAI tool call finished: model=%s iterations=%d latency=%.2fs "
+                        "tool_calls_in_turn=%d tokens=%d (in=%d out=%d cached=%d)",
+                        resolved_model, iteration + 1, elapsed,
+                        iteration,
+                        total_total, total_input, total_output, total_cached,
+                    )
+                    if stream_result is not None:
+                        stream_result.prompt_tokens = total_input
+                        stream_result.completion_tokens = total_output
+                        stream_result.total_tokens = total_total
+                        stream_result.cached_tokens = total_cached
+                        stream_result.latency_seconds = elapsed
+                    return content
+
+                # Append output items (including reasoning) to messages for context
+                messages.extend(_output_items_to_dicts(response.output))
+
+                # Execute each function call and append results
+                for fc in function_calls:
+                    handler = tool_handlers.get(fc.name)
+                    tool_args: dict = {}
+                    if handler is None:
+                        result = f"Error: unknown tool '{fc.name}'"
+                        logger.error(
+                            "Unknown tool requested: tool=%s call_id=%s dispatch_id=%s "
+                            "session_key=%s log_id=%s iteration=%d",
+                            fc.name, fc.call_id, dispatch_id, session_key, log_id, iteration,
+                        )
+                    else:
                         try:
-                            hc_result = await handler(**hc_args)
-                            recovered_names.append(hc_name)
-                            if on_tool_call:
-                                try:
-                                    summary = (
-                                        hc_result.text[:200]
-                                        if isinstance(hc_result, ImageInjection)
-                                        else hc_result[:200]
-                                    )
-                                    await on_tool_call(hc_name, hc_args, summary)
-                                except Exception:
-                                    pass
-                        except Exception as hc_exc:
+                            tool_args = json.loads(fc.arguments)
+                            result = await handler(**tool_args)
+                        except Exception as e:
+                            result = f"Error: {e}"
                             logger.error(
-                                "Hermes tool call failed: tool=%s dispatch_id=%s "
-                                "session_key=%s args=%s error=%s",
-                                hc_name, dispatch_id, session_key,
-                                json.dumps(hc_args, default=str)[:500], hc_exc,
+                                "Tool call failed: tool=%s call_id=%s dispatch_id=%s "
+                                "session_key=%s log_id=%s iteration=%d args=%s error=%s",
+                                fc.name, fc.call_id, dispatch_id, session_key, log_id,
+                                iteration, json.dumps(tool_args, default=str)[:500], e,
                                 exc_info=True,
                             )
-                    if recovered_names:
-                        logger.info(
-                            "Recovered %d Hermes tool call(s) from text: model=%s "
-                            "dispatch_id=%s session_key=%s tools=%s",
-                            len(recovered_names), resolved_model, dispatch_id,
-                            session_key, recovered_names,
-                        )
-                        content = _strip_hermes_tool_calls(content)
+
+                    if isinstance(result, ImageInjection):
+                        messages.append({
+                            "type": "function_call_output",
+                            "call_id": fc.call_id,
+                            "output": result.text,
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": result.text},
+                                {"type": "input_image", "image_url": result.data_url},
+                            ],
+                        })
+                    else:
+                        messages.append({
+                            "type": "function_call_output",
+                            "call_id": fc.call_id,
+                            "output": result,
+                        })
+
+                    if on_tool_call:
+                        try:
+                            summary = result.text[:200] if isinstance(result, ImageInjection) else result[:200]
+                            await on_tool_call(fc.name, tool_args, summary)
+                        except Exception:
+                            pass
+
                 logger.info(
-                    "OpenAI tool call finished: model=%s iterations=%d latency=%.2fs "
-                    "tool_calls_in_turn=%d tokens=%d (in=%d out=%d cached=%d)",
-                    resolved_model, iteration + 1, elapsed,
-                    iteration,
-                    total_total, total_input, total_output, total_cached,
+                    "chat_with_tools: iteration=%d function_calls=%d",
+                    iteration + 1, len(function_calls),
                 )
-                if stream_result is not None:
-                    stream_result.prompt_tokens = total_input
-                    stream_result.completion_tokens = total_output
-                    stream_result.total_tokens = total_total
-                    stream_result.cached_tokens = total_cached
-                    stream_result.latency_seconds = elapsed
-                return content
 
-            # Append output items (including reasoning) to messages for context
-            messages.extend(_output_items_to_dicts(response.output))
-
-            # Execute each function call and append results
-            for fc in function_calls:
-                handler = tool_handlers.get(fc.name)
-                tool_args: dict = {}
-                if handler is None:
-                    result = f"Error: unknown tool '{fc.name}'"
-                    logger.error(
-                        "Unknown tool requested: tool=%s call_id=%s dispatch_id=%s "
-                        "session_key=%s log_id=%s iteration=%d",
-                        fc.name, fc.call_id, dispatch_id, session_key, log_id, iteration,
-                    )
-                else:
+                if on_iteration_complete:
                     try:
-                        tool_args = json.loads(fc.arguments)
-                        result = await handler(**tool_args)
-                    except Exception as e:
-                        result = f"Error: {e}"
-                        logger.error(
-                            "Tool call failed: tool=%s call_id=%s dispatch_id=%s "
-                            "session_key=%s log_id=%s iteration=%d args=%s error=%s",
-                            fc.name, fc.call_id, dispatch_id, session_key, log_id,
-                            iteration, json.dumps(tool_args, default=str)[:500], e,
-                            exc_info=True,
-                        )
-
-                if isinstance(result, ImageInjection):
-                    messages.append({
-                        "type": "function_call_output",
-                        "call_id": fc.call_id,
-                        "output": result.text,
-                    })
-                    messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": result.text},
-                            {"type": "input_image", "image_url": result.data_url},
-                        ],
-                    })
-                else:
-                    messages.append({
-                        "type": "function_call_output",
-                        "call_id": fc.call_id,
-                        "output": result,
-                    })
-
-                if on_tool_call:
-                    try:
-                        summary = result.text[:200] if isinstance(result, ImageInjection) else result[:200]
-                        await on_tool_call(fc.name, tool_args, summary)
+                        await on_iteration_complete(messages)
                     except Exception:
                         pass
 
-            logger.info(
-                "chat_with_tools: iteration=%d function_calls=%d",
-                iteration + 1, len(function_calls),
-            )
+            logger.warning(
+                "OpenAI tool call hit max iterations: model=%s max=%d",
+                resolved_model, max_iterations)
+            if not wrap.enabled:
+                return _LEGACY_ITER_STOP
+            return await self._forced_wrapup(
+                messages, resolved_model, request_kwargs,
+                dispatch_id=dispatch_id, session_key=session_key,
+                fallback=_LEGACY_ITER_STOP)
+        finally:
+            # Budget nudges are turn-scoped guidance — never persist them
+            # into the conversation history the caller keeps.
+            _strip_wrap_nudges(messages)
 
-            if on_iteration_complete:
-                try:
-                    await on_iteration_complete(messages)
-                except Exception:
-                    pass
-
-        elapsed = time.monotonic() - t0
-        logger.warning("OpenAI tool call hit max iterations: model=%s max=%d", resolved_model, max_iterations)
-        return "Max tool call iterations reached."
+    async def _forced_wrapup(
+        self, messages: list[dict[str, Any]], resolved_model: str,
+        request_kwargs: dict[str, Any], *, dispatch_id: str | None,
+        session_key: str | None, fallback: str,
+    ) -> str:
+        """Exhaustion path: one final LLM round with tools stripped, so the
+        model writes its own closing reply instead of hitting a canned stop.
+        Falls back to the legacy canned string when the round fails or comes
+        back empty — callers always get a non-empty string."""
+        kwargs = {k: v for k, v in request_kwargs.items() if k != "tools"}
+        messages.append({"role": "system", "content": _SELF_WRAP_FINAL})
+        try:
+            response = await self._client_for(resolved_model).responses.create(
+                input=messages, **kwargs)
+        except Exception:
+            logger.error(
+                "OpenAI forced wrap-up round failed: model=%s dispatch_id=%s "
+                "session_key=%s", resolved_model, dispatch_id, session_key,
+                exc_info=True)
+            return fallback
+        content = _response_text_with_citations(response)
+        if not content:
+            logger.warning(
+                "OpenAI forced wrap-up round empty: model=%s dispatch_id=%s "
+                "session_key=%s", resolved_model, dispatch_id, session_key)
+        return content or fallback
 
     async def chat_stream_with_tools(
         self,

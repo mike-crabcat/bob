@@ -226,8 +226,14 @@ class DispatchRunner:
             # Wall-clock budget for main WhatsApp turns (bug fix): without
             # one, a hung call holds the session lock forever. Enforced
             # between iterations — the in-flight round always completes.
+            is_main_turn = spec.call_category == "whatsapp_incoming"
             time_limit = (self.ctx.settings.backburner.max_run_seconds
-                          if spec.call_category == "whatsapp_incoming" else None)
+                          if is_main_turn else None)
+            # Iteration cap for the same turns: a GLM tool odyssey at ~10s a
+            # call burns the whole wall-clock budget without finishing
+            # (2026-09-01: three 60+-iteration turns killed at the budget).
+            # Subagents cap at 30; main turns get a little more headroom.
+            iteration_cap = 35 if is_main_turn else 100
 
             async def _llm() -> str:
                 return await LLMDispatchService(self.ctx).chat_with_tools(
@@ -238,6 +244,7 @@ class DispatchRunner:
                     dispatch_id=spec.dispatch_id,
                     contact_id=spec.contact_id,
                     time_limit_seconds=time_limit,
+                    max_iterations=iteration_cap,
                 )
 
             from bob_server.services import backburner as backburner_mod

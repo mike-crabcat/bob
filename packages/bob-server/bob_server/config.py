@@ -334,6 +334,21 @@ class BackburnerSettings:
 
 
 @dataclass(slots=True)
+class SelfWrapSettings:
+    """Self-wrap nudges for the chat_with_tools loop (openai_service).
+
+    Replaces the hard budget stop with a two-stage nudge: a soft one-shot
+    prompt when the turn nears its time or iteration budget (the model wraps
+    up in its own words), and a forced final round with tools stripped at
+    exhaustion. Disabled → the legacy canned-string stop returns.
+    """
+
+    enabled: bool = True
+    duration_fraction: float = 0.75   # soft nudge at this fraction of time_limit_seconds
+    iteration_margin: int = 3         # soft nudge this many iterations before the cap
+
+
+@dataclass(slots=True)
 class ReconciliationSettings:
     """Configuration for memory reconciliation model selection.
 
@@ -435,6 +450,7 @@ class Settings:
     whatsapp_bridge: WhatsAppBridgeSettings = field(default_factory=WhatsAppBridgeSettings)
     patience: PatienceSettings = field(default_factory=PatienceSettings)
     backburner: BackburnerSettings = field(default_factory=BackburnerSettings)
+    self_wrap: SelfWrapSettings = field(default_factory=SelfWrapSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
@@ -757,6 +773,12 @@ class Settings:
                 max_run_seconds=float(os.getenv("BOB_BACKBURNER_MAX_RUN_S", "600")),
                 sessions=os.getenv("BOB_BACKBURNER_SESSIONS", ""),
                 probe_model=os.getenv("BOB_BACKBURNER_PROBE_MODEL", ""),
+            ),
+            self_wrap=SelfWrapSettings(
+                enabled=(os.getenv("BOB_SELF_WRAP", "on").strip().lower()
+                         not in {"off", "0", "false", "no"}),
+                duration_fraction=float(os.getenv("BOB_SELF_WRAP_DURATION_FRACTION", "0.75")),
+                iteration_margin=int(os.getenv("BOB_SELF_WRAP_ITERATION_MARGIN", "3")),
             ),
             reconciliation=reconciliation,
             dream=dream,
