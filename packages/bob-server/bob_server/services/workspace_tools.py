@@ -201,6 +201,17 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         return prefix + body
 
     @tool
+    async def get_time() -> str:
+        """Return the current local date and time with its timezone name and UTC offset, e.g. 'Tuesday 01 September 2026, 06:52 (AWST, UTC+08:00)'."""
+        from datetime import datetime
+
+        from bob_server.services.prompt_assembler import format_local_now
+        return (
+            f"{format_local_now()}\n"
+            f"(ISO: {datetime.now().astimezone().isoformat(timespec='seconds')})"
+        )
+
+    @tool
     async def read_image(
         path: str,
     ) -> ImageInjection:
@@ -234,7 +245,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         from bob_server.services.skill_loader import load_skill
         return load_skill(ctx.settings.harness.workspace_dir, skill_name)
 
-    tools = [bash, read_image, use_skill]
+    tools = [bash, get_time, read_image, use_skill]
 
     if session_key:
         @tool

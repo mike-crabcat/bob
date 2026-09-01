@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,23 +85,37 @@ _cached_prompt: tuple[Any, str] | None = None  # (mtime_hash, content)
 _cached_mtime: dict[str, float] = {}
 
 
-def local_now_prompt_line() -> str:
+def format_local_now(now: datetime | None = None) -> str:
+    """'Tuesday 01 September 2026, 06:52 (AWST, UTC+08:00)' — the shared
+    wall-clock stamp for the prompt line and the get_time tool, so the two
+    can never drift apart."""
+    if now is None:
+        now = datetime.now().astimezone()
+    tz_name = now.tzname() or "server-local"
+    off = now.strftime("%z") or "+0000"
+    return (
+        f"{now.strftime('%A %d %B %Y, %H:%M')} "
+        f"({tz_name}, UTC{off[:3]}:{off[3:]})"
+    )
+
+
+def local_now_prompt_line(*, tools_hint: bool = True) -> str:
     """Turn-scoped clock line (live 2026-09-01: the system prompt carried a
     static 'Timezone: Australia/Perth' but no current time — the model had
     no grounding for date-relative reasoning, and computed UTC cron hours
     into a local-hours routine contract). The stamp is the turn's START:
-    turns can run minutes, so precise/mid-turn times must be re-checked."""
-    from datetime import datetime
-    now = datetime.now().astimezone()
-    tz_name = now.tzname() or "server-local"
-    off = now.strftime("%z") or "+0000"
-    return (
-        f"Local time now: {now.strftime('%A %d %B %Y, %H:%M')} "
-        f"({tz_name}, UTC{off[:3]}:{off[3:]}) — taken at this turn's start. "
-        "For precise or mid-turn times, check with bash: "
-        "date '+%A %d %B %Y %H:%M %Z' — and always quote the timezone it "
-        "prints when stating times."
-    )
+    turns can run minutes, so precise/mid-turn times must be re-checked.
+    tools_hint=False drops the re-check sentence for tool-less calls (goal
+    reviser, email-outgoing priming) so the line never advertises tools the
+    call doesn't have."""
+    line = f"Local time now: {format_local_now()} — taken at this turn's start."
+    if tools_hint:
+        line += (
+            " For precise or mid-turn times, call get_time "
+            "(or bash: date '+%A %d %B %Y %H:%M %Z') — and always quote the "
+            "timezone it prints when stating times."
+        )
+    return line
 
 
 async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
@@ -332,6 +347,7 @@ async def build_chat_messages(
     max_history: int = 20,
     claimed_ids: set[str] | frozenset[str] | None = None,
     send_tool_name: str = "",
+    include_time: bool = True,
 ) -> list[dict[str, Any]]:
     """Build a messages array: system prompt + session history + optional user message.
 
@@ -343,12 +359,23 @@ async def build_chat_messages(
     user turn re-presents the new stimulus so the input ends user-final. Turns
     claimed by nudges alone get a system directive to fold silently instead.
     ``send_tool_name`` names the turn's delivery tool in those trailers.
+    ``include_time`` appends the turn-start local clock to the system message
+    (2026-09-01 fan-out: every channel's turns ground date-relative reasoning).
+    A system message is therefore emitted even when system_content and
+    voice_instructions are both empty; include_time=False restores the
+    pre-clock shape exactly.
     """
     system_parts: list[str] = []
     if system_content:
         system_parts.append(system_content)
     if voice_instructions:
         system_parts.append(voice_instructions)
+    # Appended LAST, not prepended: provider prompt caching is prefix-based,
+    # so a volatile clock at the front would forfeit the stable persona
+    # prefix every turn. The "Local time now:" substring guard keeps the
+    # injection idempotent for callers that already carry the line.
+    if include_time and not any("Local time now:" in p for p in system_parts):
+        system_parts.append(local_now_prompt_line())
 
     messages: list[dict[str, Any]] = []
     if system_parts:

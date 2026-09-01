@@ -839,12 +839,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # the old outreach block; outreach state rides in the goal itself.
         goals_prompt = await assembler.goals_block(session_key)
 
-        # Turn-start clock first: date-relative reasoning ("tomorrow",
-        # "this week") and local-vs-UTC arithmetic need a grounded now
-        # (2026-09-01 routine-misfire follow-up).
-        from bob_server.services.prompt_assembler import local_now_prompt_line
+        # The turn-start clock is appended by build_chat_messages (2026-09-01
+        # fan-out to every channel) — date-relative reasoning ("tomorrow",
+        # "this week") and local-vs-UTC arithmetic need a grounded now.
         system_content = "\n\n".join(
-            p for p in (local_now_prompt_line(), workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
         )
 
         from bob_server.services.llm_dispatch import LLMDispatchService

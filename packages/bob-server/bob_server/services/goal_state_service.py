@@ -220,8 +220,13 @@ async def _call_reviser(
         f"# Stimulus\n{stimulus}\n\n"
         "Return the updated state JSON object per the contract."
     )
+    from bob_server.services.prompt_assembler import local_now_prompt_line
+
+    # Stamp-only clock (tools_hint=False — this call carries no tools): the
+    # reviser reasons about ISO dues and decide_by windows, so it needs a
+    # grounded now like any turn (2026-09-01 time-grounding fan-out).
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": _reviser_system_prompt()},
+        {"role": "system", "content": _reviser_system_prompt() + "\n\n" + local_now_prompt_line(tools_hint=False)},
         {"role": "user", "content": user},
     ]
 

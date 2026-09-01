@@ -21,6 +21,7 @@ from typing import Any
 from uuid import uuid4
 
 from bob_server.services.base import BaseService, utcnow
+from bob_server.services.prompt_assembler import format_local_now
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,16 @@ def build_outbound_instructions(contact_name: str | None = None, goal: str = "")
         "or it's clear you won't get it — call the end_call tool. Do not announce that "
         "you're hanging up; just call the tool after your closing line."
     ).format(name_hint=name_hint)
+    # Call-start clock: Realtime has no bash/get_time, so this stamp is the
+    # channel's whole time grounding. Outbound instructions are baked at
+    # placement (prewarm) — the stamp can precede answer by up to ~2 min,
+    # accepted: day/date grounding is the value, not the minute.
+    clock = (
+        f"Current local time at call start: {format_local_now()}. "
+        "Trust this over any other sense of today's date."
+    )
     return (
+        f"{clock}\n\n"
         f"{preamble}\n\n"
         "--- Your goal on this call — PRIVATE NOTES, not a script ---\n"
         "The text below is your private brief of facts and constraints. Never "
@@ -130,9 +140,13 @@ def build_inbound_instructions(phone_number: str, contact_name: str | None = Non
         "When the call has reached its natural end, call the end_call tool — "
         "do not announce that you're hanging up."
     )
+    clock = (
+        f"Current local time at call start: {format_local_now()}. "
+        "Trust this over any other sense of today's date."
+    )
     if agenda.strip():
-        return f"{context}\n\n--- Context for this caller ---\n{agenda.strip()}"
-    return context
+        return f"{clock}\n\n{context}\n\n--- Context for this caller ---\n{agenda.strip()}"
+    return f"{clock}\n\n{context}"
 
 
 def extract_outcome(tool_calls: list[dict[str, Any]] | None) -> dict[str, Any] | None:

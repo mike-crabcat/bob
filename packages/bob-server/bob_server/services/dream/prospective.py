@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from bob_server.context import AppContext
@@ -71,7 +71,11 @@ class ProspectiveService(BaseService):
         llm_mod = await self._llm()
         raw = await review._chat_json(
             llm_mod,
-            system=PROSPECTIVE_SYSTEM + f"\n\nToday: {utcnow().strftime('%Y-%m-%d')}",
+            # Local date, not UTC: Perth is UTC+8, so utcnow() calls this
+            # "yesterday" for the first 8h of every local day (2026-09-01
+            # time-grounding fan-out).
+            system=PROSPECTIVE_SYSTEM
+            + f"\n\nToday: {datetime.now().astimezone().strftime('%Y-%m-%d')}",
             user=user_prompt,
             call_category="dream_prospective",
             session_key="",

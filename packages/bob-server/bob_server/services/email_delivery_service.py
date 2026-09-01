@@ -187,7 +187,7 @@ class EmailDeliveryService(BaseService):
         if settings.openai.enabled:
             from bob_server.services.llm_dispatch import LLMDispatchService
             from bob_server.services.session_service import SessionService
-            from bob_server.services.prompt_assembler import load_workspace_prompt
+            from bob_server.services.prompt_assembler import load_workspace_prompt, local_now_prompt_line
 
             send_content = "\n".join([
                 "## Email You Just Sent",
@@ -222,6 +222,9 @@ class EmailDeliveryService(BaseService):
                 custom_agenda,
                 "You are managing an email conversation. The following is an outgoing email you sent for your context.",
             ) if p]
+            # Stamp-only clock: this dispatch passes tools=[] (2026-09-01
+            # time-grounding fan-out), so no get_time/bash hint.
+            system_parts.append(local_now_prompt_line(tools_hint=False))
 
             messages = [
                 {"role": "system", "content": "\n\n".join(system_parts)},

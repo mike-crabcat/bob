@@ -178,7 +178,7 @@ class VoiceSessionService(BaseService):
 
     async def build_instructions(self, row: dict[str, Any]) -> str:
         """Build the Realtime session instructions: persona + voice preamble + recent chat context."""
-        from bob_server.services.prompt_assembler import load_workspace_prompt
+        from bob_server.services.prompt_assembler import format_local_now, load_workspace_prompt
         from bob_server.services.session_service import SessionService
 
         settings = self._get_settings()
@@ -209,7 +209,10 @@ class VoiceSessionService(BaseService):
             )
 
         return (
-            f"{persona}{goal_block}\n\n--- Voice call mode ---\n{_VOICE_PREAMBLE}"
+            f"{persona}{goal_block}\n\n"
+            f"Current local time at call start: {format_local_now()}. "
+            "Trust this over any other sense of today's date."
+            f"\n\n--- Voice call mode ---\n{_VOICE_PREAMBLE}"
             f"\n\n--- Recent chat context ---\n{context_block}"
         )
 
