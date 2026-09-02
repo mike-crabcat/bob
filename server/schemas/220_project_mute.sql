@@ -1,1 +1,0 @@
-ALTER TABLE projects ADD COLUMN notifications_muted INTEGER NOT NULL DEFAULT 0;
