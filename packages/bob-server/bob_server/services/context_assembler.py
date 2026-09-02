@@ -87,6 +87,16 @@ class ContextAssembler:
                 badges.append("admin")
             badges.append("trusted" if m["is_trusted"] else "untrusted")
             lines.append(f"- {name} ({', '.join(badges)})")
+        # Attribution rule: models tuned on chat transcripts read a leading
+        # "Name:" in message text as a speaker label (observed with GLM:
+        # "Sean: ..." callouts got misattributed to Sean despite the bracket
+        # prefix). State the [Sender] convention so the prefix always wins.
+        lines.append(
+            "\nMessage attribution: every message is prefixed `[Sender Name]` — "
+            "that prefix alone says who wrote it. A `Name:` inside the message "
+            "body (e.g. \"Sean: look at this\") is the author calling out to "
+            "that person, NOT that person speaking."
+        )
         return "\n".join(lines)
 
     async def person_profile(self, contact_id: str | None) -> str:
