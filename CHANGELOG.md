@@ -4,6 +4,12 @@ All notable changes to Bob are documented here. Entries are based on analysis of
 
 ## 2026-09-02 – 2026-09-03
 
+### Changed (2026-09-03 follow-up)
+- `ui_dist` moves out of `server/` to the repo root (alongside `server/`): the built bundle is a docker-only artifact, baked to `/app/ui_dist` in the image. Outside docker the dashboard is the vite dev server in `ui/` — `main.py` mounts `/dashboard` from the top-level `ui_dist/` only when a build exists. Stale Aug-23 `pnpm run dev` (old `ui_app` path) killed; start dashboard dev fresh with `npm --prefix ui run dev`.
+
+### Removed (2026-09-03 follow-up)
+- `deploy.sh` — never actually used (it pushed the long-dead `bobv3` branch; the real deploy method has always been `systemctl --user restart bob.service`, which picks up the working tree via `uv run`). The test gate is now manual by design: run `uv run pytest tests -q` before meaningful changes.
+
 ### Changed
 - Repo restructure to top-level `server/` + `ui/` + `bridge/` (was `packages/bob-server/bob_server/…`), retiring the installable-package model: single root pyproject (project `bob`), Python 3.12 pinned (the old package venv had drifted to brew 3.14 with a broken SSL CA bundle and no PIL — email polling and image resizing had been failing in prod; both fixed by the pinned venv), import package renamed `bob_server` → `server`, dashboard SPA now built by `deploy.sh` itself (deploys previously served a stale hand-built `ui_dist`), and deploy pushes `master` (was long-dead `bobv3`)
 

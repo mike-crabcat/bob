@@ -269,7 +269,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(dashboard_ws.router, prefix="/dashboard")
 
     # Dashboard SPA static files (must be last dashboard-related mount)
-    dashboard_dist = Path(__file__).parent / "ui_dist"
+    # Built SPA lives alongside the server dir (repo-root/ui_dist in a
+    # checkout, /app/ui_dist in the docker image) — never inside server/.
+    # Outside docker the dashboard is normally the vite dev server (ui/);
+    # this mount applies when a build exists (docker).
+    dashboard_dist = Path(__file__).resolve().parent.parent / "ui_dist"
     if dashboard_dist.is_dir():
         from fastapi.staticfiles import StaticFiles
         app.mount("/dashboard", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard_spa")

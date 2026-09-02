@@ -13,9 +13,9 @@ export default defineConfig({
   },
   base: "/dashboard/",
   build: {
-    // Emits into the server tree so main.py's Path(__file__).parent / "ui_dist"
-    // mount keeps working; gitignored, rebuilt by deploy.sh / the Docker build.
-    outDir: "../server/ui_dist",
+    // Top-level ui_dist/ (alongside server/) — the docker image's bundle.
+    // Outside docker the dashboard is this dev server, not a build.
+    outDir: "../ui_dist",
     emptyOutDir: true,
   },
   server: {

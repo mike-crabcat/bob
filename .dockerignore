@@ -3,7 +3,7 @@
 **/__pycache__
 **/*.pyc
 ui/node_modules
-server/ui_dist
+ui_dist
 server/db.sqlite
 tests
 docs

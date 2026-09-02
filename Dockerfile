@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=deps /app/.venv /app/.venv
 COPY server/ /app/server/
-COPY --from=ui /build/dist/ /app/server/ui_dist/
+COPY --from=ui /build/dist/ /app/ui_dist/
 COPY skills/ /app/skills/
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && chown -R bob:bob /app /home/bob /entrypoint.sh

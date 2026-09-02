@@ -18,7 +18,7 @@ A single FastAPI application plus a Go WhatsApp bridge. Distributed via Docker (
 
 - **Default host/port**: `127.0.0.1:8420` (override with `BOB_HOST` / `BOB_PORT`)
 - **Entry point**: `server/main.py`
-- **Dashboard**: React SPA built into `server/ui_dist/` (by `deploy.sh` or the Docker build; `npm run build` in `ui/`) and served at `/dashboard`. Dev server runs from `ui/`.
+- **Dashboard**: React SPA (`ui/`, Vite + TypeScript + Tailwind). Outside docker the dashboard is the vite dev server (`npm --prefix ui run dev`); the docker image bakes a build into top-level `ui_dist/` which the server mounts at `/dashboard` when present.
 - **API**: REST endpoints under `/api/v1/` plus `/dashboard/api/*` for the SPA
 
 ## Key Directories
@@ -57,6 +57,7 @@ Config directory is `/home/bob/config`
 ## Development
 
 - Package manager: `uv` (Python 3.12 pinned via `.python-version`); single project at the repo root
-- UI: `npm` in `ui/`
-- Deploy (primary): `./deploy.sh` — tests → SPA build → venv sync → push master → restart → healthcheck
+- UI: `npm` in `ui/` (vite dev server is the dashboard outside docker)
+- Deploy (primary): `systemctl --user restart bob.service` — the unit runs `uv run` from this checkout, so a restart picks up the working tree. Run `uv run pytest tests -q` yourself before meaningful changes; nothing gates it automatically
+- Docker instances: see README → "Bob instances (Docker)"
 - Test: `uv run pytest tests -q`

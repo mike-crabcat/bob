@@ -21,7 +21,7 @@ scripts/rollout.sh
 
 # Build outputs
 node_modules/
-server/ui_dist
+ui_dist
 bridge/bin
 bridge/whatsappbridge
 
