@@ -57,7 +57,7 @@ Config directory is `/home/bob/config`
 ## Development
 
 - Package manager: `uv` (Python 3.12 pinned via `.python-version`); single project at the repo root
-- UI: `npm` in `ui/` (vite dev server is the dashboard outside docker)
+- UI: `npm` in `ui/` — the dashboard outside docker is the vite dev server, run as the `bob-ui.service` user unit (auto-starts, logs: `journalctl --user -u bob-ui.service`)
 - Deploy (primary): `systemctl --user restart bob.service` — the unit runs `uv run` from this checkout, so a restart picks up the working tree. Run `uv run pytest tests -q` yourself before meaningful changes; nothing gates it automatically
 - Docker instances: see README → "Bob instances (Docker)"
 - Test: `uv run pytest tests -q`
