@@ -20,9 +20,13 @@ scripts/rollout.sh
 .superpowers/
 
 # Build outputs
+node_modules/
 packages/bob-server/bob_server/ui_dist
+server/ui_dist
 services/whatsappbridge/bin
 services/whatsappbridge/whatsappbridge
+bridge/bin
+bridge/whatsappbridge
 
 # Stray dev DBs
 *.sqlite
