@@ -223,6 +223,34 @@ The service listens on `127.0.0.1:8420` by default.
 - ReDoc: `http://localhost:8420/redoc`
 - Health: `http://localhost:8420/health`
 
+## Bob Instances (Docker)
+
+The primary instance runs from this checkout under systemd (`./deploy.sh`). Additional Bob instances run via Docker — the image bundles the server, the built dashboard, the claude CLI harness, and the core skill bundle. Registry: `ghcr.io/mike-crabcat/bob` (public). Full design: `docs/bob-docker-plan.md`.
+
+### Throwaway test instance (this box)
+
+```bash
+BOB_PORT=8421 docker compose -p test-1 -f compose.yaml -f compose.ephemeral.yaml up -d
+```
+
+The ephemeral override swaps bind mounts for named volumes, so `docker compose -p test-1 down -v` erases the whole instance — data, workspace, claude state. Nothing to clean up. It boots from an empty database (fresh baseline schema) and the seeded skills; set `BOB_OPENAI_API_KEY` via an env file if you want live LLM turns. Port allocation on this box: primary owns 8420 (+8430 bridge, 8443 funnel); tests take 8421+.
+
+### Install for someone else (their machine)
+
+1. Install Docker, then:
+   ```bash
+   mkdir -p ~/bob/{data,config,workspace} && cd bob
+   curl -fsSL https://raw.githubusercontent.com/mike-crabcat/bob/master/compose.yaml -o compose.yaml   # or copy from the repo
+   cp /path/to/.env.example config/.env && $EDITOR config/.env   # their own keys
+   ```
+2. Claude harness auth (once): `docker compose run --rm bob claude login` — or set `ANTHROPIC_API_KEY` in `config/.env`.
+3. `BOB_INSTANCE_DIR=~/bob BOB_PORT=8420 docker compose -p bob up -d`
+4. Healthcheck: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8420/dashboard` → 307/200.
+
+What each instance gets: its own SQLite DB and workspace (bind mounts under `~/bob`), its own claude volume, the browser sidecar (`BU_CDP_URL` is pre-wired), and the seeded core skills. Upgrades: `docker compose pull && docker compose up -d` — migrations run on boot. Their backup: `sqlite3 ~/bob/data/bob.db ".backup ..." ` plus tar of the instance dir.
+
+Voice/WhatsApp need the instance's own Twilio number + public webhook URL (`--profile whatsapp` for the bridge); leave off otherwise.
+
 ### Dashboard Development
 
 The dashboard is a React SPA (Vite + TypeScript + Tailwind) in `ui/`.
