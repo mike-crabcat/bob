@@ -1,0 +1,21 @@
+# Throwaway-instance override: swap the bind mounts for named volumes so
+# `docker compose -p <name> down -v` erases the whole instance — no instance
+# dir left behind. Combine with compose.yaml:
+#   BOB_PORT=8421 docker compose -p test-1 -f compose.yaml -f compose.ephemeral.yaml up -d
+services:
+  bob:
+    volumes:
+      - data:/home/bob/data
+      - config:/home/bob/config
+      - workspace:/home/bob/workspace
+      - claude:/home/bob/.claude
+      - bobenv:/home/bob/bobenv
+  whatsappbridge:
+    volumes:
+      - data:/home/bob/data
+      - workspace:/home/bob/workspace
+
+volumes:
+  data:
+  config:
+  workspace:

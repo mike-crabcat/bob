@@ -1,0 +1,59 @@
+# Bob instance compose. Two ways to run (see README → "Bob instances"):
+#
+#   persistent install:
+#     BOB_INSTANCE_DIR=~/bob BOB_PORT=8420 docker compose -p bob up -d
+#   throwaway test (named volumes, `down -v` erases everything):
+#     BOB_PORT=8421 docker compose -p test-x -f compose.yaml -f compose.ephemeral.yaml up -d
+#
+# Local dev builds the image from the checkout; installs can
+# `docker compose pull` from the public registry instead.
+
+services:
+  bob:
+    image: ghcr.io/mike-crabcat/bob:${BOB_VERSION:-latest}
+    build: .
+    ports:
+      - "${BOB_PORT:-8420}:8420"
+    extra_hosts:
+      # reach a co-located openclaw gateway via http://host.docker.internal:<port>
+      - "host.docker.internal:host-gateway"
+    user: "1000:1000"
+    env_file:
+      - path: ${BOB_INSTANCE_DIR:-./instance}/config/.env
+        required: false
+    environment:
+      # browser sidecar endpoint; overrides to reuse a host chrome if preferred
+      BU_CDP_URL: ${BU_CDP_URL:-http://chrome:9222}
+    volumes:
+      - ${BOB_INSTANCE_DIR:-./instance}/data:/home/bob/data
+      - ${BOB_INSTANCE_DIR:-./instance}/config:/home/bob/config
+      - ${BOB_INSTANCE_DIR:-./instance}/workspace:/home/bob/workspace
+      - claude:/home/bob/.claude
+      - bobenv:/home/bob/bobenv
+    restart: unless-stopped
+
+  chrome:
+    # browser sidecar — CDP attach; bob's image carries no browser payload.
+    # headless-shell accepts chromium flags; profile persists in the named volume.
+    image: chromedp/headless-shell:latest
+    command: ["--remote-debugging-port=9222", "--user-data-dir=/data/profile", "--no-first-run", "--disable-dev-shm-usage"]
+    volumes:
+      - chrome-profile:/data
+    restart: unless-stopped
+
+  whatsappbridge:
+    build: ./bridge
+    profiles: ["whatsapp"] # opt-in: only instances with their own number
+    environment:
+      BOB_CONFIG_DIR: /home/bob/config
+      BOB_WS_URL: ${BOB_WS_URL:-ws://bob:8420/ws}
+    user: "1000:1000"
+    volumes:
+      - ${BOB_INSTANCE_DIR:-./instance}/data:/home/bob/data
+      - ${BOB_INSTANCE_DIR:-./instance}/workspace:/home/bob/workspace
+    restart: unless-stopped
+
+volumes:
+  claude:
+  bobenv:
+  chrome-profile:
