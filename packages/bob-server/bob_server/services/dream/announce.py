@@ -44,7 +44,7 @@ class AnnounceService(BaseService):
     async def flush(self) -> dict[str, Any]:
         """Send pending announcements. Idempotent via announced_at guard."""
         settings = self.ctx.settings.dream
-        result: dict[str, Any] = {"sessions": 0, "plans_announced": 0, "deferred_hot": 0, "deferred_cap": 0, "skipped": 0}
+        result: dict[str, Any] = {"sessions": 0, "plans_announced": 0, "deferred_hot": 0, "deferred_cap": 0, "expired_stale": 0, "skipped": 0}
 
         pending = await self.store.plans_pending_announce()
         if not pending:
@@ -77,6 +77,15 @@ class AnnounceService(BaseService):
                 result["deferred_hot"] += 0  # bridge down; keep pending
                 logger.info("dream announce: bridge not connected; %d plan(s) stay pending", len(plans))
                 continue
+
+            # Stale-premise guard: expire plans whose question was already
+            # answered before composing (2026-09-02: "the coffee still hasn't
+            # got a date" was announced the day after the coffee happened).
+            if settings.announce_factcheck:
+                plans, stale = await self._factcheck(session_key, plans)
+                result["expired_stale"] += len(stale)
+                if not plans:
+                    continue
 
             message = await self._compose(session_key, plans)
             try:
@@ -122,6 +131,11 @@ class AnnounceService(BaseService):
                 continue
             if await self.store.announcements_today(session_key) >= settings.announce_daily_cap_per_session:
                 continue
+            if settings.announce_factcheck:
+                remaining, stale = await self._factcheck(session_key, [plan])
+                if stale:
+                    continue
+                plan = remaining[0]
             message = await self._compose(session_key, [plan], follow_up=True)
             try:
                 await bridge.send_message(chat_id, message)
@@ -131,6 +145,64 @@ class AnnounceService(BaseService):
             await self._record(session_key, message, [plan])
             sent += 1
         return sent
+
+    async def _factcheck(self, session_key: str, plans: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+        """Expire plans whose premise no longer holds before announcing.
+
+        The composer grounds itself only in plan text, so a plan whose
+        question was already answered still reads as live (2026-09-02: "the
+        coffee still hasn't got a date" was announced the day AFTER the
+        coffee happened). Each plan is checked against the current time and
+        the session's active-goal context; STALE verdicts expire the plan
+        instead of announcing. Checker errors fail open (announce anyway).
+        """
+        import asyncio
+
+        from bob_server.services.dream.models import Evidence
+        from bob_server.services.dream.prompts import FACTCHECK_SYSTEM
+        from bob_server.services.llm_dispatch import LLMDispatchService
+
+        now_line = datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %z")
+        goal_ctx = (await self.store.active_goal_context(session_key)) or "(no active goals for this conversation)"
+        llm = LLMDispatchService(self.ctx)
+
+        async def _check(plan: dict) -> tuple[dict, str | None]:
+            summary = (
+                f"{plan['title']}\n{plan['what_was_discussed']}\n"
+                f"Proposed next step: {plan.get('proposed_action') or '(none)'}\n"
+                f"Timeframe hint: {plan.get('due_hint') or '(none)'}"
+            )
+            try:
+                verdict = await llm.chat(
+                    messages=[
+                        {"role": "system", "content": FACTCHECK_SYSTEM},
+                        {"role": "user", "content": (
+                            f"Current local time: {now_line}\n\n"
+                            f"Active goal context:\n{goal_ctx}\n\n"
+                            f"Pending plan:\n{summary}")},
+                    ],
+                    call_category="dream_factcheck",
+                    session_key=session_key,
+                    model=self.ctx.settings.openai.get_memory_model(),
+                    temperature=0.0,
+                )
+            except Exception:
+                logger.exception("dream announce: fact-check failed for %s; announcing", plan.get("id"))
+                return plan, None
+            text = (verdict or "").strip()
+            if text.upper().startswith("STALE"):
+                reason = text.split(":", 1)[1].strip() if ":" in text else "premise no longer holds"
+                return plan, reason
+            return plan, None
+
+        checked = await asyncio.gather(*(_check(p) for p in plans))
+        stale = [(p, reason) for p, reason in checked if reason]
+        for plan, reason in stale:
+            await self.store.set_plan_status(plan["id"], "expired", evidence=Evidence(
+                kind="expired", note=f"announce fact-check: {reason}"))
+            logger.info("dream announce: expired stale plan %s (%s)", plan["id"], reason)
+        keep = [p for p, reason in checked if not reason]
+        return keep, stale
 
     async def _compose(self, session_key: str, plans: list[dict], *, follow_up: bool = False) -> str:
         from bob_server.services.dream.prompts import ANNOUNCE_SYSTEM

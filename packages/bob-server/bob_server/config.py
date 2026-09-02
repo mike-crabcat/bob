@@ -384,6 +384,7 @@ class DreamSettings:
     draft_mode: bool = True
     auto_approve_plans: bool = False       # boot default; runtime value in dream_config
     announce_daily_cap_per_session: int = 3
+    announce_factcheck: bool = True           # expire stale-premise plans instead of announcing
     announce_defer_active_minutes: int = 10
     reannounce_after_days: int = 3
     max_reannounces_per_plan: int = 1
@@ -727,6 +728,7 @@ class Settings:
             draft_mode=_env_bool("BOB_DREAM_DRAFT_MODE", default=True),
             auto_approve_plans=_env_bool("BOB_DREAM_AUTO_APPROVE_PLANS"),
             announce_daily_cap_per_session=int(os.getenv("BOB_DREAM_ANNOUNCE_DAILY_CAP", "3")),
+            announce_factcheck=_env_bool("BOB_DREAM_ANNOUNCE_FACTCHECK", True),
             announce_defer_active_minutes=int(os.getenv("BOB_DREAM_ANNOUNCE_DEFER_ACTIVE_MINUTES", "10")),
             reannounce_after_days=int(os.getenv("BOB_DREAM_REANNOUNCE_AFTER_DAYS", "3")),
             max_reannounces_per_plan=int(os.getenv("BOB_DREAM_MAX_REANNOUNCES", "1")),

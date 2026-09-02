@@ -547,6 +547,23 @@ class DreamStore(BaseService):
                 return entry["session_key"]
         return None
 
+    async def active_goal_context(self, session_key: str) -> str:
+        """Objective+progress of the session's active goals, for the announce
+        fact-check. The composer sees only plan text, so contradicting facts
+        (event already booked/held) must be fetched explicitly."""
+        from bob_server.repositories.goals import GoalRepository
+
+        rows = await GoalRepository(self.db).list_active(conversation_id=session_key, limit=3)
+        if not rows:
+            return ""
+        parts = []
+        for r in rows:
+            bits = [f"Objective: {r['objective']}"]
+            if r.get("progress"):
+                bits.append(f"Progress: {r['progress']}")
+            parts.append("\n".join(bits))
+        return "\n\n".join(parts)
+
     async def session_last_inbound_at(self, session_key: str) -> str | None:
         from bob_server.repositories.history import HistoryRepository
         return await HistoryRepository(self.db).last_message_at(session_key, role="user")

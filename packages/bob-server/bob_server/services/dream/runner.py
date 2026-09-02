@@ -204,8 +204,11 @@ class DreamRunner(BaseService):
             stats["merged"].append({"type": "resolution", "id": match["id"], "title": cand.title})
             return
         if terminal:
-            # Fresh explicit evidence may reopen; otherwise suppress.
-            if self._evidence_is_fresh(cand.evidence, terminal):
+            # Fresh HUMAN evidence may reopen; otherwise suppress. Timestamp
+            # freshness alone resurrected completed items on recycled system
+            # text (2026-09-02: goal-progress headers kept reopening the AI
+            # Doom coffee plan after the coffee had already happened).
+            if self._evidence_has_human(cand.evidence) and self._evidence_is_fresh(cand.evidence, terminal):
                 await self.store.set_resolution_status(
                     terminal["id"], "open",
                     evidence=Evidence(kind="reopened", note="fresh evidence re-committed", run_id=run_id),
@@ -238,7 +241,8 @@ class DreamRunner(BaseService):
             stats["merged"].append({"type": "plan", "id": match["id"], "title": cand.title})
             return
         if terminal:
-            if self._evidence_is_fresh(cand.evidence, terminal):
+            # Same human-evidence rule as resolutions — see _write_resolution.
+            if self._evidence_has_human(cand.evidence) and self._evidence_is_fresh(cand.evidence, terminal):
                 await self.store.set_plan_status(
                     terminal["id"], "approved", approved_by="auto",
                     evidence=Evidence(kind="reopened", note="fresh evidence re-committed", run_id=run_id),
@@ -255,9 +259,15 @@ class DreamRunner(BaseService):
             )
             stats["capped_dropped"].append({"type": "plan", "title": cand.title, "deferred": True})
             return
-        # Backlog guard: plans with only old evidence never auto-approve.
-        auto_ok = await self._session_autoplan(session_key) and self._evidence_is_fresh(
-            cand.evidence, {"ts": (utcnow() - timedelta(days=self.settings.backlog_evidence_days)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        # Backlog guard: plans with only old evidence never auto-approve — and
+        # neither do plans cited only from system text (goal wakes, routines,
+        # Bob's own replies); a human has to have said something.
+        auto_ok = (
+            await self._session_autoplan(session_key)
+            and self._evidence_has_human(cand.evidence)
+            and self._evidence_is_fresh(
+                cand.evidence, {"ts": (utcnow() - timedelta(days=self.settings.backlog_evidence_days)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            )
         )
         if auto_ok:
             item_id = await self.store.insert_plan(
@@ -315,6 +325,17 @@ class DreamRunner(BaseService):
             return True
         newest = max((_parse_iso(e.at) for e in evidence), default=None)
         return newest is not None and newest > ref
+
+    @staticmethod
+    def _evidence_has_human(evidence: list[Evidence]) -> bool:
+        """At least one cited message was authored by a human.
+
+        Human inbound carries a sender id (``by``); system-generated rows
+        (goal wakes, routine injections, background-task relays) and Bob's
+        own replies leave it empty. Failure mode is conservative: channels
+        that don't populate sender_id simply never reopen terminal items.
+        """
+        return any(e.by for e in evidence)
 
     async def _session_autoplan(self, session_key: str) -> bool:
         """Autoplan is session-scoped (conversations.policy_json, /autoplan command)."""
