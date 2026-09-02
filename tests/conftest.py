@@ -1,25 +1,45 @@
-"""Shared pytest fixtures for all test modules."""
+"""Shared test fixtures for bob-server."""
 
+from __future__ import annotations
+
+import asyncio
 from pathlib import Path
-from uuid import uuid4
 
-import pytest_asyncio
+import pytest
+
+from bob_server.config import Settings
+from bob_server.context import AppContext
 from bob_server.database import Database
 
-SCHEMA_DIR = Path(__file__).parent.parent / "packages" / "bob-server" / "bob_server" / "schemas"
+
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "bob_server" / "schemas"
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 async def db():
-    """Create a fresh in-memory test database for each test."""
-    db_path = Path(f"/tmp/bob-test-{uuid4()}.db")
+    """Provide a connected in-memory SQLite database with all migrations applied."""
+    database = Database(
+        db_path=Path(":memory:"),
+        schema_dir=SCHEMA_DIR,
+        pool_size=1,
+    )
+    await database.connect()
+    await database.apply_migrations()
+    yield database
+    await database.close()
 
-    db = Database(db_path=db_path, schema_dir=SCHEMA_DIR, pool_size=1)
-    await db.connect()
-    await db.apply_migrations()
 
-    yield db
+@pytest.fixture
+async def ctx(db):
+    """Provide an AppContext with the test database and default settings."""
+    settings = Settings.from_env()
+    return AppContext(db=db, settings=settings)
 
-    await db.close()
-    if db_path.exists():
-        db_path.unlink()
+
+@pytest.fixture(autouse=True)
+def _reset_occupancy():
+    """Occupancy is module-level state — never let it leak across tests."""
+    from bob_server.services import occupancy
+    occupancy.reset_for_tests()
+    yield
+    occupancy.reset_for_tests()
