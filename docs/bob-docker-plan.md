@@ -1,7 +1,7 @@
 # Bob Docker Restructure Plan
 
 Date: 2026-08-31 (revised same day: Docker is for *additional* instances, not a migration)
-Status: decisions settled except registry visibility + Chrome timing; ready to execute from Phase 0
+Status: all decisions settled 2026-09-02; ready to execute from Phase 0
 Goal: collapse the `packages/bob-server/bob_server` Python-package layout into top-level `server/` and `ui/` folders, drop the PyPI/wheel distribution model, and make Docker a supported way to stand up **additional** Bob instances — primarily Bobs for **other people** (their machines, their keys), plus **throwaway local test instances** on this box. The primary instance on this box **stays on systemd + uv**, unchanged in kind.
 
 ---
@@ -38,6 +38,7 @@ bob/
   ui/                      # was packages/bob-server/bob_server/ui_app — Vite + React SPA source
     src/ public/ index.html vite.config.ts package.json package-lock.json
   bridge/                  # was services/whatsappbridge — Go WhatsApp bridge
+  skills/                  # core skill bundle (captured from the live workspace) — seeded into new instances
   tests/                   # merged: root tests/ + packages/bob-server/tests/
   Dockerfile compose.yaml .dockerignore docker/   # the additional-instance path
   pyproject.toml           # single project: deps merged from root workspace + package, `bob` script entry
@@ -57,9 +58,9 @@ Additional instances are exactly the case where host networking is wrong — on 
 
 **D3 — UI package manager: npm.** `package-lock.json` exists and node_modules on disk is npm-laid-out; delete `pnpm-lock.yaml`. `npm ci` in the image build.
 
-**D4 — Image distribution: ghcr is the channel for other people; checkout builds for local dev.** Other people's instances `docker compose pull` a tagged image from ghcr (the gh PAT has write:packages) — a release is `build + push` tagged with the server version and/or git SHA, and an upgrade is `docker compose pull && docker compose up -d` (migrations run on boot; this is what replaces PyPI versioning). Mike's throwaway test instances build from the checkout. Decide registry visibility — private (they `docker login` with a read-scoped deploy token) vs public — at Phase 2.
+**D4 — Image distribution: ghcr is the channel for other people; checkout builds for local dev.** Other people's instances `docker compose pull` a tagged image from ghcr (the gh PAT has write:packages) — a release is `build + push` tagged with the server version and/or git SHA, and an upgrade is `docker compose pull && docker compose up -d` (migrations run on boot; this is what replaces PyPI versioning). Mike's throwaway test instances build from the checkout. **Registry visibility decided 2026-09-02: public.** No login step for installers; anyone who pulls still needs their own LLM keys and claude auth before the instance does anything useful.
 
-**D5 — Browser skill / Chrome: sidecar container (leading option; timing still open).** The skill is already CDP-attach (`BU_CDP_URL` env in `workspace/skills/browser/skill.md`) — so the bob image needs **no browser payload at all**. Plan: a `chrome` compose service (`chromedp/headless-shell` or thin chromium wrapper) exposing CDP, named volume for the profile (Bob's logged-in sessions stay per-instance), `BU_CDP_URL=http://chrome:9222` in the instance `.env`, sidecar in the default profile so other people get browser out of the box. Mike's local throwaways can instead reuse the host Chrome free via `BU_CDP_URL=http://host.docker.internal:9223` (shares the primary's profile — fine for tests, wrong for isolation). Work: env-ize the CDP URL in `skill.md` (hardcoded 127.0.0.1:9223 in a few spots), make the local auto-start line conditional. Alternative rejected-for-now: baking chromium into the bob image (+~400 MB, `--no-sandbox`, lifecycle coupled); remote-browser SaaS rejected (third-party cookies). Whether this lands in Phase 2 or Phase 4 is the open timing call.
+**D5 — Browser skill / Chrome: sidecar container (decided 2026-09-02: sidecar, lands in Phase 2 with the skills bundle).** The skill is already CDP-attach (`BU_CDP_URL` env in `workspace/skills/browser/skill.md`) — so the bob image needs **no browser payload at all**. A `chrome` compose service (`chromedp/headless-shell` or thin chromium wrapper, pinned tag) exposes CDP, with a named volume for the profile (Bob's logged-in sessions stay per-instance); `BU_CDP_URL=http://chrome:9222` in the instance `.env`. Mike's local throwaways can instead reuse the host Chrome free via `BU_CDP_URL=http://host.docker.internal:9223` (shares the primary's profile — fine for tests, wrong for isolation). Work: env-ize the CDP URL in `skill.md` (hardcoded 127.0.0.1:9223 in a few spots), make the local auto-start line conditional. Rejected: baking chromium into the bob image (+~400 MB, `--no-sandbox`, lifecycle coupled); remote-browser SaaS (third-party cookies).
 
 **D6 — Per-instance claude auth.** Each container instance gets its own named volume for `~/.claude` and authenticates once at creation: either run `docker compose run --rm bob claude login` (interactive OAuth) or set `ANTHROPIC_API_KEY` in the instance `.env`. For other people's instances this is simply each owner's own account or key — the runbook documents both; there is no shared billing. Sharing the host's `~/.claude` into a container is possible on this box (transcript slugs are cwd-derived so they don't collide) but couples instances' claude state — not the default.
 
@@ -84,11 +85,13 @@ Additional instances are exactly the case where host networking is wrong — on 
 4. `ui/vite.config.ts`: `outDir: "../server/ui_dist"` (server code unchanged — still `Path(__file__).parent / "ui_dist"`).
 5. `.gitignore`: `node_modules/`, `server/ui_dist`, `bridge/bin`, `bridge/whatsappbridge`; drop the `scripts/` entries.
 6. Primary deploy path (systemd, now the permanent arrangement):
-   - `bob.service`: `WorkingDirectory=/home/bob/bob`, `ExecStart=/home/bob/.local/bin/uv run --project /home/bob/bob bob serve --host 127.0.0.1 --port 8420 --data-dir /home/bob/data --config-dir /home/bob/config --db-path /home/bob/data/bob.db`
+   - `bob.service`: `WorkingDirectory=/home/bob/bob`, `ExecStart=/home/bob/.local/bin/uv run --project /home/bob/bob bob serve --host 127.0.0.1 --port 8420 --data-dir /home/bob/data --config-dir /home/bob/config --db-path /home/bob/data/bob.db`. `whatsappbridge.service` gets the matching one-liner: `ExecStart=/home/bob/bob/bridge/bin/whatsappbridge` (binary rebuilt via `make build`). Both edits ship **in the same deploy as the code move** — new code under the old unit dead-starts on the stale `WorkingDirectory`, and vice versa — so `deploy.sh` grows a `systemctl --user daemon-reload` step to make it atomic. Rollback: revert commit + revert the two unit lines + reload + restart.
    - `deploy.sh`: fix stale `bobv3` → `master`; run the **full merged suite** (`uv run pytest tests -q`); **add the missing UI build step** (`npm --prefix ui ci && npm --prefix ui run build`) before restart — closing the "prod serves a stale SPA" gap.
    - `backup.sh`: update its `packages/bob-server` path references.
 7. Docs: rewrite the layout/dev sections of `AGENTS.md` (it feeds CLAUDE.md), README Setup, `DOCS.yaml`, `docs/datamodel.md`. `CHANGELOG.md`: new entry, don't rewrite history.
 8. Verification gate (all before touching prod): full pytest suite green; `bob serve` boots from new layout; dashboard + smoke items from `docs/smoke-test-guide.md` pass; one real WhatsApp inbound and one dashboard action observed in logs.
+
+9. **Schema squash** (decided 2026-09-02; separate commit after the move+rename commit so the move diff stays pure-moves): replace the 150 numbered deltas in `server/schemas/` with a single `001_baseline.sql` holding the current schema; future migrations continue from `002_`. The mechanism falls out of the tracker (`schema_migrations` records **filenames**, `database.py:128` skips known names): the baseline gets a **new filename**, so it runs exactly once against every existing DB — including prod — and therefore must be fully idempotent: `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and seed rows as `INSERT OR IGNORE` keyed on their natural unique keys (the delta chain seeds data in ~10 files). On prod that makes it a no-op that appends one `schema_migrations` row; on a fresh instance (every docker instance, from now on) it builds the whole schema in one script instead of replaying 150. Generate, don't hand-write: apply the existing delta chain to a scratch DB, dump `sqlite_master` + seed rows, transform to idempotent form. Gates: (a) **equivalence** — scratch DB built via baseline must match one built via the 150 deltas (`sqlite_master` dump + seed-table checksums identical); (b) **prod-copy boot** — a copy of `bob.db` taken with `sqlite3 ".backup"` (online, WAL-safe — never `cp` a live db) runs `apply_migrations` and gains exactly one new `schema_migrations` row, zero errors, schema dump unchanged; (c) full suite green, reviewing `test_database.py` + conftests for migration-specific assertions. **No maintenance window**: verification runs against copies with Bob live, and the squash deploys as an ordinary `deploy.sh` restart — the boot-time no-op is the entire prod-side effect (fresh `backup.sh` snapshot beforehand as belt-and-braces). Rollback: revert the commit; the prod-side effect is one tracker row. Tag the pre-squash commit `schema-pre-squash` so the delta history stays reachable. Also delete the unreferenced legacy `packages/bob-server/schema.sql`.
 
 ## Phase 2 — Dockerize the additional-instance path
 
@@ -153,6 +156,12 @@ services:
       - bobenv:/home/bob/bobenv
     restart: unless-stopped
 
+  chrome:                                   # D5 — browser sidecar; CDP-attach, no browser in the bob image
+    image: chromedp/headless-shell:<pinned>
+    volumes:
+      - chrome-profile:/data                # per-instance logged-in sessions
+    restart: unless-stopped
+
   whatsappbridge:
     build: ./bridge
     profiles: ["whatsapp"]                     # opt-in — only instances with their own number
@@ -166,11 +175,14 @@ services:
 volumes:
   claude:
   bobenv:
+  chrome-profile:
 ```
 
    Run per instance: `BOB_INSTANCE_DIR=~/instances/bob2 BOB_PORT=8421 docker compose -p bob2 up -d`. The `-p` project name keeps `claude`/`bobenv` volumes per instance. Nothing here touches the primary's systemd units or its `~/data`/`~/config`/`~/workspace`.
 
 4. **First instance = the burn-in** (per the careful-rollouts rule — never ship an image on faith): stand up `bob-staging` on this box with `BOB_PORT=8421` and a `backup.sh` snapshot restored into `~/instances/staging/`. Verify: dashboard renders on 8421, a stub conversation turn end-to-end (dashboard → llm_call_log → reply), `claude` CLI spawns inside the container (`docker compose exec bob claude --version`), heartbeat tasks fire with sane wall-clock under `TZ`, healthcheck curl. Then repeat once with **empty** data/config/workspace dirs — that is the exact state other people's instances boot from, so any missing template or required config file surfaces here, not on their machine. The primary runs untouched throughout — a bad staging container is a `docker compose down`, not an incident.
+
+5. **Core skills bundle** (decided 2026-09-02): capture a curated set of workspace skills into top-level `skills/`, versioned in the repo and baked into the image. **Sync is deliberately manual-but-scripted**: `scripts/capture-skills.sh` copies an allowlist from `~/workspace/skills/` (secret-shaped files excluded and post-scanned as a hard gate), prints a diff-stat, and Mike commits the result like code — the workspace is Bob's runtime lab and nothing auto-promotes from it into distribution. An advisory `--check` drift mode can ride along in the release flow; it never auto-commits. The container entrypoint seeds `~/workspace/skills/` **only if missing** (skel semantics — the agent's live, evolved copy is never clobbered on upgrade) and pip-installs `skills/requirements.txt` (browser-use etc.) into `bobenv` on first boot; the primary's workspace is never synced from the repo. Bundled skills take keys from instance env, documented in `.env.example`; personal/account-bound skills (redbark, cryptobro, bob-merch, printful, radio, ai-doom-post, jingle-of-the-day, sylvain-wise-rasta, pancake-protocol, faces, sheddenify-now-playing) are never captured. **Ship list confirmed 2026-09-02 (11 skills):** zero-config — browser, skill-guru, docx-to-md, md-to-docx, pdf-to-text, itinerary-pdf, creative-writing-review, changelog-impact; key-needing — openai-image (`OPENAI_API_KEY`), google-places (`GOOGLE_PLACES_API_KEY`), videogen (`RUNWARE_API_KEY`; its `apikey` file is already excluded by the capture gate and env takes precedence in the loader — one-line SKILL.md doc tweak during capture to say so). All three are already env-driven; no skill code changes. Later candidates, not in v1: meme-gif-library, spotify-playlists, bom-weather (Perth-hardcoded), email-draft-send + trip-assistant (no `skill.md` — verify first). The empty-dirs boot in item 4 is the gate proving the seed is complete and boots useful.
 
 ## Phase 3 — Standing up instances (runbook, lives in README)
 
@@ -185,7 +197,7 @@ Two flavors, because the two audiences want opposite things: other people need a
 
 **3b. A Bob for someone else (their machine):**
 
-1. They install Docker and `docker login ghcr.io` (read-scoped deploy token if the registry is private — visibility decided in D4).
+1. They install Docker. The registry is public — no login needed (D4).
 2. They fetch the bootstrap bundle — `compose.yaml`, `compose.ephemeral.yaml` excluded, plus `.env.example` — published as a release artifact or copy-paste from the README. No repo checkout needed.
 3. `mkdir -p ~/bob/{data,config,workspace}`; fill `config/.env` with **their own** keys. LLM traffic goes direct to OpenAI/OpenRouter (the defaults; no openclaw gateway exists on their box). Phone and WhatsApp stay off unless they bring their own number + public webhook URL.
 4. Claude auth: `docker compose run --rm bob claude login` (their account) or `ANTHROPIC_API_KEY` in `.env` (D6).
@@ -198,7 +210,7 @@ Two flavors, because the two audiences want opposite things: other people need a
 - Update agent memory entries that reference `packages/bob-server/...` paths.
 - Release hygiene for the ghcr channel (D4): tag images with the server version + git SHA; publish the bootstrap bundle (`compose.yaml` + `.env.example`) alongside each release; decide multi-arch (`buildx --platform linux/amd64,linux/arm64` — sqlite-vec/PyAV/numpy all ship arm64 wheels) when someone actually needs it.
 - Ship config templates so a fresh boot needs keys and nothing else: `.env.example` with every required `BOB_*` documented, plus anything the server demands from `~/config` on first boot (verified by the empty-dirs gate in Phase 2.4).
-- **Default workspace seed** (surfaced 2026-09-02): skills live in the workspace *volume*, so a fresh instance boots with **no skills at all** — and `browser-use` needs pip-installing into the instance's `bobenv`. The bootstrap bundle must seed a default `skills/` dir (browser at minimum) + a first-boot env setup step. The Phase 2.4 empty-dirs boot is the gate that proves the seed is complete.
+- **Core skills bundle cadence**: the primary's workspace stays authoritative; repo copies under `skills/` are distribution snapshots. Re-capture when a core skill meaningfully improves; grow the bundle as new generic skills stabilise (capture gate: no key-shaped files, personal skills excluded — rules in Phase 2.5).
 - Chrome for the browser skill in containers (D5): bake chromium into the image or a companion chrome service exposing CDP; pick after checking how browser-use launches/connects. Priority raised slightly — other people's Bobs ship with the same default skill set, and browser is the one that silently won't work.
 - Secrets-from-files for remaining env-var secrets (Twilio creds still leak to agent bash — API-security point 2; a read-only secrets mount matches the existing OpenRouter key-file pattern). Applies to every instance, not just the primary.
 - Optional: a media-pruning cron for long-lived containers (the systemd timer only covers the primary's workspace).
@@ -214,6 +226,8 @@ Two flavors, because the two audiences want opposite things: other people need a
 | Timezone/locale drift breaks wall-clock tasks | `TZ` env per instance (default UTC, document setting it), tzdata installed, heartbeat watch item |
 | Root-owned files in bind mounts | `user: "1000:1000"` + ownership check in the runbook |
 | Fresh boot from empty config fails for other people | Empty-dirs boot gate in Phase 2.4; `.env.example` + templates shipped per release |
-| Private-registry login friction for other people | Read-scoped deploy token documented in 3b, or flip visibility to public — decide with D4 |
+| A secret file rides into the repo via skill capture | Capture refuses key-shaped filenames; review the capture diff like any other code |
+| Public image visibility (world-pullable) | Accepted (D4, 2026-09-02): image carries no secrets — keys arrive per-instance via env, personal skills are never bundled, capture gate guards the bundle |
 | Two test suites merge conflicts (fixtures, markers) | Reconcile conftests explicitly in Phase 1.3; suite must be green pre-deploy either way |
+| Schema squash drops or corrupts a schema element/seed | Equivalence gate (fresh-via-baseline ≡ fresh-via-150-deltas, `sqlite_master` + seed checksums) + prod-copy no-op boot |
 | WhatsApp/phone in a container without its own number/funnel | Bridge behind a compose profile; phone gated on `base_url` config — documented in the runbook |
