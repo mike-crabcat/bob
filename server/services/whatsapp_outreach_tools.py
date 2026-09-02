@@ -9,12 +9,12 @@ import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from bob_server.services.tools import tool
-from bob_server.services.openai_service import strip_citation_markers
+from server.services.tools import tool
+from server.services.openai_service import strip_citation_markers
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
-    from bob_server.services.whatsapp_bridge_service import WhatsAppBridgeService
+    from server.context import AppContext
+    from server.services.whatsapp_bridge_service import WhatsAppBridgeService
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ async def _deliver_group_send(
     (as the bridge does for inbound). Callers own every gate — membership,
     policy, approval. Extra provenance keys ride in the effect payload for the
     dashboard timeline and audit."""
-    from bob_server.services.effects import emit_and_deliver
+    from server.services.effects import emit_and_deliver
 
     result = await emit_and_deliver(
         ctx, kind="whatsapp_send",
@@ -76,7 +76,7 @@ async def _deliver_group_send(
     # Mirror the sent message into the group conversation's history (as
     # the bridge does for inbound), so later prompts see it.
     try:
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
         await SessionService(ctx).add_message(
             group_key, "assistant", message, channel="whatsapp",
             metadata={"proactive_group_send": True, **provenance},
@@ -122,7 +122,7 @@ def make_group_send_tools(
         they belong to, no policy flag, can carry images)."""
         import time
 
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
 
         if not wa_service.connected:
             return json.dumps({"ok": False, "error": "WhatsApp bridge is not connected"})
@@ -186,12 +186,12 @@ def make_whatsapp_outreach_tools(
         Pass parent_goal_id to roll this outreach up into a plan's child goal
         (e.g. a time-negotiation fan-out) instead of waking you directly."""
         parent_goal = parent_goal_id.strip() or None
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
 
         db = ctx.db
 
         # Look up contact
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         contact = await ContactRepository(db).get(contact_id)
         if contact is None:
             return json.dumps({"ok": False, "error": "Contact not found"})
@@ -222,7 +222,7 @@ def make_whatsapp_outreach_tools(
         # Convert phone to JID and send
         jid = _phone_to_jid(phone)
         if media_path:
-            from bob_server.services.whatsapp_bridge_service import _prepare_media
+            from server.services.whatsapp_bridge_service import _prepare_media
             workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
             resolved = (workspace / media_path).resolve()
             if not str(resolved).startswith(str(workspace)):
@@ -242,10 +242,10 @@ def make_whatsapp_outreach_tools(
 
         # Derive requestor name from current session context
         requestor_name = "the agent"
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         current_route = await ConversationRepository(db).route_for(current_session_key)
         if current_route and current_route.get("contact_id"):
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             requestor = await ContactRepository(db).get(current_route["contact_id"])
             if requestor:
                 requestor_name = requestor["name"]
@@ -261,12 +261,12 @@ def make_whatsapp_outreach_tools(
         try:
             from datetime import datetime, timedelta, timezone
 
-            from bob_server.services.goal_service import create_goal
+            from server.services.goal_service import create_goal
             phone_digits_g = re.sub(r"\D", "", phone)
             strategy = {"requestor": requestor_name, "message": message}
             if parent_goal:
-                from bob_server.repositories.goals import GoalRepository
-                from bob_server.services.goal_state_service import parse_strategy
+                from server.repositories.goals import GoalRepository
+                from server.services.goal_state_service import parse_strategy
                 parent = await GoalRepository(db).get(parent_goal)
                 if parent is not None:
                     refs = parse_strategy(parent).refs.entities
@@ -287,7 +287,7 @@ def make_whatsapp_outreach_tools(
             logger.warning("failed to create outreach goal", exc_info=True)
 
         # Ensure the target DM binding exists (no outreach state on it).
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         await ConversationRepository(db).register_endpoint(
             target_session_key, endpoint_kind="dm", contact_id=str(contact["id"]))
 
@@ -300,9 +300,9 @@ def make_whatsapp_outreach_tools(
         )
 
         # Upsert the contact as a participant in the target session
-        from bob_server.services.base import utcnow
+        from server.services.base import utcnow
         now_iso = utcnow().isoformat()
-        from bob_server.repositories.participants import ParticipantRepository
+        from server.repositories.participants import ParticipantRepository
         await ParticipantRepository(db).upsert(
             target_session_key, phone,
             display_name=contact["name"], contact_id=contact["id"],
@@ -314,7 +314,7 @@ def make_whatsapp_outreach_tools(
         )
 
         # Log under source session so it shows as bob-initiated
-        from bob_server.services.llm_dispatch import _record_log
+        from server.services.llm_dispatch import _record_log
         await _record_log(
             db,
             provider="outreach",
@@ -352,12 +352,12 @@ def make_whatsapp_outreach_tools(
     ) -> str:
         """Retrieve recent messages from a contact's WhatsApp session.
         Use this to check if a contact has replied to an outreach message."""
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
 
         db = ctx.db
 
         # Look up contact by name
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         contact = await ContactRepository(db).search_by_name(f"%{contact_name}%")
         if contact is None:
             return json.dumps({"ok": False, "error": f"No contact found matching '{contact_name}'"})
@@ -423,13 +423,13 @@ def make_outreach_reply_tools(
         Call when you have achieved the objective or obtained the requested information.
         The result will be dispatched to the originating session, which will decide
         how to handle it (potentially messaging the requesting contact)."""
-        from bob_server.services.goal_service import settle_goal
-        from bob_server.services.wake_service import wake_conversation
+        from server.services.goal_service import settle_goal
+        from server.services.wake_service import wake_conversation
 
         db = ctx.db
 
         # The active outreach goal held by this conversation IS the state.
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         goal = await GoalRepository(db).active_outreach(current_session_key)
         if not goal or not goal["origin_conversation_id"]:
             return json.dumps({"ok": False, "error": "No active outreach to report"})
@@ -444,7 +444,7 @@ def make_outreach_reply_tools(
         requestor = strategy.get("requestor", "unknown")
 
         # Look up target contact name for context
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         target_contact_name = await ConversationRepository(db).contact_name_for(
             current_session_key) or "unknown"
 

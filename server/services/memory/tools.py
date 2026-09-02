@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bob_server.services.memory.claim_types import render_entity
-from bob_server.services.memory.models import ENTITY_TYPES
+from server.services.memory.claim_types import render_entity
+from server.services.memory.models import ENTITY_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ async def _resolve_entity(db: Any, query: str) -> dict | None:
 
     # Embedding similarity search
     try:
-        from bob_server.services.memory.embedding import search_similar
+        from server.services.memory.embedding import search_similar
         results = await search_similar(db, query, limit=5, threshold=1.2)
         if results:
             top = results[0]
@@ -214,7 +214,7 @@ async def _resolve_entity(db: Any, query: str) -> dict | None:
 
 async def _dream_items_block(db, entity_id: str) -> str:
     """Compact open dream items linked to an entity, for recall augmentation."""
-    from bob_server.services.dream.store import DreamStore
+    from server.services.dream.store import DreamStore
     items = await DreamStore.from_db(db).items_for_entity(entity_id)
     lines: list[str] = []
     for it in items:

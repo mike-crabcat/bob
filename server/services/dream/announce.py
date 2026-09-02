@@ -15,9 +15,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService, iso_utc, json_dumps, utcnow
-from bob_server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
+from server.context import AppContext
+from server.services.base import BaseService, iso_utc, json_dumps, utcnow
+from server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 class AnnounceService(BaseService):
     def __init__(self, ctx: AppContext) -> None:
         super().__init__(ctx)
-        from bob_server.services.dream.store import DreamStore
+        from server.services.dream.store import DreamStore
 
         self.store = DreamStore(ctx)
 
@@ -158,9 +158,9 @@ class AnnounceService(BaseService):
         """
         import asyncio
 
-        from bob_server.services.dream.models import Evidence
-        from bob_server.services.dream.prompts import FACTCHECK_SYSTEM
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.dream.models import Evidence
+        from server.services.dream.prompts import FACTCHECK_SYSTEM
+        from server.services.llm_dispatch import LLMDispatchService
 
         now_line = datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %z")
         goal_ctx = (await self.store.active_goal_context(session_key)) or "(no active goals for this conversation)"
@@ -205,8 +205,8 @@ class AnnounceService(BaseService):
         return keep, stale
 
     async def _compose(self, session_key: str, plans: list[dict], *, follow_up: bool = False) -> str:
-        from bob_server.services.dream.prompts import ANNOUNCE_SYSTEM
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.dream.prompts import ANNOUNCE_SYSTEM
+        from server.services.llm_dispatch import LLMDispatchService
 
         summaries = []
         for p in plans:
@@ -236,7 +236,7 @@ class AnnounceService(BaseService):
 
     async def _record(self, session_key: str, message: str, plans: list[dict]) -> None:
         """Record the announcement so future dreams can find it and extraction skips it."""
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
 
         await SessionService(self.ctx).add_message(
             session_key,

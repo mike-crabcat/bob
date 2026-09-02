@@ -1,7 +1,7 @@
 """Workspace bash tool eval cases with mocked handlers."""
 
-from bob_server.evals.case import JudgeCriteria, StructuralCheck
-from bob_server.evals.registry import eval_case
+from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.registry import eval_case
 
 _MOCK_LS_OUTPUT = (
     "SOUL.md\n"
@@ -13,7 +13,7 @@ _MOCK_LS_OUTPUT = (
 
 
 def _make_mock_workspace_tools():
-    from bob_server.services.tools import tool
+    from server.services.tools import tool
 
     @tool
     async def bash(command: str) -> str:
@@ -51,7 +51,7 @@ def _extract_tool_calls(messages: list) -> list[dict]:
     ),
 )
 async def workspace_bash(ctx):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     messages = [
         {"role": "system", "content": "You are an AI assistant with access to a bash tool that runs commands in the workspace. Use it when asked about files."},

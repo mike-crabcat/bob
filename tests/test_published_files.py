@@ -13,8 +13,8 @@ import secrets
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from bob_server.main import create_app
-from bob_server.config import Settings
+from server.main import create_app
+from server.config import Settings
 
 
 @pytest.fixture

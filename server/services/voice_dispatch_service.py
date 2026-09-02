@@ -20,8 +20,8 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from bob_server.services.base import BaseService, utcnow
-from bob_server.services.prompt_assembler import format_local_now
+from server.services.base import BaseService, utcnow
+from server.services.prompt_assembler import format_local_now
 
 logger = logging.getLogger(__name__)
 
@@ -185,19 +185,19 @@ async def mark_voice_subagent_complete(db: Any, subagent_id: str, result_text: s
     # Occupancy (Phase VI item 6): the call is over — release the person's
     # conversation and drain any messages queued during the call.
     try:
-        from bob_server.services import occupancy
+        from server.services import occupancy
         occupancy.mark_idle_by_ref(subagent_id)
     except Exception:
         logger.warning("occupancy release failed for %s", subagent_id[:8], exc_info=True)
     try:
-        from bob_server.repositories.subagents import SubagentRepository
+        from server.repositories.subagents import SubagentRepository
         await SubagentRepository(db).complete_voice(subagent_id, result_text[:4000])
     except Exception:
         logger.warning("Failed to mark voice subagent %s completed", subagent_id[:8], exc_info=True)
     # Bob3 Phase V: settle the linked goal. No wake here — the voice/call
     # result dispatch wakes the origin with the full summary.
     try:
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         goal = await GoalRepository(db).get_by_external_ref(subagent_id)
         if goal and goal["status"] == "active":
             await GoalRepository(db).transition(
@@ -222,8 +222,8 @@ async def append_call_completed_event(
     the call binding (falls back to the origin conversation). Idempotent on
     (source='voice', external_id)."""
     try:
-        from bob_server.repositories.conversations import ConversationRepository
-        from bob_server.repositories.event_log import Event, EventLogRepository
+        from server.repositories.conversations import ConversationRepository
+        from server.repositories.event_log import Event, EventLogRepository
 
         repo = ConversationRepository(db)
         conv = await repo.resolve(call_session_key) if call_session_key else None
@@ -262,7 +262,7 @@ def hangup_twilio_call(settings: Any, call_sid: str) -> bool:
 async def persist_call_transcript(db: Any, call_id: str, transcript: str) -> None:
     """Persist a partial phone-call transcript after a turn boundary (best-effort)."""
     try:
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         await PhoneCallRepository(db).set_transcript(call_id, transcript)
     except Exception:
         logger.warning("Failed to persist partial phone transcript", exc_info=True)
@@ -277,7 +277,7 @@ async def load_call_meta(db: Any, call_sid: str) -> dict | None:
     cached = call_agendas.get(call_sid)
     if cached is not None:
         return cached
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     row = await PhoneCallRepository(db).get_by_sid(call_sid)
     if row is None:
         return None
@@ -362,7 +362,7 @@ async def initiate_outbound_call(
     # connect-at-answer on any failure.
     if engine == "openai_realtime":
         try:
-            from bob_server.services import realtime_prewarm
+            from server.services import realtime_prewarm
             realtime_prewarm.start_prewarm(
                 call_id, db=db, settings=settings,
                 phone_number=to_number, agenda=agenda, meta=meta,
@@ -380,7 +380,7 @@ async def initiate_outbound_call(
     sid = call.sid or ""
     if not sid:
         if engine == "openai_realtime":
-            from bob_server.services import realtime_prewarm
+            from server.services import realtime_prewarm
             await realtime_prewarm.discard(call_id)
         return {"error": "Twilio returned no call SID"}
 
@@ -395,7 +395,7 @@ async def initiate_outbound_call(
         "realtime_meta": meta,
     }
 
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     await PhoneCallRepository(db).insert_outbound(
         call_id=call_id, call_sid=sid, phone_number=to_number, agenda=agenda,
         engine=engine, realtime_meta_json=json.dumps(meta),
@@ -439,7 +439,7 @@ class VoiceDispatchService(BaseService):
         if modality not in ("phone", "voice_link"):
             raise ValueError(f"unknown modality: {modality!r} — use 'phone' or 'voice_link'")
 
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         contact = await ContactRepository(self.db).get(contact_id)
         if contact is None:
             raise ValueError(f"contact not found: {contact_id}")
@@ -451,14 +451,14 @@ class VoiceDispatchService(BaseService):
         # it — enforces MAX_LIVE_CALLS and lets ingress queue inbound text on
         # this person's conversation for the post-call turn.
         if person_conversation_id:
-            from bob_server.services import occupancy
+            from server.services import occupancy
             occupancy.mark_live(person_conversation_id, subagent_id)
 
         settings = self._get_settings()
         instructions = build_outbound_instructions(contact["name"], task)
 
         if modality == "voice_link":
-            from bob_server.services.voice_session_service import VoiceSessionService
+            from server.services.voice_session_service import VoiceSessionService
             # Ported from the retired reach_out_with_voice_call tool: the call
             # transcript/memory attaches to the contact's DM session (not the
             # requesting group), and the outcome reports back to whoever asked.
@@ -524,12 +524,12 @@ class VoiceDispatchService(BaseService):
         digits = re.sub(r"\D", "", contact.get("phone_number") or "")
         if not digits:
             return None
-        from bob_server.repositories.subagents import SubagentRepository
+        from server.repositories.subagents import SubagentRepository
         call_session_key = await SubagentRepository(self.db).session_key_of(subagent_id)
         if call_session_key is None:
             return None
         try:
-            from bob_server.repositories.conversations import ConversationRepository
+            from server.repositories.conversations import ConversationRepository
             repo = ConversationRepository(self.db)
             conv = await repo.ensure(f"agent:main:whatsapp:dm:{digits}")
             await repo.bind(
@@ -543,6 +543,6 @@ class VoiceDispatchService(BaseService):
             return None
 
     async def _update_subagent_status(self, subagent_id: str, status: str) -> None:
-        from bob_server.repositories.subagents import SubagentRepository
+        from server.repositories.subagents import SubagentRepository
         await SubagentRepository(self.db).set_status(
             subagent_id, status, utcnow().isoformat())

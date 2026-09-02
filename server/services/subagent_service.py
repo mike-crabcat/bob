@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from bob_server.services.base import BaseService, utcnow
+from server.services.base import BaseService, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class SubagentService(BaseService):
     """Manages async subagent lifecycle — create, run, message, check, list, kill."""
 
     def _repo(self):
-        from bob_server.repositories.subagents import SubagentRepository
+        from server.repositories.subagents import SubagentRepository
         return SubagentRepository(self.db)
 
     async def create_subagent(
@@ -81,7 +81,7 @@ class SubagentService(BaseService):
         # regardless of agent_type — the LLM keeps inventing new type names
         # ("phone-call", "voice_chat", "general-purpose", …) and contact_id is
         # the unambiguous "this is a call to a person" marker.
-        from bob_server.services.voice_dispatch_service import normalise_voice_modality
+        from server.services.voice_dispatch_service import normalise_voice_modality
 
         requested_modality = modality
         normalised_type = _normalise_voice_agent_type(agent_type)
@@ -108,7 +108,7 @@ class SubagentService(BaseService):
         # Bob3 Phase V: a subagent is a goal held on behalf of the parent
         # conversation. Completion settles the goal and wakes the parent.
         try:
-            from bob_server.services.goal_service import create_goal
+            from server.services.goal_service import create_goal
             await create_goal(
                 self.ctx,
                 conversation_id=session_key,
@@ -132,7 +132,7 @@ class SubagentService(BaseService):
                 )
             except Exception as e:
                 logger.warning("openai_voice subagent %s dispatch failed: %s", short_id, e)
-                from bob_server.services import occupancy
+                from server.services import occupancy
                 occupancy.mark_idle_by_ref(subagent_id)
                 await self._update_status(subagent_id, "failed", error=str(e))
                 return {"ok": False, "error": str(e), "subagent_id": subagent_id, "session_key": session_key}
@@ -163,7 +163,7 @@ class SubagentService(BaseService):
         # are executor kinds on the SpawnSubagent record. The executor starts
         # the background run; the pump can re-deliver after a crash (the
         # executor guards against re-spawning finished or running subagents).
-        from bob_server.services import effects as effects_svc
+        from server.services import effects as effects_svc
         spawn = await effects_svc.emit_and_deliver(
             self.ctx,
             kind="subagent_spawn",
@@ -199,7 +199,7 @@ class SubagentService(BaseService):
         Thin delegation to VoiceDispatchService, which owns contact resolution,
         instruction building, and Twilio placement.
         """
-        from bob_server.services.voice_dispatch_service import VoiceDispatchService
+        from server.services.voice_dispatch_service import VoiceDispatchService
 
         return await VoiceDispatchService(self.ctx).dispatch_contact_call(
             subagent_id, task, contact_id, modality, parent_session_key,
@@ -220,7 +220,7 @@ class SubagentService(BaseService):
         try:
             if agent_type == "local":
                 # Store user message in session before execution
-                from bob_server.services.session_service import SessionService
+                from server.services.session_service import SessionService
                 await SessionService(self.ctx).add_message(
                     session_key, "user", task, channel="subagent",
                 )
@@ -230,7 +230,7 @@ class SubagentService(BaseService):
                     model=model,
                 )
             elif agent_type == "script":
-                from bob_server.services.session_service import SessionService
+                from server.services.session_service import SessionService
                 await SessionService(self.ctx).add_message(
                     session_key, "user", task, channel="subagent",
                 )
@@ -260,7 +260,7 @@ class SubagentService(BaseService):
 
         # Store assistant message in subagent session
         # (user message already stored before execution for local, or stored here for claude)
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
         if agent_type not in ("local", "script"):
             await session_svc.add_message(session_key, "user", task, channel="subagent")
@@ -299,7 +299,7 @@ class SubagentService(BaseService):
             settings = self._get_settings()
 
             # Store user message before execution (local needs it in session history)
-            from bob_server.services.session_service import SessionService
+            from server.services.session_service import SessionService
             session_svc = SessionService(self.ctx)
             if agent_type == "local":
                 await session_svc.add_message(session_key, "user", message, channel="subagent")
@@ -402,7 +402,7 @@ class SubagentService(BaseService):
                 return {"ok": False,
                         "error": f"Task already {row['status']} — nothing to cancel. "
                                  "Check its result instead (check_subagent)."}
-            from bob_server.services import backburner as _bb
+            from server.services import backburner as _bb
             res = _bb.request_kill(row["id"])
             if not res.get("ok"):
                 return {"ok": False,
@@ -420,21 +420,21 @@ class SubagentService(BaseService):
         # working) and hang up any live phone call — the phone_calls row now
         # carries subagent_id (migration 355), so the call_sid is reachable.
         if row["agent_type"] == "openai_voice":
-            from bob_server.services.voice_dispatch_service import hangup_twilio_call
+            from server.services.voice_dispatch_service import hangup_twilio_call
 
             try:
                 now_iso = utcnow().isoformat()
-                from bob_server.services.voice_session_service import VoiceSessionService
+                from server.services.voice_session_service import VoiceSessionService
                 await VoiceSessionService.from_db(self.db).expire_for_subagent(
                     subagent_id, now_iso)
                 # Keep the phone_calls mirror row in sync (calls UI).
-                from bob_server.repositories.phone_calls import PhoneCallRepository
+                from server.repositories.phone_calls import PhoneCallRepository
                 await PhoneCallRepository(self.db).cancel_voice_links_for_subagent(
                     subagent_id, now_iso)
             except Exception:
                 logger.warning("Failed to expire voice_session for killed subagent %s", subagent_id[:8], exc_info=True)
 
-            from bob_server.repositories.phone_calls import PhoneCallRepository
+            from server.repositories.phone_calls import PhoneCallRepository
             call = await PhoneCallRepository(self.db).latest_for_subagent(subagent_id)
             if call and call["status"] in ("active", "ringing"):
                 if hangup_twilio_call(self._get_settings(), call["call_sid"]):
@@ -442,10 +442,10 @@ class SubagentService(BaseService):
 
         await self._update_status(subagent_id, "killed")
         try:
-            from bob_server.repositories.goals import GoalRepository
+            from server.repositories.goals import GoalRepository
             goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
             if goal and goal["status"] == "active":
-                from bob_server.services.goal_service import settle_goal
+                from server.services.goal_service import settle_goal
                 await settle_goal(self.ctx, goal["id"], status="cancelled",
                                   result="subagent killed", wake_origin=False)
         except Exception:
@@ -501,9 +501,9 @@ class SubagentService(BaseService):
                 f"You can also use message_subagent to reply or kill_subagent to terminate."
             )
 
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.services.goal_service import settle_goal
-        from bob_server.services.wake_service import wake_conversation
+        from server.repositories.goals import GoalRepository
+        from server.services.goal_service import settle_goal
+        from server.services.wake_service import wake_conversation
 
         settled = False
         try:
@@ -556,8 +556,8 @@ class SubagentService(BaseService):
         """Run a shell command in the workspace as a background job (Bob3:
         async skill execution). Same sandbox and skill env as the bash tool;
         the parent conversation is woken with the output when it finishes."""
-        from bob_server.services.skill_env import build_skill_env
-        from bob_server.services.workspace_tools import _check_command_safety
+        from server.services.skill_env import build_skill_env
+        from server.services.workspace_tools import _check_command_safety
 
         settings = self._get_settings()
         workspace = settings.harness.workspace_dir.expanduser().resolve()
@@ -610,7 +610,7 @@ class SubagentService(BaseService):
 
         # Build system prompt
         if persona:
-            from bob_server.services.prompt_assembler import load_workspace_prompt
+            from server.services.prompt_assembler import load_workspace_prompt
             system_content = await load_workspace_prompt(
                 settings.harness.workspace_dir, db=self.db,
             )
@@ -622,11 +622,11 @@ class SubagentService(BaseService):
             )
 
         # Build workspace-only tool set
-        from bob_server.services.workspace_tools import make_workspace_tools
+        from server.services.workspace_tools import make_workspace_tools
         tools = make_workspace_tools(self.ctx, session_key=session_key)
 
         # Build messages from session history
-        from bob_server.services.prompt_assembler import build_chat_messages
+        from server.services.prompt_assembler import build_chat_messages
         messages = await build_chat_messages(
             None, session_key,
             db=self.db,
@@ -635,7 +635,7 @@ class SubagentService(BaseService):
         )
 
         # Dispatch via LLM dispatch (logs calls, publishes events)
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
         result_text = await LLMDispatchService(self.ctx).chat_with_tools(
             messages=messages,
             tools=tools,
@@ -726,11 +726,11 @@ def _register_spawn_executor() -> None:
     """SpawnSubagent effect executor (Bob3 Phase VI item 5): claude/local are
     executor kinds on the durable spawn record. Starts the background run and
     returns immediately; guards against re-spawning on pump re-delivery."""
-    from bob_server.services import effects as effects_svc
+    from server.services import effects as effects_svc
 
     async def _exec_spawn(ctx, payload):
         subagent_id = payload["subagent_id"]
-        from bob_server.repositories.subagents import SubagentRepository
+        from server.repositories.subagents import SubagentRepository
         sub_status = await SubagentRepository(ctx.db).status_of(subagent_id)
         if sub_status is None:
             raise RuntimeError(f"subagent {subagent_id} not found")

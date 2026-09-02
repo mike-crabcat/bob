@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.repositories.history import HistoryRepository
-from bob_server.services.prompt_assembler import build_chat_messages
-from bob_server.services.session_service import SessionService
+from server.repositories.history import HistoryRepository
+from server.services.prompt_assembler import build_chat_messages
+from server.services.session_service import SessionService
 
 
 async def _pending_ids(db, key: str) -> set[str]:
@@ -204,8 +204,8 @@ async def test_dispatch_runner_marks_claims_end_to_end(ctx, db, monkeypatch):
     """The runner passes its claimed ids through: a real dispatch turn over
     the mid-turn-arrival shape sends the LLM a user-final input whose trailer
     re-presents the new stimulus."""
-    from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.dispatch_runner import DispatchRunner, DispatchSpec
+    from server.services.llm_dispatch import LLMDispatchService
 
     key = "test:claim:runner"
     svc = SessionService(ctx)

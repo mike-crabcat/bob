@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
@@ -20,7 +20,7 @@ async def get_phone_calls(request: Request) -> dict[str, Any]:
     )
     if not table_exists:
         return {"calls": []}
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     rows = await PhoneCallRepository(db).recent_with_contacts(limit=50)
     calls: list[dict[str, Any]] = []
     for row in rows:
@@ -47,7 +47,7 @@ async def get_phone_call_detail(request: Request, call_id: str) -> dict[str, Any
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     call = await PhoneCallRepository(db).detail_with_contact(call_id)
     if not call:
         return {"error": "Call not found"}
@@ -87,7 +87,7 @@ async def dashboard_initiate_call(request: Request) -> dict[str, Any]:
     if not phone_settings.enabled:
         return {"error": "Phone subsystem is not enabled"}
 
-    from bob_server.services.voice_dispatch_service import (
+    from server.services.voice_dispatch_service import (
         build_outbound_instructions,
         initiate_outbound_call,
     )
@@ -111,14 +111,14 @@ async def hangup_phone_call(request: Request, call_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     call = await PhoneCallRepository(db).get(call_id)
     if not call:
         return {"error": "Call not found"}
     if call["status"] not in ("active", "ringing"):
         return {"error": f"Call is {call['status']}, cannot hang up"}
 
-    from bob_server.services.voice_dispatch_service import hangup_twilio_call
+    from server.services.voice_dispatch_service import hangup_twilio_call
 
     if hangup_twilio_call(request.app.state.settings, call["call_sid"]):
         return {"ok": True}
@@ -130,7 +130,7 @@ async def get_phone_recording(request: Request, call_id: str) -> Any:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     call = await PhoneCallRepository(db).get(call_id)
     if not call or not call["recording_path"]:
         return {"error": "No recording available"}

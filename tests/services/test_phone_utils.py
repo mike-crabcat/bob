@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.services.phone_utils import normalize_phone
+from server.services.phone_utils import normalize_phone
 
 
 @pytest.mark.parametrize(

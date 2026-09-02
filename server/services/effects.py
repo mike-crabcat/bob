@@ -89,7 +89,7 @@ async def emit_and_deliver(
 
     ``{"ok": bool, "effect_id", "external_result_id"?, "error"?, "duplicate"?}``
     """
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
 
     repo = EffectRepository(ctx.db)
     effect_id = await repo.emit(
@@ -113,7 +113,7 @@ async def deliver(ctx: Any, effect: dict[str, Any]) -> dict[str, Any]:
     """Run the executor for a claimed ('delivering') effect and record the outcome."""
     import json as _json
 
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
 
     repo = EffectRepository(ctx.db)
     kind = effect["kind"]
@@ -168,7 +168,7 @@ async def pump_due_effects(ctx: Any, *, limit: int = 20) -> int:
     pump only ever claims 'pending'). Returns the number of effects
     processed. Called by the heartbeat task.
     """
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
 
     kinds = registered_kinds(retryable_only=True)
     if not kinds:
@@ -206,7 +206,7 @@ async def _claim_one(ctx: Any, effect_id: str) -> dict[str, Any] | None:
 async def _append_result_event(ctx: Any, effect: dict[str, Any],
                                event_type: str, **extra: Any) -> None:
     try:
-        from bob_server.repositories import Event, EventLogRepository
+        from server.repositories import Event, EventLogRepository
 
         await EventLogRepository(ctx.db).append(Event(
             event_type=event_type,

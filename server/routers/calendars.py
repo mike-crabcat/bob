@@ -7,8 +7,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
 
-from bob_server.dependencies import get_calendar_service
-from bob_server.models import (
+from server.dependencies import get_calendar_service
+from server.models import (
     CalendarCreate,
     CalendarResponse,
     CalendarUpdate,
@@ -19,7 +19,7 @@ from bob_server.models import (
     EventResponse,
     EventUpdate,
 )
-from bob_server.services.calendar_service import CalendarService
+from server.services.calendar_service import CalendarService
 
 
 router = APIRouter(prefix="/api/v1", tags=["calendars"])

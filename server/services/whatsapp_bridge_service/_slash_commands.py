@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 import logging
 
-from bob_server.services.base import utcnow
-from bob_server.services.whatsapp_bridge_service._media import _format_created_at
+from server.services.base import utcnow
+from server.services.whatsapp_bridge_service._media import _format_created_at
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class SlashCommandsMixin:
             return
 
         enabled = arg == "on"
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         repo = ConversationRepository(self.db)
         await repo.ensure(session_key)
         await repo.set_policy(session_key, {"patience_enabled": enabled})
@@ -79,7 +79,7 @@ class SlashCommandsMixin:
             return
 
         enabled = arg == "on"
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         repo = ConversationRepository(self.db)
         await repo.ensure(session_key)
         policy = await repo.get_policy(session_key)
@@ -93,7 +93,7 @@ class SlashCommandsMixin:
 
     async def _cmd_who(self, chat_id: str) -> None:
         """Reply with the active persona revision and creation timestamp."""
-        from bob_server.services import persona as persona_service
+        from server.services import persona as persona_service
         row = await persona_service.active_record(self.db)
         if row is None:
             await self.send_message(chat_id, "no active persona — using built-in defaults")
@@ -113,7 +113,7 @@ class SlashCommandsMixin:
             await self.send_message(chat_id, "Usage: /verbose on|off|status")
             return
 
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         repo = ConversationRepository(self.db)
         await repo.ensure(session_key)
         policy = await repo.get_policy(session_key)
@@ -143,7 +143,7 @@ class SlashCommandsMixin:
         Outreach (calls/emails to new people) stays off regardless — that needs
         a separate per-plan flip.
         """
-        from bob_server.services.dream import config as dream_config
+        from server.services.dream import config as dream_config
 
         arg = args.strip().lower()
         if arg not in ("on", "off", "status", ""):
@@ -160,7 +160,7 @@ class SlashCommandsMixin:
         current = await dream_config.get_session_autoplan(
             self.db, session_key, self.ctx.settings.dream.auto_approve_plans
         )
-        from bob_server.services.dream import DreamStore
+        from server.services.dream import DreamStore
         c = await DreamStore.from_db(self.db).autoplan_counters(session_key)
         counts = f"({c.get('drafts') or 0} draft, {c.get('pending') or 0} awaiting announce, {c.get('announced') or 0} announced)"
         if arg == "on":
@@ -184,8 +184,8 @@ class SlashCommandsMixin:
         services/model_registry.py. Applies to this chat's main dispatch
         turns only; memory/patience passes stay on their configured models.
         """
-        from bob_server.repositories.conversations import ConversationRepository
-        from bob_server.services import model_registry
+        from server.repositories.conversations import ConversationRepository
+        from server.services import model_registry
 
         arg = args.strip()
         settings = self.ctx.settings
@@ -229,7 +229,7 @@ class SlashCommandsMixin:
         guard). Reply summarises what was recorded. If /verbose is on for the
         session, the extraction turn itself surfaces the per-claim breakdown.
         """
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
 
         svc = MemoryService(self.ctx)
         try:

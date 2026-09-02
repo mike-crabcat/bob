@@ -11,10 +11,10 @@ from httpx import Timeout
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
-from bob_server.context import AppContext
-from bob_server.services import model_registry
-from bob_server.services.base import BaseService
-from bob_server.services.tools import ImageInjection
+from server.context import AppContext
+from server.services import model_registry
+from server.services.base import BaseService
+from server.services.tools import ImageInjection
 
 try:
     from openai import AsyncOpenAI
@@ -302,7 +302,7 @@ def _get_cached_client(
     if cache_key in _clients:
         return _clients[cache_key]
     if AsyncOpenAI is None:
-        raise RuntimeError("openai SDK is not installed. Install with: pip install bob-server[openai]")
+        raise RuntimeError("openai SDK is not installed.")
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=base_url,

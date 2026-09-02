@@ -7,15 +7,15 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.repositories import (
+from server.repositories import (
     Event,
     EventLogRepository,
     EffectRepository,
     TurnRepository,
     new_event_id,
 )
-from bob_server.repositories.turns import MAX_ATTEMPTS as TURN_MAX_ATTEMPTS
-from bob_server.repositories.effects import MAX_ATTEMPTS as EFFECT_MAX_ATTEMPTS
+from server.repositories.turns import MAX_ATTEMPTS as TURN_MAX_ATTEMPTS
+from server.repositories.effects import MAX_ATTEMPTS as EFFECT_MAX_ATTEMPTS
 
 CONV = "agent:main:whatsapp:dm:614000000001"
 

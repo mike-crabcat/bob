@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 
-from bob_server.database import Database
+from server.database import Database
 
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ def _parse_channel(session_key: str) -> str:
 
 
 def _check_auth(request: Request) -> bool:
-    from bob_server.api_auth import api_token_valid
+    from server.api_auth import api_token_valid
 
     return api_token_valid(request.app.state.settings, request)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()

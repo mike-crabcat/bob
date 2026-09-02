@@ -8,13 +8,13 @@ import re
 from datetime import datetime
 from typing import Any
 
-from bob_server.services.memory.claim_types import (
+from server.services.memory.claim_types import (
     get_all_keys,
     build_extraction_prompt_section,
     ENTITY_TYPE_REGISTRY,
     render_entity,
 )
-from bob_server.services.memory.models import Claim
+from server.services.memory.models import Claim
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def update_entity_mentions(db: Any, entity_ids: list[str],
     if not entity_ids or not message_ids:
         return
     try:
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(db).messages_by_ids(message_ids)
         for row in rows or []:
             cid = row["conversation_id"]
@@ -469,7 +469,7 @@ async def update_entity_fts(db: Any, entity_id: str) -> None:
     )
 
     try:
-        from bob_server.services.memory.embedding import embed_text, upsert_embedding
+        from server.services.memory.embedding import embed_text, upsert_embedding
         embedding = await embed_text(rendered)
         if embedding:
             await upsert_embedding(db, entity_id, embedding)

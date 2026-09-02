@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from bob_server.services.attention.tier0 import detect_addressed
+from server.services.attention.tier0 import detect_addressed
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +239,7 @@ class AttentionCoordinator:
 
         decision = "ACT"
         if (not w.addressed_any) and probe_enabled and not _always_act():
-            from bob_server.services.attention.tier2 import probe_actionability
+            from server.services.attention.tier2 import probe_actionability
             decision = await probe_actionability(
                 self.ctx, session_key, bot_name=bot_name, model=probe_model)
             if decision == "WAIT" and not w.wait_extended:
@@ -269,7 +269,7 @@ class AttentionCoordinator:
             # Mid-turn arrivals stay pending (invariant 5); give them their
             # own turn instead of stranding them until the next stimulus.
             try:
-                from bob_server.repositories.history import HistoryRepository
+                from server.repositories.history import HistoryRepository
                 leftovers = await HistoryRepository(self.ctx.db).pending_user_ids(session_key)
                 if leftovers:
                     logger.info("attention: %d mid-turn arrival(s) pending for %s, re-arming",
@@ -280,7 +280,7 @@ class AttentionCoordinator:
                                session_key, exc_info=True)
 
     async def _flush_without_dispatch(self, session_key: str) -> None:
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
         claimed = await SessionService(self.ctx).mark_dispatched(session_key)
         logger.info("attention: STAND_DOWN for %s — %d message(s) flushed without main LLM",
                     session_key, claimed)

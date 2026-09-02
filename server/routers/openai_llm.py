@@ -5,9 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from bob_server.dependencies import get_app_context
-from bob_server.context import AppContext
-from bob_server.services.openai_service import OpenAIService
+from server.dependencies import get_app_context
+from server.context import AppContext
+from server.services.openai_service import OpenAIService
 
 router = APIRouter(prefix="/api/v1/openai", tags=["openai"])
 

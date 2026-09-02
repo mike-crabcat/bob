@@ -9,11 +9,11 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
-from bob_server.database import Database
-from bob_server.dependencies import get_database
-from bob_server.models import ContactCreate, ContactResponse, ContactUpdate
-from bob_server.repositories.contacts import ContactRepository
-from bob_server.services.phone_utils import normalize_phone
+from server.database import Database
+from server.dependencies import get_database
+from server.models import ContactCreate, ContactResponse, ContactUpdate
+from server.repositories.contacts import ContactRepository
+from server.services.phone_utils import normalize_phone
 
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -154,8 +154,8 @@ async def update_contact(
 
     # Propagate name change to linked person entity's display_name snapshot
     if payload.name is not None:
-        from bob_server.context import AppContext
-        from bob_server.services.memory import MemoryService
+        from server.context import AppContext
+        from server.services.memory import MemoryService
         ctx = AppContext(settings=request.app.state.settings, db=database)
         await MemoryService(ctx).sync_person_display_name_for_contact(
             str(contact_id), payload.name,
@@ -185,8 +185,8 @@ async def delete_contact(
     await ContactRepository(database).soft_delete(str(contact_id))
 
     # Retire the contact_id claim so the link doesn't dangle
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
+    from server.context import AppContext
+    from server.services.memory import MemoryService
     ctx = AppContext(settings=request.app.state.settings, db=database)
     await MemoryService(ctx).retire_contact_id_claim(str(contact_id))
 
@@ -304,9 +304,9 @@ async def get_contact_entity(
     if not row:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory.entity_resolver import canonical_contact_id
-    from bob_server.services.memory.service import MemoryService
+    from server.context import AppContext
+    from server.services.memory.entity_resolver import canonical_contact_id
+    from server.services.memory.service import MemoryService
 
     settings = request.app.state.settings
     ctx = AppContext(settings=settings, db=database)
@@ -336,8 +336,8 @@ async def get_contact_claims(
     if not row:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    from bob_server.services.memory.claim_service import get_active_claims
-    from bob_server.services.memory.entity_resolver import canonical_contact_id
+    from server.services.memory.claim_service import get_active_claims
+    from server.services.memory.entity_resolver import canonical_contact_id
 
     entity_id = canonical_contact_id(str(contact_id))
     claims = await get_active_claims(database, entity_id)

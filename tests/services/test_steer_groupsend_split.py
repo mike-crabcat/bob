@@ -19,7 +19,7 @@ async def _seed_contact(ctx) -> None:
         "INSERT INTO contacts (id, name, phone_number, is_trusted, "
         "created_at, updated_at) VALUES ('c-mike', 'Mike', '+61400000000', "
         "1, datetime('now'), datetime('now'))")
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     await ConversationRepository(ctx.db).register_endpoint(
         DM_KEY, endpoint_kind="dm", contact_id="c-mike")
 
@@ -27,7 +27,7 @@ async def _seed_contact(ctx) -> None:
 async def _spec(ctx, **overrides):
     from typing import Any
 
-    from bob_server.services.whatsapp_bridge_service._service import (
+    from server.services.whatsapp_bridge_service._service import (
         WhatsAppBridgeService)
     kwargs: dict[str, Any] = dict(
         session_key=DM_KEY, chat_id=CHAT_ID, chat_kind="dm",
@@ -78,9 +78,9 @@ async def test_wake_session_derives_human_initiated_from_pending_rows(
     steering even though the route resolves a contact id."""
     await _seed_contact(ctx)
 
-    from bob_server.services.attention import AttentionCoordinator
-    from bob_server.services.session_service import SessionService
-    from bob_server.services.whatsapp_bridge_service._service import (
+    from server.services.attention import AttentionCoordinator
+    from server.services.session_service import SessionService
+    from server.services.whatsapp_bridge_service._service import (
         WhatsAppBridgeService)
 
     recorded: dict[str, object] = {}

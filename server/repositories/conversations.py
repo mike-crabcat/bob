@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from bob_server.database import Database
+from server.database import Database
 
 
 def _now_iso() -> str:
@@ -345,7 +345,7 @@ class ConversationRepository:
 
     async def _append_merge_event(self, event_type: str, conversation_id: str,
                                   payload: dict[str, Any]) -> None:
-        from bob_server.repositories.event_log import Event, EventLogRepository
+        from server.repositories.event_log import Event, EventLogRepository
         try:
             await EventLogRepository(self.db).append(Event(
                 event_type=event_type,

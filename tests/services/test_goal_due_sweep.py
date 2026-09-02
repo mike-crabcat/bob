@@ -19,10 +19,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
-from bob_server.repositories.wakeups import WakeupRepository
-from bob_server.services import goal_service
-from bob_server.services.goal_service import extract_due_instant
-from bob_server.services.goal_state_service import _reviser_system_prompt
+from server.repositories.wakeups import WakeupRepository
+from server.services import goal_service
+from server.services.goal_service import extract_due_instant
+from server.services.goal_state_service import _reviser_system_prompt
 
 WORK_KEY = "agent:main:whatsapp:group:120363422982048691"
 
@@ -121,7 +121,7 @@ async def test_sweep_window_edges(ctx, db):
 async def test_pump_renders_action_due_wake(ctx, db, monkeypatch):
     wake = AsyncMock()
     monkeypatch.setattr(
-        "bob_server.services.wake_service.wake_conversation", wake)
+        "server.services.wake_service.wake_conversation", wake)
 
     due = datetime.now(timezone.utc) - timedelta(hours=1)
     await _goal_with_due(ctx, _iso(due))

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
+from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
 YAML = """\
 aliases:
@@ -19,7 +19,7 @@ pricing:
 
 
 def _make_service(db, tmp_path, *, openrouter_enabled):
-    from bob_server.services import model_registry
+    from server.services import model_registry
     model_registry._models_cache = None
     (tmp_path / "models.yaml").write_text(YAML, encoding="utf-8")
     svc = object.__new__(WhatsAppBridgeService)
@@ -38,7 +38,7 @@ def _make_service(db, tmp_path, *, openrouter_enabled):
 
 @pytest.fixture(autouse=True)
 def _clear_registry_cache():
-    from bob_server.services import model_registry
+    from server.services import model_registry
     model_registry._models_cache = None
     yield
     model_registry._models_cache = None
@@ -55,7 +55,7 @@ async def test_status_shows_default(db, tmp_path):
 
 @pytest.mark.asyncio
 async def test_set_alias_and_status(db, tmp_path):
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     svc = _make_service(db, tmp_path, openrouter_enabled=True)
     await svc._cmd_model("chinese", "wa:123", "chat-1")
     text = svc.send_message.call_args.args[1]
@@ -72,7 +72,7 @@ async def test_set_alias_and_status(db, tmp_path):
 
 @pytest.mark.asyncio
 async def test_set_plain_model(db, tmp_path):
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     svc = _make_service(db, tmp_path, openrouter_enabled=False)
     await svc._cmd_model("gpt-5.6-terra", "wa:123", "chat-1")
     policy = await ConversationRepository(db).get_policy("wa:123")
@@ -81,7 +81,7 @@ async def test_set_plain_model(db, tmp_path):
 
 @pytest.mark.asyncio
 async def test_rejects_openrouter_when_unconfigured(db, tmp_path):
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     svc = _make_service(db, tmp_path, openrouter_enabled=False)
     await svc._cmd_model("chinese", "wa:123", "chat-1")
     text = svc.send_message.call_args.args[1]
@@ -94,7 +94,7 @@ async def test_rejects_openrouter_when_unconfigured(db, tmp_path):
 async def test_plain_unknown_name_is_allowed(db, tmp_path):
     """Plain names can't be verified against OpenAI's catalog offline — they
     pass through (plan decision); only malformed names are rejected."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     svc = _make_service(db, tmp_path, openrouter_enabled=True)
     await svc._cmd_model("turbo", "wa:123", "chat-1")
     policy = await ConversationRepository(db).get_policy("wa:123")
@@ -123,7 +123,7 @@ async def test_unknown_command_gets_reply(db, tmp_path):
 
 @pytest.mark.asyncio
 async def test_reset_clears_override(db, tmp_path):
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     svc = _make_service(db, tmp_path, openrouter_enabled=True)
     await svc._cmd_model("cheap", "wa:123", "chat-1")
     await svc._cmd_model("default", "wa:123", "chat-1")

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
@@ -22,12 +22,12 @@ async def get_status(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    from bob_server.services import quota_gate
+    from server.services import quota_gate
 
-    from bob_server.repositories.effects import EffectRepository
-    from bob_server.repositories.turns import TurnRepository
-    from bob_server.repositories.goals import GoalRepository
-    from bob_server.repositories.wakeups import WakeupRepository
+    from server.repositories.effects import EffectRepository
+    from server.repositories.turns import TurnRepository
+    from server.repositories.goals import GoalRepository
+    from server.repositories.wakeups import WakeupRepository
     effect_counts = await EffectRepository(db).status_counts()
 
     dead_effects = [
@@ -72,7 +72,7 @@ async def get_status(request: Request) -> dict[str, Any]:
     ]
 
     # Undispatched inbound (last 48h; older rows are pre-Bob3 relics).
-    from bob_server.repositories.history import HistoryRepository
+    from server.repositories.history import HistoryRepository
     undispatched_n = await HistoryRepository(db).undispatched_count(hours=48)
 
     size_row = await db.fetch_one(
@@ -111,7 +111,7 @@ async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.turns import TurnRepository
+    from server.repositories.turns import TurnRepository
     row = await TurnRepository(db).stuck_check(turn_id)
     if not row:
         return {"ok": False, "error": "turn not found"}
@@ -129,7 +129,7 @@ async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
     # The killed dispatch already marked its user messages dispatched=1, and
     # DispatchRunner refuses to run with nothing pending — restore the zombie
     # turn's claimed messages first so the retry has something to claim.
-    from bob_server.repositories.history import HistoryRepository
+    from server.repositories.history import HistoryRepository
     restored = await HistoryRepository(db).restore_messages_for_turn(turn_id)
     try:
         await bridge.wake_session(conversation_id)
@@ -146,7 +146,7 @@ async def retry_effect(effect_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
     changed = await EffectRepository(db).requeue_dead(effect_id)
     if not changed:
         return {"ok": False, "error": "effect not found or not dead"}
@@ -159,7 +159,7 @@ async def discard_effect(effect_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
     changed = await EffectRepository(db).discard_dead(effect_id)
     if not changed:
         return {"ok": False, "error": "effect not found or not dead"}

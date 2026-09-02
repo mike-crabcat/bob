@@ -7,13 +7,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from bob_server.cron import next_cron_occurrence
-from bob_server.services.routine_service import (
+from server.cron import next_cron_occurrence
+from server.services.routine_service import (
     RoutineService,
     _format_routine_now,
     _outside_validity_window,
 )
-from bob_server.services.routine_tools import _routine_to_yaml
+from server.services.routine_tools import _routine_to_yaml
 
 
 def test_routine_yaml_echoes_next_fire_in_local_wall_clock():
@@ -176,7 +176,7 @@ def test_format_routine_now_uses_routine_tz_not_ambient_utc():
 
 
 def test_build_common_tools_excludes_routine_tools_when_disabled(ctx):
-    from bob_server.services.tool_registry import build_common_tools
+    from server.services.tool_registry import build_common_tools
 
     tools = build_common_tools(ctx, session_key="agent:main:test:x:x", include_routines=False)
     names = {t.name for t in tools}
@@ -186,7 +186,7 @@ def test_build_common_tools_excludes_routine_tools_when_disabled(ctx):
 
 
 def test_build_common_tools_includes_routine_tools_by_default(ctx):
-    from bob_server.services.tool_registry import build_common_tools
+    from server.services.tool_registry import build_common_tools
 
     tools = build_common_tools(ctx, session_key="agent:main:test:x:x")
     names = {t.name for t in tools}
@@ -239,7 +239,7 @@ async def test_upsert_routine_defaults_null_tz_and_window(svc, session_key):
 
 
 async def test_upsert_routine_schedules_wakeup(svc, session_key):
-    from bob_server.repositories.wakeups import WakeupRepository
+    from server.repositories.wakeups import WakeupRepository
 
     routine = await svc.upsert_routine(
         session_key=session_key,
@@ -270,7 +270,7 @@ async def test_upsert_routine_schedules_wakeup(svc, session_key):
 
 
 async def test_disable_and_delete_cancel_wakeup(svc, session_key):
-    from bob_server.repositories.wakeups import WakeupRepository
+    from server.repositories.wakeups import WakeupRepository
 
     await svc.upsert_routine(
         session_key=session_key, name="gone", schedule="0 7 * * *",
@@ -297,7 +297,7 @@ async def test_fire_wakeup_skips_expired_routine_but_keeps_series(svc, session_k
     # Validity window is enforced at fire time: an expired routine's slot is
     # skipped (no dispatch) but returns True so recurrence bookkeeping stays
     # uniform; a deleted/disabled routine ends the series (False).
-    from bob_server.services import goal_service, routine_service
+    from server.services import goal_service, routine_service
 
     fired = []
     monkeypatch.setattr(routine_service, "fire_routine_detached",
@@ -330,7 +330,7 @@ async def test_cron_recurrence_stores_utc_not_before(svc, session_key):
     # The continuous-fire regression guard, now at the wakeup seam: rescheduled
     # occurrences must be stored as UTC ISO strings so claim_due's TEXT compare
     # (not_before <= now-UTC) is offset-safe for e.g. Europe/Paris routines.
-    from bob_server.services.goal_service import _next_occurrence
+    from server.services.goal_service import _next_occurrence
 
     next_at = _next_occurrence({
         "id": "w1", "recurrence": "cron:30 6 * * *", "tz": "Europe/Paris",
@@ -353,7 +353,7 @@ async def test_cron_recurrence_stores_utc_not_before(svc, session_key):
 
 
 async def test_write_routine_tool_rejects_unknown_timezone(svc, session_key):
-    from bob_server.services.routine_tools import make_routine_tools
+    from server.services.routine_tools import make_routine_tools
 
     ctx = svc.ctx
     tools = make_routine_tools(ctx, session_key=session_key)
@@ -371,7 +371,7 @@ async def test_write_routine_tool_rejects_unknown_timezone(svc, session_key):
 
 
 async def test_write_routine_tool_rejects_bad_valid_until(svc, session_key):
-    from bob_server.services.routine_tools import make_routine_tools
+    from server.services.routine_tools import make_routine_tools
 
     ctx = svc.ctx
     tools = make_routine_tools(ctx, session_key=session_key)
@@ -389,7 +389,7 @@ async def test_write_routine_tool_rejects_bad_valid_until(svc, session_key):
 
 
 async def test_write_routine_tool_accepts_tz_and_validity(svc, session_key):
-    from bob_server.services.routine_tools import make_routine_tools
+    from server.services.routine_tools import make_routine_tools
 
     ctx = svc.ctx
     tools = make_routine_tools(ctx, session_key=session_key)
@@ -420,7 +420,7 @@ async def test_write_routine_tool_rejects_verbatim_request_prompt(svc, session_k
     # including "disable/delete this routine if possible" — an instruction the
     # routine's own runs can never obey because routine dispatch withholds
     # routine-management tools.
-    from bob_server.services.routine_tools import make_routine_tools
+    from server.services.routine_tools import make_routine_tools
 
     ctx = svc.ctx
     tools = make_routine_tools(ctx, session_key=session_key)
@@ -440,7 +440,7 @@ async def test_write_routine_tool_rejects_verbatim_request_prompt(svc, session_k
 
 
 async def test_write_routine_tool_rejects_tool_name_references(svc, session_key):
-    from bob_server.services.routine_tools import make_routine_tools
+    from server.services.routine_tools import make_routine_tools
 
     ctx = svc.ctx
     tools = make_routine_tools(ctx, session_key=session_key)
@@ -459,7 +459,7 @@ async def test_write_routine_tool_rejects_tool_name_references(svc, session_key)
 async def test_write_routine_tool_accepts_operational_prompt_with_guard_clause(svc, session_key):
     # Output-safety phrasing like the AI doom routines use ("do not create,
     # edit, inspect, or describe routines") must not trip the guard.
-    from bob_server.services.routine_tools import make_routine_tools
+    from server.services.routine_tools import make_routine_tools
 
     ctx = svc.ctx
     tools = make_routine_tools(ctx, session_key=session_key)
@@ -520,7 +520,7 @@ async def test_fire_wakeup_advances_the_mirror(ctx, svc, session_key, monkeypatc
     import json as _json
     from uuid import uuid4
 
-    from bob_server.services import goal_service, routine_service
+    from server.services import goal_service, routine_service
 
     # never dispatch an LLM turn from the test
     monkeypatch.setattr(routine_service, "fire_routine_detached",

@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 
-from bob_server.context import AppContext
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.tools import Tool, tool
 
 _ACTIVE_PLAN_STATUSES = ("draft", "proposed", "approved", "actioned")
 
 
 def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
-    from bob_server.services.dream.store import DreamStore
+    from server.services.dream.store import DreamStore
 
     store = DreamStore(ctx)
 
@@ -54,8 +54,8 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     async def plan_cancel(reason: str, plan_id: str = "") -> str:
         """Cancel an open plan for this conversation. Use when someone says it's off,
         not wanted, or already handled elsewhere. `reason` should quote or paraphrase them."""
-        from bob_server.services.dream.models import Evidence
-        from bob_server.services.base import utcnow
+        from server.services.dream.models import Evidence
+        from server.services.base import utcnow
 
         plan = await _resolve(plan_id or None)
         if plan is None:
@@ -69,8 +69,8 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     @tool
     async def plan_complete(plan_id: str = "") -> str:
         """Mark an open plan completed. Use when someone says it's done/sorted/arranged."""
-        from bob_server.services.dream.models import Evidence
-        from bob_server.services.base import utcnow
+        from server.services.dream.models import Evidence
+        from server.services.base import utcnow
 
         plan = await _resolve(plan_id or None)
         if plan is None:
@@ -92,8 +92,8 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         """Amend an open plan for this conversation. Update fields someone changed
         (new date, different plan). `progress` records a concrete step just taken and
         marks the plan actioned. Empty strings leave fields unchanged."""
-        from bob_server.services.dream.models import Evidence
-        from bob_server.services.base import utcnow
+        from server.services.dream.models import Evidence
+        from server.services.base import utcnow
 
         plan = await _resolve(plan_id or None)
         if plan is None:

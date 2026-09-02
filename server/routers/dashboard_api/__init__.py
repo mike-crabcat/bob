@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api import (
+from server.routers.dashboard_api import (
     home, contacts, calls, workspace, memory,
     frontend_errors, skills, subagents, phone, persona, dreams, auth, ops,
     conversations, goals as goals_api,

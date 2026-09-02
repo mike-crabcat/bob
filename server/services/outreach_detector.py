@@ -26,7 +26,7 @@ import os
 import uuid
 from typing import Any
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ async def get_watermark(db: Any) -> str | None:
 
 
 async def advance_watermark(db: Any, event_id: str) -> None:
-    from bob_server.services.base import utcnow
+    from server.services.base import utcnow
     await db.execute(
         """INSERT INTO outreach_detector_watermark (id, event_id, updated_at)
            VALUES (1, ?, ?)
@@ -69,7 +69,7 @@ async def advance_watermark(db: Any, event_id: str) -> None:
 
 
 async def _newest_event_id(db: Any) -> str:
-    from bob_server.repositories.event_log import EventLogRepository
+    from server.repositories.event_log import EventLogRepository
 
     return await EventLogRepository(db).newest_event_id(DETECTED_EVENT_TYPE)
 
@@ -89,7 +89,7 @@ async def sweep(ctx: AppContext, *, limit: int = _MAX_EVENTS_PER_TICK) -> int:
         await advance_watermark(ctx.db, await _newest_event_id(ctx.db))
         return 0
 
-    from bob_server.repositories.event_log import EventLogRepository
+    from server.repositories.event_log import EventLogRepository
 
     rows = await EventLogRepository(ctx.db).events_after(
         DETECTED_EVENT_TYPE, wm, limit=limit)
@@ -111,7 +111,7 @@ async def _process_event(ctx: AppContext, ev: dict[str, Any]) -> None:
     message_id = str(payload.get("session_message_id") or "")
     if not contact_id or not message_id:
         return
-    from bob_server.repositories.history import HistoryRepository
+    from server.repositories.history import HistoryRepository
 
     message = await HistoryRepository(ctx.db).message_by_id(message_id)
     if message is None or message["synthetic"]:
@@ -120,9 +120,9 @@ async def _process_event(ctx: AppContext, ev: dict[str, Any]) -> None:
     if not text:
         return  # media-only
 
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.repositories.goals import GoalRepository
-    from bob_server.repositories.participants import ParticipantRepository
+    from server.repositories.conversations import ConversationRepository
+    from server.repositories.goals import GoalRepository
+    from server.repositories.participants import ParticipantRepository
 
     goal_convs = await ParticipantRepository(ctx.db).conversations_for_contact(contact_id)
     # Event rows carry raw session_keys; goals/participants hold canonical ids.
@@ -158,7 +158,7 @@ async def _probe_goal(ctx: AppContext, *, goal: dict[str, Any], text: str,
             logger.warning("outreach probe errored for goal %s", goal["id"])
         return
 
-    from bob_server.services.goal_service import complete_goal
+    from server.services.goal_service import complete_goal
 
     who = sender_name or "the contact"
     result = f"Out-of-channel confirmation from {who}: {note or text[:200]}"
@@ -172,7 +172,7 @@ async def _run_probe(ctx: AppContext, *, goal: dict[str, Any], text: str,
                      sender_name: str) -> tuple[str, str]:
     """One LLM call: does this message satisfy the objective? Fail-closed."""
     try:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         response = await LLMDispatchService(ctx).chat(
             [{"role": "system", "content": _PROBE_SYSTEM},

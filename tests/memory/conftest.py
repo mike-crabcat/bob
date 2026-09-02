@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from bob_server.database import Database
-from bob_server.context import AppContext
-from bob_server.config import Settings
-from bob_server.services.memory import MemoryService
+from server.database import Database
+from server.context import AppContext
+from server.config import Settings
+from server.services.memory import MemoryService
 
 
-SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "bob_server" / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "server" / "schemas"
 
 
 @pytest.fixture

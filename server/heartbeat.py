@@ -9,11 +9,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.repositories.contacts import ContactRepository
-from bob_server.repositories.event_log import EventLogRepository
-from bob_server.repositories.history import HistoryRepository
+from server.context import AppContext
+from server.database import Database
+from server.repositories.contacts import ContactRepository
+from server.repositories.event_log import EventLogRepository
+from server.repositories.history import HistoryRepository
 
 
 logger = logging.getLogger(__name__)
@@ -73,8 +73,8 @@ class EmailPollingTask:
         if not settings.agentmail.enabled or not settings.email_polling_enabled:
             return
 
-        from bob_server.services.agentmail_client import AgentMailClient
-        from bob_server.services.email_polling_service import EmailPollingService
+        from server.services.agentmail_client import AgentMailClient
+        from server.services.email_polling_service import EmailPollingService
 
         client = AgentMailClient(
             base_url=settings.agentmail.base_url,
@@ -99,8 +99,8 @@ class EmailSyncTask:
         if not settings.agentmail.enabled:
             return
 
-        from bob_server.services.agentmail_client import AgentMailClient
-        from bob_server.services.email_polling_service import EmailPollingService
+        from server.services.agentmail_client import AgentMailClient
+        from server.services.email_polling_service import EmailPollingService
 
         client = AgentMailClient(
             base_url=settings.agentmail.base_url,
@@ -156,7 +156,7 @@ class SessionIdleSummaryTask:
             task.add_done_callback(self._extraction_tasks.discard)
 
     async def _extract_one(self, ctx: AppContext, session_key: str) -> None:
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
 
         try:
             result = await MemoryService(ctx).run_silent_turn_extraction(
@@ -194,7 +194,7 @@ class CallCleanupTask:
         max_age_days = settings.phone.call_recording_max_age_days
         cutoff = (now - timedelta(days=max_age_days)).isoformat()
 
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         calls_repo = PhoneCallRepository(ctx.db)
         old_calls = await calls_repo.completed_before(cutoff)
         if not old_calls:
@@ -235,7 +235,7 @@ class LlmLogRetentionTask:
         _last_llm_log_redaction = now
 
         cutoff = (now - timedelta(days=self.payload_max_age_days)).isoformat()
-        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        from server.repositories.llm_call_log import LlmCallLogRepository
         redacted = await LlmCallLogRepository(ctx.db).redact_payloads_before(cutoff)
         if redacted:
             logger.info("Redacted payloads from %d llm_call_log row(s)", redacted)
@@ -269,7 +269,7 @@ class EventLogReconciliationTask:
                 role="user", channel="whatsapp", since_iso=since_iso)
 
         async def _email_count(since_iso: str) -> int:
-            from bob_server.services.email_store import EmailStore
+            from server.services.email_store import EmailStore
             return await EmailStore(ctx.db).inbound_count_since(since_iso)
 
         for source, count_fn in (
@@ -367,10 +367,10 @@ class MemoryReconciliationTask:
         if _last_memory_reconcile and (now - _last_memory_reconcile) < self._THROTTLE:
             return
 
-        from bob_server.services.memory import MemoryService
-        from bob_server.services.memory.reconciliation import filter_due_for_reconciliation
+        from server.services.memory import MemoryService
+        from server.services.memory.reconciliation import filter_due_for_reconciliation
 
-        from bob_server.services.memory import admin as memory_admin
+        from server.services.memory import admin as memory_admin
         candidate_ids = await memory_admin.recently_touched_entity_ids(
             ctx.db, limit=recon.daily_batch_max_entities)
         if not candidate_ids:
@@ -408,7 +408,7 @@ class LLMCallStalenessTask:
     STALE_MINUTES = 30
 
     async def run(self, ctx: AppContext) -> None:
-        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        from server.repositories.llm_call_log import LlmCallLogRepository
         count = await LlmCallLogRepository(ctx.db).fail_stale_running(
             stale_minutes=self.STALE_MINUTES)
         if count:
@@ -438,7 +438,7 @@ class DreamTask:
             return
         self._last_check_at = now_mono
 
-        from bob_server.services.dream import DreamRunner
+        from server.services.dream import DreamRunner
 
         runner = DreamRunner(ctx)
 
@@ -473,7 +473,7 @@ class LocationFetchTask:
             return
         self._last_fetch_at = now_mono
 
-        from bob_server.services.location_tools import _get_ha_client
+        from server.services.location_tools import _get_ha_client
 
         client = _get_ha_client(ctx)
         try:
@@ -523,7 +523,7 @@ class EffectPumpTask:
     name = "effect_pump"
 
     async def run(self, ctx: AppContext) -> None:
-        from bob_server.services.effects import pump_due_effects
+        from server.services.effects import pump_due_effects
 
         processed = await pump_due_effects(ctx)
         if processed:
@@ -536,7 +536,7 @@ class WakeupPumpTask:
     name = "wakeup_pump"
 
     async def run(self, ctx: AppContext) -> None:
-        from bob_server.services.goal_service import pump_due_wakeups
+        from server.services.goal_service import pump_due_wakeups
 
         fired = await pump_due_wakeups(ctx)
         if fired:
@@ -555,7 +555,7 @@ class ClaimRouterSweepTask:
     name = "claim_router_sweep"
 
     async def run(self, ctx: AppContext) -> None:
-        from bob_server.services.memory.claim_router import replay_pending
+        from server.services.memory.claim_router import replay_pending
 
         replayed = await replay_pending(ctx)
         if replayed:
@@ -575,7 +575,7 @@ class OutreachDetectorSweepTask:
     name = "outreach_detector_sweep"
 
     async def run(self, ctx: AppContext) -> None:
-        from bob_server.services.outreach_detector import sweep
+        from server.services.outreach_detector import sweep
 
         processed = await sweep(ctx)
         if processed:
@@ -612,8 +612,8 @@ class GoalReviewTask:
             return
         _last_goal_review = now
 
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.services.goal_state_service import (
+        from server.repositories.goals import GoalRepository
+        from server.services.goal_state_service import (
             enqueue_revision, parse_strategy,
         )
 
@@ -650,7 +650,7 @@ class GoalReviewTask:
                 # streak 2; this is the origin escalation (plan §1.2 wake
                 # matrix) — one wake at the streak-4 threshold, not per cycle.
                 target = goal["origin_conversation_id"] or goal["conversation_id"]
-                from bob_server.services.wake_service import wake_conversation
+                from server.services.wake_service import wake_conversation
                 try:
                     await wake_conversation(
                         ctx, target,
@@ -694,7 +694,7 @@ class GoalDueTask:
             return
         _last_due_sweep = now
 
-        from bob_server.services.goal_service import schedule_due_action_wakes
+        from server.services.goal_service import schedule_due_action_wakes
         try:
             scheduled = await schedule_due_action_wakes(ctx)
         except Exception:

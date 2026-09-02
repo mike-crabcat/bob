@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bob_server.database import Database
+from server.database import Database
 
 # Resolves a session_key to its canonical conversation id inline: the
 # binding's conversation if one exists, else the key itself.
@@ -28,7 +28,7 @@ class ParticipantRepository:
         if row:
             return row["conversation_id"]
         if create:
-            from bob_server.repositories.conversations import ConversationRepository
+            from server.repositories.conversations import ConversationRepository
 
             conv = await ConversationRepository(self.db).ensure(session_key)
             return conv["id"]
@@ -147,7 +147,7 @@ class AgendaRepository:
         if cid_row:
             cid = cid_row["conversation_id"]
         else:
-            from bob_server.repositories.conversations import ConversationRepository
+            from server.repositories.conversations import ConversationRepository
 
             conv = await ConversationRepository(self.db).ensure(session_key)
             cid = conv["id"]

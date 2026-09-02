@@ -14,7 +14,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_registry_cache():
-    from bob_server.services import model_registry
+    from server.services import model_registry
     model_registry._models_cache = None
     yield
     model_registry._models_cache = None
@@ -40,8 +40,8 @@ ROUTINE = {
 
 
 async def _fire(db, tmp_path, monkeypatch, captured):
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.services import routine_service
+    from server.repositories.conversations import ConversationRepository
+    from server.services import routine_service
 
     class _FakeSessionSvc:
         def __init__(self, ctx):
@@ -71,20 +71,20 @@ async def _fire(db, tmp_path, monkeypatch, captured):
         return ""
 
     monkeypatch.setattr(
-        "bob_server.services.session_service.SessionService", _FakeSessionSvc)
+        "server.services.session_service.SessionService", _FakeSessionSvc)
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService", _FakeDispatch)
+        "server.services.llm_dispatch.LLMDispatchService", _FakeDispatch)
     monkeypatch.setattr(ConversationRepository, "route_for", _fake_route_for)
     monkeypatch.setattr(routine_service.RoutineService, "mark_run", _fake_mark_run)
     monkeypatch.setattr(
-        "bob_server.services.prompt_assembler.build_chat_messages", _fake_build_messages)
+        "server.services.prompt_assembler.build_chat_messages", _fake_build_messages)
     monkeypatch.setattr(
-        "bob_server.services.prompt_assembler.load_workspace_prompt", _fake_workspace_prompt)
+        "server.services.prompt_assembler.load_workspace_prompt", _fake_workspace_prompt)
     monkeypatch.setattr(
-        "bob_server.services.tool_registry.build_common_tools",
+        "server.services.tool_registry.build_common_tools",
         lambda *a, **k: [])
     monkeypatch.setattr(
-        "bob_server.services.wake_service.session_key_to_chat_id",
+        "server.services.wake_service.session_key_to_chat_id",
         lambda sk: None)
 
     await routine_service.fire_routine(_ctx(db, tmp_path), dict(ROUTINE))
@@ -92,8 +92,8 @@ async def _fire(db, tmp_path, monkeypatch, captured):
 
 @pytest.mark.asyncio
 async def test_routine_uses_override_model(db, tmp_path, monkeypatch):
-    from bob_server.services import model_registry
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.services import model_registry
+    from server.repositories.conversations import ConversationRepository
 
     (tmp_path / "models.yaml").write_text(
         "aliases:\n  chinese: z-ai/glm-5.3-flash\n", encoding="utf-8")
@@ -115,7 +115,7 @@ async def test_routine_carries_wall_clock_budget(db, tmp_path, monkeypatch):
     bulletin can't be allowed to become a 10-minute tool odyssey
     (2026-08-29: recovery turn + two routines ran 10.6 min on the radio
     group)."""
-    from bob_server.services.routine_service import ROUTINE_WALL_CLOCK_SECONDS
+    from server.services.routine_service import ROUTINE_WALL_CLOCK_SECONDS
 
     captured: dict = {}
     await _fire(db, tmp_path, monkeypatch, captured)
@@ -125,7 +125,7 @@ async def test_routine_carries_wall_clock_budget(db, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_routine_without_override_uses_default(db, tmp_path, monkeypatch):
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     await ConversationRepository(db).ensure("wa:123")
 
     captured: dict = {}

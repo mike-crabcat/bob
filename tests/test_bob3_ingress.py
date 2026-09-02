@@ -13,7 +13,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from bob_server.heartbeat import EventLogReconciliationTask
+from server.heartbeat import EventLogReconciliationTask
 
 from tests.services.test_email_inbound_characterization import (
     _make_service as _make_email_service,
@@ -128,7 +128,7 @@ async def test_email_duplicate_message_id_appends_single_event(ctx, db, monkeypa
 
 
 async def test_phone_status_webhook_append_is_idempotent_per_sid_and_status(db):
-    from bob_server.routers.phone import _append_call_status_event
+    from server.routers.phone import _append_call_status_event
 
     await db.execute(
         """INSERT INTO phone_calls (id, call_sid, phone_number, direction, status, started_at)
@@ -148,7 +148,7 @@ async def test_phone_status_webhook_append_is_idempotent_per_sid_and_status(db):
 
 
 async def test_phone_status_append_never_raises_for_unknown_call(db):
-    from bob_server.routers.phone import _append_call_status_event
+    from server.routers.phone import _append_call_status_event
 
     await _append_call_status_event(db, "CA-missing", "completed", "")
     events = await _events(db, "phone")
@@ -160,7 +160,7 @@ async def test_phone_status_append_never_raises_for_unknown_call(db):
 
 
 async def test_routine_fired_event_is_idempotent_per_slot(ctx, db):
-    from bob_server.services.routine_service import append_fired_event
+    from server.services.routine_service import append_fired_event
 
     routine = {
         "id": "routine-1",
@@ -184,14 +184,14 @@ async def test_routine_fired_event_is_idempotent_per_slot(ctx, db):
 
 
 async def test_reconciliation_task_skips_sources_with_no_events_and_runs_clean(ctx, db):
-    import bob_server.heartbeat as hb
+    import server.heartbeat as hb
     hb._last_event_log_reconcile = None
 
     # No events at all: baselines missing, task must no-op without error.
     await EventLogReconciliationTask().run(ctx)
 
     # With one whatsapp event + matching legacy row it must run the compare.
-    from bob_server.repositories import Event, EventLogRepository
+    from server.repositories import Event, EventLogRepository
     await EventLogRepository(db).append(Event(
         event_type="message.received", binding_key="k", conversation_id="k",
         source="whatsapp", external_id="wamid-recon-1"))

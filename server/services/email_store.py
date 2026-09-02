@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bob_server.services.base import utcnow
+from server.services.base import utcnow
 
 
 class EmailStore:

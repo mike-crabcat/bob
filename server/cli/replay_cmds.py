@@ -11,8 +11,8 @@ mechanical redaction can't judge semantic sensitivity.
 
 from __future__ import annotations
 
-from bob_server.cli._helpers import *  # noqa: F403,F405
-from bob_server.repositories.history import HistoryRepository
+from server.cli._helpers import *  # noqa: F403,F405
+from server.repositories.history import HistoryRepository
 
 
 app = typer.Typer(help="Replay corpus tooling (episode export + redaction)")
@@ -59,8 +59,8 @@ async def _export_episode(
 ) -> None:
     import json
 
-    from bob_server.config import Settings
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.database import Database
 
     settings = Settings.from_env()
     db = Database(db_path=settings.db_path, schema_dir=None, pool_size=1)
@@ -177,8 +177,8 @@ def export_probe_candidates(
 async def _export_probe_candidates(limit: int, out: Path | None) -> None:
     import json
 
-    from bob_server.config import Settings
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.database import Database
 
     settings = Settings.from_env()
     db = Database(db_path=settings.db_path, schema_dir=None, pool_size=1)
@@ -232,10 +232,10 @@ def probe_matrix(
 async def _probe_matrix(golden: Path | None, model: str) -> None:
     import json
 
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-    from bob_server.services.attention.tier2 import probe_decide
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
+    from server.services.attention.tier2 import probe_decide
 
     if golden is None:
         golden = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "probe_golden.json"

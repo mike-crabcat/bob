@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from bob_server.database import Database, Transaction
+from server.database import Database, Transaction
 
 
 def _utcnow_iso() -> str:

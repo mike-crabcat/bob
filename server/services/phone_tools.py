@@ -13,10 +13,10 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import tool
+from server.services.tools import tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def make_phone_tools(
     async def get_call_status(call_id: str) -> str:
         """Check the status of a phone call. Returns current status, duration, and exchange count."""
         db = ctx.db
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         call = await PhoneCallRepository(db).get(call_id)
         if not call:
             return json.dumps({"ok": False, "error": "Call not found"})

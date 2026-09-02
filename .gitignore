@@ -21,7 +21,6 @@ scripts/rollout.sh
 
 # Build outputs
 node_modules/
-packages/bob-server/bob_server/ui_dist
 server/ui_dist
 services/whatsappbridge/bin
 services/whatsappbridge/whatsappbridge

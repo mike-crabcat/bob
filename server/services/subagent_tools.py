@@ -6,10 +6,10 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import tool
+from server.services.tools import tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
 
         After calling this, you MUST send a message to the user summarizing what you delegated.
         Use check_subagent to poll for results and message_subagent for follow-up."""
-        from bob_server.services.subagent_service import SubagentService
+        from server.services.subagent_service import SubagentService
 
         if not is_trusted and (agent_type or "").strip().lower() != "script":
             # Fail before the service's alias normalisation can coerce an
@@ -117,7 +117,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     @tool
     async def check_subagent(subagent_id: str) -> str:
         """Check the status and result of a subagent. Returns current status and result if available."""
-        from bob_server.services.subagent_service import SubagentService
+        from server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
         result = await svc.check_subagent(subagent_id, parent_session_key=session_key)
@@ -127,7 +127,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     async def message_subagent(subagent_id: str, message: str) -> str:
         """Send a follow-up message to a subagent. The subagent will process your message
         and return a response. Only use on subagents in 'waiting_for_parent' status."""
-        from bob_server.services.subagent_service import SubagentService
+        from server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
         result = await svc.message_subagent(subagent_id, message, parent_session_key=session_key)
@@ -137,7 +137,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     async def list_subagents(status: str = "") -> str:
         """List your subagents, optionally filtered by status.
         Valid statuses: created, running, waiting_for_parent, completed, failed, killed."""
-        from bob_server.services.subagent_service import SubagentService
+        from server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
         results = await svc.list_subagents(session_key, status)
@@ -146,7 +146,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     @tool
     async def kill_subagent(subagent_id: str) -> str:
         """Kill a running subagent. Cancels execution and marks it as killed."""
-        from bob_server.services.subagent_service import SubagentService
+        from server.services.subagent_service import SubagentService
 
         svc = SubagentService(ctx)
         result = await svc.kill_subagent(subagent_id, parent_session_key=session_key)

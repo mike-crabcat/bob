@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from bob_server.models import JournalEntryType
+from server.models import JournalEntryType
 
 
 pytestmark = pytest.mark.openclaw_live

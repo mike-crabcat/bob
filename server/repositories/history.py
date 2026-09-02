@@ -41,7 +41,7 @@ class HistoryRepository:
         self.db = db
 
     async def _cid(self, session_key: str) -> str:
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         return await ConversationRepository(self.db).resolve_cid(session_key)
 
     async def recent_dialogue(

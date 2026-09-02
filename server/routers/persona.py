@@ -8,10 +8,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from bob_server.dependencies import get_app_context
-from bob_server.context import AppContext
-from bob_server.models import PersonaUpdate
-from bob_server.services import persona as persona_service
+from server.dependencies import get_app_context
+from server.context import AppContext
+from server.models import PersonaUpdate
+from server.services import persona as persona_service
 
 
 router = APIRouter(tags=["persona"])

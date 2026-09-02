@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bob_server.config import PhoneSettings, Settings
-from bob_server.context import AppContext
-from bob_server.services.voice_dispatch_service import call_agendas, initiate_outbound_call
+from server.config import PhoneSettings, Settings
+from server.context import AppContext
+from server.services.voice_dispatch_service import call_agendas, initiate_outbound_call
 
 
 def _make_phone_settings(*, enabled: bool = True, base_url: str = "https://example.com") -> PhoneSettings:
@@ -36,7 +36,7 @@ def _mock_twilio():
     mock_twilio = MagicMock()
     mock_twilio_rest = MagicMock()
     with patch.dict(sys.modules, {"twilio": mock_twilio, "twilio.rest": mock_twilio_rest}), \
-         patch("bob_server.services.realtime_prewarm.start_prewarm"):
+         patch("server.services.realtime_prewarm.start_prewarm"):
         # start_prewarm is patched out: it would open REAL OpenAI sessions
         # from the test process using the configured API key.
         yield mock_twilio_rest.Client

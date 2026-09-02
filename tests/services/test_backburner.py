@@ -27,14 +27,14 @@ import json
 
 import pytest
 
-from bob_server.services.backburner import (
+from server.services.backburner import (
     BackburnerService,
     _parse_probe_output,
     applies,
     build_transcript,
     mode,
 )
-from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
+from server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
 DM_KEY = "agent:main:whatsapp:dm:61400000000"
 GROUP_KEY = "agent:main:whatsapp:group:1234"
@@ -42,7 +42,7 @@ GROUP_KEY = "agent:main:whatsapp:group:1234"
 
 @pytest.fixture(autouse=True)
 def _reset_backburner():
-    from bob_server.services import backburner
+    from server.services import backburner
     backburner.reset_for_tests()
     yield
     backburner.reset_for_tests()
@@ -159,7 +159,7 @@ def test_parse_probe_output_variants():
 
 
 async def test_probe_falls_back_to_templates_on_failure(ctx, bb, monkeypatch):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     async def _boom(self, messages, **kwargs):
         raise RuntimeError("probe provider down")
@@ -176,7 +176,7 @@ async def test_probe_is_logged_against_the_session(ctx, bb, monkeypatch):
     """detach_probe rows must carry session_key/contact_id or they never
     show in the conversation's calls view (found live 2026-08-30: the first
     15 probe rows were invisible — session_key NULL)."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
     seen: dict = {}
 
     async def _chat(self, messages, **kwargs):
@@ -197,7 +197,7 @@ async def test_probe_is_logged_against_the_session(ctx, bb, monkeypatch):
 def stub_llm(monkeypatch):
     """chat_with_tools sleeps past the watchdog then returns; probe chat is
     a well-behased JSON reply."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     async def _chat(self, messages, **kwargs):
         return '{"summary": "checking the hotel bookings", "holding_text": "still on the hotels, back soon"}'
@@ -217,11 +217,11 @@ def stub_history(monkeypatch):
         return [{"role": "user", "content": "find us a hotel thursday"}]
 
     monkeypatch.setattr(
-        "bob_server.services.prompt_assembler.build_chat_messages", _build)
+        "server.services.prompt_assembler.build_chat_messages", _build)
 
 
 async def _pending_message(ctx, key=DM_KEY):
-    from bob_server.services.session_service import SessionService
+    from server.services.session_service import SessionService
     await SessionService(ctx).add_message(key, "user", "find us a hotel thursday",
                                           channel="whatsapp", dispatched=0)
 
@@ -233,7 +233,7 @@ async def test_nudge_and_routine_turns_do_not_detach(ctx, bb, stub_llm, stub_his
     it's internal/proactive work, and detaching relay turns amplifies
     (task → relay nudge → slow relay turn → task → …). task_relay is
     rescue-eligible but still detach-quiet (dispatch_runner set split)."""
-    from bob_server.services.session_service import SessionService
+    from server.services.session_service import SessionService
 
     for provenance in ("wake_nudge", "routine", "task_relay"):
         await SessionService(ctx).add_message(
@@ -317,7 +317,7 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
 
 
 async def test_fast_turn_never_detaches(ctx, bb, stub_history, monkeypatch):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     async def _fast(self, messages, tools, **kwargs):
         return "immediate answer"
@@ -347,7 +347,7 @@ async def test_turn_that_spokes_during_probe_never_detaches(ctx, bb, stub_histor
     proceeded anyway — _terminal then relayed the already-delivered reply
     back as a speak-expected task_relay and the group got a duplicate. A
     turn that already spoke must fall through to the inline wait."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     FINAL = "Scanned it. The profile's history holds about 21 distinct hosts."
 
@@ -393,7 +393,7 @@ async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
     """The other half of the guard: the llm task completing while the probe
     runs is the same race with the flag never flipped — detach must abort
     before registering anything."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     async def _slow_probe(self, messages, **kwargs):
         await asyncio.sleep(0.1)
@@ -412,7 +412,7 @@ async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
 async def test_capture_mode_intercepts_sends(ctx, bb):
     """The bridge's send tool: once capture mode flips, sends are captured as
     result and no effect is emitted."""
-    from bob_server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
+    from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
     svc = WhatsAppBridgeService(ctx)
     contact = None
@@ -441,8 +441,8 @@ async def test_capture_mode_intercepts_sends(ctx, bb):
 async def _settled_detached_task(ctx, *, sent_texts: list[str], result_text: str):
     """Register a detached_turn + goal the way detach() does, run _terminal
     on it, and return (goal_id, subagent_id)."""
-    from bob_server.repositories.subagents import SubagentRepository
-    from bob_server.services.goal_service import create_goal
+    from server.repositories.subagents import SubagentRepository
+    from server.services.goal_service import create_goal
 
     subagent_id = "aaaabbbb"
     await SubagentRepository(ctx.db).insert(
@@ -500,8 +500,8 @@ async def test_terminal_still_relays_new_result_after_intermediate_send(ctx, bb)
 # ------------------------------------------------------------- kill path
 
 async def test_kill_live_detached_task_settles_quietly(ctx, bb, stub_llm, stub_history, monkeypatch):
-    from bob_server.services.llm_dispatch import LLMDispatchService
-    from bob_server.services.subagent_service import SubagentService
+    from server.services.llm_dispatch import LLMDispatchService
+    from server.services.subagent_service import SubagentService
 
     # a long-running turn so there is something to kill mid-flight
     async def _very_slow(self, messages, tools, **kwargs):
@@ -549,8 +549,8 @@ async def test_kill_live_detached_task_settles_quietly(ctx, bb, stub_llm, stub_h
 # ------------------------------------------------------- restart recovery
 
 async def test_recovery_settles_orphaned_goals(ctx, bb):
-    from bob_server.repositories.subagents import SubagentRepository
-    from bob_server.services.goal_service import create_goal
+    from server.repositories.subagents import SubagentRepository
+    from server.services.goal_service import create_goal
 
     repo = SubagentRepository(ctx.db)
     await repo.insert(

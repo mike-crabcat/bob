@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from bob_server.services.workspace_tools import make_workspace_tools
+from server.services.workspace_tools import make_workspace_tools
 
 
 def test_get_time_is_in_workspace_tools(ctx):
@@ -31,7 +31,7 @@ async def test_get_time_returns_stamp_and_iso(ctx):
 
 
 def test_outbound_instructions_carry_call_start_clock():
-    from bob_server.services.voice_dispatch_service import build_outbound_instructions
+    from server.services.voice_dispatch_service import build_outbound_instructions
 
     text = build_outbound_instructions("Alice", "Confirm the booking")
     assert "Current local time at call start:" in text
@@ -40,7 +40,7 @@ def test_outbound_instructions_carry_call_start_clock():
 
 
 def test_inbound_instructions_carry_call_start_clock():
-    from bob_server.services.voice_dispatch_service import build_inbound_instructions
+    from server.services.voice_dispatch_service import build_inbound_instructions
 
     text = build_inbound_instructions("+61400000000", "Alice", "agenda text")
     assert "Current local time at call start:" in text

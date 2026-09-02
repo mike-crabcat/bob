@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from bob_server.cli._helpers import *  # noqa: F403,F405
+from server.cli._helpers import *  # noqa: F403,F405
 
 app = typer.Typer(help="Dream system: reflective self-improvement and proactive plans")
 
 
 async def _run(trigger: str, dry_run: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
     from pathlib import Path
 
     settings = Settings.from_env()
@@ -21,7 +21,7 @@ async def _run(trigger: str, dry_run: bool) -> None:
     ctx = AppContext(settings=settings, db=db)
     try:
         if dry_run:
-            from bob_server.services.dream import DreamStore
+            from server.services.dream import DreamStore
 
             store = DreamStore(ctx)
             await store.sweep_stale_runs()
@@ -34,7 +34,7 @@ async def _run(trigger: str, dry_run: bool) -> None:
             for s in due:
                 typer.echo(f"  {s['session_key']}  new_messages={s['new_messages']} newest={s['newest_message_at']}")
             return
-        from bob_server.services.dream import DreamRunner
+        from server.services.dream import DreamRunner
 
         result = await DreamRunner(ctx).maybe_run(trigger=trigger)
         if result is None:
@@ -69,9 +69,9 @@ def dream_status() -> None:
 
 
 async def _status() -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
     from pathlib import Path
 
     settings = Settings.from_env()
@@ -80,8 +80,8 @@ async def _status() -> None:
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
     try:
-        from bob_server.services.dream import DreamStore
-        from bob_server.services.dream import config as dream_config
+        from server.services.dream import DreamStore
+        from server.services.dream import config as dream_config
 
         d = settings.dream
         sessions = await dream_config.list_autoplan_sessions(db, enabled=True)
@@ -107,9 +107,9 @@ def dream_autoplan(
 
 
 async def _autoplan(state: str | None, session_key: str | None) -> None:
-    from bob_server.config import Settings
-    from bob_server.database import Database
-    from bob_server.services.dream import config as dream_config
+    from server.config import Settings
+    from server.database import Database
+    from server.services.dream import config as dream_config
     from pathlib import Path
 
     settings = Settings.from_env()
@@ -150,9 +150,9 @@ def dream_reindex() -> None:
 
 
 async def _reindex() -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
     from pathlib import Path
 
     settings = Settings.from_env()
@@ -162,7 +162,7 @@ async def _reindex() -> None:
     await db.apply_migrations()
     ctx = AppContext(settings=settings, db=db)
     try:
-        from bob_server.services.dream import DreamStore
+        from server.services.dream import DreamStore
 
         count = await DreamStore(ctx).rebuild_item_embeddings()
         typer.echo(f"re-embedded {count} item(s)")
@@ -182,9 +182,9 @@ def dream_list(
 
 
 async def _list(kind: str, status: str | None) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
     from pathlib import Path
 
     settings = Settings.from_env()
@@ -193,7 +193,7 @@ async def _list(kind: str, status: str | None) -> None:
     await db.connect()
     ctx = AppContext(settings=settings, db=db)
     try:
-        from bob_server.services.dream import DreamStore
+        from server.services.dream import DreamStore
 
         store = DreamStore(ctx)
         statuses = [status] if status else None

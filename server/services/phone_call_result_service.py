@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ async def generate_call_summary(
     """
     db = ctx.db
 
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     call_row = await PhoneCallRepository(db).get(call_id)
     engine = (call_row["engine"] if call_row else None) or "default"
 
@@ -38,7 +38,7 @@ async def generate_call_summary(
             except (json.JSONDecodeError, TypeError):
                 outcome = None
 
-        from bob_server.services.voice_dispatch_service import format_outcome
+        from server.services.voice_dispatch_service import format_outcome
         outcome_block = format_outcome(outcome)
 
         if not transcript.strip() and not outcome_block:
@@ -57,7 +57,7 @@ async def generate_call_summary(
 
 async def _summarize_transcript(ctx: AppContext, agenda: str, transcript: str) -> str:
     """Run the LLM summariser over a transcript block."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     messages = [
         {
@@ -99,7 +99,7 @@ async def dispatch_call_result(
     settled without a second wake (the wake below carries the result).
     ``wa_service`` is accepted for backward compatibility and unused.
     """
-    from bob_server.services.wake_service import wake_conversation
+    from server.services.wake_service import wake_conversation
 
     summary = await generate_call_summary(ctx, call_id, agenda, status)
 
@@ -128,10 +128,10 @@ async def _append_call_event(
     """Voice-as-binding: record the outcome as an event on the person's
     conversation (resolved via the call's subagent binding)."""
     try:
-        from bob_server.services.voice_dispatch_service import (
+        from server.services.voice_dispatch_service import (
             append_call_completed_event,
         )
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         row = await PhoneCallRepository(ctx.db).outcome_with_call_session(call_id)
         outcome = None
         if row and row["outcome"]:
@@ -159,13 +159,13 @@ async def _settle_call_goal(ctx: AppContext, call_id: str, status: str, result: 
     result (origin wake via the chokepoint, or the hierarchy roll-up for a
     child goal) — the caller then skips its own direct wake."""
     try:
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         row = await PhoneCallRepository(ctx.db).get(call_id)
         subagent_id = row["subagent_id"] if row else None
         if not subagent_id:
             return False
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.services.goal_service import settle_goal
+        from server.repositories.goals import GoalRepository
+        from server.services.goal_service import settle_goal
 
         goal = await GoalRepository(ctx.db).get_by_external_ref(subagent_id)
         if goal and goal["status"] == "active":

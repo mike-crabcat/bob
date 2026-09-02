@@ -22,12 +22,12 @@ def _content_char_len(content: Any) -> int:
         )
     return 0
 
-from bob_server.services.tools import Tool
+from server.services.tools import Tool
 
-from bob_server.services import model_registry
-from bob_server.services import quota_gate
-from bob_server.services.base import BaseService
-from bob_server.services.openai_service import OpenAIService, StreamResult
+from server.services import model_registry
+from server.services import quota_gate
+from server.services.base import BaseService
+from server.services.openai_service import OpenAIService, StreamResult
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +220,7 @@ async def _record_log(
     If log_id is provided and a row with that id exists, UPDATE it.
     Otherwise INSERT a new row.
     """
-    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    from server.repositories.llm_call_log import LlmCallLogRepository
     try:
         return await LlmCallLogRepository(db).upsert(
             log_id=log_id, provider=provider, model=model,
@@ -660,7 +660,7 @@ class LLMDispatchService(BaseService):
             cancel_reason = "server restart"
             if is_cancel and dispatch_id:
                 try:
-                    from bob_server.services import backburner as _bb
+                    from server.services import backburner as _bb
                     cancel_reason = _bb.peek_cancel_reason(dispatch_id) or "server restart"
                 except Exception:
                     pass

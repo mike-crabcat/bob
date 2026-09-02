@@ -47,7 +47,7 @@ class ScriptedActors:
         self.unnecessary_wakes = 0
 
     def install(self, monkeypatch) -> None:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
         monkeypatch.setattr(LLMDispatchService, "chat", self._chat)
         monkeypatch.setattr(
             LLMDispatchService, "chat_with_tools", self._chat_with_tools)
@@ -94,7 +94,7 @@ class ScriptedActors:
         subject = ("event-lunch" if self.wrong_slug
                    else (candidates[0] if candidates else "event-lunch"))
 
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).recent_dialogue(
             session_key, limit=40, dispatched_only=False)
 
@@ -320,7 +320,7 @@ class ScriptedActors:
         # 3) Cancellation rolled in → update the plan's headcount record.
         if "headcount" in _actions(bb.get("root", "")) and \
                 "headcount updated" not in _known(bb.get("root", "")):
-            from bob_server.repositories.goals import GoalRepository
+            from server.repositories.goals import GoalRepository
             row = await GoalRepository(self.db).get(bb["root"])
             if row:
                 state = json.loads(row["strategy_json"] or "{}")
@@ -349,8 +349,8 @@ class ScriptedActors:
         """The booking wake's model turn writes the event entity + claims —
         making the booking routable memory (§3.2)."""
         from datetime import datetime as _dt
-        from bob_server.services.memory.claim_service import write_claim
-        from bob_server.services.memory.models import Claim
+        from server.services.memory.claim_service import write_claim
+        from server.services.memory.models import Claim
 
         await self.db.execute(
             "INSERT OR IGNORE INTO memory_entities "

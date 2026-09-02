@@ -8,9 +8,9 @@ import logging
 import re
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService
-from bob_server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
+from server.context import AppContext
+from server.services.base import BaseService
+from server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class ReviewService(BaseService):
 
     async def build_roster(self, session_key: str) -> tuple[str, dict[str, str]]:
         """Roster header + sender_id→name map for the session's contacts."""
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         rows = await ContactRepository(self.db).list_active()
         names: dict[str, str] = {}
         lines = []
@@ -77,8 +77,8 @@ class ReviewService(BaseService):
         group_hint: str = "",
     ) -> dict[str, Any]:
         """One LLM review call → validated candidates + stats."""
-        from bob_server.services.dream.prompts import REVIEW_SYSTEM
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.dream.prompts import REVIEW_SYSTEM
+        from server.services.llm_dispatch import LLMDispatchService
 
         stats: dict[str, Any] = {
             "session_key": session_key,

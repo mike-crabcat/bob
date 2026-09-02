@@ -41,7 +41,7 @@ async def resolve_contact(
     # Try database lookup by name
     if db is not None:
         try:
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             row = await ContactRepository(db).get_by_name_exact(name_or_ref)
             if row:
                 return canonical_contact_id(str(row["id"]))

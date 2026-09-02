@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from bob_server.services import occupancy
+from server.services import occupancy
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +103,7 @@ async def test_wa_ingress_queues_during_live_call(
         stub_memory,
     )
     # Manually apply the fixtures we need from the characterization module.
-    from bob_server.services.attention import AttentionCoordinator
+    from server.services.attention import AttentionCoordinator
 
     _stub_workspace(monkeypatch)
 

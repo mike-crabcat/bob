@@ -7,10 +7,10 @@ from uuid import uuid4
 
 from aiosqlite import Connection
 
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.exceptions import NotFoundError
-from bob_server.models import (
+from server.context import AppContext
+from server.database import Database
+from server.exceptions import NotFoundError
+from server.models import (
     CalendarCreate,
     CalendarResponse,
     CalendarUpdate,
@@ -22,7 +22,7 @@ from bob_server.models import (
     EventStatus,
     EventUpdate,
 )
-from bob_server.services.base import BaseService, json_dumps, json_loads, utcnow
+from server.services.base import BaseService, json_dumps, json_loads, utcnow
 
 
 class CalendarService(BaseService):

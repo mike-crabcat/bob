@@ -15,22 +15,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bob_server.services.base import BaseService, iso_utc, utcnow
-from bob_server.services.dispatch_runner import is_no_reply
-from bob_server.services.memory.claim_types import (
+from server.services.base import BaseService, iso_utc, utcnow
+from server.services.dispatch_runner import is_no_reply
+from server.services.memory.claim_types import (
     ENTITY_TYPE_REGISTRY,
     detect_entity_type,
     detect_entity_types_in_text,
 )
-from bob_server.services.memory.models import (
+from server.services.memory.models import (
     Claim,
     EntityDocument,
 )
-from bob_server.services.memory.claim_types import (
+from server.services.memory.claim_types import (
     render_entity,
     ENTITY_TYPES,
 )
-from bob_server.services.memory.claim_service import write_claim
+from server.services.memory.claim_service import write_claim
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +60,12 @@ class MemoryService(BaseService):
             if not entity_ids:
                 return
             try:
-                from bob_server.services.memory.reconciliation import (
+                from server.services.memory.reconciliation import (
                     reconcile_entity,
                     deprecate_file_entities_without_path,
                     filter_due_for_reconciliation,
                 )
-                from bob_server.services.llm_dispatch import LLMDispatchService
+                from server.services.llm_dispatch import LLMDispatchService
                 llm = LLMDispatchService(self.ctx)
 
                 # Backoff: skip entities reconciled within the min-interval window.
@@ -108,8 +108,8 @@ class MemoryService(BaseService):
         self, workspace_dir: Path, *, entity_ids: list[str] | None = None
     ) -> dict[str, Any]:
         """Manually trigger reconciliation for specific or all active entities."""
-        from bob_server.services.memory.reconciliation import reconcile_entity, deprecate_file_entities_without_path
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.memory.reconciliation import reconcile_entity, deprecate_file_entities_without_path
+        from server.services.llm_dispatch import LLMDispatchService
 
         llm = LLMDispatchService(self.ctx)
 
@@ -206,7 +206,7 @@ class MemoryService(BaseService):
 
     async def _has_undigested_messages(self, session_key: str) -> bool:
         """True if there are session messages newer than the last silent turn."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         history = HistoryRepository(self.db)
         active_from = await self._last_silent_turn_at(session_key)
         return bool(await history.count_dialogue(session_key, active_from))
@@ -228,13 +228,13 @@ class MemoryService(BaseService):
         is_group = ":group:" in session_key
         sender_names: dict[str, str] = {}
         if is_group:
-            from bob_server.repositories.participants import ParticipantRepository
+            from server.repositories.participants import ParticipantRepository
             participants = await ParticipantRepository(self.db).list_for(session_key)
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
                     sender_names[p["contact_id"]] = p["display_name"]
 
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).recent_dialogue(
             session_key, limit=max_history, since_hours=since_hours)
 
@@ -261,7 +261,7 @@ class MemoryService(BaseService):
         """Channel-type + participant roster block for the silent-turn prompt."""
         is_group = ":group:" in session_key
         if is_group:
-            from bob_server.repositories.participants import ParticipantRepository
+            from server.repositories.participants import ParticipantRepository
             members = await ParticipantRepository(self.db).list_for(session_key)
             roster = ", ".join(
                 (m["display_name"] or m["contact_id"])
@@ -276,7 +276,7 @@ class MemoryService(BaseService):
                 "group-* entities before recording anything."
             )
             return f"# Channel context\n\n{line}"
-        from bob_server.repositories.participants import ParticipantRepository
+        from server.repositories.participants import ParticipantRepository
         p_rows = await ParticipantRepository(self.db).list_for(session_key)
         row = p_rows[0] if p_rows else None
         who = row["display_name"] if row and row["display_name"] else "the other participant"
@@ -334,12 +334,12 @@ class MemoryService(BaseService):
         guards (for explicit remember-triggered turns). ``trigger`` labels the
         stored message metadata ("idle" vs "remember") for observability.
         """
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.session_service import SessionService
-        from bob_server.services.session_dispatch_gate import SessionDispatchGate
-        from bob_server.services.memory.extraction_tools import make_extraction_tools
-        from bob_server.services.memory.prompts import build_silent_turn_prompt
-        from bob_server.services.memory.claim_types import build_extraction_prompt_section
+        from server.services.llm_dispatch import LLMDispatchService
+        from server.services.session_service import SessionService
+        from server.services.session_dispatch_gate import SessionDispatchGate
+        from server.services.memory.extraction_tools import make_extraction_tools
+        from server.services.memory.prompts import build_silent_turn_prompt
+        from server.services.memory.claim_types import build_extraction_prompt_section
 
         db = self.db
         settings = self.ctx.settings
@@ -392,7 +392,7 @@ class MemoryService(BaseService):
             # referenced by active plans (cross-conversation identity).
             candidates_block = ""
             try:
-                from bob_server.services.memory.claim_router import (
+                from server.services.memory.claim_router import (
                     build_candidate_entities_block,
                 )
                 candidates_block = await build_candidate_entities_block(db, session_key)
@@ -484,7 +484,7 @@ class MemoryService(BaseService):
             # Bob Events §2.1: the marker message now exists, so the claims
             # written during the loop (whose source_messages reference it)
             # can resolve to a conversation — refresh their mention rows.
-            from bob_server.services.memory.claim_router import (
+            from server.services.memory.claim_router import (
                 refresh_mentions_for_turn,
             )
             await refresh_mentions_for_turn(db, turn_message_id)
@@ -521,7 +521,7 @@ class MemoryService(BaseService):
         # replay in the heartbeat sweep). Never blocks extraction on failure.
         if claims_created:
             try:
-                from bob_server.services.memory.claim_router import (
+                from server.services.memory.claim_router import (
                     handle_extraction_batch,
                 )
                 await handle_extraction_batch(
@@ -557,7 +557,7 @@ class MemoryService(BaseService):
         if not new_entity_rows and not new_claim_rows:
             return
 
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         policy = await ConversationRepository(self.db).get_policy(session_key)
         if not policy.get("memory_verbose"):
             return
@@ -579,7 +579,7 @@ class MemoryService(BaseService):
                 lines.append(f"  - {c['subject_id']}.{c['claim_type_key']} {val}")
         notice = "\n".join(lines)
 
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
         await SessionService(self.ctx).add_message(
             session_key, "system", notice,
             metadata={
@@ -717,7 +717,7 @@ class MemoryService(BaseService):
 
     async def _update_entity_fts(self, entity_id: str) -> None:
         """Render entity claims via template and update the FTS index."""
-        from bob_server.services.memory.claim_service import update_entity_fts
+        from server.services.memory.claim_service import update_entity_fts
         await update_entity_fts(self.db, entity_id)
 
     @staticmethod
@@ -738,7 +738,7 @@ class MemoryService(BaseService):
             )
             if rows and rows[0]["value"]:
                 hex8 = rows[0]["value"][:8]
-                from bob_server.repositories.contacts import ContactRepository
+                from server.repositories.contacts import ContactRepository
                 row = await ContactRepository(self.db).get_by_id_prefix(hex8)
                 if row and row["name"]:
                     return row["name"]
@@ -758,7 +758,7 @@ class MemoryService(BaseService):
         self, workspace_dir: Path, query: str, entity_type: str = ""
     ) -> dict[str, Any]:
         """Search memory using FTS5 across rendered entity bodies."""
-        from bob_server.services.memory.tools import find
+        from server.services.memory.tools import find
 
         if entity_type:
             results = await find(self.db, entity_type)
@@ -783,7 +783,7 @@ class MemoryService(BaseService):
         # If FTS found nothing, try embedding search
         if not fts_rows:
             try:
-                from bob_server.services.memory.embedding import search_similar
+                from server.services.memory.embedding import search_similar
                 emb_results = await search_similar(self.db, query, limit=10, threshold=1.2)
                 if emb_results:
                     entity_ids = [r["entity_id"] for r in emb_results]
@@ -819,8 +819,8 @@ class MemoryService(BaseService):
 
     async def merge_entities(self, *, dry_run: bool = False) -> dict[str, Any]:
         """Detect and merge duplicate entities using embeddings + LLM."""
-        from bob_server.services.memory.merge import run_merge
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.memory.merge import run_merge
+        from server.services.llm_dispatch import LLMDispatchService
 
         llm = LLMDispatchService(self.ctx)
         return await run_merge(self.db, llm, dry_run=dry_run)
@@ -835,7 +835,7 @@ class MemoryService(BaseService):
 
     async def rebuild_embeddings(self) -> int:
         """Rebuild embedding vectors for all entities. Returns count."""
-        from bob_server.services.memory.embedding import embed_batch, upsert_embedding
+        from server.services.memory.embedding import embed_batch, upsert_embedding
 
         rows = await self.db.fetch_all(
             "SELECT entity_id, entity_type, display_name FROM memory_entities WHERE status = 'active'"
@@ -877,7 +877,7 @@ class MemoryService(BaseService):
 
     async def _get_contact_directory(self):
         """Load and cache ContactDirectory."""
-        from bob_server.services.memory.contact_directory import ContactDirectory
+        from server.services.memory.contact_directory import ContactDirectory
         cache = getattr(self, "_contact_dir_cache", None)
         if cache is None and self.ctx and hasattr(self.ctx, "db") and self.ctx.db:
             cache = await ContactDirectory.load(self.ctx.db)
@@ -933,11 +933,11 @@ class MemoryService(BaseService):
         """Load group member canonical contact IDs for a session."""
         if not source_id:
             return None
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         route = await ConversationRepository(self.db).route_for(source_id)
         if not route or route["endpoint_kind"] != "group" or not route["address"]:
             return None
-        from bob_server.repositories.groups import GroupRepository
+        from server.repositories.groups import GroupRepository
         ids = await GroupRepository(self.db).member_contact_ids(route["address"])
         return [f"contact-{cid[:8]}" for cid in map(str, ids)]
 
@@ -999,7 +999,7 @@ class MemoryService(BaseService):
 
         # Write a contact_id claim linking person to contacts table row
         hex8 = contact_id[:8]
-        from bob_server.services.memory.claim_service import write_claim
+        from server.services.memory.claim_service import write_claim
         claim = Claim(
             id=f"claim-person-{person_id}-contact_id",
             claim_type_key="contact_id",

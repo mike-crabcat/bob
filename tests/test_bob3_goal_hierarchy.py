@@ -16,9 +16,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.repositories.goals import GoalRepository
-from bob_server.repositories.wakeups import WakeupRepository
-from bob_server.services import goal_service
+from server.repositories.goals import GoalRepository
+from server.repositories.wakeups import WakeupRepository
+from server.services import goal_service
 
 
 def _past() -> str:
@@ -41,7 +41,7 @@ def _reviser_json(state: dict, *, wake_needed: bool = False,
 @pytest.fixture
 def mock_wake(monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     return wake
 
 
@@ -49,7 +49,7 @@ def mock_wake(monkeypatch):
 def reviser(monkeypatch):
     """Mock the reviser LLM call; tests set `.response` (a JSON string).
     `.calls` records each call's kwargs (max_tokens, reasoning_effort…)."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     mock = AsyncMock()
     mock.response = _reviser_json({"plan": "updated", "known": ["alice confirmed"]})
@@ -125,7 +125,7 @@ async def test_child_settle_rolls_up_without_origin_wake(ctx, db, mock_wake, rev
          "refs": {"entities": ["event-team-lunch"], "claims": []}})
 
     await goal_service.complete_goal(ctx, child["id"], result="alice confirmed 3pm")
-    from bob_server.services.effects import pump_due_effects
+    from server.services.effects import pump_due_effects
     await pump_due_effects(ctx)  # roll-up revisions queue for the pump
 
     # Child settle never wakes the origin directly.
@@ -147,7 +147,7 @@ async def test_reviser_wakes_parent_working_conversation_not_origin(
         {"plan": "x"}, wake_needed=True, summary="alice confirmed — quorum reached")
 
     await goal_service.complete_goal(ctx, child["id"], result="alice confirmed 3pm")
-    from bob_server.services.effects import pump_due_effects
+    from server.services.effects import pump_due_effects
     await pump_due_effects(ctx)
 
     mock_wake.assert_awaited_once()
@@ -159,7 +159,7 @@ async def test_reviser_wakes_parent_working_conversation_not_origin(
 async def test_root_settle_wakes_origin_once(ctx, db, mock_wake, reviser):
     root, child = await _make_tree(ctx)
     await goal_service.complete_goal(ctx, child["id"], result="done")
-    from bob_server.services.effects import pump_due_effects
+    from server.services.effects import pump_due_effects
     await pump_due_effects(ctx)
     await goal_service.complete_goal(ctx, root["id"], result="lunch booked")
 
@@ -206,7 +206,7 @@ async def test_reviser_token_budget_accommodates_thinking_models(
     2026-08-29). The call must use the settings ceiling (default 4000)."""
     root, _ = await _make_tree(ctx)
 
-    from bob_server.services.goal_state_service import revise_goal_state
+    from server.services.goal_state_service import revise_goal_state
     await revise_goal_state(ctx, root["id"], "stimulus", stimulus_id="test:cap")
 
     assert reviser.calls, "reviser was called"
@@ -221,7 +221,7 @@ async def test_reviser_malformed_output_degrades_to_wake(ctx, db, mock_wake, rev
     before = (await GoalRepository(db).get(root["id"]))["strategy_json"]
     reviser.response = "not json at all"
 
-    from bob_server.services.goal_state_service import revise_goal_state
+    from server.services.goal_state_service import revise_goal_state
     outcome = await revise_goal_state(
         ctx, root["id"], " Stimulus: bob says Tuesday. ",
         stimulus_id="test:malformed")
@@ -249,7 +249,7 @@ async def test_reviser_cas_conflict_retries(ctx, db, mock_wake, reviser):
             return False
         return await real_revise(self, goal_id, **kwargs)
 
-    from bob_server.services.goal_state_service import revise_goal_state
+    from server.services.goal_state_service import revise_goal_state
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(GoalRepository, "revise", _flaky_revise)
         outcome = await revise_goal_state(ctx, root["id"], "stimulus",
@@ -266,7 +266,7 @@ async def test_shadow_mode_records_but_suppresses_wake(
     reviser.response = _reviser_json({"plan": "x"}, wake_needed=True, summary="changed")
     monkeypatch.setenv("BOB_GOAL_STATE_SHADOW", "1")
 
-    from bob_server.services.goal_state_service import revise_goal_state
+    from server.services.goal_state_service import revise_goal_state
     outcome = await revise_goal_state(ctx, root["id"], "stimulus",
                                       stimulus_id="test:shadow")
     assert outcome["wake"] == "shadow_wake"
@@ -283,7 +283,7 @@ async def test_legacy_outreach_strategy_reaches_reviser_prompt(
 
     seen: dict = {}
 
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     async def _chat(self, messages, **kwargs):
         seen["user"] = messages[-1]["content"]
@@ -291,7 +291,7 @@ async def test_legacy_outreach_strategy_reaches_reviser_prompt(
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(LLMDispatchService, "chat", _chat)
-        from bob_server.services.goal_state_service import revise_goal_state
+        from server.services.goal_state_service import revise_goal_state
         await revise_goal_state(ctx, goal["id"], "stimulus",
                                 stimulus_id="test:legacy")
 
@@ -304,7 +304,7 @@ async def test_legacy_outreach_strategy_reaches_reviser_prompt(
 # ---------------------------------------------------------------------------
 
 async def test_goals_block_caps_at_five_goals_and_truncates(ctx, db):
-    from bob_server.services.context_assembler import ContextAssembler
+    from server.services.context_assembler import ContextAssembler
 
     long_plan = "word " * 400
     for i in range(7):
@@ -320,7 +320,7 @@ async def test_goals_block_caps_at_five_goals_and_truncates(ctx, db):
 
 
 async def test_goals_block_empty_without_goals(ctx, db):
-    from bob_server.services.context_assembler import ContextAssembler
+    from server.services.context_assembler import ContextAssembler
     assert await ContextAssembler(ctx).goals_block("nobody") == ""
 
 
@@ -329,7 +329,7 @@ async def test_goals_block_empty_without_goals(ctx, db):
 # ---------------------------------------------------------------------------
 
 async def test_create_goal_tool_with_parent_and_strategy(ctx, db, mock_wake):
-    from bob_server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import make_goal_tools
 
     tools = {t.name: t for t in make_goal_tools(ctx, "work")}
     root_out = json.loads(await tools["create_goal"].handler(
@@ -358,7 +358,7 @@ async def test_create_goal_tool_with_parent_and_strategy(ctx, db, mock_wake):
 
 
 async def test_update_goal_state_tool_cas_write(ctx, db, mock_wake):
-    from bob_server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import make_goal_tools
 
     tools = {t.name: t for t in make_goal_tools(ctx, "work")}
     goal_id = json.loads(await tools["create_goal"].handler(objective="obj"))["goal_id"]
@@ -387,7 +387,7 @@ async def test_update_goal_state_tool_cas_write(ctx, db, mock_wake):
 
 
 async def test_schedule_goal_wakeup_tool_targets_root(ctx, db, mock_wake):
-    from bob_server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import make_goal_tools
 
     tools = {t.name: t for t in make_goal_tools(ctx, "work")}
     root_id = json.loads(await tools["create_goal"].handler(objective="root"))["goal_id"]
@@ -409,7 +409,7 @@ async def test_schedule_goal_wakeup_tool_targets_root(ctx, db, mock_wake):
 # ---------------------------------------------------------------------------
 
 async def test_call_result_wake_rides_settle_chokepoint(ctx, db, mock_wake, reviser):
-    from bob_server.services import phone_call_result_service as prs
+    from server.services import phone_call_result_service as prs
 
     root = await goal_service.create_goal(
         ctx, conversation_id="work", objective="book venue",
@@ -423,7 +423,7 @@ async def test_call_result_wake_rides_settle_chokepoint(ctx, db, mock_wake, revi
         return {"subagent_id": "sub-9"}
 
     with pytest.MonkeyPatch.context() as mp:
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         mp.setattr(PhoneCallRepository, "get", _fake_get)
         # The child goal is parented: no direct origin wake; roll-up instead.
         woke = await prs._settle_call_goal(ctx, "call-1", "completed",
@@ -439,7 +439,7 @@ async def test_call_result_wake_rides_settle_chokepoint(ctx, db, mock_wake, revi
 
 @pytest.fixture
 def review_task(monkeypatch):
-    from bob_server import heartbeat
+    from server import heartbeat
     monkeypatch.setattr(heartbeat, "_last_goal_review", None)
     monkeypatch.delenv("BOB_GOAL_REVIEW_DISABLED", raising=False)
     return heartbeat.GoalReviewTask()

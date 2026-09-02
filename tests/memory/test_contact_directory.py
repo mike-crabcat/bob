@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.services.memory.contact_directory import ContactDirectory
+from server.services.memory.contact_directory import ContactDirectory
 
 
 @pytest.mark.asyncio

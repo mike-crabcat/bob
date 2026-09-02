@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
@@ -15,7 +15,7 @@ async def get_subagents(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.subagents import SubagentRepository
+    from server.repositories.subagents import SubagentRepository
     rows = await SubagentRepository(db).recent(limit=50)
     subagents: list[dict[str, Any]] = []
     for row in rows:
@@ -40,7 +40,7 @@ async def get_subagent_detail(request: Request, subagent_id: str) -> dict[str, A
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.repositories.subagents import SubagentRepository
+    from server.repositories.subagents import SubagentRepository
     row = await SubagentRepository(db).get(subagent_id)
     if not row:
         return {"error": "not found"}
@@ -69,8 +69,8 @@ async def message_subagent(request: Request, subagent_id: str) -> dict[str, Any]
     if not message:
         return {"ok": False, "error": "message is required"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.subagent_service import SubagentService
+    from server.context import AppContext
+    from server.services.subagent_service import SubagentService
 
     ctx = AppContext(
         db=_db(request),
@@ -91,8 +91,8 @@ async def kill_subagent(request: Request, subagent_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.subagent_service import SubagentService
+    from server.context import AppContext
+    from server.services.subagent_service import SubagentService
 
     ctx = AppContext(
         db=_db(request),

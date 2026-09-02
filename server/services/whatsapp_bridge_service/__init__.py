@@ -7,15 +7,15 @@ Split into:
 - ``_service``: WhatsAppBridgeService class
 
 Re-exports ``WhatsAppBridgeService`` and ``_prepare_media`` for backward compat
-with ``from bob_server.services.whatsapp_bridge_service import ...``.
+with ``from server.services.whatsapp_bridge_service import ...``.
 """
 
 from __future__ import annotations
 
-from bob_server.services.whatsapp_bridge_service._media import (
+from server.services.whatsapp_bridge_service._media import (
     _jid_to_phone, _format_created_at, _resize_gif, _prepare_media,
 )
-from bob_server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
+from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
 
 __all__ = [

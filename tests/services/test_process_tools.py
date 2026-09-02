@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from bob_server.services import process_tools
-from bob_server.services.process_tools import make_process_tools
+from server.services import process_tools
+from server.services.process_tools import make_process_tools
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("DBUS_SESSION_BUS_ADDRESS") is None

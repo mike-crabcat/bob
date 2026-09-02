@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from bob_server.evals.case import EvalCase, JudgeCriteria, StructuralCheck
+from server.evals.case import EvalCase, JudgeCriteria, StructuralCheck
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _discover() -> None:
     for py_file in sorted(cases_dir.glob("*.py")):
         if py_file.name.startswith("_"):
             continue
-        module_name = f"bob_server.evals.cases.{py_file.stem}"
+        module_name = f"server.evals.cases.{py_file.stem}"
         try:
             importlib.import_module(module_name)
         except Exception:

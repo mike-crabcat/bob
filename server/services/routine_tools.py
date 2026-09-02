@@ -11,11 +11,11 @@ from zoneinfo import available_timezones
 
 import yaml
 
-from bob_server.cron import next_cron_occurrence, validate_cron_expression
-from bob_server.services.tools import Tool, tool
+from server.cron import next_cron_occurrence, validate_cron_expression
+from server.services.tools import Tool, tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def make_routine_tools(
     *,
     session_key: str,
 ) -> list[Tool]:
-    from bob_server.services.routine_service import RoutineService
+    from server.services.routine_service import RoutineService
 
     svc = RoutineService(ctx)
 

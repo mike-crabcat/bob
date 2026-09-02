@@ -31,7 +31,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ async def _call_reviser(
 ) -> tuple[GoalStrategy, bool, str]:
     """One reviser LLM pass with a single validation retry. Raises on hard
     failure; callers degrade to wake."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     model = (ctx.settings.goals.reviser_model
              or ctx.settings.openai.get_memory_model())
@@ -220,7 +220,7 @@ async def _call_reviser(
         f"# Stimulus\n{stimulus}\n\n"
         "Return the updated state JSON object per the contract."
     )
-    from bob_server.services.prompt_assembler import local_now_prompt_line
+    from server.services.prompt_assembler import local_now_prompt_line
 
     # Stamp-only clock (tools_hint=False — this call carries no tools): the
     # reviser reasons about ISO dues and decide_by windows, so it needs a
@@ -278,7 +278,7 @@ async def revise_goal_state(
     Returns an outcome dict for logging: {"outcome": revised|no_change|
     skipped|error, "wake": wake|no_wake|shadow_wake, "goal_id", "stimulus_id"}.
     """
-    from bob_server.repositories.goals import GoalRepository
+    from server.repositories.goals import GoalRepository
 
     outcome = {"goal_id": goal_id, "stimulus_id": stimulus_id,
                "outcome": "error", "wake": "no_wake"}
@@ -370,7 +370,7 @@ async def _wake_working(
         logger.info("goal %s: shadow-mode suppressing wake (stimulus %s)",
                     goal["id"], outcome.get("stimulus_id"))
         return outcome
-    from bob_server.services.wake_service import wake_conversation
+    from server.services.wake_service import wake_conversation
 
     try:
         await wake_conversation(
@@ -387,7 +387,7 @@ async def _wake_working(
 
 
 def _register_reviser_executor() -> None:
-    from bob_server.services import effects as effects_svc
+    from server.services import effects as effects_svc
 
     async def _exec(ctx, payload):
         result = await revise_goal_state(
@@ -425,12 +425,12 @@ async def enqueue_revision(
                "stimulus_id": stimulus_id, "allow_wake": allow_wake}
     key = f"goal_revise:{goal_id}:{stimulus_id}"
     if not inline:
-        from bob_server.repositories.effects import EffectRepository
+        from server.repositories.effects import EffectRepository
         effect_id = await EffectRepository(ctx.db).emit(
             kind="goal_revise_state", idempotency_key=key, payload=payload)
         return {"ok": True, "effect_id": effect_id, "queued": True}
 
-    from bob_server.services.effects import emit_and_deliver
+    from server.services.effects import emit_and_deliver
 
     return await emit_and_deliver(
         ctx, kind="goal_revise_state", idempotency_key=key, payload=payload)

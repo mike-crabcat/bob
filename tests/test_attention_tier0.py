@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.services.attention import detect_addressed, record_shadow_decision
+from server.services.attention import detect_addressed, record_shadow_decision
 
 BOT = "Bob"
 

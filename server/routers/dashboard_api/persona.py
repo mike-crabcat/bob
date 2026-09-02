@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
-from bob_server.services import persona as persona_service
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.services import persona as persona_service
 
 
 router = APIRouter()
@@ -30,7 +30,7 @@ async def dashboard_get_persona_history(request: Request) -> dict[str, Any]:
 @router.post("/api/persona")
 async def dashboard_create_persona(request: Request) -> dict[str, Any]:
     import uuid
-    from bob_server.models import PersonaUpdate
+    from server.models import PersonaUpdate
     db = _db(request)
     body = await request.json()
     payload = PersonaUpdate(**body)

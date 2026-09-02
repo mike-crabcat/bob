@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
-from bob_server.repositories.conversations import ConversationRepository
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.repositories.conversations import ConversationRepository
 
 
 router = APIRouter()
@@ -82,7 +82,7 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
     items: list[dict[str, Any]] = []
 
     # 1. Attention decisions (tier-1 shadow rows; space-format timestamps)
-    from bob_server.services.attention import shadow as attention_shadow
+    from server.services.attention import shadow as attention_shadow
     for r in await attention_shadow.recent_decisions(db, list(keys), limit=100):
         items.append({
             "type": "attention",
@@ -95,7 +95,7 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         })
 
     # 2. Tier-2 probe reasoning (llm_call_log; space-format timestamps)
-    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    from server.repositories.llm_call_log import LlmCallLogRepository
     for r in await LlmCallLogRepository(db).probe_decisions(list(keys), limit=50):
         decision, reason = None, None
         try:
@@ -113,7 +113,7 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         })
 
     # 3. Turns
-    from bob_server.repositories.turns import TurnRepository
+    from server.repositories.turns import TurnRepository
     for r in await TurnRepository(db).recent_for_conversation(conversation_id, limit=100):
         items.append({
             "type": "turn",
@@ -133,7 +133,7 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         if b["address"]:
             segments.add(b["address"])
             segments.add(str(b["address"]).split("@", 1)[0])
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
     effect_rows = await EffectRepository(db).timeline_candidates(conversation_id, limit=500)
     matched = 0
     for r in effect_rows:
@@ -156,7 +156,7 @@ async def get_timeline(request: Request, conversation_id: str) -> dict[str, Any]
         })
 
     # 5. Goal transitions
-    from bob_server.repositories.goals import GoalRepository
+    from server.repositories.goals import GoalRepository
     for r in await GoalRepository(db).recent_transitions(conversation_id, limit=50):
         items.append({
             "type": "goal",
@@ -198,7 +198,7 @@ async def get_bindings(request: Request, conversation_id: str) -> dict[str, Any]
 async def post_unmerge(request: Request, session_key: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     repo = ConversationRepository(_db(request))
     restored = await repo.unmerge(session_key)
@@ -230,7 +230,7 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
         session_context["kind"] = kind
 
         if kind == "group" and address:
-            from bob_server.repositories.groups import GroupRepository
+            from server.repositories.groups import GroupRepository
             group = await GroupRepository(db).get_by_jid(address)
             if group:
                 session_context["display_name"] = group["name"]
@@ -238,7 +238,7 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
                 session_context["member_count"] = group["member_count"]
 
         elif kind == "thread" and address:
-            from bob_server.services.email_store import EmailStore
+            from server.services.email_store import EmailStore
             _estore = EmailStore(db)
             thread = await _estore.thread_by_agentmail_any(address)
             if thread:
@@ -250,13 +250,13 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
                 ]
 
         elif kind == "dm" and binding["contact_id"]:
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             contact = await ContactRepository(db).get(binding["contact_id"])
             if contact:
                 session_context["display_name"] = contact["name"]
 
     calls: list[dict[str, Any]] = []
-    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    from server.repositories.llm_call_log import LlmCallLogRepository
     rows = await LlmCallLogRepository(db).session_calls_with_contact(
         session_key, limit=100)
     for row in rows:
@@ -292,7 +292,7 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
 
     participants: list[dict[str, Any]] = []
     cid = await ConversationRepository(db).resolve_cid(session_key)
-    from bob_server.repositories.participants import ParticipantRepository
+    from server.repositories.participants import ParticipantRepository
     p_rows = await ParticipantRepository(db).with_contact_names(cid)
     for row in p_rows:
         participants.append({
@@ -303,11 +303,11 @@ async def get_conversation_detail(request: Request, session_key: str) -> dict[st
             "last_active": row["last_active_at"],
         })
 
-    from bob_server.repositories.participants import AgendaRepository
+    from server.repositories.participants import AgendaRepository
     current_agenda = (await AgendaRepository(db).get(cid)) or ""
 
     messages: list[dict[str, Any]] = []
-    from bob_server.repositories.history import HistoryRepository
+    from server.repositories.history import HistoryRepository
     m_rows = await HistoryRepository(db).detail_messages(session_key, limit=200)
     for row in m_rows:
         messages.append({
@@ -345,7 +345,7 @@ async def put_conversation_agenda(request: Request, session_key: str) -> dict[st
     agenda = (body.get("agenda") or "").strip()
     db = _db(request)
     now = _utc_now()
-    from bob_server.repositories.participants import AgendaRepository
+    from server.repositories.participants import AgendaRepository
     await AgendaRepository(db).set(session_key, agenda, now)
     return {"ok": True}
 
@@ -359,8 +359,8 @@ async def post_conversation_reflect(request: Request, session_key: str) -> dict[
     if not query:
         return {"error": "query required"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.reflection_service import ReflectionService
+    from server.context import AppContext
+    from server.services.reflection_service import ReflectionService
 
     ctx = AppContext(db=_db(request), settings=request.app.state.settings)
     service = ReflectionService(ctx)

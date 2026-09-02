@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 
 @dataclass

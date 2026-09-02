@@ -31,7 +31,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from bob_server.services.base import BaseService, utcnow
+from server.services.base import BaseService, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ def build_transcript(messages_json: str | None, *, max_tail: int = 20, item_cap:
     Handles both shapes the array contains: chat messages (``role``) and
     Responses-API items (``type`` function_call / function_call_output).
     """
-    from bob_server.services.llm_dispatch import _truncate_str
+    from server.services.llm_dispatch import _truncate_str
 
     try:
         items = json.loads(messages_json or "[]")
@@ -246,7 +246,7 @@ async def run_probe(ctx: Any, dispatch_id: str, *,
 
     transcript = ""
     try:
-        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        from server.repositories.llm_call_log import LlmCallLogRepository
         row = await LlmCallLogRepository(ctx.db).get_running_by_dispatch(dispatch_id)
         if row:
             transcript = build_transcript(row.get("messages_json"))
@@ -270,7 +270,7 @@ async def run_probe(ctx: Any, dispatch_id: str, *,
             + (transcript or "(no tool activity recorded yet — still on the first response)"))
 
     try:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
         probe_task = asyncio.create_task(LLMDispatchService(ctx).chat(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             model=probe_model(settings),
@@ -360,7 +360,7 @@ class BackburnerService(BaseService):
             # c. The turn is answered — by the holding ack. Frees the claim
             #    for the next turn.
             if turn is not None:
-                from bob_server.repositories.turns import TurnRepository
+                from server.repositories.turns import TurnRepository
                 await TurnRepository(self.db).complete(turn["turn_id"])
 
             # d. Register (register, never replay).
@@ -404,8 +404,8 @@ class BackburnerService(BaseService):
     async def _register(self, spec: Any, info: dict[str, str]) -> tuple[str, str]:
         """subagents row (agent_type detached_turn) + goal held by the parent
         conversation, so goals_block carries the work into later turns."""
-        from bob_server.repositories.subagents import SubagentRepository
-        from bob_server.services.goal_service import create_goal
+        from server.repositories.subagents import SubagentRepository
+        from server.services.goal_service import create_goal
 
         subagent_id = str(uuid4())
         short = subagent_id[:8]
@@ -503,9 +503,9 @@ class BackburnerService(BaseService):
         rescue must cover them when the model skips its send call (a
         wake_nudge-labelled relay was silently dropped this way live,
         2026-08-30 — the group never heard the task's outcome)."""
-        from bob_server.services.dispatch_runner import is_no_reply
-        from bob_server.repositories.subagents import SubagentRepository
-        from bob_server.services.goal_service import settle_goal
+        from server.services.dispatch_runner import is_no_reply
+        from server.repositories.subagents import SubagentRepository
+        from server.services.goal_service import settle_goal
 
         short = subagent_id[:8]
         captured = [t for t in (capture.get("texts") or []) if t.strip()]
@@ -573,9 +573,9 @@ class BackburnerService(BaseService):
         ride every prompt forever. Settle them and wake the conversation to
         own the loss. Idempotent — settle_goal's CAS only moves active goals,
         so previously-settled rows are skipped."""
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.repositories.subagents import SubagentRepository
-        from bob_server.services.goal_service import settle_goal
+        from server.repositories.goals import GoalRepository
+        from server.repositories.subagents import SubagentRepository
+        from server.services.goal_service import settle_goal
 
         rows = await SubagentRepository(self.db).list_by_type(
             agent_type="detached_turn", status="failed", limit=200)

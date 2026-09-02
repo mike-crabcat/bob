@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Any
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ async def conversation_channel(ctx: AppContext, conversation_id: str) -> tuple[s
     if channel not in ("internal",):
         return channel, conversation_id
     try:
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         bindings = await ConversationRepository(ctx.db).bindings_for(conversation_id)
     except Exception:
         return channel, conversation_id
@@ -86,7 +86,7 @@ async def wake_conversation(
     Returns True when a dispatch was armed, False when the content was stored
     but no dispatcher was available (it stays undispatched for recovery).
     """
-    from bob_server.services.session_service import SessionService
+    from server.services.session_service import SessionService
 
     channel, _ = await conversation_channel(ctx, session_key)
     await SessionService(ctx).add_message(
@@ -131,10 +131,10 @@ async def _generic_wake_dispatch(
     import asyncio
     from uuid import uuid4
 
-    from bob_server.services.llm_dispatch import LLMDispatchService
-    from bob_server.services.prompt_assembler import build_chat_messages, load_workspace_prompt
-    from bob_server.services.session_service import SessionService
-    from bob_server.services.workspace_tools import make_workspace_tools
+    from server.services.llm_dispatch import LLMDispatchService
+    from server.services.prompt_assembler import build_chat_messages, load_workspace_prompt
+    from server.services.session_service import SessionService
+    from server.services.workspace_tools import make_workspace_tools
 
     settings = ctx.settings
     if not settings.openai.enabled:
@@ -144,9 +144,9 @@ async def _generic_wake_dispatch(
     # Bob Events §1.5: goal tools on the generic wake path — a goal_deadline
     # wake tells the LLM to "revise the goal", so it must actually be able to.
     # The wake is system-initiated, so no separate trust gate applies.
-    from bob_server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import make_goal_tools
     tools.extend(make_goal_tools(ctx, session_key))
-    from bob_server.services.approval_tools import make_approval_tools
+    from server.services.approval_tools import make_approval_tools
     tools.extend(make_approval_tools(ctx, session_key))
     dispatch_id = str(uuid4())
 
@@ -154,7 +154,7 @@ async def _generic_wake_dispatch(
         try:
             workspace_prompt = await load_workspace_prompt(
                 settings.harness.workspace_dir, db=ctx.db)
-            from bob_server.services.context_assembler import ContextAssembler
+            from server.services.context_assembler import ContextAssembler
             goals_prompt = await ContextAssembler(ctx).goals_block(session_key)
             system_content = "\n\n".join(
                 p for p in (workspace_prompt, goals_prompt) if p)
@@ -168,7 +168,7 @@ async def _generic_wake_dispatch(
                 session_key=session_key,
                 dispatch_id=dispatch_id,
             )
-            from bob_server.services.session_service import SessionService
+            from server.services.session_service import SessionService
             await SessionService(ctx).mark_dispatched(session_key)
             if result.strip():
                 await SessionService(ctx).add_message(

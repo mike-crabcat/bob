@@ -12,9 +12,9 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from bob_server.services.base import utcnow
-from bob_server.services.dispatch_runner import is_no_reply
-from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone
+from server.services.base import utcnow
+from server.services.dispatch_runner import is_no_reply
+from server.services.whatsapp_bridge_service._media import _jid_to_phone
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class GroupEventsMixin:
 
     def _contacts(self):
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         return ContactRepository(self.db)
     """Group membership and metadata sync handlers."""
 
@@ -42,7 +42,7 @@ class GroupEventsMixin:
         now_iso = utcnow().isoformat()
 
         # Upsert group
-        from bob_server.repositories.groups import GroupRepository
+        from server.repositories.groups import GroupRepository
         groups = GroupRepository(self.db)
         group_id = await groups.upsert_group(
             group_jid, name=group_name, description=description,
@@ -73,7 +73,7 @@ class GroupEventsMixin:
         key_part = group_jid.split("@")[0] if "@" in group_jid else group_jid
         session_key = f"agent:{agent_id}:whatsapp:group:{key_part}"
 
-        from bob_server.repositories.participants import ParticipantRepository
+        from server.repositories.participants import ParticipantRepository
         participants_repo = ParticipantRepository(self.db)
         for p in participants:
             p_jid = p.get("jid", "")
@@ -92,7 +92,7 @@ class GroupEventsMixin:
                 display_name=display_name or contact.get("name") or "",
                 contact_id=contact["id"],
                 is_trusted=bool(contact.get("is_trusted")), now_iso=now_iso)
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         await ConversationRepository(self.db).register_endpoint(
             session_key, endpoint_kind="group", address=group_jid)
 
@@ -112,7 +112,7 @@ class GroupEventsMixin:
         now_iso = utcnow().isoformat()
 
         # Resolve or create group
-        from bob_server.repositories.groups import GroupRepository
+        from server.repositories.groups import GroupRepository
         groups = GroupRepository(self.db)
         group_id = await groups.ensure_group(group_jid, group_name, now_iso)
 
@@ -139,7 +139,7 @@ class GroupEventsMixin:
             # Upsert session participant
             contact = await self._contacts().get_by_phone(phone_number)
             if contact:
-                from bob_server.repositories.participants import ParticipantRepository
+                from server.repositories.participants import ParticipantRepository
                 await ParticipantRepository(self.db).upsert(
                     session_key, phone_number,
                     display_name=display_name or phone_number,
@@ -176,7 +176,7 @@ class GroupEventsMixin:
                 sender_name = sender_contact["name"]
 
         # Ensure the endpoint binding exists
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         await ConversationRepository(self.db).register_endpoint(
             session_key, endpoint_kind="group", address=group_jid)
 
@@ -186,14 +186,14 @@ class GroupEventsMixin:
             return
 
         # Determine trust from the binding
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         route = await ConversationRepository(self.db).route_for(session_key)
         is_trusted = False
         if route and route["contact_id"]:
             trusted = await self._contacts().is_trusted(route["contact_id"])
             is_trusted = bool(trusted)
 
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
         # Stored with provenance + a self-describing frame so later replays
         # show WHAT happened without the reply guidance (that is turn-scoped,
@@ -211,8 +211,8 @@ class GroupEventsMixin:
         )
 
         # Build system prompt
-        from bob_server.services.session_agenda_service import SessionAgendaService
-        from bob_server.services.prompt_assembler import load_workspace_prompt
+        from server.services.session_agenda_service import SessionAgendaService
+        from server.services.prompt_assembler import load_workspace_prompt
 
         agenda_svc = SessionAgendaService(self.ctx)
         agenda = await agenda_svc.get_effective_agenda(
@@ -220,7 +220,7 @@ class GroupEventsMixin:
             contact_id=route["contact_id"] if route else None, is_trusted=is_trusted,
         )
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-        from bob_server.services.context_assembler import ContextAssembler
+        from server.services.context_assembler import ContextAssembler
         participants_prompt = await ContextAssembler(self.ctx).participants_prompt(session_key)
 
         # Turn-scoped handling note: greets are the point of this trigger, but
@@ -240,10 +240,10 @@ class GroupEventsMixin:
         )
 
         # Build tools
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.tools import Tool
-        from bob_server.services.tool_registry import build_common_tools
-        from bob_server.services.group_tools import make_group_tools
+        from server.services.llm_dispatch import LLMDispatchService
+        from server.services.tools import Tool
+        from server.services.tool_registry import build_common_tools
+        from server.services.group_tools import make_group_tools
 
         tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=route["contact_id"] if route else None)
         tools.extend(make_group_tools(self.ctx, session_key=session_key))
@@ -255,7 +255,7 @@ class GroupEventsMixin:
         send_seq = [0]
 
         async def _send_whatsapp_message(text: str) -> str:
-            from bob_server.services.effects import emit_and_deliver
+            from server.services.effects import emit_and_deliver
 
             message_was_sent[0] = True
             if is_no_reply(text):
@@ -284,7 +284,7 @@ class GroupEventsMixin:
 
         dispatch_id = str(uuid4())
 
-        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
+        from server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
         dispatch_spec = DispatchSpec(
             session_key=session_key,

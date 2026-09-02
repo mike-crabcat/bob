@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import logging
 
-from bob_server.context import AppContext
-from bob_server.services.docs_service import DocsService
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.docs_service import DocsService
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 

@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bob_server.database import Database, Transaction
+from server.database import Database, Transaction
 
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 30

@@ -16,8 +16,8 @@ import json
 import logging
 from uuid import uuid4
 
-from bob_server.context import AppContext
-from bob_server.services.tools import tool
+from server.context import AppContext
+from server.services.tools import tool
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def _validate_strategy_payload(strategy_json: str) -> dict:
     """Parse + validate a strategy JSON string from the LLM against the v2
     schema (partial input allowed; defaults fill). Returns {"state": …} or
     {"error": reason} for the caller to relay."""
-    from bob_server.services.goal_state_service import GoalStrategy
+    from server.services.goal_state_service import GoalStrategy
 
     try:
         raw = json.loads(strategy_json or "{}")
@@ -42,8 +42,8 @@ def _validate_strategy_payload(strategy_json: str) -> dict:
 
 
 def _register_goal_executors() -> None:
-    from bob_server.services import effects as effects_svc
-    from bob_server.services import goal_service
+    from server.services import effects as effects_svc
+    from server.services import goal_service
 
     async def _exec_create(ctx, payload):
         goal = await goal_service.create_goal(
@@ -61,7 +61,7 @@ def _register_goal_executors() -> None:
         return goal["id"]
 
     async def _exec_revise(ctx, payload):
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         ok = await GoalRepository(ctx.db).revise(
             payload["goal_id"],
             expected_version=payload["expected_version"],
@@ -74,7 +74,7 @@ def _register_goal_executors() -> None:
         return payload["goal_id"]
 
     async def _exec_state_write(ctx, payload):
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         ok = await GoalRepository(ctx.db).revise(
             payload["goal_id"],
             expected_version=payload["expected_version"],
@@ -93,8 +93,8 @@ def _register_goal_executors() -> None:
         return payload["goal_id"] if ok else None
 
     async def _exec_wakeup_schedule(ctx, payload):
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.repositories.wakeups import WakeupRepository
+        from server.repositories.goals import GoalRepository
+        from server.repositories.wakeups import WakeupRepository
 
         repo = GoalRepository(ctx.db)
         goal = await repo.get(payload["goal_id"])
@@ -144,7 +144,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
            "next_actions": [{"action": str, "due": str}],
            "refs": {"entities": [str], "claims": [str]}}
           plus scenario data (e.g. decision rules)."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         strategy_payload: dict | None = None
         if strategy.strip():
@@ -154,7 +154,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
             strategy_payload = checked["state"]
         parent = parent_goal_id.strip() or None
         if parent:
-            from bob_server.repositories.goals import GoalRepository
+            from server.repositories.goals import GoalRepository
             parent_goal = await GoalRepository(ctx.db).get(parent)
             if parent_goal is None or parent_goal["status"] != "active":
                 return json.dumps({"ok": False,
@@ -186,7 +186,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         """Record progress on an active goal. expected_version must match the
         goal's current version (from list_goals) — a stale update is rejected
         so an outdated strategy never overwrites a newer one."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         result = await emit_and_deliver(
             ctx, kind="goal_revise",
@@ -209,7 +209,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
          "next_actions": [{"action": str, "due": str}],
          "refs": {"entities": [str], "claims": [str]}} — preserving keys you
         are not changing. expected_version must match (from list_goals)."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         checked = _validate_strategy_payload(state)
         if "error" in checked:
@@ -228,7 +228,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
             # this version the earlier write applied — this attempt is stale
             # (a different payload reusing the version). If the version still
             # matches, the earlier effect is merely pending: idempotent ok.
-            from bob_server.repositories.goals import GoalRepository
+            from server.repositories.goals import GoalRepository
             current = await GoalRepository(ctx.db).get(goal_id)
             if current is None or current["version"] > expected_version:
                 return json.dumps({"ok": False,
@@ -246,7 +246,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         (e.g. reminders before an event). When it fires, the ROOT goal's
         working conversation is woken with the note and the goal's current
         state. The wakeup is cancelled automatically if the goal settles."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         result = await emit_and_deliver(
             ctx, kind="goal_wakeup_schedule",
@@ -261,7 +261,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         """List available goal templates — playbooks instantiable as a full
         goal tree (children + decision rules). Shows each template's
         description and required params."""
-        from bob_server.services.goal_templates import load_templates
+        from server.services.goal_templates import load_templates
 
         templates = load_templates(ctx.settings.config_dir)
         return json.dumps({"ok": True, "templates": [
@@ -284,7 +284,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
          "group_session_key": "agent:main:whatsapp:group:<groupid>",
          "decide_by": "2026-09-05T17:00:00+00:00"}
         Adapt the created tree afterwards with the other goal tools."""
-        from bob_server.services.goal_templates import instantiate_template
+        from server.services.goal_templates import instantiate_template
 
         try:
             params = json.loads(params_json or "{}")
@@ -306,7 +306,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         on behalf of another conversation and has no parent, that
         conversation is woken with the result; a child goal's result rolls up
         into its parent's state instead."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         outcome = await emit_and_deliver(
             ctx, kind="goal_complete",
@@ -323,8 +323,8 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         """List this conversation's active goals: id, objective, kind,
         progress, version, deadline, parent/children, and the state summary
         (plan, known, open questions, next actions, entity refs)."""
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.services.goal_state_service import parse_strategy
+        from server.repositories.goals import GoalRepository
+        from server.services.goal_state_service import parse_strategy
 
         repo = GoalRepository(ctx.db)
         rows = await repo.list_active(conversation_id=session_key)

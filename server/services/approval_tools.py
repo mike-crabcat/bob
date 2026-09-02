@@ -15,8 +15,8 @@ import logging
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from bob_server.context import AppContext
-from bob_server.services.tools import tool
+from server.context import AppContext
+from server.services.tools import tool
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +73,10 @@ async def _run_on_approved(ctx: Any, row: dict[str, Any]) -> None:
 
 
 def _register_approval_executors() -> None:
-    from bob_server.services import effects as effects_svc
+    from server.services import effects as effects_svc
 
     async def _exec_request(ctx, payload):
-        from bob_server.repositories.approvals import ApprovalRepository
+        from server.repositories.approvals import ApprovalRepository
 
         row = await ApprovalRepository(ctx.db).create(
             approval_type=payload["approval_type"],
@@ -91,7 +91,7 @@ def _register_approval_executors() -> None:
         # the proposal summary in hand.
         origin = payload.get("origin_conversation_id")
         if origin:
-            from bob_server.services.wake_service import wake_conversation
+            from server.services.wake_service import wake_conversation
             summary = _summarize_proposal(payload.get("proposal"))
             try:
                 await wake_conversation(
@@ -107,7 +107,7 @@ def _register_approval_executors() -> None:
         return row["id"]
 
     async def _exec_respond(ctx, payload):
-        from bob_server.repositories.approvals import ApprovalRepository
+        from server.repositories.approvals import ApprovalRepository
 
         repo = ApprovalRepository(ctx.db)
         row = await repo.respond(
@@ -138,7 +138,7 @@ def _register_approval_executors() -> None:
     # breath as the executors above, so the pump can never deliver an
     # approval_respond with the hook missing — the lazy-registration quirk
     # that affects kinds registered in tool-assembly functions cannot bite.
-    from bob_server.services import steering as _steering
+    from server.services import steering as _steering
     _steering.register()
 
 
@@ -159,7 +159,7 @@ def make_approval_tools(ctx: AppContext, session_key: str) -> list:
         "proposal": {"goal_id": ..., "summary": ..., "order": {Printful cart}}}.
         The request wakes YOUR conversation's requester with the cart
         summary; nothing is ordered until they approve via respond_approval."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         try:
             spec = json.loads(approval_json or "{}")
@@ -191,7 +191,7 @@ def make_approval_tools(ctx: AppContext, session_key: str) -> list:
     async def list_pending_approvals() -> str:
         """List pending approvals awaiting a human decision (id, type,
         title, description). Purchase approvals show the cart summary."""
-        from bob_server.repositories.approvals import ApprovalRepository
+        from server.repositories.approvals import ApprovalRepository
 
         rows = await ApprovalRepository(ctx.db).pending()
         out = []
@@ -225,7 +225,7 @@ def make_approval_tools(ctx: AppContext, session_key: str) -> list:
         """Respond to a pending approval: decision is "approve" or "reject".
         Only a human reply should drive this — approving a purchase releases
         the order for placement (within the approved cart only)."""
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         decision = decision.strip().lower()
         if decision in ("approve", "yes", "y", "ok", "approved"):

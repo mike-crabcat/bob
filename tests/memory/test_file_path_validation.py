@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bob_server.services.memory.claim_service import (
+from server.services.memory.claim_service import (
     _is_valid_file_path,
     _invalid_file_entities,
 )

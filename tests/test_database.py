@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from bob_server.database import Database
+from server.database import Database
 
 
-SCHEMA_DIR = Path(__file__).resolve().parent.parent / "bob_server" / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "server" / "schemas"
 
 
 @pytest.fixture

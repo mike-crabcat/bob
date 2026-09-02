@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import logging
 
-from bob_server.context import AppContext
-from bob_server.services.memory import MemoryService
-from bob_server.services.memory.models import ENTITY_TYPES
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.memory import MemoryService
+from server.services.memory.models import ENTITY_TYPES
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     async def recall(query: str) -> str:
         """Retrieve entity information by ID, name, or natural language query.
         Returns the entity's claims rendered as readable text."""
-        from bob_server.services.memory.tools import recall as _recall
+        from server.services.memory.tools import recall as _recall
         return await _recall(ctx.db, query)
 
     async def _find_handler(
@@ -34,7 +34,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         claim_type_key: str = "",
         value: str = "",
     ) -> str:
-        from bob_server.services.memory.tools import find as _find
+        from server.services.memory.tools import find as _find
         return await _find(ctx.db, entity_type, claim_type_key or None, value or None)
 
     find = Tool(
@@ -90,9 +90,9 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         - "rename_entity": Change an entity's ID (e.g. daylog-bali-aug3 -> daylog-bali-aug4 when the date was wrong). Requires entity_id, new_entity_id (must match the entity's type prefix). Rewrites all claim/bulletin/relation refs. Optional new_display_name updates the label too.
         - "create_entity": Create a new typed entity (e.g. a missing daylog) and optionally attach initial claims. Requires entity_id (must match entity_type prefix), entity_type. Optional claims_json: JSON array of [{"claim_type_key": "...", "value": "..."} or {"claim_type_key": "...", "object_id": "..."}]. Optional new_display_name overrides the default label. Use this when you need to materialize an entity that should exist but doesn't (e.g. relocating a misplaced note to its own daylog).
         Always provide a reason explaining why the correction is needed."""
-        from bob_server.services.memory.claim_service import write_claim, update_entity_fts
-        from bob_server.services.memory.models import Claim
-        from bob_server.services.memory import admin as memory_admin
+        from server.services.memory.claim_service import write_claim, update_entity_fts
+        from server.services.memory.models import Claim
+        from server.services.memory import admin as memory_admin
         from datetime import datetime
         import uuid
 
@@ -242,7 +242,7 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             await memory_admin.rename_entity_row(
                 ctx.db, entity_id, new_entity_id,
                 new_display_name=new_display_name or None)
-            from bob_server.services.memory.cleanup import (
+            from server.services.memory.cleanup import (
                 rewrite_claims, rewrite_bulletin_entities, rewrite_entity_relations,
             )
             rename_map = {entity_id: new_entity_id}

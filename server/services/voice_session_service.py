@@ -17,10 +17,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from bob_server.services.base import BaseService, utcnow
+from server.services.base import BaseService, utcnow
 
 if TYPE_CHECKING:
-    from bob_server.services.whatsapp_bridge_service import WhatsAppBridgeService
+    from server.services.whatsapp_bridge_service import WhatsAppBridgeService
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ class VoiceSessionService(BaseService):
                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
             (token, origin_session_key, voice, goal, report_back_session_key, subagent_id, now),
         )
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         await PhoneCallRepository(self.db).insert_voice_link(
             token=token, phone_number=phone_number, goal=goal,
             subagent_id=subagent_id, origin_session_key=origin_session_key)
@@ -116,7 +116,7 @@ class VoiceSessionService(BaseService):
             "UPDATE voice_sessions SET status='completed', completed_at=? WHERE status='active'",
             (now,),
         )
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         calls_repo = PhoneCallRepository(self.db)
         if count:
             await calls_repo.complete_stale_voice_links()
@@ -156,7 +156,7 @@ class VoiceSessionService(BaseService):
                 "UPDATE voice_sessions SET status='active', activated_at=? WHERE id=?",
                 (now, token),
             )
-            from bob_server.repositories.phone_calls import PhoneCallRepository
+            from server.repositories.phone_calls import PhoneCallRepository
             await PhoneCallRepository(self.db).activate_voice_link(token)
         return row
 
@@ -171,15 +171,15 @@ class VoiceSessionService(BaseService):
                 "UPDATE voice_sessions SET transcript = ? WHERE id = ?",
                 (transcript, token),
             )
-            from bob_server.repositories.phone_calls import PhoneCallRepository
+            from server.repositories.phone_calls import PhoneCallRepository
             await PhoneCallRepository(self.db).set_voice_link_transcript(token, transcript)
         except Exception:
             logger.warning("Failed to persist partial voice transcript", exc_info=True)
 
     async def build_instructions(self, row: dict[str, Any]) -> str:
         """Build the Realtime session instructions: persona + voice preamble + recent chat context."""
-        from bob_server.services.prompt_assembler import format_local_now, load_workspace_prompt
-        from bob_server.services.session_service import SessionService
+        from server.services.prompt_assembler import format_local_now, load_workspace_prompt
+        from server.services.session_service import SessionService
 
         settings = self._get_settings()
         persona = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
@@ -233,9 +233,9 @@ class VoiceSessionService(BaseService):
         """
         import json as _json
 
-        from bob_server.services.session_service import SessionService
-        from bob_server.services.wake_service import wake_conversation
-        from bob_server.services.voice_dispatch_service import (
+        from server.services.session_service import SessionService
+        from server.services.wake_service import wake_conversation
+        from server.services.voice_dispatch_service import (
             extract_outcome,
             mark_voice_subagent_complete,
         )
@@ -265,7 +265,7 @@ class VoiceSessionService(BaseService):
             (transcript, duration_seconds,
              _json.dumps(outcome) if outcome else None, now, token),
         )
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         await PhoneCallRepository(self.db).complete_voice_link(
             token, transcript=transcript, duration_seconds=duration_seconds,
             outcome_json=_json.dumps(outcome) if outcome else None)
@@ -302,10 +302,10 @@ class VoiceSessionService(BaseService):
 
         # Voice-as-binding: record the outcome as an event on the person's
         # conversation (resolved via the subagent call binding, else origin).
-        from bob_server.services.voice_dispatch_service import append_call_completed_event
+        from server.services.voice_dispatch_service import append_call_completed_event
         call_key = ""
         if subagent_id:
-            from bob_server.repositories.subagents import SubagentRepository
+            from server.repositories.subagents import SubagentRepository
             call_key = await SubagentRepository(self.db).session_key_of(subagent_id) or ""
         await append_call_completed_event(
             self.db,
@@ -328,8 +328,8 @@ class VoiceSessionService(BaseService):
         """Summarise the voice transcript in 2-4 sentences."""
         if not transcript.strip() and not outcome:
             return "The call ended before any conversation took place."
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.voice_dispatch_service import format_outcome
+        from server.services.llm_dispatch import LLMDispatchService
+        from server.services.voice_dispatch_service import format_outcome
 
         outcome_block = format_outcome(outcome)
         transcript_block = (

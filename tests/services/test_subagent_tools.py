@@ -29,7 +29,7 @@ NOW = "2026-08-27T02:00:00+00:00"
 
 
 def _tools(ctx, session_key, is_trusted):
-    from bob_server.services.subagent_tools import make_subagent_tools
+    from server.services.subagent_tools import make_subagent_tools
     return {t.name: t for t in
             make_subagent_tools(ctx, session_key, is_trusted=is_trusted)}
 
@@ -52,7 +52,7 @@ async def test_untrusted_create_subagent_rejects_non_script(ctx):
     alias normalisation can coerce them into a phone call or LLM run."""
     tools = _tools(ctx, GROUP_KEY, is_trusted=False)
     for bad in ("claude", "local", "openai_voice", "script-executor"):
-        with patch("bob_server.services.subagent_service.SubagentService") as svc_cls:
+        with patch("server.services.subagent_service.SubagentService") as svc_cls:
             out = json.loads(await tools["create_subagent"].handler(
                 task="do a thing", agent_type=bad))
         assert not out["ok"], bad
@@ -62,7 +62,7 @@ async def test_untrusted_create_subagent_rejects_non_script(ctx):
 
 async def test_untrusted_create_subagent_allows_script(ctx):
     tools = _tools(ctx, GROUP_KEY, is_trusted=False)
-    with patch("bob_server.services.subagent_service.SubagentService") as svc_cls:
+    with patch("server.services.subagent_service.SubagentService") as svc_cls:
         svc_cls.return_value.create_subagent = AsyncMock(
             return_value={"ok": True, "subagent_id": "sa-1"})
         out = json.loads(await tools["create_subagent"].handler(
@@ -75,7 +75,7 @@ async def test_untrusted_create_subagent_allows_script(ctx):
 
 async def test_check_and_kill_scoped_to_parent_session(ctx):
     """Another session's subagent is invisible: not-found, never confirmed."""
-    from bob_server.services.subagent_service import SubagentService
+    from server.services.subagent_service import SubagentService
 
     await ctx.db.execute(
         """INSERT INTO subagents (id, parent_session_key, session_key, task,
@@ -102,7 +102,7 @@ async def test_check_and_kill_scoped_to_parent_session(ctx):
 async def test_registry_gives_untrusted_sessions_subagent_tools(ctx):
     """The registry wires the (script-gated) tools whenever skill dev is on —
     that is the production flag — and nothing when it is off."""
-    from bob_server.services.tool_registry import build_common_tools
+    from server.services.tool_registry import build_common_tools
 
     ctx.settings.harness.skill_dev_enabled = True
     try:

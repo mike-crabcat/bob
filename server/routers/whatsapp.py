@@ -7,8 +7,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from bob_server.dependencies import get_app_context
-from bob_server.context import AppContext
+from server.dependencies import get_app_context
+from server.context import AppContext
 
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])

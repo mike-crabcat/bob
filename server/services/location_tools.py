@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from bob_server.context import AppContext
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def _get_ha_client(ctx: AppContext):
     cached = getattr(ctx, "_ha_client", None)
     if cached is not None:
         return cached
-    from bob_server.services.homeassistant_client import HomeAssistantClient
+    from server.services.homeassistant_client import HomeAssistantClient
 
     settings = ctx.settings.homeassistant
     client = HomeAssistantClient(settings.url, settings.bearer_token)

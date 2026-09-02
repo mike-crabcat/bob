@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bob_server.services.dispatch_runner import is_no_reply
-from bob_server.services.memory.claim_types import ENTITY_TYPES
+from server.services.dispatch_runner import is_no_reply
+from server.services.memory.claim_types import ENTITY_TYPES
 
 # Only the N most recent media attachments are base64-inlined into replayed
 # history; older ones are text stubs (path only) to keep prompt size bounded.
@@ -147,7 +147,7 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     parts: list[str] = []
 
     # Load embedded persona from codebase (with DB-configured values)
-    from bob_server.services.persona import get_persona
+    from server.services.persona import get_persona
     rendered_persona = await get_persona(db)
     parts.append(rendered_persona)
 
@@ -167,7 +167,7 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
                 parts.append(content)
 
     # Load skills index (lightweight — full skill loaded on-demand via use_skill tool)
-    from bob_server.services.skill_loader import load_skills_index
+    from server.services.skill_loader import load_skills_index
     skills_index = load_skills_index(workspace_dir)
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
@@ -395,7 +395,7 @@ async def build_chat_messages(
         sender_names: dict[str, str] = {}
         mention_names: dict[str, str] = {}
         if is_group:
-            from bob_server.repositories.participants import ParticipantRepository
+            from server.repositories.participants import ParticipantRepository
             participants = await ParticipantRepository(db).list_for(session_key)
             for p in participants:
                 if p["contact_id"] and p["display_name"]:
@@ -405,7 +405,7 @@ async def build_chat_messages(
                     if digits:
                         mention_names[digits] = p["display_name"]
 
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(db).recent_dialogue(
             session_key, limit=max_history)
 

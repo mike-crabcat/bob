@@ -1,12 +1,12 @@
 """Email handling eval cases."""
 
-from bob_server.evals.case import JudgeCriteria, StructuralCheck
-from bob_server.evals.registry import eval_case
+from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.registry import eval_case
 
 
 async def _build_email_system_prompt(ctx, instructions: str) -> str:
     """Build system prompt with workspace identity context for email evals."""
-    from bob_server.services.prompt_assembler import load_workspace_prompt
+    from server.services.prompt_assembler import load_workspace_prompt
 
     workspace = await load_workspace_prompt(ctx.settings.harness.workspace_dir, db=getattr(ctx, 'db', None))
     parts: list[str] = []
@@ -35,7 +35,7 @@ async def _build_email_system_prompt(ctx, instructions: str) -> str:
     ),
 )
 async def email_professional_reply(ctx):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     system_prompt = await _build_email_system_prompt(ctx, (
         "You are managing an email conversation. "
@@ -77,7 +77,7 @@ async def email_professional_reply(ctx):
     ),
 )
 async def email_untrusted_sender_caution(ctx):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     system_prompt = await _build_email_system_prompt(ctx, (
         "You are managing an email conversation. An incoming message has been received "

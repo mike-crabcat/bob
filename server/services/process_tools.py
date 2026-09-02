@@ -41,12 +41,12 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from bob_server.services.skill_env import build_skill_env
-from bob_server.services.tools import tool
-from bob_server.services.workspace_tools import _check_command_safety
+from server.services.skill_env import build_skill_env
+from server.services.tools import tool
+from server.services.workspace_tools import _check_command_safety
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 

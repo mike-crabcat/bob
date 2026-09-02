@@ -2,10 +2,10 @@
 
 The CLI is split into one module per subapp under this package; this file is
 the entry point that wires them all together. Console-script hook:
-``bob = "bob_server.cli:app"``.
+``bob = "server.cli:app"``.
 
 For backwards compatibility with callers (and tests) that did
-``from bob_server import cli`` and accessed ``cli.serve``, ``cli.urlopen``,
+``from server import cli`` and accessed ``cli.serve``, ``cli.urlopen``,
 etc., this module re-exports the helpers from :mod:`._helpers` and the
 service-command functions from :mod:`.service_cmds`.
 """
@@ -16,9 +16,9 @@ import typer
 
 # Bring all helpers + stdlib re-exports into the cli namespace so legacy
 # `cli.X` references keep working.
-from bob_server.cli._helpers import *  # noqa: F403,F405
-from bob_server.cli._helpers import __all__ as _helpers_all
-from bob_server.cli.service_cmds import (  # noqa: F401
+from server.cli._helpers import *  # noqa: F403,F405
+from server.cli._helpers import __all__ as _helpers_all
+from server.cli.service_cmds import (  # noqa: F401
     install, uninstall, start, stop, restart, status, logs, serve,
     register as _register_service_commands,
 )
@@ -29,19 +29,19 @@ _register_service_commands(app)
 
 
 # Subapp registration
-from bob_server.cli.contacts import app as contact_app  # noqa: E402
-from bob_server.cli.memory_cmds import app as memory_app  # noqa: E402
-from bob_server.cli.calendars import app as calendar_app  # noqa: E402
-from bob_server.cli.events import app as event_app  # noqa: E402
-from bob_server.cli.context_cmds import app as context_app  # noqa: E402
-from bob_server.cli.webhooks import app as webhook_app  # noqa: E402
-from bob_server.cli.email_cmds import app as email_app  # noqa: E402
-from bob_server.cli.calls import app as phone_app  # noqa: E402
-from bob_server.cli.openai_cmds import app as openai_app  # noqa: E402
-from bob_server.cli.eval_cmds import app as eval_app  # noqa: E402
-from bob_server.cli.replay_cmds import app as replay_app  # noqa: E402
-from bob_server.cli.whatsapp_cmds import app as whatsapp_app  # noqa: E402
-from bob_server.cli.dream_cmds import app as dream_app  # noqa: E402
+from server.cli.contacts import app as contact_app  # noqa: E402
+from server.cli.memory_cmds import app as memory_app  # noqa: E402
+from server.cli.calendars import app as calendar_app  # noqa: E402
+from server.cli.events import app as event_app  # noqa: E402
+from server.cli.context_cmds import app as context_app  # noqa: E402
+from server.cli.webhooks import app as webhook_app  # noqa: E402
+from server.cli.email_cmds import app as email_app  # noqa: E402
+from server.cli.calls import app as phone_app  # noqa: E402
+from server.cli.openai_cmds import app as openai_app  # noqa: E402
+from server.cli.eval_cmds import app as eval_app  # noqa: E402
+from server.cli.replay_cmds import app as replay_app  # noqa: E402
+from server.cli.whatsapp_cmds import app as whatsapp_app  # noqa: E402
+from server.cli.dream_cmds import app as dream_app  # noqa: E402
 
 app.add_typer(contact_app, name="contact")
 app.add_typer(memory_app, name="memory")

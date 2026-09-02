@@ -10,11 +10,11 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
-from bob_server.config import Settings
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.dependencies import get_app_context, get_database, get_settings
-from bob_server.models import (
+from server.config import Settings
+from server.context import AppContext
+from server.database import Database
+from server.dependencies import get_app_context, get_database, get_settings
+from server.models import (
     EmailInboxCreate,
     EmailInboxResponse,
     EmailInboxUpdate,
@@ -22,7 +22,7 @@ from bob_server.models import (
     EmailSendRequest,
     EmailThreadResponse,
 )
-from bob_server.services.base import json_dumps, json_loads, utcnow
+from server.services.base import json_dumps, json_loads, utcnow
 
 
 router = APIRouter(prefix="/api/v1/email", tags=["email"])
@@ -73,7 +73,7 @@ async def register_inbox(
     """Register an AgentMail inbox for email relay."""
     inbox_id = str(uuid4())
     now = utcnow().isoformat()
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     store = EmailStore(database)
     await store.insert_inbox(
         inbox_id=inbox_id,
@@ -93,7 +93,7 @@ async def list_inboxes(
     database: Database = Depends(get_database),
 ) -> list[EmailInboxResponse]:
     """List registered email inboxes."""
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     rows = await EmailStore(database).list_inboxes(active_only=active_only)
     return [_row_to_inbox(row) for row in rows]
 
@@ -104,7 +104,7 @@ async def get_inbox(
     database: Database = Depends(get_database),
 ) -> EmailInboxResponse:
     """Get a registered email inbox."""
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     row = await EmailStore(database).get_inbox(str(inbox_id))
     if row is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
@@ -118,7 +118,7 @@ async def update_inbox(
     database: Database = Depends(get_database),
 ) -> EmailInboxResponse:
     """Update a registered email inbox."""
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     store = EmailStore(database)
     existing = await store.get_inbox(str(inbox_id))
     if existing is None:
@@ -145,7 +145,7 @@ async def remove_inbox(
     database: Database = Depends(get_database),
 ) -> None:
     """Soft-delete a registered email inbox."""
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     store = EmailStore(database)
     existing = await store.get_inbox(str(inbox_id))
     if existing is None:
@@ -165,7 +165,7 @@ async def send_email(
     ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Send a new email from a registered inbox."""
-    from bob_server.services.email_delivery_service import EmailDeliveryService
+    from server.services.email_delivery_service import EmailDeliveryService
 
     delivery_service = EmailDeliveryService(ctx)
     try:
@@ -193,9 +193,9 @@ async def reply_to_email(
     ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Reply to an email message."""
-    from bob_server.services.agentmail_client import AgentMailClient
+    from server.services.agentmail_client import AgentMailClient
 
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     inbox = await EmailStore(database).get_inbox(str(inbox_id), active_only=True)
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found or inactive")
@@ -216,7 +216,7 @@ async def reply_to_email(
     # Persist the reply
     agentmail_thread_id = result.get("thread_id", "")
     if agentmail_thread_id:
-        from bob_server.services.email_delivery_service import EmailDeliveryService
+        from server.services.email_delivery_service import EmailDeliveryService
         delivery_service = EmailDeliveryService(ctx, agentmail_client=AgentMailClient(
             base_url=settings.agentmail.base_url,
             api_key=settings.agentmail.api_key,
@@ -247,9 +247,9 @@ async def list_messages(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """List messages in an inbox (proxied to AgentMail)."""
-    from bob_server.services.agentmail_client import AgentMailClient
+    from server.services.agentmail_client import AgentMailClient
 
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     inbox = await EmailStore(database).get_inbox(str(inbox_id))
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
@@ -279,9 +279,9 @@ async def download_attachment(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     """Download an email attachment from AgentMail."""
-    from bob_server.services.agentmail_client import AgentMailClient
+    from server.services.agentmail_client import AgentMailClient
 
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     inbox = await EmailStore(database).get_inbox(str(inbox_id))
     if inbox is None:
         raise HTTPException(status_code=404, detail="Inbox not found")
@@ -314,7 +314,7 @@ async def list_threads(
     database: Database = Depends(get_database),
 ) -> list[EmailThreadResponse]:
     """List tracked email threads."""
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     rows = await EmailStore(database).list_threads(
         inbox_id=str(inbox_id) if inbox_id is not None else None,
         active_only=active_only)
@@ -327,7 +327,7 @@ async def get_thread(
     database: Database = Depends(get_database),
 ) -> EmailThreadResponse:
     """Get a tracked email thread."""
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     row = await EmailStore(database).get_thread(str(thread_id))
     if row is None:
         raise HTTPException(status_code=404, detail="Thread not found")
@@ -344,7 +344,7 @@ async def update_thread_agenda(
     agenda = payload.get("agenda", "").strip()
     if not agenda:
         raise HTTPException(status_code=422, detail="agenda must not be empty")
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     store = EmailStore(database)
     await store.set_thread_agenda(str(thread_id), agenda, utcnow().isoformat())
     row = await store.get_thread(str(thread_id), include_deleted=True)
@@ -360,12 +360,12 @@ async def sync_emails(
     ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Sync all inboxes — fetch missing messages from AgentMail and persist locally."""
-    from bob_server.services.email_polling_service import EmailPollingService
+    from server.services.email_polling_service import EmailPollingService
 
     if not settings.agentmail.enabled:
         raise HTTPException(status_code=400, detail="AgentMail is not configured")
 
-    from bob_server.services.agentmail_client import AgentMailClient
+    from server.services.agentmail_client import AgentMailClient
 
     client = AgentMailClient(
         base_url=settings.agentmail.base_url,
@@ -385,12 +385,12 @@ async def poll_emails(
     ctx: AppContext = Depends(get_app_context),
 ) -> dict[str, Any]:
     """Poll all inboxes for new messages and dispatch through patience system."""
-    from bob_server.services.email_polling_service import EmailPollingService
+    from server.services.email_polling_service import EmailPollingService
 
     if not settings.agentmail.enabled:
         raise HTTPException(status_code=400, detail="AgentMail is not configured")
 
-    from bob_server.services.agentmail_client import AgentMailClient
+    from server.services.agentmail_client import AgentMailClient
 
     client = AgentMailClient(
         base_url=settings.agentmail.base_url,

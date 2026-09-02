@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
-from bob_server.cli._helpers import *  # noqa: F403,F405
+from server.cli._helpers import *  # noqa: F403,F405
 
 
 class _PreserveLoggingConfig(uvicorn.Config):
@@ -22,7 +22,7 @@ class _PreserveLoggingConfig(uvicorn.Config):
 
     uvicorn's default ``Config.configure_logging()`` applies ``LOGGING_CONFIG``
     via ``dictConfig()``, which clears the root logger handlers we set up in
-    ``bob_server.structured_logging.configure_logging()`` (notably the daily
+    ``server.structured_logging.configure_logging()`` (notably the daily
     rolling file handler). Skipping it preserves our setup so file logging
     keeps working through the lifetime of the server.
     """

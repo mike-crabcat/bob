@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bob_server.services.attention.tier0 import detect_addressed
+from server.services.attention.tier0 import detect_addressed
 
 logger = logging.getLogger(__name__)
 

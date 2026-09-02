@@ -17,8 +17,8 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from bob_server.services.base import utcnow
-from bob_server.services.voice_dispatch_service import (
+from server.services.base import utcnow
+from server.services.voice_dispatch_service import (
     build_inbound_instructions,
     call_agendas,
     extract_outcome,
@@ -62,7 +62,7 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
     contact_id: str | None = None
     is_trusted = False
     contact_name: str | None = None
-    from bob_server.repositories.contacts import ContactRepository
+    from server.repositories.contacts import ContactRepository
     contacts_repo = ContactRepository(db)
     contact = await contacts_repo.get_by_phone(phone_number)
     if contact:
@@ -75,8 +75,8 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
             name=phone_number, phone_number=phone_number, is_trusted=0)
 
     # Resolve agenda
-    from bob_server.context import AppContext
-    from bob_server.services.session_agenda_service import SessionAgendaService
+    from server.context import AppContext
+    from server.services.session_agenda_service import SessionAgendaService
     ctx = AppContext(db=db, settings=settings)
     agenda_svc = SessionAgendaService(ctx)
     agenda = await agenda_svc.get_effective_agenda(
@@ -86,12 +86,12 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
     instructions = build_inbound_instructions(phone_number, contact_name, agenda)
 
     # Register the endpoint binding
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     await ConversationRepository(ctx.db).register_endpoint(
         session_key, endpoint_kind="call", contact_id=str(contact_id))
 
     # Insert DB record
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     await PhoneCallRepository(db).insert_inbound(
         call_id=call_id, call_sid=call_sid, phone_number=phone_number, agenda=agenda)
 
@@ -120,7 +120,7 @@ async def initiate_call(request: Request) -> dict:
         return {"error": "Missing 'to' phone number"}
 
     agenda = body.get("agenda", "").strip()
-    from bob_server.services.voice_dispatch_service import build_outbound_instructions
+    from server.services.voice_dispatch_service import build_outbound_instructions
     instructions = build_outbound_instructions(goal=agenda)
 
     return await initiate_outbound_call(
@@ -155,7 +155,7 @@ async def twiml_webhook(request: Request) -> PlainTextResponse:
 
     base_url = settings.phone.base_url or settings.resolved_public_url
 
-    from bob_server.services.voice_dispatch_service import build_stream_twiml
+    from server.services.voice_dispatch_service import build_stream_twiml
     twiml = build_stream_twiml(base_url)
 
     logger.info("TwiML webhook: returning stream TwiML for %s/phone/media", base_url)
@@ -177,7 +177,7 @@ async def _maybe_dispatch_call_result(
     concurrent callers (previously an in-memory set).
     """
     # Look up the call record to get origin_session_key and call_id
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     calls_repo = PhoneCallRepository(db)
     if call_sid:
         call_row = await calls_repo.get_by_sid(call_sid)
@@ -196,8 +196,8 @@ async def _maybe_dispatch_call_result(
     origin_session_key = call_row["origin_session_key"]
     agenda = call_row["agenda"] or ""
 
-    from bob_server.context import AppContext
-    from bob_server.services.phone_call_result_service import dispatch_call_result
+    from server.context import AppContext
+    from server.services.phone_call_result_service import dispatch_call_result
 
     ctx = AppContext(db=db, settings=settings)
     ctx.whatsapp_bridge = getattr(app_state, "whatsapp_bridge_service", None)
@@ -227,9 +227,9 @@ async def _append_call_status_event(db: Any, call_sid: str, call_status: str, ca
     if not call_sid or not call_status:
         return
     try:
-        from bob_server.repositories import Event, EventLogRepository
+        from server.repositories import Event, EventLogRepository
 
-        from bob_server.repositories.phone_calls import PhoneCallRepository
+        from server.repositories.phone_calls import PhoneCallRepository
         row = await PhoneCallRepository(db).get_by_sid(call_sid)
         phone = (row or {}).get("phone_number") or "unknown"
         binding = f"agent:main:phone:dm:{phone.lstrip('+')}"
@@ -263,7 +263,7 @@ async def call_status(request: Request) -> dict:
     await _append_call_status_event(db, call_sid, call_status, call_duration)
 
     # Persist status to DB
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     calls_repo = PhoneCallRepository(db)
     if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
         await calls_repo.complete_by_sid(
@@ -276,7 +276,7 @@ async def call_status(request: Request) -> dict:
         # (no-answer/busy/failed — the stream never arrives).
         row = await calls_repo.get_by_sid(call_sid)
         if row is not None:
-            from bob_server.services import realtime_prewarm
+            from server.services import realtime_prewarm
             await realtime_prewarm.discard(row["id"])
 
         # Dispatch call result to originating session if applicable
@@ -299,7 +299,7 @@ async def call_status(request: Request) -> dict:
 async def list_calls(request: Request) -> dict:
     """List recent phone calls."""
     db = request.app.state.db
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     calls = await PhoneCallRepository(db).recent(limit=50)
     return {"calls": [dict(c) for c in calls]}
 
@@ -310,7 +310,7 @@ async def get_call(call_id: str, request: Request) -> dict:
     db = request.app.state.db
 
     # Support lookup by call_sid or internal id
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     call = await PhoneCallRepository(db).get(call_id)
     if not call:
         return {"error": "Call not found"}
@@ -322,7 +322,7 @@ async def get_call(call_id: str, request: Request) -> dict:
 async def hangup_call(call_id: str, request: Request) -> dict:
     """Hang up an active or ringing phone call via Twilio."""
     db = request.app.state.db
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     call = await PhoneCallRepository(db).get(call_id)
     if not call:
         return {"error": "Call not found"}
@@ -404,9 +404,9 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
     runs the RealtimeBridge concurrently. On stop/disconnect the bridge winds
     down and the transcript/recording are persisted.
     """
-    from bob_server.context import AppContext
-    from bob_server.services.realtime_bridge import RealtimeBridge, TwilioMediaSource
-    from bob_server.services.realtime_tools import make_realtime_tools
+    from server.context import AppContext
+    from server.services.realtime_bridge import RealtimeBridge, TwilioMediaSource
+    from server.services.realtime_tools import make_realtime_tools
 
     app_state = websocket.app.state
     settings_full = app_state.settings
@@ -442,7 +442,7 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
     # Claim the session prewarmed at placement (see services/realtime_prewarm.py)
     # so the greeting flows into a live, fully-configured session at 1×. Falls
     # back to connecting here — the pre-prewarm behaviour — on any failure.
-    from bob_server.services import realtime_prewarm
+    from server.services import realtime_prewarm
     prewarmed = await realtime_prewarm.claim(call_id)
     if prewarmed is not None:
         bridge = prewarmed
@@ -461,7 +461,7 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
             speak_first=speak_first,
         )
 
-    from bob_server.repositories.phone_calls import PhoneCallRepository
+    from server.repositories.phone_calls import PhoneCallRepository
     await PhoneCallRepository(db).attach_stream(call_id, stream_sid)
     if event_bus:
         await event_bus.publish("phone.call.active", {"call_id": call_id})
@@ -544,7 +544,7 @@ async def _run_realtime_call(websocket: WebSocket, call_sid: str, stream_sid: st
             logger.warning("Failed to finalize realtime recording", exc_info=True)
 
         try:
-            from bob_server.repositories.phone_calls import PhoneCallRepository
+            from server.repositories.phone_calls import PhoneCallRepository
             await PhoneCallRepository(db).finalize(
                 call_id, transcript=transcript, recording_path=rec_path,
                 duration_seconds=duration,

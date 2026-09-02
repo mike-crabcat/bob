@@ -9,7 +9,7 @@ each cleanup increment ports call sites and deletes their entries. Adding
 a NEW entry to an allowlist requires a documented reason.
 
 Detector notes: scans string constants (and f-string constant parts) in
-bob_server/**/*.py via ast, skipping docstrings and comments. SQL keywords
+server/**/*.py via ast, skipping docstrings and comments. SQL keywords
 are matched case-sensitively (uppercase), so prose does not false-positive.
 Dynamic table names (f-string placeholders) are invisible to the scanner
 by construction — annotate such sites with a nearby comment and keep the
@@ -22,9 +22,9 @@ import ast
 import re
 from pathlib import Path
 
-import bob_server
+import server
 
-PKG_ROOT = Path(bob_server.__file__).parent
+PKG_ROOT = Path(server.__file__).parent
 
 # Target owner sets. Prefixes (trailing /) own whole packages. Paths that do
 # not exist yet (e.g. repositories/phone_calls.py) are planned owners from

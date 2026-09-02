@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.repositories.llm_call_log import LlmCallLogRepository
+from server.repositories.llm_call_log import LlmCallLogRepository
 
 
 async def _log(db, **kwargs):

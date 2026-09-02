@@ -15,9 +15,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService, iso_utc, utcnow
-from bob_server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
+from server.context import AppContext
+from server.services.base import BaseService, iso_utc, utcnow
+from server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 class DreamRunner(BaseService):
     def __init__(self, ctx: AppContext) -> None:
         super().__init__(ctx)
-        from bob_server.services.dream.store import DreamStore
+        from server.services.dream.store import DreamStore
 
         self.store = DreamStore(ctx)
         self.settings = ctx.settings.dream
@@ -153,7 +153,7 @@ class DreamRunner(BaseService):
     # ---------------------------------------------------------- retrospective
 
     async def _retrospective(self, run_id: str, stats: dict) -> None:
-        from bob_server.services.dream.review import ReviewService
+        from server.services.dream.review import ReviewService
 
         review = ReviewService(self.ctx)
 
@@ -302,7 +302,7 @@ class DreamRunner(BaseService):
         logger.info("dream run %s replayed %d deferred candidate(s)", run_id, len(processed))
 
     async def _dedup_lookup(self, item_type: str, title: str, body: str) -> tuple[dict | None, dict | None, list[float] | None]:
-        from bob_server.services.memory.embedding import embed_text
+        from server.services.memory.embedding import embed_text
 
         embedding = await embed_text(f"{title}\n{body}"[:2000])
         if embedding is None:
@@ -339,7 +339,7 @@ class DreamRunner(BaseService):
 
     async def _session_autoplan(self, session_key: str) -> bool:
         """Autoplan is session-scoped (conversations.policy_json, /autoplan command)."""
-        from bob_server.services.dream import config as dream_config
+        from server.services.dream import config as dream_config
 
         return await dream_config.get_session_autoplan(
             self.db, session_key, self.settings.auto_approve_plans
@@ -348,14 +348,14 @@ class DreamRunner(BaseService):
     # ----------------------------------------------------------- prospective
 
     async def _prospective(self, run_id: str) -> dict:
-        from bob_server.services.dream.prospective import ProspectiveService
+        from server.services.dream.prospective import ProspectiveService
 
         return await ProspectiveService(self.ctx).run(run_id=run_id, settings=self.settings)
 
     # -------------------------------------------------------------- announce
 
     async def _announce(self, stats: dict) -> None:
-        from bob_server.services.dream.announce import AnnounceService
+        from server.services.dream.announce import AnnounceService
 
         svc = AnnounceService(self.ctx)
         stats["announce"] = await svc.flush()
@@ -366,7 +366,7 @@ class DreamRunner(BaseService):
     # ---------------------------------------------------------------- journal
 
     async def _journal(self, run_id: str, stats: dict) -> None:
-        from bob_server.services.dream.journal import JournalService
+        from server.services.dream.journal import JournalService
 
         facts = {k: v for k, v in stats.items() if not k.startswith("_")}
         stats["_journal_text"] = await JournalService(self.ctx).synthesise(facts=facts)

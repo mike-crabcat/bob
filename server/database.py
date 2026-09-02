@@ -9,7 +9,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bob_server.config import Settings
+    from server.config import Settings
 
 import aiosqlite
 
@@ -197,7 +197,7 @@ class Database:
 
     def get_settings(self) -> "Settings":
         """Return cached settings, falling back to env."""
-        from bob_server.config import Settings
+        from server.config import Settings
 
         if isinstance(self.settings, Settings):
             return self.settings

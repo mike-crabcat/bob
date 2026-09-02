@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from bob_server.services.voice_dispatch_service import (
+from server.services.voice_dispatch_service import (
     build_inbound_instructions,
     build_outbound_instructions,
     extract_outcome,
@@ -185,7 +185,7 @@ async def test_dispatch_voice_link_targets_contact_dm_with_report_back(ctx):
     """voice_link from a group: memory attaches to the contact's DM session,
     the outcome reports back to the requesting session (ported from the
     retired reach_out_with_voice_call tool)."""
-    from bob_server.services.voice_dispatch_service import VoiceDispatchService
+    from server.services.voice_dispatch_service import VoiceDispatchService
 
     await ctx.db.execute(
         """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
@@ -215,7 +215,7 @@ async def test_dispatch_voice_link_targets_contact_dm_with_report_back(ctx):
 async def test_dispatch_voice_link_from_own_dm_no_report_back(ctx):
     """voice_link requested from the contact's own DM: origin is the DM, no
     redundant report_back target."""
-    from bob_server.services.voice_dispatch_service import VoiceDispatchService
+    from server.services.voice_dispatch_service import VoiceDispatchService
 
     await ctx.db.execute(
         """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
@@ -242,7 +242,7 @@ async def test_voice_session_mirrors_to_phone_calls(ctx):
     """Browser voice-link calls must appear in the phone calls UI: create()
     writes a mirror phone_calls row and each lifecycle transition keeps it
     in sync (same id, direction='voice_link')."""
-    from bob_server.services.voice_session_service import VoiceSessionService
+    from server.services.voice_session_service import VoiceSessionService
 
     svc = VoiceSessionService(ctx)
     created = await svc.create(
@@ -288,7 +288,7 @@ def test_invalid_realtime_voice_falls_back(monkeypatch):
     """A TTS-only voice (fable) must never reach a realtime session — an
     invalid voice makes session.update fail and the call silently runs on
     default settings (2026-08-15 voice-link call)."""
-    from bob_server.config import Settings
+    from server.config import Settings
 
     monkeypatch.setenv("BOB_OPENAI_REALTIME_VOICE", "fable")
     settings = Settings.from_env()
@@ -304,8 +304,8 @@ def test_invalid_realtime_voice_falls_back(monkeypatch):
 async def test_dispatch_binds_call_to_person_conversation(ctx):
     """The call's subagent session key becomes a binding on the person's
     conversation, so transcripts/outcomes land on the person."""
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.services.voice_dispatch_service import VoiceDispatchService
+    from server.repositories.conversations import ConversationRepository
+    from server.services.voice_dispatch_service import VoiceDispatchService
 
     await ctx.db.execute(
         """INSERT INTO contacts (id, name, phone_number, is_trusted, created_at, updated_at)
@@ -331,8 +331,8 @@ async def test_dispatch_binds_call_to_person_conversation(ctx):
 async def test_append_call_completed_event_lands_on_person(ctx):
     """call.completed events resolve through the call binding to the person's
     conversation; binding_key preserves the call endpoint."""
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.services.voice_dispatch_service import append_call_completed_event
+    from server.repositories.conversations import ConversationRepository
+    from server.services.voice_dispatch_service import append_call_completed_event
 
     repo = ConversationRepository(ctx.db)
     person = await repo.ensure("agent:main:whatsapp:dm:61499000111")
@@ -366,7 +366,7 @@ async def test_append_call_completed_event_lands_on_person(ctx):
 async def test_append_call_completed_event_falls_back_to_origin(ctx):
     """Unbound call (e.g. legacy/inbound): the event lands on the origin
     conversation."""
-    from bob_server.services.voice_dispatch_service import append_call_completed_event
+    from server.services.voice_dispatch_service import append_call_completed_event
 
     await append_call_completed_event(
         ctx.db,
@@ -384,7 +384,7 @@ async def test_append_call_completed_event_falls_back_to_origin(ctx):
 async def test_subagent_spawn_recorded_as_effect(ctx, monkeypatch):
     """claude/local spawns ride a durable subagent_spawn effect; the executor
     starts the run."""
-    from bob_server.services.subagent_service import SubagentService
+    from server.services.subagent_service import SubagentService
 
     ran: list[str] = []
 

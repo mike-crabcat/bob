@@ -8,12 +8,12 @@ Design: dream-v2-plan.md at the repo root. Two artifact types:
 All LLM passes run on the memory model. Dreams never block the heartbeat.
 """
 
-from bob_server.services.dream.announce import AnnounceService
-from bob_server.services.dream.journal import JournalService
-from bob_server.services.dream.prospective import ProspectiveService
-from bob_server.services.dream.review import ReviewService
-from bob_server.services.dream.runner import DreamRunner
-from bob_server.services.dream.store import DreamStore
+from server.services.dream.announce import AnnounceService
+from server.services.dream.journal import JournalService
+from server.services.dream.prospective import ProspectiveService
+from server.services.dream.review import ReviewService
+from server.services.dream.runner import DreamRunner
+from server.services.dream.store import DreamStore
 
 __all__ = [
     "AnnounceService",

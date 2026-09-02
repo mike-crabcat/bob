@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bob_server.cli._helpers import *  # noqa: F403,F405
+from server.cli._helpers import *  # noqa: F403,F405
 
 
 app = typer.Typer(help="Memory wiki operations")
@@ -33,9 +33,9 @@ def memory_mentions_backfill(
 
 
 async def _memory_mentions_backfill(dry_run: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.database import Database
-    from bob_server.services.memory.claim_service import (
+    from server.config import Settings
+    from server.database import Database
+    from server.services.memory.claim_service import (
         count_entity_mentions, list_claim_provenance, update_entity_mentions,
     )
 
@@ -70,9 +70,9 @@ async def _memory_mentions_backfill(dry_run: bool) -> None:
 
 
 async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -82,11 +82,11 @@ async def _memory_reconcile(entity_ids: list[str] | None, all: bool, render_only
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from bob_server.services.memory.reconciliation import render_entity_full, reconcile_entity
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.memory.reconciliation import render_entity_full, reconcile_entity
+        from server.services.llm_dispatch import LLMDispatchService
 
         if all:
-            from bob_server.services.memory import admin as memory_admin
+            from server.services.memory import admin as memory_admin
             entity_ids = await memory_admin.all_active_entity_ids(db)
 
         if not entity_ids:
@@ -138,8 +138,8 @@ def memory_model_override_list() -> None:
 
 
 async def _memory_model_override_set(entity_id: str, model: str, reason: str) -> None:
-    from bob_server.config import Settings
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -159,8 +159,8 @@ async def _memory_model_override_set(entity_id: str, model: str, reason: str) ->
 
 
 async def _memory_model_override_remove(entity_id: str) -> None:
-    from bob_server.config import Settings
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -178,8 +178,8 @@ async def _memory_model_override_remove(entity_id: str) -> None:
 
 
 async def _memory_model_override_list() -> None:
-    from bob_server.config import Settings
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -211,9 +211,9 @@ def memory_merge(
 
 
 async def _memory_merge(dry_run: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -223,7 +223,7 @@ async def _memory_merge(dry_run: bool) -> None:
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
 
         svc = MemoryService(ctx)
         result = await svc.merge_entities(dry_run=dry_run)
@@ -240,9 +240,9 @@ def memory_validate() -> None:
 
 
 async def _memory_validate() -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -252,7 +252,7 @@ async def _memory_validate() -> None:
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
 
         workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)
@@ -276,9 +276,9 @@ def memory_reindex() -> None:
 
 
 async def _memory_reindex() -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -288,7 +288,7 @@ async def _memory_reindex() -> None:
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
         svc = MemoryService(ctx)
         count = await svc.rebuild_fts()
         typer.echo(f"FTS index rebuilt: {count} entities indexed.")
@@ -306,11 +306,11 @@ def memory_cleanup_contacts(
 
 
 async def _memory_cleanup_contacts(dry_run: bool) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
-    from bob_server.services.memory.cleanup import run_cleanup, build_renaming_map
-    from bob_server.services.memory.contact_directory import ContactDirectory
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
+    from server.services.memory.cleanup import run_cleanup, build_renaming_map
+    from server.services.memory.contact_directory import ContactDirectory
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -358,9 +358,9 @@ def memory_query(
 
 
 async def _memory_query(question: str, entity_type: str, actor: str | None, channel: str | None) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -370,7 +370,7 @@ async def _memory_query(question: str, entity_type: str, actor: str | None, chan
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
 
         workspace = settings.harness.workspace_dir
         svc = MemoryService(ctx)

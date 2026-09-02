@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import json
 
-from bob_server.config import PhoneSettings
-from bob_server.context import AppContext
-from bob_server.services.phone_tools import make_phone_tools
+from server.config import PhoneSettings
+from server.context import AppContext
+from server.services.phone_tools import make_phone_tools
 
 
 def _make_phone_settings(*, enabled: bool = True) -> PhoneSettings:

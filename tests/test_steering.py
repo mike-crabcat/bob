@@ -18,10 +18,10 @@ import pytest
 # its registration tail) steering's conversation_steer executor + on-approved
 # hook — in production the bridge's tool assembly guarantees this before any
 # request can run.
-from bob_server.services import approval_tools  # noqa: F401
-from bob_server.services import steering
+from server.services import approval_tools  # noqa: F401
+from server.services import steering
 
-from bob_server.repositories.approvals import ApprovalRepository
+from server.repositories.approvals import ApprovalRepository
 
 OWNER_DM = "agent:main:whatsapp:dm:61456224867"
 HELEN_DM = "agent:main:whatsapp:dm:61424193179"
@@ -45,7 +45,7 @@ def _ensure_registered():
 @pytest.fixture
 def mock_wake(monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     return wake
 
 
@@ -53,7 +53,7 @@ def mock_wake(monkeypatch):
 def stub_send():
     """Stub whatsapp_send executor for the kept proactive-send tool (no
     bridge is constructed in tests), restoring whatever was registered."""
-    from bob_server.services import effects as effects_svc
+    from server.services import effects as effects_svc
     saved = effects_svc._EXECUTORS.get("whatsapp_send")
     stub = AsyncMock(return_value="req-fake")
     effects_svc.register_executor("whatsapp_send", stub)
@@ -65,7 +65,7 @@ def stub_send():
 
 
 async def _group(db, gid: str, name: str, *member_ids: str) -> None:
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     await ConversationRepository(db).register_endpoint(
         f"agent:main:whatsapp:group:{gid}", endpoint_kind="group",
@@ -83,8 +83,8 @@ async def _group(db, gid: str, name: str, *member_ids: str) -> None:
 
 
 async def _seed(ctx, *, owner=True) -> None:
-    from bob_server.repositories.contacts import ContactRepository
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.contacts import ContactRepository
+    from server.repositories.conversations import ConversationRepository
 
     if owner:
         await ctx.db.execute(
@@ -295,7 +295,7 @@ async def test_approve_fires_exactly_one_wake_with_steer_provenance(ctx, db, moc
 async def test_approve_is_idempotent_on_respond_redelivery(ctx, db, mock_wake):
     """A pump retry of approval_respond (already settled row) must re-run the
     follow-through without producing a second wake."""
-    from bob_server.services.effects import deliver
+    from server.services.effects import deliver
 
     await _seed(ctx)
     out = await _steer(ctx)
@@ -375,8 +375,8 @@ async def test_list_pending_approvals_includes_steer_fields(ctx, db, mock_wake):
 # ---------------------------------------------------------------------------
 
 async def test_prompt_replay_labels_steer_rows(ctx, db):
-    from bob_server.services.prompt_assembler import build_chat_messages
-    from bob_server.services.session_service import SessionService
+    from server.services.prompt_assembler import build_chat_messages
+    from server.services.session_service import SessionService
 
     old = await SessionService(ctx).add_message(
         GROUP_KEY, "user", "[Steering request — Helen Burnside, via the Pirate Radio group]\nold ask",
@@ -402,8 +402,8 @@ async def test_prompt_replay_labels_steer_rows(ctx, db):
 # ---------------------------------------------------------------------------
 
 async def test_proactive_group_send_kept_and_relay_retired(ctx, db, mock_wake, stub_send):
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.services.whatsapp_outreach_tools import make_group_send_tools
+    from server.repositories.conversations import ConversationRepository
+    from server.services.whatsapp_outreach_tools import make_group_send_tools
 
     class _FakeBridge:
         connected = True

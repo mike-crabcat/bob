@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from bob_server.config import Settings
-from bob_server.context import AppContext
-from bob_server.database import Database
+from server.config import Settings
+from server.context import AppContext
+from server.database import Database
 
 
-SCHEMA_DIR = Path(__file__).resolve().parent.parent / "bob_server" / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "server" / "schemas"
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ async def ctx(db):
 @pytest.fixture(autouse=True)
 def _reset_occupancy():
     """Occupancy is module-level state — never let it leak across tests."""
-    from bob_server.services import occupancy
+    from server.services import occupancy
     occupancy.reset_for_tests()
     yield
     occupancy.reset_for_tests()

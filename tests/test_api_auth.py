@@ -8,8 +8,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from bob_server.config import PhoneSettings, Settings
-from bob_server.main import create_app
+from server.config import PhoneSettings, Settings
+from server.main import create_app
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:

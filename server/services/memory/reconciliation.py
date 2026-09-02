@@ -15,23 +15,23 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from bob_server.services.memory.claim_types import (
+from server.services.memory.claim_types import (
     ENTITY_REF_CLAIM_KEYS,
     ENTITY_TYPE_PREFIXES,
     ENTITY_TYPE_REGISTRY,
     get_claim_types_for_entity,
     render_entity,
 )
-from bob_server.services.memory.claim_service import (
+from server.services.memory.claim_service import (
     write_claim,
     supersede_claim,
     validate_claim_for_write,
     _is_valid_file_path,
 )
-from bob_server.services.memory.models import Claim
-from bob_server.services.memory.merge import _execute_merge, _deduplicate_claims
-from bob_server.services.memory.entity_tools import make_list_entities_tool, make_get_entity_tool
-from bob_server.services.tools import Tool, tool
+from server.services.memory.models import Claim
+from server.services.memory.merge import _execute_merge, _deduplicate_claims
+from server.services.memory.entity_tools import make_list_entities_tool, make_get_entity_tool
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 

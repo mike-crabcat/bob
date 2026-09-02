@@ -24,7 +24,7 @@ PROBE_NOT_SATISFIED = json.dumps({"satisfied": False, "note": "unrelated chatter
 @pytest.fixture(autouse=True)
 def clean_executor_registry():
     """The reaper test registers an executor; never leak it into other files."""
-    from bob_server.services import effects as effects_svc
+    from server.services import effects as effects_svc
 
     saved = dict(effects_svc._EXECUTORS)
     effects_svc.executors_reset_for_tests()
@@ -45,7 +45,7 @@ class _ProbeLLM:
 
 async def _seed_world(db, *, goal_status: str = "active") -> str:
     """Contacts + conversations + participants + an outreach goal in David's DM."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     conv_repo = ConversationRepository(db)
     group_cid = (await conv_repo.ensure(GROUP))["id"]
@@ -70,7 +70,7 @@ async def _seed_world(db, *, goal_status: str = "active") -> str:
 
 async def _append_received(db, *, message_id: str, conversation_id: str,
                            text: str = "Yeah I'm in for the coffee") -> None:
-    from bob_server.repositories import Event, EventLogRepository
+    from server.repositories import Event, EventLogRepository
 
     await db.execute(
         "INSERT INTO messages (id, conversation_id, role, content, created_at) "
@@ -88,11 +88,11 @@ async def _append_received(db, *, message_id: str, conversation_id: str,
 
 
 async def _run_sweep(ctx, monkeypatch, reply: str) -> _ProbeLLM:
-    from bob_server.services import outreach_detector
+    from server.services import outreach_detector
 
     probe = _ProbeLLM(reply)
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat", probe.chat)
+        "server.services.llm_dispatch.LLMDispatchService.chat", probe.chat)
     await outreach_detector.sweep(ctx)
     return probe
 
@@ -109,7 +109,7 @@ async def test_first_run_positions_watermark_without_probing(ctx, monkeypatch):
 
 
 async def test_out_of_channel_confirmation_completes_goal(ctx, monkeypatch):
-    from bob_server.services import outreach_detector
+    from server.services import outreach_detector
 
     await _seed_world(ctx.db)
     await outreach_detector.sweep(ctx)  # first run: position watermark
@@ -135,7 +135,7 @@ async def test_out_of_channel_confirmation_completes_goal(ctx, monkeypatch):
 
 async def test_unrelated_group_chatter_leaves_goal_active(ctx, monkeypatch):
     await _seed_world(ctx.db)
-    from bob_server.services import outreach_detector
+    from server.services import outreach_detector
     await outreach_detector.sweep(ctx)
     await _append_received(ctx.db, message_id="m3", conversation_id=GROUP,
                            text="The shirt mockup looks great")
@@ -151,7 +151,7 @@ async def test_unrelated_group_chatter_leaves_goal_active(ctx, monkeypatch):
 async def test_in_channel_reply_is_not_probed(ctx, monkeypatch):
     """A reply inside the goal's own DM is the DM agent's job — no probe."""
     await _seed_world(ctx.db)
-    from bob_server.services import outreach_detector
+    from server.services import outreach_detector
     await outreach_detector.sweep(ctx)
     await _append_received(ctx.db, message_id="m4", conversation_id=DAVID_DM)
 
@@ -160,7 +160,7 @@ async def test_in_channel_reply_is_not_probed(ctx, monkeypatch):
 
 
 async def test_kill_switch_freezes_watermark(ctx, monkeypatch):
-    from bob_server.services import outreach_detector
+    from server.services import outreach_detector
 
     await _seed_world(ctx.db)
     await outreach_detector.sweep(ctx)
@@ -182,13 +182,13 @@ async def test_kill_switch_freezes_watermark(ctx, monkeypatch):
 
 async def test_probe_error_fails_closed(ctx, monkeypatch):
     await _seed_world(ctx.db)
-    from bob_server.services import outreach_detector
+    from server.services import outreach_detector
     await outreach_detector.sweep(ctx)
     await _append_received(ctx.db, message_id="m6", conversation_id=GROUP)
 
     async def _boom(*a, **k):
         raise RuntimeError("llm down")
-    monkeypatch.setattr("bob_server.services.llm_dispatch.LLMDispatchService.chat", _boom)
+    monkeypatch.setattr("server.services.llm_dispatch.LLMDispatchService.chat", _boom)
     await outreach_detector.sweep(ctx)
 
     goal = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = 'goal-david'")
@@ -200,7 +200,7 @@ async def test_probe_error_fails_closed(ctx, monkeypatch):
 # ------------------------------------------------------------------- reaper
 
 async def test_reaper_requeues_stuck_delivering(db):
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
 
     old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     await db.execute(
@@ -225,7 +225,7 @@ async def test_reaper_requeues_stuck_delivering(db):
 
 
 async def test_reaper_dead_letters_past_max_attempts(db):
-    from bob_server.repositories.effects import EffectRepository
+    from server.repositories.effects import EffectRepository
 
     old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     await db.execute(
@@ -243,8 +243,8 @@ async def test_reaper_dead_letters_past_max_attempts(db):
 
 async def test_pump_requeues_then_claims_stuck_effect(ctx):
     """The stuck eff-227017 class: pump due must rescue it end to end."""
-    from bob_server.repositories.effects import EffectRepository
-    from bob_server.services.effects import register_executor
+    from server.repositories.effects import EffectRepository
+    from server.services.effects import register_executor
 
     old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     await ctx.db.execute(
@@ -261,7 +261,7 @@ async def test_pump_requeues_then_claims_stuck_effect(ctx):
         return "done"
 
     register_executor("goal_revise_state", _exec, retryable=True)
-    from bob_server.services.effects import pump_due_effects
+    from server.services.effects import pump_due_effects
     processed = await pump_due_effects(ctx)
     assert processed == 1
     assert delivered == ["?"]  # payload '{}' — executor ran

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from fastapi import Depends, Request
 
-from bob_server.config import Settings
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.exceptions import ForbiddenError
-from bob_server.services.calendar_service import CalendarService
+from server.config import Settings
+from server.context import AppContext
+from server.database import Database
+from server.exceptions import ForbiddenError
+from server.services.calendar_service import CalendarService
 
 
 def get_settings(request: Request) -> Settings:
@@ -23,7 +23,7 @@ def require_dashboard_origin(request: Request) -> None:
     Currently unused by any router (kept for reuse); delegates to the shared
     comparison path in api_auth so it cannot drift from the middleware.
     """
-    from bob_server.api_auth import api_token_valid
+    from server.api_auth import api_token_valid
 
     if not api_token_valid(request.app.state.settings, request):
         raise ForbiddenError("This operation requires dashboard authorization")

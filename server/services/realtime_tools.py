@@ -18,10 +18,10 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import tool
+from server.services.tools import tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def make_realtime_tools(
         """Look up the contact record for the number being called (name, notes)."""
         if not phone_number:
             return json.dumps({"error": "no phone number associated with this call"})
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         row = await ContactRepository(ctx.db).get_by_phone(phone_number)
         if row is None:
             return json.dumps({"found": False})

@@ -18,8 +18,8 @@ from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from bob_server.services.realtime_bridge import BrowserAudioSource, RealtimeBridge
-from bob_server.services.realtime_tools import make_realtime_tools
+from server.services.realtime_bridge import BrowserAudioSource, RealtimeBridge
+from server.services.realtime_tools import make_realtime_tools
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ async def voice_realtime(websocket: WebSocket) -> None:
     client = websocket.client.host if websocket.client else "unknown"
     logger.info("Realtime WS connected from %s", client)
 
-    from bob_server.context import AppContext
+    from server.context import AppContext
     ctx = AppContext(
         db=websocket.app.state.db,
         settings=websocket.app.state.settings,
@@ -83,7 +83,7 @@ async def voice_realtime(websocket: WebSocket) -> None:
     on_complete: Any = None  # set below in persona mode
     session_svc = None  # VoiceSessionService in persona mode
     if session_id:
-        from bob_server.services.voice_session_service import VoiceSessionService
+        from server.services.voice_session_service import VoiceSessionService
         session_svc = VoiceSessionService(ctx)
         row = await session_svc.resolve(session_id)
         if row is None:

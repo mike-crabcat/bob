@@ -7,10 +7,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.services.base import BaseService, iso_utc, json_dumps, json_loads, utcnow
-from bob_server.services.dream.models import (
+from server.context import AppContext
+from server.database import Database
+from server.services.base import BaseService, iso_utc, json_dumps, json_loads, utcnow
+from server.services.dream.models import (
     PLAN_ACTIVE_STATUSES,
     PLAN_TERMINAL_STATUSES,
     RESOLUTION_ACTIVE_STATUSES,
@@ -132,7 +132,7 @@ class DreamStore(BaseService):
         queue months of history; once a cursor exists, any messages after it
         count (they're leftovers the dream owes a review).
         """
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         return await HistoryRepository(self.db).review_candidates(
             min_new_messages=min_new_messages,
             max_sessions=max_sessions,
@@ -142,7 +142,7 @@ class DreamStore(BaseService):
         self, session_key: str, cursor_at: str | None, *, lookback_days: int, limit: int
     ) -> list[dict]:
         """Messages to review: after the cursor (or within lookback on first sight)."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).messages_since(
             session_key,
             since_iso=cursor_at or None,
@@ -438,7 +438,7 @@ class DreamStore(BaseService):
     # ------------------------------------------------------------ embeddings
 
     async def upsert_item_embedding(self, item_id: str, embedding: list[float]) -> None:
-        from bob_server.services.memory.embedding import _pack_embedding
+        from server.services.memory.embedding import _pack_embedding
 
         await self.db.execute(
             "DELETE FROM dream_item_embeddings WHERE item_id = ?", (item_id,)
@@ -450,7 +450,7 @@ class DreamStore(BaseService):
 
     async def rebuild_item_embeddings(self) -> int:
         """Re-embed all non-terminal items (title + body). Used after metric changes."""
-        from bob_server.services.memory.embedding import embed_batch
+        from server.services.memory.embedding import embed_batch
 
         resolutions = await self.list_resolutions(list(RESOLUTION_ACTIVE_STATUSES) + ["draft"])
         plans = await self.list_plans(list(PLAN_ACTIVE_STATUSES))
@@ -475,7 +475,7 @@ class DreamStore(BaseService):
         self, query_embedding: list[float], *, threshold: float, limit: int = 5
     ) -> list[dict]:
         """Cosine-similar existing items: [{item_id, distance}]."""
-        from bob_server.services.memory.embedding import _pack_embedding
+        from server.services.memory.embedding import _pack_embedding
 
         try:
             rows = await self.db.fetch_all(
@@ -551,7 +551,7 @@ class DreamStore(BaseService):
         """Objective+progress of the session's active goals, for the announce
         fact-check. The composer sees only plan text, so contradicting facts
         (event already booked/held) must be fetched explicitly."""
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
 
         rows = await GoalRepository(self.db).list_active(conversation_id=session_key, limit=3)
         if not rows:
@@ -565,25 +565,25 @@ class DreamStore(BaseService):
         return "\n\n".join(parts)
 
     async def session_last_inbound_at(self, session_key: str) -> str | None:
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         return await HistoryRepository(self.db).last_message_at(session_key, role="user")
 
     async def announcements_today(self, session_key: str) -> int:
         """Announcement messages recorded in this session today (daily cap)."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         return await HistoryRepository(self.db).assistant_metadata_count_today(
             session_key, metadata_like="%dream_announce%")
 
     async def user_messages_since(self, session_key: str, since_iso: str) -> list[dict]:
         """Engagement check: user messages in a session after a timestamp."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).messages_since(
             session_key, since_iso=since_iso, role="user", limit=50)
         return [dict(r) for r in rows] if rows else []
 
     async def announce_history(self, limit: int = 30) -> list[dict]:
         """Recent announcement records, newest first (Controls tab)."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         return await HistoryRepository(self.db).recent_assistant_with_metadata(
             metadata_like="%dream_announce%", limit=limit)
 

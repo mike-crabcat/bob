@@ -7,10 +7,10 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.services.agentmail_client import AgentMailClient
-from bob_server.services.base import BaseService, json_dumps, utcnow
+from server.context import AppContext
+from server.database import Database
+from server.services.agentmail_client import AgentMailClient
+from server.services.base import BaseService, json_dumps, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class EmailDeliveryService(BaseService):
         Falls back to sending a new threaded message if no existing message found.
         """
         # Look up the latest message in this thread to get its agentmail_message_id
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(self.db)
         latest = await store.latest_in_thread(thread_id)
 
@@ -121,7 +121,7 @@ class EmailDeliveryService(BaseService):
 
         Returns the AgentMail response dict.
         """
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         inbox = await EmailStore(self.db).get_inbox(inbox_id, active_only=True)
         if inbox is None:
             raise ValueError(f"Inbox {inbox_id} not found or inactive")
@@ -144,13 +144,13 @@ class EmailDeliveryService(BaseService):
         contact_id = None
         recipient_email = to if isinstance(to, str) else (to[0] if to else "")
         if recipient_email:
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             contact = await ContactRepository(self.db).get_by_email(recipient_email)
             if contact:
                 contact_id = contact["id"]
 
         # Create thread + session route
-        from bob_server.services.email_polling_service import (
+        from server.services.email_polling_service import (
             CUSTOM_AGENDA_TEMPLATE,
             resolve_or_create_email_thread,
         )
@@ -166,7 +166,7 @@ class EmailDeliveryService(BaseService):
 
         # Persist agenda immediately (not waiting for lazy migration)
         if agenda and thread:
-            from bob_server.services.session_agenda_service import SessionAgendaService
+            from server.services.session_agenda_service import SessionAgendaService
             await SessionAgendaService(self.ctx).set_agenda(thread["session_key"], agenda)
 
         # Persist outgoing message
@@ -185,9 +185,9 @@ class EmailDeliveryService(BaseService):
         # Dispatch to LLM for context priming
         settings = self._get_settings()
         if settings.openai.enabled:
-            from bob_server.services.llm_dispatch import LLMDispatchService
-            from bob_server.services.session_service import SessionService
-            from bob_server.services.prompt_assembler import load_workspace_prompt, local_now_prompt_line
+            from server.services.llm_dispatch import LLMDispatchService
+            from server.services.session_service import SessionService
+            from server.services.prompt_assembler import load_workspace_prompt, local_now_prompt_line
 
             send_content = "\n".join([
                 "## Email You Just Sent",
@@ -204,7 +204,7 @@ class EmailDeliveryService(BaseService):
             # the conversation + binding exist for outbound-initiated threads
             # so they appear in conversation-centric views and merge correctly.
             try:
-                from bob_server.repositories.conversations import ConversationRepository
+                from server.repositories.conversations import ConversationRepository
                 conversation = await ConversationRepository(self.db).ensure(
                     session_key, title=subject,
                     address=(session_key.rsplit(":", 1)[-1]
@@ -273,7 +273,7 @@ class EmailDeliveryService(BaseService):
         now = utcnow()
         message_id = str(uuid4())
 
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(self.db)
         await store.insert_message(
             message_id=message_id,

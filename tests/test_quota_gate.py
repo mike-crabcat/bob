@@ -2,7 +2,7 @@
 
 import pytest
 
-from bob_server.services import quota_gate
+from server.services import quota_gate
 
 
 @pytest.fixture(autouse=True)

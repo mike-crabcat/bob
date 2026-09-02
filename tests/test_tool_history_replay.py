@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from bob_server.services.llm_dispatch import (
+from server.services.llm_dispatch import (
     LLMDispatchService,
     _build_tool_trace,
     _cap_item,
@@ -20,16 +20,16 @@ from bob_server.services.llm_dispatch import (
     _is_image_user_block,
     _ITEM_CAP,
 )
-from bob_server.services.prompt_assembler import build_chat_messages
-from bob_server.services.session_service import SessionService
+from server.services.prompt_assembler import build_chat_messages
+from server.services.session_service import SessionService
 
 
-SCHEMA_DIR = Path(__file__).resolve().parent.parent / "bob_server" / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "server" / "schemas"
 
 
 @pytest.fixture
 async def db():
-    from bob_server.database import Database
+    from server.database import Database
     database = Database(db_path=Path(":memory:"), schema_dir=SCHEMA_DIR, pool_size=1)
     await database.connect()
     await database.apply_migrations()
@@ -39,8 +39,8 @@ async def db():
 
 @pytest.fixture
 async def ctx(db):
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
+    from server.config import Settings
+    from server.context import AppContext
     return AppContext(db=db, settings=Settings.from_env())
 
 
@@ -153,7 +153,7 @@ async def test_pop_tool_trace_serializes_items_to_json():
 
 
 async def test_pop_tool_trace_falls_back_when_items_exceed_cap():
-    from bob_server.services.llm_dispatch import _WHOLE_TRACE_CAP
+    from server.services.llm_dispatch import _WHOLE_TRACE_CAP
     big_out = "x" * (_WHOLE_TRACE_CAP + 100)
     _dispatch_tool_trace["d2"] = {
         "items": [{"type": "function_call_output", "call_id": "c1", "output": big_out}],
@@ -252,7 +252,7 @@ async def test_replay_handles_rows_without_trace(ctx, db):
 async def test_dispatch_failure_clears_trace():
     """When chat_with_tools raises, the trace entry should be popped to avoid
     leaking (the dispatch_id will never be consumed by add_message)."""
-    from bob_server.services.llm_dispatch import LLMDispatchService as Dispatch
+    from server.services.llm_dispatch import LLMDispatchService as Dispatch
     _dispatch_tool_trace["doomed"] = {"items": [], "summary": ""}
     # Simulate the cleanup path the except block runs.
     _dispatch_tool_trace.pop("doomed", None)

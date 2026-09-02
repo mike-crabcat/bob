@@ -13,10 +13,10 @@ import asyncio
 
 import pytest
 
-import bob_server.services.skill_developer_service as skill_developer_service
-import bob_server.services.subagent_service as subagent_service
-from bob_server.services.skill_developer_service import SkillDeveloperService
-from bob_server.services.subagent_service import SubagentService
+import server.services.skill_developer_service as skill_developer_service
+import server.services.subagent_service as subagent_service
+from server.services.skill_developer_service import SkillDeveloperService
+from server.services.subagent_service import SubagentService
 
 
 class FakeProc:

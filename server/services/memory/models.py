@@ -52,7 +52,7 @@ def serialize_frontmatter(fm: dict, body: str) -> str:
 # Entity types & helpers
 # ---------------------------------------------------------------------------
 
-from bob_server.services.memory.claim_types import ENTITY_TYPES  # noqa: F401 — re-export
+from server.services.memory.claim_types import ENTITY_TYPES  # noqa: F401 — re-export
 
 
 CLAIM_STATUSES: tuple[str, ...] = (

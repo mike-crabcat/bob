@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-import bob_server.cli as cli
+import server.cli as cli
 
 
 runner = CliRunner()

@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService
+from server.context import AppContext
+from server.services.base import BaseService
 
 
 class JournalService(BaseService):
     async def synthesise(self, *, facts: dict[str, Any]) -> str:
         """Run facts → markdown narrative. Prose output, not JSON."""
-        from bob_server.services.dream.prompts import SYNTHESIS_SYSTEM
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.dream.prompts import SYNTHESIS_SYSTEM
+        from server.services.llm_dispatch import LLMDispatchService
 
         user_prompt = "Run facts (JSON):\n" + json.dumps(facts, indent=1, default=str)[:12000]
         llm = LLMDispatchService(self.ctx)

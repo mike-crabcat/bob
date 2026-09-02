@@ -8,10 +8,10 @@ routine/subagent bookkeeping rows out of the transcript.
 
 from __future__ import annotations
 
-from bob_server.repositories.conversations import ConversationRepository
-from bob_server.repositories.participants import ParticipantRepository
-from bob_server.services.attention.tier2 import _build_context
-from bob_server.services.session_service import SessionService
+from server.repositories.conversations import ConversationRepository
+from server.repositories.participants import ParticipantRepository
+from server.services.attention.tier2 import _build_context
+from server.services.session_service import SessionService
 
 SESSION = "agent:main:whatsapp:group:tier2ctx"
 

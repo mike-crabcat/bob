@@ -119,8 +119,8 @@ async def resolve_session_model(db: Any, settings: Any, session_key: str) -> str
     (memory, patience, reflection) don't call this — they keep their
     configured models by construction.
     """
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.services import model_registry
+    from server.repositories.conversations import ConversationRepository
+    from server.services import model_registry
     try:
         policy = await ConversationRepository(db).get_policy(session_key)
     except Exception:
@@ -145,11 +145,11 @@ class DispatchRunner:
         self.db = ctx.db
 
     async def run(self, spec: DispatchSpec) -> str:
-        from bob_server.repositories.history import HistoryRepository
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.prompt_assembler import build_chat_messages
-        from bob_server.services.session_dispatch_gate import SessionDispatchGate
-        from bob_server.services.session_service import SessionService
+        from server.repositories.history import HistoryRepository
+        from server.services.llm_dispatch import LLMDispatchService
+        from server.services.prompt_assembler import build_chat_messages
+        from server.services.session_dispatch_gate import SessionDispatchGate
+        from server.services.session_service import SessionService
 
         session_key = spec.session_key
         session_svc = SessionService(self.ctx)
@@ -177,7 +177,7 @@ class DispatchRunner:
             # (e.g. group-event notifications) simply runs without a turn row.
             turn = None
             try:
-                from bob_server.repositories.turns import TurnRepository
+                from server.repositories.turns import TurnRepository
                 turn = await TurnRepository(self.db).claim(
                     session_key, lease_owner=_lease_owner())
             except Exception:
@@ -213,7 +213,7 @@ class DispatchRunner:
                     while True:
                         await asyncio.sleep(60)
                         try:
-                            from bob_server.repositories.turns import TurnRepository
+                            from server.repositories.turns import TurnRepository
                             alive = await TurnRepository(self.db).heartbeat_lease(turn_id)
                         except Exception:
                             logger.warning("turn heartbeat failed", exc_info=True)
@@ -247,7 +247,7 @@ class DispatchRunner:
                     max_iterations=iteration_cap,
                 )
 
-            from bob_server.services import backburner as backburner_mod
+            from server.services import backburner as backburner_mod
             bb_applies = (human_stimulus and backburner_mod.applies(
                 self.ctx.settings, spec.call_category, session_key))
             bb_mode = backburner_mod.mode(self.ctx.settings)
@@ -291,7 +291,7 @@ class DispatchRunner:
             except Exception as exc:
                 if turn is not None:
                     try:
-                        from bob_server.repositories.turns import TurnRepository
+                        from server.repositories.turns import TurnRepository
                         await TurnRepository(self.db).fail(turn["turn_id"], str(exc))
                     except Exception:
                         logger.warning("turn fail-mark failed", exc_info=True)
@@ -368,7 +368,7 @@ class DispatchRunner:
 
             if turn is not None:
                 try:
-                    from bob_server.repositories.turns import TurnRepository
+                    from server.repositories.turns import TurnRepository
                     await TurnRepository(self.db).complete(turn["turn_id"])
                 except Exception:
                     logger.warning("turn complete-mark failed", exc_info=True)

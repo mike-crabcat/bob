@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bob_server.services.openai_service import OpenAIService
+from server.services.openai_service import OpenAIService
 
 
 def _service(monkeypatch, tmp_path, *, wrap_enabled=True, wrap_text="wrapped up"):

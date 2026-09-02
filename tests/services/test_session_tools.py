@@ -13,8 +13,8 @@ import json
 
 import pytest
 
-from bob_server.services.session_tools import make_session_tools
-from bob_server.services.session_service import SessionService
+from server.services.session_tools import make_session_tools
+from server.services.session_service import SessionService
 
 GROUP_KEY = "agent:main:whatsapp:group:111"
 OTHER_GROUP_KEY = "agent:main:whatsapp:group:222"
@@ -40,7 +40,7 @@ async def seeded(ctx):
         "VALUES ('c2', 'Mike', '+61400000001', ?, ?)", (NOW, NOW))
 
     # find_session reads bindings (Increment 4).
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     repo = ConversationRepository(ctx.db)
     await repo.ensure(GROUP_KEY, address="111@g.us", endpoint_kind="group")
     await repo.ensure(OTHER_GROUP_KEY, address="222@g.us", endpoint_kind="group")
@@ -147,7 +147,7 @@ async def test_trusted_get_session_messages_reads_any_session(seeded):
 
 
 async def test_build_common_tools_wires_current_session(seeded):
-    from bob_server.services.tool_registry import build_common_tools
+    from server.services.tool_registry import build_common_tools
 
     tools = build_common_tools(seeded, session_key=GROUP_KEY, is_trusted=False, include_routines=False)
     read = _tool(tools, "get_session_messages")

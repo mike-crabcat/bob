@@ -14,9 +14,9 @@ import logging
 import re
 from pathlib import Path
 
-from bob_server.context import AppContext
-from bob_server.services.skill_env import build_skill_env
-from bob_server.services.tools import ImageInjection, tool
+from server.context import AppContext
+from server.services.skill_env import build_skill_env
+from server.services.tools import ImageInjection, tool
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         """Return the current local date and time with its timezone name and UTC offset, e.g. 'Tuesday 01 September 2026, 06:52 (AWST, UTC+08:00)'."""
         from datetime import datetime
 
-        from bob_server.services.prompt_assembler import format_local_now
+        from server.services.prompt_assembler import format_local_now
         return (
             f"{format_local_now()}\n"
             f"(ISO: {datetime.now().astimezone().isoformat(timespec='seconds')})"
@@ -242,7 +242,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
     ) -> str:
         """Load the full instructions for a skill by name. Returns the skill's instructions
         and the path to its directory so you can run its scripts via bash with correct paths."""
-        from bob_server.services.skill_loader import load_skill
+        from server.services.skill_loader import load_skill
         return load_skill(ctx.settings.harness.workspace_dir, skill_name)
 
     tools = [bash, get_time, read_image, use_skill]
@@ -253,7 +253,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
             """Update the agenda for this session. The agenda extends the system prompt,
             guiding your behavior for all subsequent turns. Replace the full agenda text —
             use this to mark tasks complete, add new goals, or change your instructions."""
-            from bob_server.services.session_agenda_service import SessionAgendaService
+            from server.services.session_agenda_service import SessionAgendaService
             await SessionAgendaService(ctx).set_agenda(session_key, agenda)
             return json.dumps({"ok": True})
 

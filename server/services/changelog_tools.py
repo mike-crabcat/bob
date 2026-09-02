@@ -11,14 +11,14 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from bob_server.context import AppContext
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
 # Resolve once at import time: walk up from this file to find CHANGELOG.md
-_PACKAGE_DIR = Path(__file__).resolve().parent  # .../bob_server/services
-_SERVER_DIR = _PACKAGE_DIR.parent  # .../bob_server
+_PACKAGE_DIR = Path(__file__).resolve().parent  # .../server/services
+_SERVER_DIR = _PACKAGE_DIR.parent  # .../server
 _CHANGELOG_PATH: Path | None = None
 for parent in _SERVER_DIR.parents:
     candidate = parent / "CHANGELOG.md"

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from bob_server.services.base import BaseService
+from server.services.base import BaseService
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class SessionService(BaseService):
         tool_blocks_json: str | None = None
         if synthetic is None:
             if role == "assistant" and dispatch_id:
-                from bob_server.services.llm_dispatch import LLMDispatchService
+                from server.services.llm_dispatch import LLMDispatchService
                 synthetic = LLMDispatchService.pop_memory_used(dispatch_id)
                 trace = LLMDispatchService.pop_tool_trace(dispatch_id)
                 if trace is not None:
@@ -79,7 +79,7 @@ class SessionService(BaseService):
         meta_json = json.dumps(metadata) if metadata else None
         # Canonical conversation id via bindings; the raw key is preserved as
         # binding_key (which endpoint the message rode).
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         conversation_id = await ConversationRepository(self.db).resolve_cid(
             session_key, txn=txn)
         await (txn or self.db).execute(
@@ -94,7 +94,7 @@ class SessionService(BaseService):
 
     async def mark_dispatched(self, session_key: str) -> int:
         """Mark all undispatched user messages as dispatched. Returns count marked."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         cid = await HistoryRepository(self.db)._cid(session_key)
         count = await self.db.execute(
             "UPDATE messages SET dispatched = 1 "
@@ -111,14 +111,14 @@ class SessionService(BaseService):
         roles: list[str] | None = None,
     ) -> list[SessionMessage]:
         """Retrieve messages for a session, oldest first."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).messages(
             session_key, limit=limit, roles=roles)
         return [self._row_to_message(r) for r in rows]
 
     async def delete_session(self, session_key: str) -> None:
         """Delete all messages for a session (conversation-wide)."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         await self.db.execute(
             "DELETE FROM messages WHERE conversation_id = ?",
             (await HistoryRepository(self.db)._cid(session_key),),

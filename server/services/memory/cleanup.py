@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bob_server.services.memory.contact_directory import ContactDirectory
+from server.services.memory.contact_directory import ContactDirectory
 
 
 async def build_renaming_map(

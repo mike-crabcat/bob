@@ -9,10 +9,10 @@ to pending, turn failed with events released so a fresh claim works.
 
 from __future__ import annotations
 
-from bob_server.repositories import Event, EventLogRepository
-from bob_server.repositories.history import HistoryRepository
-from bob_server.repositories.turns import TurnRepository
-from bob_server.services.session_service import SessionService
+from server.repositories import Event, EventLogRepository
+from server.repositories.history import HistoryRepository
+from server.repositories.turns import TurnRepository
+from server.services.session_service import SessionService
 
 KEY = "agent:main:whatsapp:group:recovery-test"
 

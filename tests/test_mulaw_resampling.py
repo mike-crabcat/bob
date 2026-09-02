@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from bob_server.services.mulaw import (
+from server.services.mulaw import (
     AntiAliasedDownsampler,
     apply_gain,
     resample_24k_to_8k,
@@ -97,7 +97,7 @@ def _active_spans(ch: np.ndarray, sr: int = 24000) -> list[tuple[float, float]]:
 
 def test_recording_channels_are_time_aligned(tmp_path):
     """Bob's audio must appear at its wall-clock position, not packed at t=0."""
-    from bob_server.services.realtime_bridge import TwilioMediaSource
+    from server.services.realtime_bridge import TwilioMediaSource
 
     src = TwilioMediaSource(ws=None, stream_sid="test")
     src._start_monotonic = 1000.0  # pretend the call started 1000s ago
@@ -124,7 +124,7 @@ def test_recording_channels_are_time_aligned(tmp_path):
 
 def test_recording_sequential_outbound_does_not_collapse_gaps(tmp_path):
     """Two Bob utterances with a pause between must keep that pause."""
-    from bob_server.services.realtime_bridge import TwilioMediaSource
+    from server.services.realtime_bridge import TwilioMediaSource
 
     src = TwilioMediaSource(ws=None, stream_sid="test")
     src._start_monotonic = 1000.0
@@ -153,8 +153,8 @@ def test_recording_keeps_head_buffered_while_relay_connects(tmp_path):
     import asyncio
     import time
 
-    from bob_server.services.realtime_bridge import TwilioMediaSource
-    from bob_server.services.mulaw import pcm16_to_mulaw
+    from server.services.realtime_bridge import TwilioMediaSource
+    from server.services.mulaw import pcm16_to_mulaw
 
     src = TwilioMediaSource(ws=None, stream_sid="test")
     # 20ms of audible 8kHz phone audio per frame.

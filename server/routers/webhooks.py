@@ -6,9 +6,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from bob_server.dependencies import get_app_context
-from bob_server.context import AppContext
-from bob_server.services.webhook_service import WebhookService
+from server.dependencies import get_app_context
+from server.context import AppContext
+from server.services.webhook_service import WebhookService
 
 
 router = APIRouter(tags=["webhooks"])
@@ -160,7 +160,7 @@ async def retry_delivery(
         raise HTTPException(status_code=404, detail="Delivery not found")
     
     # Reset status to pending and attempt delivery
-    from bob_server.services.webhook_service import WebhookStatus
+    from server.services.webhook_service import WebhookStatus
     if delivery["status"] == WebhookStatus.DELIVERED:
         raise HTTPException(status_code=400, detail="Delivery already succeeded")
     

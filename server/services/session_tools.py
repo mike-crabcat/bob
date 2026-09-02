@@ -6,10 +6,10 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import Tool, tool
+from server.services.tools import Tool, tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def make_session_tools(
             return None
         keys: set[str] = set()
         if contact_id:
-            from bob_server.repositories.participants import ParticipantRepository
+            from server.repositories.participants import ParticipantRepository
             keys |= set(await ParticipantRepository(db).conversations_for_contact(contact_id))
         if current_session_key:
             keys.add(current_session_key)
@@ -58,7 +58,7 @@ def make_session_tools(
             return json.dumps({"error": "Query cannot be empty"})
 
         # Build name index: UNION of group sessions and DM sessions
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         rows = await ConversationRepository(db).named_sessions()
 
         if not rows:
@@ -128,7 +128,7 @@ def make_session_tools(
 
         # Newest N, then flip to oldest-first for readability. (SessionService
         # .get_messages applies LIMIT to the oldest end, which is wrong here.)
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         messages = await HistoryRepository(db).recent_with_sender_names(
             target, limit=limit)
 

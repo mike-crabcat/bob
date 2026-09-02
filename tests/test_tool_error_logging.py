@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bob_server.services.openai_service import OpenAIService
+from server.services.openai_service import OpenAIService
 
 
 def _make_fake_client(*, tool_name: str, call_id: str, arguments: str = "{}") -> tuple[object, list[dict]]:
@@ -95,7 +95,7 @@ async def test_tool_handler_exception_logged_with_context(ctx, fake_openai_clien
         raise ValueError("kaboom from handler")
 
     svc = OpenAIService(ctx)
-    with caplog.at_level("ERROR", logger="bob_server.services.openai_service"):
+    with caplog.at_level("ERROR", logger="server.services.openai_service"):
         result = await svc.chat_with_tools(
             model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "trigger the boom"}],
@@ -136,7 +136,7 @@ async def test_unknown_tool_logged_at_error(ctx, fake_openai_client, caplog):
     fake_openai_client(tool_name="ghost_tool", call_id="call-ghost")
 
     svc = OpenAIService(ctx)
-    with caplog.at_level("ERROR", logger="bob_server.services.openai_service"):
+    with caplog.at_level("ERROR", logger="server.services.openai_service"):
         result = await svc.chat_with_tools(
             model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "call the ghost"}],
@@ -175,7 +175,7 @@ async def test_tool_args_truncated_in_log(ctx, fake_openai_client, caplog):
         raise RuntimeError("fail")
 
     svc = OpenAIService(ctx)
-    with caplog.at_level("ERROR", logger="bob_server.services.openai_service"):
+    with caplog.at_level("ERROR", logger="server.services.openai_service"):
         await svc.chat_with_tools(
             model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "go"}],

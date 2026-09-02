@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from bob_server.repositories.subagents import SubagentRepository
+from server.repositories.subagents import SubagentRepository
 
 PARENT = "agent:main:whatsapp:group:120363000000000001"
 

@@ -6,15 +6,15 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends
 
-from bob_server.dependencies import get_database
-from bob_server.database import Database
-from bob_server.models import (
+from server.dependencies import get_database
+from server.database import Database
+from server.models import (
     ContextCalendarResponse,
     ContextSummaryResponse,
     EventContextItem,
 )
-from bob_server.services.base import utcnow
-from bob_server.services.calendar_service import CalendarService
+from server.services.base import utcnow
+from server.services.calendar_service import CalendarService
 
 
 router = APIRouter(prefix="/api/v1/context", tags=["context"])

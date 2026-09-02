@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bob_server.services import quota_gate
-from bob_server.services.dispatch_runner import _is_quota_error
+from server.services import quota_gate
+from server.services.dispatch_runner import _is_quota_error
 
 
 @pytest.fixture(autouse=True)
@@ -74,9 +74,9 @@ class TestIsQuotaError:
 class TestResolveModelOverride:
     @pytest.mark.asyncio
     async def test_resolves_alias_and_respects_unconfigured_openrouter(self, db, tmp_path):
-        from bob_server.services import model_registry
-        from bob_server.services.dispatch_runner import DispatchRunner
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.services import model_registry
+        from server.services.dispatch_runner import DispatchRunner
+        from server.repositories.conversations import ConversationRepository
 
         (tmp_path / "models.yaml").write_text(
             "aliases:\n  chinese: z-ai/glm-5.3-flash\n", encoding="utf-8")
@@ -98,8 +98,8 @@ class TestResolveModelOverride:
 
     @pytest.mark.asyncio
     async def test_unset_override_returns_none(self, db, tmp_path):
-        from bob_server.services.dispatch_runner import DispatchRunner
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.services.dispatch_runner import DispatchRunner
+        from server.repositories.conversations import ConversationRepository
         await ConversationRepository(db).ensure("wa:456")
         ctx = SimpleNamespace(db=db, settings=SimpleNamespace(
             config_dir=tmp_path, openrouter=SimpleNamespace(enabled=True)))

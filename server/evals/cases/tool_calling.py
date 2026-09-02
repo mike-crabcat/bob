@@ -1,7 +1,7 @@
 """Tool calling eval cases."""
 
-from bob_server.evals.case import JudgeCriteria, StructuralCheck
-from bob_server.evals.registry import eval_case
+from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.registry import eval_case
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:
@@ -40,9 +40,9 @@ _INITIAL_AGENDA = """\
     ),
 )
 async def tool_calling_update_agenda(ctx):
-    from bob_server.services.llm_dispatch import LLMDispatchService
-    from bob_server.services.session_agenda_service import SessionAgendaService
-    from bob_server.services.workspace_tools import make_workspace_tools
+    from server.services.llm_dispatch import LLMDispatchService
+    from server.services.session_agenda_service import SessionAgendaService
+    from server.services.workspace_tools import make_workspace_tools
 
     session_key = "eval:update_agenda:test"
 

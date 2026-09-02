@@ -16,10 +16,10 @@ import httpx
 import pytest
 import uvicorn
 
-from bob_server.config import OpenClawHookSettings, Settings
-from bob_server.database import Database
-from bob_server.main import create_app
-from bob_server.models import (
+from server.config import OpenClawHookSettings, Settings
+from server.database import Database
+from server.main import create_app
+from server.models import (
     JournalEntryType,
     ProjectCloseRequest,
     ProjectCreate,
@@ -29,16 +29,16 @@ from bob_server.models import (
     TaskCreate,
     TaskFailureRequest,
 )
-from bob_server.services.notification_service import NotificationService
-from bob_server.services.openclaw_hook_service import OpenClawHookService
-from bob_server.services.openclaw_reasoning_service import OpenClawReasoningService
-from bob_server.services.project_service import ProjectService
-from bob_server.services.project_spec_service import ProjectSpecService
-from bob_server.services.session_route_service import SessionRouteService
-from bob_server.services.task_service import TaskService
+from server.services.notification_service import NotificationService
+from server.services.openclaw_hook_service import OpenClawHookService
+from server.services.openclaw_reasoning_service import OpenClawReasoningService
+from server.services.project_service import ProjectService
+from server.services.project_spec_service import ProjectSpecService
+from server.services.session_route_service import SessionRouteService
+from server.services.task_service import TaskService
 
 
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "bob_server" / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parents[2] / "server" / "schemas"
 TASK_ASSIGNMENT_TIMEOUT_SECONDS = 90.0
 CHAT_POLL_INTERVAL_SECONDS = 2.0
 
@@ -626,7 +626,7 @@ def bob_http_server(acceptance_settings: Settings, artifact_dir: Path) -> str:
         if not started:
             raise RuntimeError(f"Bob HTTP server failed to start on {base_url}")
         artifact = {"base_url": base_url, "port": port}
-        (artifact_dir / "bob_server.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+        (artifact_dir / "server.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
         yield base_url
     finally:
         client.close()

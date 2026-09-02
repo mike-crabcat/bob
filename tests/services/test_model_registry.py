@@ -3,7 +3,7 @@ pricing, and yaml hot-reload."""
 
 from __future__ import annotations
 
-from bob_server.services import model_registry
+from server.services import model_registry
 
 import pytest
 

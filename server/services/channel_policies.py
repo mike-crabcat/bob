@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from bob_server.repositories.contacts import ContactRepository
+from server.repositories.contacts import ContactRepository
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class ContactResolver:
         contact_id = await self.contacts.create(name=name, phone_number=phone_number)
         logger.info("auto-seeded untrusted contact %s for phone %s",
                     contact_id, phone_number)
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
         await MemoryService(self.ctx).ensure_person_entry(
             self.ctx.settings.harness.workspace_dir,
             contact_id=contact_id, name=name,
@@ -63,7 +63,7 @@ class ContactResolver:
         channel-provided display name and sync person memory."""
         if sender_name and contact["name"] in ("", placeholder):
             await self.contacts.update_name(contact["id"], sender_name)
-            from bob_server.services.memory import MemoryService
+            from server.services.memory import MemoryService
             await MemoryService(self.ctx).sync_person_display_name_for_contact(
                 contact["id"], sender_name)
 

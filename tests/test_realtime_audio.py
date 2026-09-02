@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from bob_server.services.mulaw import (
+from server.services.mulaw import (
     mulaw_to_pcm16,
     pcm16_to_mulaw,
     resample_24k_to_8k,

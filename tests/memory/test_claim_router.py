@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.repositories.goals import GoalRepository
-from bob_server.services import goal_service
+from server.repositories.goals import GoalRepository
+from server.services import goal_service
 
 GROUP_KEY = "agent:main:whatsapp:group:doom"
 DM_KEY = "agent:main:whatsapp:dm:61400000001"
@@ -28,14 +28,14 @@ def _reviser_json(state: dict, *, wake_needed: bool = False,
 @pytest.fixture
 def mock_wake(monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     return wake
 
 
 @pytest.fixture
 def llm_chat(monkeypatch):
     """Mock every cheap-model chat (reviser + probe); set .side_effect per test."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
     mock = AsyncMock(return_value=_reviser_json({"plan": "waiting"}))
     monkeypatch.setattr(LLMDispatchService, "chat", mock)
     return mock
@@ -104,7 +104,7 @@ async def _seed_goal_with_entity_ref(ctx, entity_id: str) -> str:
 
 
 async def _run_batch(ctx, *, marker: str) -> dict:
-    from bob_server.services.memory.claim_router import handle_extraction_batch
+    from server.services.memory.claim_router import handle_extraction_batch
     return await handle_extraction_batch(ctx, session_key=GROUP_KEY,
                                          turn_message_id=marker)
 
@@ -114,8 +114,8 @@ async def _run_batch(ctx, *, marker: str) -> dict:
 # ---------------------------------------------------------------------------
 
 async def test_write_claim_updates_mentions(ctx, db):
-    from bob_server.services.memory.claim_service import write_claim
-    from bob_server.services.memory.models import Claim
+    from server.services.memory.claim_service import write_claim
+    from server.services.memory.models import Claim
     from datetime import datetime
 
     await _seed_entity(db, "person-alice", "person")
@@ -134,7 +134,7 @@ async def test_write_claim_updates_mentions(ctx, db):
 async def test_refresh_mentions_after_marker_exists(ctx, db):
     """Extraction writes claims referencing a marker message that doesn't
     exist yet; the post-turn refresh closes the gap."""
-    from bob_server.services.memory.claim_router import refresh_mentions_for_turn
+    from server.services.memory.claim_router import refresh_mentions_for_turn
 
     await _seed_entity(db, "event-team-lunch")
     # Claim written before the marker message exists (extraction order).
@@ -271,7 +271,7 @@ async def test_probe_failure_fails_open(ctx, db, mock_wake, llm_chat):
 
 
 async def test_candidate_entities_block_seeds_extractor(ctx, db):
-    from bob_server.services.memory.claim_router import build_candidate_entities_block
+    from server.services.memory.claim_router import build_candidate_entities_block
 
     await _seed_goal_with_entity_ref(ctx, "event-team-lunch")
     await _seed_entity(db, "event-team-lunch", display_name="Team Lunch")
@@ -285,7 +285,7 @@ async def test_candidate_entities_block_seeds_extractor(ctx, db):
 
 
 async def test_create_entity_soft_resolution_steers_reuse(ctx, db):
-    from bob_server.services.memory.extraction_tools import make_extraction_tools
+    from server.services.memory.extraction_tools import make_extraction_tools
 
     await _seed_entity(db, "event-team-lunch", display_name="Lunch")
     tools = {t.name: t for t in make_extraction_tools(db, "msg-extr-x")}
@@ -324,7 +324,7 @@ async def test_echo_suppression_holder_only_match(ctx, db, mock_wake, llm_chat):
 
 async def test_kill_switch_holds_watermark_then_replays(ctx, db, mock_wake,
                                                         llm_chat, monkeypatch):
-    from bob_server.services.memory import claim_router as router
+    from server.services.memory import claim_router as router
 
     await _seed_goal_with_entity_ref(ctx, "event-team-lunch")
     await _seed_entity(db, "event-team-lunch")
@@ -354,7 +354,7 @@ async def test_kill_switch_holds_watermark_then_replays(ctx, db, mock_wake,
 
 async def test_replay_after_inline_delivery_is_idempotent(ctx, db, mock_wake,
                                                           llm_chat):
-    from bob_server.services.memory import claim_router as router
+    from server.services.memory import claim_router as router
 
     await _seed_goal_with_entity_ref(ctx, "event-team-lunch")
     await _seed_entity(db, "event-team-lunch")

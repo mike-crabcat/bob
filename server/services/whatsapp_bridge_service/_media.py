@@ -17,7 +17,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from bob_server.services.phone_utils import normalize_phone
+from server.services.phone_utils import normalize_phone
 
 logger = logging.getLogger(__name__)
 

@@ -19,11 +19,11 @@ import websockets
 
 from fastapi import HTTPException
 
-from bob_server.config import Settings
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService, utcnow
-from bob_server.services.openai_service import strip_citation_markers
-from bob_server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
+from server.config import Settings
+from server.context import AppContext
+from server.services.base import BaseService, utcnow
+from server.services.openai_service import strip_citation_markers
+from server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ _quota_notify_last: dict[str, float] = {}
 _QUOTA_NOTIFY_MIN_INTERVAL = 3600.0  # 1 hour
 
 
-from bob_server.services.dispatch_runner import _is_quota_error, is_no_reply
+from server.services.dispatch_runner import _is_quota_error, is_no_reply
 
 
 async def _notify_quota_exhausted(wa_service: Any, chat_id: str, session_key: str) -> None:
@@ -75,8 +75,8 @@ def _copy_document_to_workspace(settings: Settings, src: Path, msg_id: str) -> s
 
 
 
-from bob_server.services.whatsapp_bridge_service._group_events import GroupEventsMixin
-from bob_server.services.whatsapp_bridge_service._slash_commands import SlashCommandsMixin
+from server.services.whatsapp_bridge_service._group_events import GroupEventsMixin
+from server.services.whatsapp_bridge_service._slash_commands import SlashCommandsMixin
 
 
 class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
@@ -99,7 +99,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         """Bind this instance as the executor for WhatsApp send effects
         (Bob3 Phase IV outbox). Last-constructed instance wins — there is
         one live bridge per process."""
-        from bob_server.services import effects as effects_svc
+        from server.services import effects as effects_svc
 
         async def _exec_send(ctx: Any, payload: dict[str, Any]) -> str:
             return await self.send_message(
@@ -139,7 +139,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         # Post-call drain (Bob3 Phase VI item 6): when a live call ends,
         # occupancy wakes the conversation so queued messages run as one turn.
-        from bob_server.services import occupancy
+        from server.services import occupancy
         occupancy.set_drain(self.wake_session)
 
         # Subscribe to memory verbose notices and forward to WhatsApp.
@@ -352,7 +352,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if not text:
                     continue
                 try:
-                    from bob_server.repositories.conversations import (
+                    from server.repositories.conversations import (
                         ConversationRepository, wa_send_jid)
                     route = await ConversationRepository(self.db).route_for(session_key)
                     jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
@@ -370,7 +370,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         Fuzzy: exact match first, then prefix-match fallback for WhatsApp JIDs
         with extra trailing digits (see ContactRepository.get_by_phone_fuzzy).
         """
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         contact = await ContactRepository(self.db).get_by_phone_fuzzy(phone_number)
         if contact:
             return contact["id"], bool(contact.get("is_trusted", 0))
@@ -381,7 +381,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         existing = await self._lookup_contact(phone_number)
         if existing:
             return existing
-        from bob_server.services.channel_policies import ContactResolver
+        from server.services.channel_policies import ContactResolver
         new_id = await ContactResolver(self.ctx).seed_untrusted_by_phone(
             phone_number, display_name)
         return new_id, False
@@ -418,7 +418,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
 
         # Typing extends an armed attention window (Tier 1 presence awareness).
-        from bob_server.services.attention import AttentionCoordinator
+        from server.services.attention import AttentionCoordinator
         AttentionCoordinator(self.ctx).notify_typing(session_key, sender_name or "")
 
 
@@ -524,7 +524,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             return
         contact_id = None
         is_trusted = False
-        from bob_server.services.channel_policies import WhatsAppInboundPolicy
+        from server.services.channel_policies import WhatsAppInboundPolicy
         resolution = await WhatsAppInboundPolicy(self.ctx).resolve_sender(
             chat_kind=chat_kind, phone_number=phone_number, sender_name=sender_name)
         if not resolution.accepted:
@@ -564,7 +564,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # backfills conversation.id = session_key) — diverges only on merge.
         binding_key = session_key
         try:
-            from bob_server.repositories.conversations import ConversationRepository
+            from server.repositories.conversations import ConversationRepository
             conversation = await ConversationRepository(self.db).ensure(
                 session_key,
                 address=chat_id if chat_kind == "group" else phone_number,
@@ -589,18 +589,18 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 if not phone:
                     continue
                 # Try session participants first (group members with display names)
-                from bob_server.repositories.participants import ParticipantRepository
+                from server.repositories.participants import ParticipantRepository
                 participant = await ParticipantRepository(self.db).get(session_key, phone)
                 if participant and participant["display_name"]:
                     mention_map[phone] = participant["display_name"]
                     continue
                 # Then try contacts table
-                from bob_server.repositories.contacts import ContactRepository
+                from server.repositories.contacts import ContactRepository
                 contact_match = await ContactRepository(self.db).get_by_phone(phone)
                 if contact_match and contact_match["name"]:
                     mention_map[phone] = contact_match["name"]
                 # Upsert mentioned user as participant so dispatch-time resolution can find them
-                from bob_server.repositories.participants import ParticipantRepository
+                from server.repositories.participants import ParticipantRepository
                 await ParticipantRepository(self.db).touch(
                     session_key, phone, mention_map.get(phone, phone), now_iso)
             # Replace @phone_number patterns with @DisplayName
@@ -609,14 +609,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 text = re.sub(rf"@{re.escape(bare)}\b", f"@{name}", text)
 
         # Upsert sender as session participant
-        from bob_server.repositories.participants import ParticipantRepository
+        from server.repositories.participants import ParticipantRepository
         await ParticipantRepository(self.db).upsert(
             session_key, phone_number,
             display_name=sender_name or phone_number,
             contact_id=contact_id, is_trusted=bool(is_trusted), now_iso=now_iso)
 
         # Register the endpoint binding — DM carries contact_id, group the JID
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         repo = ConversationRepository(self.db)
         if chat_kind == "group":
             await repo.register_endpoint(
@@ -627,7 +627,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 contact_id=str(contact_id) if contact_id else None)
 
         # Resolve agenda
-        from bob_server.services.session_agenda_service import SessionAgendaService
+        from server.services.session_agenda_service import SessionAgendaService
         agenda_svc = SessionAgendaService(self.ctx)
         agenda = await agenda_svc.get_effective_agenda(
             session_key, "whatsapp",
@@ -646,7 +646,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 # Auto-seed contact from shared vCard
                 if phone:
                     normalized_phone = _jid_to_phone(phone)
-                    from bob_server.repositories.contacts import ContactRepository
+                    from server.repositories.contacts import ContactRepository
                     repo = ContactRepository(self.db)
                     existing = await repo.get_by_phone(normalized_phone)
                     if not existing:
@@ -680,7 +680,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
         message_metadata: dict[str, Any] | None = None
         if image_path:
             message_metadata = {
@@ -712,7 +712,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # record of accepted stimuli, keyed (source=whatsapp, external_id=
         # wa_message_id) so bridge redeliveries can't double-accept. Audit
         # -only in Phase I — dispatch still runs off session_messages.
-        from bob_server.repositories import Event, EventLogRepository
+        from server.repositories import Event, EventLogRepository
 
         event_repo = EventLogRepository(self.db)
         session_svc = SessionService(self.ctx)
@@ -751,7 +751,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         )
 
         async def _run_dispatch() -> str:
-            from bob_server.services.dispatch_runner import DispatchRunner
+            from server.services.dispatch_runner import DispatchRunner
             return await DispatchRunner(self.ctx).run(dispatch_spec)
 
         # Attention coordinator (Bob3 Phase III cutover): Tier 0 addressed
@@ -759,18 +759,18 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # (probe_enabled) decides WHETHER an unaddressed group batch runs.
         # Route metadata keeps the legacy flag names for operator continuity.
         # Policy lives on the conversation (Increment 3).
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         policy = await ConversationRepository(self.db).get_policy(session_key)
         probe_enabled = bool(policy.get("patience_enabled")) and bool(
             policy.get("patience_relevance_gating"))
 
-        from bob_server.services.attention import AttentionCoordinator
+        from server.services.attention import AttentionCoordinator
 
         # Occupancy (Bob3 Phase VI item 6): while a call is live on this
         # conversation, non-urgent text stays stored-but-undispatched and the
         # post-call drain (wake_session) runs it as one turn. Urgent text
         # dispatches immediately.
-        from bob_server.services import occupancy
+        from server.services import occupancy
         if occupancy.is_live(session_key) and not occupancy.is_urgent(text or ""):
             occupancy.defer(session_key)
             logger.info("occupancy: call live on %s — queued message for post-call turn",
@@ -816,8 +816,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         human_initiated splits the cross-conversation messaging tools so the
         model can't pick wrong: human-started turns get steer_conversation
         only, autonomous wake turns get send_whatsapp_group_message only."""
-        from bob_server.services.context_assembler import ContextAssembler
-        from bob_server.services.prompt_assembler import load_workspace_prompt
+        from server.services.context_assembler import ContextAssembler
+        from server.services.prompt_assembler import load_workspace_prompt
 
         settings = self._get_settings()
         assembler = ContextAssembler(self.ctx)
@@ -846,10 +846,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
         )
 
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.tools import Tool
-        from bob_server.services.tool_registry import build_common_tools
-        from bob_server.services.group_tools import make_group_tools
+        from server.services.llm_dispatch import LLMDispatchService
+        from server.services.tools import Tool
+        from server.services.tool_registry import build_common_tools
+        from server.services.group_tools import make_group_tools
 
         wa_service = self
 
@@ -862,7 +862,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         # WhatsApp-specific: outreach tools (trusted DMs and groups)
         if contact_id and (is_trusted or chat_kind == "group"):
-            from bob_server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
+            from server.services.whatsapp_outreach_tools import make_whatsapp_outreach_tools
             tools.extend(make_whatsapp_outreach_tools(self.ctx, self, session_key))
 
         # Bob Events §1.5: proactive group send — autonomous wake-path turns
@@ -873,7 +873,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # the verbatim direct send (2026-08-30 AI-doom double-post), so the
         # split is structural now.
         if is_trusted and not human_initiated:
-            from bob_server.services.whatsapp_outreach_tools import make_group_send_tools
+            from server.services.whatsapp_outreach_tools import make_group_send_tools
             tools.extend(make_group_send_tools(self.ctx, self, session_key))
 
         # Steering (docs/steering-plan.md): any turn a human contact started
@@ -883,15 +883,15 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # no human dispatched them, so the gate is the dispatch origin, not
         # contact resolution.
         if contact_id and human_initiated:
-            from bob_server.services.steering import make_steering_tools
+            from server.services.steering import make_steering_tools
             tools.extend(make_steering_tools(self.ctx, session_key, contact_id))
 
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:
-            from bob_server.services.goal_tools import make_goal_tools
+            from server.services.goal_tools import make_goal_tools
             tools.extend(make_goal_tools(self.ctx, session_key))
             # Bob Events §3.4: the payment gate's human side.
-            from bob_server.services.approval_tools import make_approval_tools
+            from server.services.approval_tools import make_approval_tools
             tools.extend(make_approval_tools(self.ctx, session_key))
 
         # Voice outreach: attach whenever the requester is a trusted contact, in any
@@ -900,14 +900,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # trust rather than chat kind. `initiate_voice_call` self-gates to DM-only
         # via its chat-id check, so attaching it in groups is harmless.
         if is_trusted:
-            from bob_server.services.voice_outreach_tools import make_voice_outreach_tools
+            from server.services.voice_outreach_tools import make_voice_outreach_tools
             tools.extend(make_voice_outreach_tools(self.ctx, self, session_key))
 
         # Outreach reply tool for active outreach targets (goal-backed).
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         active_outreach = await GoalRepository(self.db).active_outreach(session_key)
         if active_outreach:
-            from bob_server.services.whatsapp_outreach_tools import make_outreach_reply_tools
+            from server.services.whatsapp_outreach_tools import make_outreach_reply_tools
             tools.extend(make_outreach_reply_tools(self.ctx, self, session_key))
 
         message_was_sent = [False]
@@ -929,7 +929,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             # Bob3 Phase IV: sends go through the effects outbox — recorded
             # durably, delivered inline, retried by the pump after a crash.
             # History (sent_texts) is written from delivery confirmation.
-            from bob_server.services.effects import emit_and_deliver
+            from server.services.effects import emit_and_deliver
 
             message_was_sent[0] = True
             if is_no_reply(text):
@@ -985,7 +985,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             """Backburner holding ack — sent by the detach sequence while the
             turn's own send tool is still mid-flight. Own idempotency key so a
             retry can never duplicate a turn-send."""
-            from bob_server.services.effects import emit_and_deliver
+            from server.services.effects import emit_and_deliver
 
             result = await emit_and_deliver(
                 self.ctx, kind="whatsapp_send",
@@ -995,7 +995,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 logger.warning("backburner: holding ack delivery failed (dispatch=%s): %s",
                                dispatch_id, result.get("error"))
 
-        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
+        from server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
         async def _on_quota_exhausted() -> None:
             await _notify_quota_exhausted(wa_service, chat_id, session_key)
@@ -1033,7 +1033,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         kill -9 during an armed attention window loses zero messages.
 
         Returns the number of sessions re-armed."""
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).undispatched_conversations(
             channel="whatsapp")
         resumed = 0
@@ -1059,9 +1059,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         drain of queued human texts, or crash recovery of a never-dispatched
         inbound. Pure wake-content rows keep the turn autonomous.
         """
-        from bob_server.repositories.conversations import (
+        from server.repositories.conversations import (
             ConversationRepository, wa_send_jid)
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         route = await ConversationRepository(self.db).route_for(session_key)
         jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
         if not jid:
@@ -1070,7 +1070,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         contact_id = route["contact_id"]
         is_trusted = False
         if contact_id:
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             trusted = await ContactRepository(self.db).is_trusted(contact_id)
             is_trusted = bool(trusted)
 
@@ -1084,8 +1084,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 session_key),
         )
 
-        from bob_server.services.attention import AttentionCoordinator
-        from bob_server.services.dispatch_runner import DispatchRunner
+        from server.services.attention import AttentionCoordinator
+        from server.services.dispatch_runner import DispatchRunner
 
         async def _run_dispatch(s=spec) -> str:
             return await DispatchRunner(self.ctx).run(s)

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
-from bob_server.repositories.contacts import ContactRepository
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.repositories.contacts import ContactRepository
 
 
 router = APIRouter()
@@ -49,7 +49,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         return {"id": None}
 
     sessions: list[dict[str, Any]] = []
-    from bob_server.repositories.participants import ParticipantRepository
+    from server.repositories.participants import ParticipantRepository
     session_rows = await ParticipantRepository(db).contact_session_rollup(contact_id)
     for row in session_rows:
         sessions.append({
@@ -64,7 +64,7 @@ async def get_contact_detail(request: Request, contact_id: str) -> dict[str, Any
         "SELECT name FROM sqlite_master WHERE type='table' AND name='whatsappgroup_members'"
     )
     if groups_table:
-        from bob_server.repositories.groups import GroupRepository
+        from server.repositories.groups import GroupRepository
         group_rows = await GroupRepository(db).groups_for_contact(contact_id)
         for row in group_rows:
             groups.append({
@@ -116,8 +116,8 @@ async def update_contact(request: Request, contact_id: str) -> dict[str, Any]:
 
     # Propagate name change to linked person entity's display_name snapshot
     if "name" in updates:
-        from bob_server.context import AppContext
-        from bob_server.services.memory import MemoryService
+        from server.context import AppContext
+        from server.services.memory import MemoryService
         settings = request.app.state.settings
         ctx = AppContext(settings=settings, db=db)
         await MemoryService(ctx).sync_person_display_name_for_contact(
@@ -136,8 +136,8 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
     if not row:
         return {"error": "contact not found"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory.service import MemoryService
+    from server.context import AppContext
+    from server.services.memory.service import MemoryService
 
     settings = request.app.state.settings
     ctx = AppContext(settings=settings, db=db)
@@ -146,7 +146,7 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
     # Find person entity: try contact_id claim first, then name-slug match
     entity_id: str | None = None
     hex8 = str(contact_id)[:8]
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     claim_entity = await memory_admin.entity_id_for_contact_hex(db, hex8)
     if claim_entity:
         entity_id = claim_entity
@@ -166,8 +166,8 @@ async def get_contact_entity(request: Request, contact_id: str) -> dict[str, Any
         return {"error": "not found"}
 
     # Render entity claims
-    from bob_server.services.memory.claim_service import get_active_claims
-    from bob_server.services.memory.claim_types import render_entity
+    from server.services.memory.claim_service import get_active_claims
+    from server.services.memory.claim_types import render_entity
 
     claims = await get_active_claims(db, entity.entity_id)
     claim_dicts = [
@@ -194,12 +194,12 @@ async def get_contact_claims(request: Request, contact_id: str) -> Any:
     if not row:
         return {"error": "contact not found"}
 
-    from bob_server.services.memory.claim_service import get_active_claims
+    from server.services.memory.claim_service import get_active_claims
 
     # Find person entity: try contact_id claim first, then name-slug match
     entity_id: str | None = None
     hex8 = str(contact_id)[:8]
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     claim_entity = await memory_admin.entity_id_for_contact_hex(db, hex8)
     if claim_entity:
         entity_id = claim_entity

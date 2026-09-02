@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
-from bob_server.repositories.llm_call_log import LlmCallLogRepository
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.repositories.llm_call_log import LlmCallLogRepository
 
 
 router = APIRouter()
@@ -40,7 +40,7 @@ async def get_home(request: Request) -> dict[str, Any]:
             })
     if msgs_exists_home:
         seen = {s["session_key"] for s in active_sessions}
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         msg_rows = await HistoryRepository(db).activity_rollup(limit=50)
         for row in msg_rows:
             key = row["session_key"]
@@ -92,7 +92,7 @@ async def get_home(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entities'"
     )
     if entities_table:
-        from bob_server.services.memory import admin as memory_admin
+        from server.services.memory import admin as memory_admin
         entity_count = await memory_admin.active_entity_count(db)
 
         claims_table = await db.fetch_one(
@@ -120,7 +120,7 @@ async def get_home(request: Request) -> dict[str, Any]:
     total_cost_24h = 0.0
     unpriced_calls = 0
     if log_exists:
-        from bob_server.services import model_registry
+        from server.services import model_registry
         settings = getattr(request.app.state, "settings", None)
         yaml_pricing = model_registry.pricing(settings.config_dir) if settings else {}
         cost_rows = await LlmCallLogRepository(db).cost_rollup_24h()

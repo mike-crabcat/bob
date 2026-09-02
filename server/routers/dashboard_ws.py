@@ -10,8 +10,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from bob_server.database import Database
-from bob_server.services.event_bus import EventBus
+from server.database import Database
+from server.services.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ async def dashboard_websocket(websocket: WebSocket) -> None:
                         session_key = msg.get("session_key", "")
                         agenda = msg.get("agenda", "")
                         if session_key:
-                            from bob_server.repositories.participants import AgendaRepository
+                            from server.repositories.participants import AgendaRepository
                             await AgendaRepository(db).set(
                                 session_key, agenda,
                                 datetime.now(timezone.utc).isoformat())

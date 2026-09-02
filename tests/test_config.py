@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from bob_server.config import Settings
+from server.config import Settings
 
 
 def _clear_bob_env(monkeypatch, tmp_path: Path) -> None:

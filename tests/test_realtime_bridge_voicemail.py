@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
-from bob_server.services.realtime_bridge import RealtimeBridge
-from bob_server.services.tools import tool
+from server.services.realtime_bridge import RealtimeBridge
+from server.services.tools import tool
 
 
 @tool

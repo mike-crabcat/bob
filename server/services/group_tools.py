@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import Tool
+from server.services.tools import Tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,12 @@ def make_group_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     async def _participants() -> str:
         """List all current participants in this group with their names, admin status, and contact info."""
         # Resolve the group from session_key via bindings.address -> whatsappgroups.whatsapp_jid
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         route = await ConversationRepository(db).route_for(session_key)
         if not route or not route["address"]:
             return "Not in a group session."
 
-        from bob_server.repositories.groups import GroupRepository
+        from server.repositories.groups import GroupRepository
         groups = GroupRepository(db)
         group = await groups.get_by_jid(route["address"])
         if not group:

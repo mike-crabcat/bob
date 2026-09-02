@@ -17,11 +17,11 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import tool
+from server.services.tools import tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
-    from bob_server.services.whatsapp_bridge_service import WhatsAppBridgeService
+    from server.context import AppContext
+    from server.services.whatsapp_bridge_service import WhatsAppBridgeService
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,8 @@ def make_voice_outreach_tools(
         create them first with create_contact(name, phone_number) and pass the
         returned contact_id.
         """
-        from bob_server.services.voice_session_service import VoiceSessionService
-        from bob_server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
+        from server.services.voice_session_service import VoiceSessionService
+        from server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
 
         chat_id = _session_key_to_chat_id(session_key)
         if chat_id is None or "@s.whatsapp.net" not in chat_id:

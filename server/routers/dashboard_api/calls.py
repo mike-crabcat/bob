@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
@@ -16,7 +16,7 @@ async def get_call_detail(request: Request, call_id: str) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    from server.repositories.llm_call_log import LlmCallLogRepository
     row = await LlmCallLogRepository(db).get(call_id)
     if not row:
         return {"error": "not found"}

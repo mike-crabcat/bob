@@ -11,22 +11,22 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from bob_server.services.tools import Tool
-from bob_server.services.workspace_tools import make_workspace_tools
-from bob_server.services.process_tools import make_process_tools
-from bob_server.services.memory_tools import make_memory_tools
-from bob_server.services.docs_tools import make_docs_tools
-from bob_server.services.changelog_tools import make_changelog_tools
-from bob_server.services.email_tools import make_email_send_tools, make_email_thread_tools
-from bob_server.services.contact_tools import make_contact_tools
-from bob_server.services.phone_tools import make_phone_tools
-from bob_server.services.reflection_service import make_reflection_tools
-from bob_server.services.subagent_tools import make_subagent_tools
-from bob_server.services.session_tools import make_session_tools
-from bob_server.services.routine_tools import make_routine_tools
+from server.services.tools import Tool
+from server.services.workspace_tools import make_workspace_tools
+from server.services.process_tools import make_process_tools
+from server.services.memory_tools import make_memory_tools
+from server.services.docs_tools import make_docs_tools
+from server.services.changelog_tools import make_changelog_tools
+from server.services.email_tools import make_email_send_tools, make_email_thread_tools
+from server.services.contact_tools import make_contact_tools
+from server.services.phone_tools import make_phone_tools
+from server.services.reflection_service import make_reflection_tools
+from server.services.subagent_tools import make_subagent_tools
+from server.services.session_tools import make_session_tools
+from server.services.routine_tools import make_routine_tools
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def build_common_tools(
 
     # Dream plan tools — participants adjust plans conversationally (session-bound)
     if ctx.settings.dream.enabled:
-        from bob_server.services.dream.tools import make_dream_tools
+        from server.services.dream.tools import make_dream_tools
 
         _extend(make_dream_tools(ctx, session_key=session_key))
 
@@ -103,7 +103,7 @@ def build_common_tools(
 
     # Home Assistant — adds current_location() when configured
     if ctx.settings.homeassistant.enabled:
-        from bob_server.services.location_tools import make_location_tools
+        from server.services.location_tools import make_location_tools
         _extend(make_location_tools(ctx))
 
     return tools

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from bob_server.config import Settings
+from server.config import Settings
 
 
 # Correlation ID context variable (thread-safe for asyncio)

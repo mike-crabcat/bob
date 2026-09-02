@@ -8,10 +8,10 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.services.agentmail_client import AgentMailClient
-from bob_server.services.base import BaseService, json_dumps, utcnow
+from server.context import AppContext
+from server.database import Database
+from server.services.agentmail_client import AgentMailClient
+from server.services.base import BaseService, json_dumps, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ async def _canonical_session_key(db: Database, binding_key: str) -> str:
     conversation id so downstream state keys under the conversation. 1:1
     today; diverges only after an explicit merge."""
     try:
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         # Email binding keys are agent:{aid}:email:thread:{thread_id}; the
         # thread id is the wire address for the thread endpoint.
         thread_id = binding_key.rsplit(":", 1)[-1] if ":email:thread:" in binding_key else None
@@ -127,7 +127,7 @@ async def resolve_or_create_email_thread(
 
     Returns ``(thread_row, is_new_thread)``.
     """
-    from bob_server.services.email_store import EmailStore
+    from server.services.email_store import EmailStore
     store = EmailStore(db)
     existing = await store.thread_by_agentmail(inbox["id"], agentmail_thread_id)
     if existing is not None:
@@ -140,7 +140,7 @@ async def resolve_or_create_email_thread(
     now = utcnow()
     now_iso = now.isoformat()
 
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     await ConversationRepository(db).register_endpoint(
         session_key, endpoint_kind="thread", address=agentmail_thread_id)
@@ -189,7 +189,7 @@ class EmailPollingService(BaseService):
         if not settings.agentmail.enabled:
             return 0
 
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         inboxes = await EmailStore(self.db).active_inboxes()
         if not inboxes:
             return 0
@@ -210,7 +210,7 @@ class EmailPollingService(BaseService):
         Args:
             inbox: Database row dict or agentmail_inbox_id string.
         """
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(self.db)
         if isinstance(inbox, str):
             row = await store.inbox_by_agentmail_id(inbox)
@@ -277,7 +277,7 @@ class EmailPollingService(BaseService):
             return False
 
         # Dedup check
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(self.db)
         existing = await store.message_by_agentmail_id(agentmail_message_id)
         if existing is not None:
@@ -296,7 +296,7 @@ class EmailPollingService(BaseService):
                 thread_id = existing["thread_id"]
                 session_key_row = await store.thread_by_agentmail_any(thread_id)
                 if session_key_row:
-                    from bob_server.repositories.history import HistoryRepository
+                    from server.repositories.history import HistoryRepository
                     has_history = await HistoryRepository(self.db).has_any(
                         session_key_row["session_key"])
                     if not has_history:
@@ -317,7 +317,7 @@ class EmailPollingService(BaseService):
         # Store the message and append the ingress event in ONE transaction
         # (Bob3 invariants 1+2). external_id = agentmail_message_id gives
         # accept-once; audit-only in Phase I (dispatch unchanged).
-        from bob_server.repositories import Event, EventLogRepository
+        from server.repositories import Event, EventLogRepository
 
         binding_key_for_event = _build_session_key(thread_id)
         session_key_for_event = await _canonical_session_key(self.db, binding_key_for_event)
@@ -360,7 +360,7 @@ class EmailPollingService(BaseService):
             ), txn=txn)
 
         # Attention shadow (Bob3 Phase III): email is always addressed.
-        from bob_server.services.attention import record_shadow_decision
+        from server.services.attention import record_shadow_decision
         await record_shadow_decision(
             self.db,
             session_key=session_key_for_event,
@@ -434,7 +434,7 @@ class EmailPollingService(BaseService):
     ) -> tuple[dict[str, Any], bool]:
         """Find or create an email_threads record for this message."""
         sender_email, sender_name = _parse_from(message.get("from"))
-        from bob_server.services.channel_policies import EmailInboundPolicy
+        from server.services.channel_policies import EmailInboundPolicy
         sender = await EmailInboundPolicy(self.ctx).resolve_sender(sender_email, sender_name)
         contact_id = sender.contact_id
         is_trusted = sender.is_trusted
@@ -468,7 +468,7 @@ class EmailPollingService(BaseService):
         but code/exec payloads are never persisted. Everything else lands in
         `<workspace>/email-attachments/<thread_id>/`.
         """
-        from bob_server.services.email_tools import is_blocked_attachment
+        from server.services.email_tools import is_blocked_attachment
 
         settings = self._get_settings()
         workspace_dir = settings.harness.workspace_dir.expanduser()
@@ -555,11 +555,11 @@ class EmailPollingService(BaseService):
         prompt_parts: list[str] = []
 
         # 1. Resolve agenda
-        from bob_server.services.session_agenda_service import SessionAgendaService
+        from server.services.session_agenda_service import SessionAgendaService
         contact_id = thread.get("contact_id")
         is_trusted = False
         if contact_id:
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             is_trusted = bool(await ContactRepository(self.db).is_trusted(contact_id))
         agenda_svc = SessionAgendaService(self.ctx)
         agenda_text = await agenda_svc.get_effective_agenda(
@@ -573,7 +573,7 @@ class EmailPollingService(BaseService):
 
         # 2. Prior outgoing email context — only on the first incoming reply
         if is_new_thread:
-            from bob_server.services.email_store import EmailStore
+            from server.services.email_store import EmailStore
             prior_outgoing = await EmailStore(self.db).first_from_sender(
                 thread["agentmail_thread_id"], inbox["email_address"])
             if prior_outgoing and prior_outgoing["text_body"]:
@@ -648,21 +648,21 @@ class EmailPollingService(BaseService):
             session_key, is_new_thread,
         )
 
-        from bob_server.services.llm_dispatch import LLMDispatchService
-        from bob_server.services.email_tools import make_email_tools
-        from bob_server.services.tool_registry import build_common_tools
-        from bob_server.services.session_service import SessionService
-        from bob_server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+        from server.services.llm_dispatch import LLMDispatchService
+        from server.services.email_tools import make_email_tools
+        from server.services.tool_registry import build_common_tools
+        from server.services.session_service import SessionService
+        from server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
 
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
-        from bob_server.services.context_assembler import ContextAssembler
+        from server.services.context_assembler import ContextAssembler
         participants_prompt = await ContextAssembler(self.ctx).participants_prompt(
             session_key, include_identifier=True)
 
         # Load memory index for trusted sessions
         memory_prompt = ""
         if is_trusted:
-            from bob_server.services.memory import MemoryService
+            from server.services.memory import MemoryService
             mem_svc = MemoryService(self.ctx)
             memory_prompt = await mem_svc.build_memory_index(
                 settings.harness.workspace_dir
@@ -707,14 +707,14 @@ class EmailPollingService(BaseService):
         # Bob Events §1.5: goal tools for trusted email threads (parity with
         # the WhatsApp inbound path).
         if is_trusted:
-            from bob_server.services.goal_tools import make_goal_tools
+            from server.services.goal_tools import make_goal_tools
             tools.extend(make_goal_tools(self.ctx, session_key))
-            from bob_server.services.approval_tools import make_approval_tools
+            from server.services.approval_tools import make_approval_tools
             tools.extend(make_approval_tools(self.ctx, session_key))
 
         # If this thread was initiated from another session, inject the finish_email_thread tool
         if origin_session_key:
-            from bob_server.services.email_tools import make_email_thread_result_tools
+            from server.services.email_tools import make_email_thread_result_tools
             wa_service = getattr(self.ctx, "whatsapp_bridge", None)
             tools.extend(make_email_thread_result_tools(
                 self.ctx,
@@ -726,7 +726,7 @@ class EmailPollingService(BaseService):
 
         dispatch_id = str(uuid4())
 
-        from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
+        from server.services.dispatch_runner import DispatchRunner, DispatchSpec
 
         dispatch_spec = DispatchSpec(
             session_key=session_key,
@@ -774,13 +774,13 @@ class EmailPollingService(BaseService):
             # Resolve to contact
             contact_id = None
             is_trusted = 0
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             contact = await ContactRepository(self.db).get_by_email(email_lower)
             if contact:
                 contact_id = contact["id"]
                 is_trusted = 1 if contact.get("is_trusted") else 0
             display_name = name or email_lower
-            from bob_server.repositories.participants import ParticipantRepository
+            from server.repositories.participants import ParticipantRepository
             await ParticipantRepository(self.db).upsert(
                 session_key, email_lower,
                 display_name=display_name, contact_id=contact_id,
@@ -808,7 +808,7 @@ class EmailPollingService(BaseService):
         if not settings.agentmail.enabled:
             return 0
 
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         inboxes = await EmailStore(self.db).active_inboxes()
         if not inboxes:
             return 0
@@ -828,7 +828,7 @@ class EmailPollingService(BaseService):
         Unlike poll_inbox, this fetches all messages (not just unread),
         skips mark-read and LLM dispatch, and fixes thread message counts.
         """
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(self.db)
         if isinstance(inbox, str):
             row = await store.inbox_by_agentmail_id(inbox)
@@ -878,5 +878,5 @@ class EmailPollingService(BaseService):
 
     async def _recount_thread_messages(self, inbox_id: str) -> None:
         """Fix thread message counts by recounting actual persisted messages."""
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         await EmailStore(self.db).recount_inbox_threads(inbox_id, utcnow().isoformat())

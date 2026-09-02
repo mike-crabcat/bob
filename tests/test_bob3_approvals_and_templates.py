@@ -14,14 +14,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.repositories.approvals import ApprovalRepository
-from bob_server.repositories.goals import GoalRepository
+from server.repositories.approvals import ApprovalRepository
+from server.repositories.goals import GoalRepository
 
 
 @pytest.fixture
 def mock_wake(monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     return wake
 
 
@@ -69,7 +69,7 @@ async def test_pending_view_and_list(ctx, db):
 # ---------------------------------------------------------------------------
 
 async def test_approval_request_wakes_origin_with_summary(ctx, db, mock_wake):
-    from bob_server.services.approval_tools import make_approval_tools
+    from server.services.approval_tools import make_approval_tools
 
     tools = {t.name: t for t in make_approval_tools(ctx, "conv-origin")}
     out = json.loads(await tools["request_approval"].handler(
@@ -93,7 +93,7 @@ async def test_approve_records_decision_and_chains_no_effects(ctx, db, mock_wake
     agent's job (via its skills) on the wake that follows. No vendor effect
     may exist in the platform."""
     approval_id = await _purchase_approval(ctx)
-    from bob_server.services.approval_tools import make_approval_tools
+    from server.services.approval_tools import make_approval_tools
     tools = {t.name: t for t in make_approval_tools(ctx, "conv")}
 
     out = json.loads(await tools["respond_approval"].handler(
@@ -107,7 +107,7 @@ async def test_approve_records_decision_and_chains_no_effects(ctx, db, mock_wake
 
 async def test_reject_records_without_side_effects(ctx, db, mock_wake):
     approval_id = await _purchase_approval(ctx)
-    from bob_server.services.approval_tools import make_approval_tools
+    from server.services.approval_tools import make_approval_tools
     tools = {t.name: t for t in make_approval_tools(ctx, "conv")}
 
     out = json.loads(await tools["respond_approval"].handler(
@@ -122,7 +122,7 @@ async def test_reject_records_without_side_effects(ctx, db, mock_wake):
 # ---------------------------------------------------------------------------
 
 async def test_instantiate_team_event_template(ctx, db, mock_wake):
-    from bob_server.services.goal_templates import (
+    from server.services.goal_templates import (
         instantiate_template, load_templates,
     )
 
@@ -169,7 +169,7 @@ async def test_instantiate_team_event_template(ctx, db, mock_wake):
 
 
 async def test_instantiate_missing_params_lists_them(ctx, db, mock_wake):
-    from bob_server.services.goal_templates import instantiate_template
+    from server.services.goal_templates import instantiate_template
     with pytest.raises(ValueError, match="group_session_key"):
         await instantiate_template(
             ctx, template_name="team-event", session_key="work",
@@ -177,7 +177,7 @@ async def test_instantiate_missing_params_lists_them(ctx, db, mock_wake):
 
 
 async def test_template_tools_roundtrip(ctx, db, mock_wake):
-    from bob_server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import make_goal_tools
 
     tools = {t.name: t for t in make_goal_tools(ctx, "work")}
     listed = json.loads(await tools["list_goal_templates"].handler())
@@ -198,12 +198,12 @@ async def test_template_tools_roundtrip(ctx, db, mock_wake):
 
 async def test_outreach_tool_parents_under_goal(ctx, db, mock_wake):
     """The negotiation fan-out's outreach goals roll up into the plan."""
-    from bob_server.services import goal_service
+    from server.services import goal_service
     root = await goal_service.create_goal(
         ctx, conversation_id="work", objective="plan lunch",
         strategy={"v": 2, "refs": {"entities": ["group-ai-doom"]}})
 
-    from bob_server.services.whatsapp_outreach_tools import (
+    from server.services.whatsapp_outreach_tools import (
         make_whatsapp_outreach_tools,
     )
 

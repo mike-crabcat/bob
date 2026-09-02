@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bob_server.services.base import BaseService, utcnow
+from server.services.base import BaseService, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +157,11 @@ class SessionAgendaService(BaseService):
     """Manages per-conversation agendas stored in the agendas table."""
 
     async def get_agenda(self, session_key: str) -> str | None:
-        from bob_server.repositories.participants import AgendaRepository
+        from server.repositories.participants import AgendaRepository
         return await AgendaRepository(self.db).get(session_key)
 
     async def set_agenda(self, session_key: str, agenda: str) -> None:
-        from bob_server.repositories.participants import AgendaRepository
+        from server.repositories.participants import AgendaRepository
         await AgendaRepository(self.db).set(session_key, agenda, utcnow().isoformat())
 
     async def get_effective_agenda(
@@ -216,7 +216,7 @@ class SessionAgendaService(BaseService):
 
     async def _migrate_email_agenda(self, session_key: str) -> str | None:
         """Check if email_threads has an agenda for this session and migrate it."""
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         agenda = await EmailStore(self.db).agenda_for_session(session_key)
         if agenda:
             await self.set_agenda(session_key, agenda)

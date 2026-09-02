@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.repositories.goals import GoalRepository
-from bob_server.repositories.wakeups import WakeupRepository
-from bob_server.services import goal_service
+from server.repositories.goals import GoalRepository
+from server.repositories.wakeups import WakeupRepository
+from server.services import goal_service
 
 
 def _past() -> str:
@@ -47,7 +47,7 @@ async def test_stale_revision_rejected(ctx, db):
 
 async def test_simultaneous_completion_single_winner(ctx, db, monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     goal = await goal_service.create_goal(
         ctx, conversation_id="c", objective="obj", origin_conversation_id="o")
 
@@ -63,7 +63,7 @@ async def test_simultaneous_completion_single_winner(ctx, db, monkeypatch):
 
 
 async def test_cancel_vs_complete_race(ctx, db, monkeypatch):
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", AsyncMock())
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", AsyncMock())
     goal = await goal_service.create_goal(ctx, conversation_id="c", objective="obj")
 
     assert await GoalRepository(db).cancel(goal["id"])
@@ -74,7 +74,7 @@ async def test_cancel_vs_complete_race(ctx, db, monkeypatch):
 
 async def test_completion_wakes_origin_with_result(ctx, db, monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     goal = await goal_service.create_goal(
         ctx, conversation_id="conv-work", objective="ask John about Thursday",
         origin_conversation_id="agent:main:whatsapp:group:123")
@@ -91,7 +91,7 @@ async def test_completion_wakes_origin_with_result(ctx, db, monkeypatch):
 
 async def test_no_wake_when_origin_is_same_conversation(ctx, db, monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     goal = await goal_service.create_goal(
         ctx, conversation_id="c", objective="obj", origin_conversation_id="c")
     await goal_service.complete_goal(ctx, goal["id"], result="done")
@@ -99,7 +99,7 @@ async def test_no_wake_when_origin_is_same_conversation(ctx, db, monkeypatch):
 
 
 async def test_deadline_schedules_wakeup_and_settle_cancels_it(ctx, db, monkeypatch):
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", AsyncMock())
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", AsyncMock())
     goal = await goal_service.create_goal(
         ctx, conversation_id="c", objective="obj",
         origin_conversation_id="o", deadline=_future())
@@ -113,7 +113,7 @@ async def test_deadline_schedules_wakeup_and_settle_cancels_it(ctx, db, monkeypa
 
 async def test_due_wakeup_fires_with_goal_context(ctx, db, monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     goal = await goal_service.create_goal(
         ctx, conversation_id="c", objective="chase the invoice",
         origin_conversation_id="o", deadline=_past())
@@ -133,7 +133,7 @@ async def test_due_wakeup_fires_with_goal_context(ctx, db, monkeypatch):
 
 async def test_wakeup_for_settled_goal_is_moot(ctx, db, monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     goal = await GoalRepository(db).create(conversation_id="c", objective="obj")
     await WakeupRepository(db).schedule(
         conversation_id="c", not_before=_past(), goal_id=goal["id"])
@@ -145,7 +145,7 @@ async def test_wakeup_for_settled_goal_is_moot(ctx, db, monkeypatch):
 
 
 async def test_recurring_wakeup_reschedules(ctx, db, monkeypatch):
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", AsyncMock())
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", AsyncMock())
     await WakeupRepository(db).schedule(
         conversation_id="c", not_before=_past(), recurrence="+30m")
 
@@ -158,8 +158,8 @@ async def test_goal_tools_create_and_complete_via_effects(ctx, db, monkeypatch):
     import json as _json
 
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
-    from bob_server.services.goal_tools import make_goal_tools
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    from server.services.goal_tools import make_goal_tools
 
     tools = {t.name: t for t in make_goal_tools(ctx, "agent:main:whatsapp:dm:1")}
     out = _json.loads(await tools["create_goal"].handler(objective="test obj"))
@@ -188,8 +188,8 @@ async def test_subagent_result_settles_goal_and_wakes_parent(ctx, db, monkeypatc
     """First subagent result completes the linked goal → origin wake; a
     follow-up result (goal settled) wakes the parent directly."""
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
-    from bob_server.services.subagent_service import SubagentService
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    from server.services.subagent_service import SubagentService
 
     parent = "agent:main:whatsapp:dm:555"
     await db.execute(
@@ -220,8 +220,8 @@ async def test_subagent_result_settles_goal_and_wakes_parent(ctx, db, monkeypatc
 
 async def test_subagent_failure_fails_goal(ctx, db, monkeypatch):
     wake = AsyncMock()
-    monkeypatch.setattr("bob_server.services.wake_service.wake_conversation", wake)
-    from bob_server.services.subagent_service import SubagentService
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    from server.services.subagent_service import SubagentService
 
     await db.execute(
         """INSERT INTO subagents (id, parent_session_key, session_key, task,
@@ -245,8 +245,8 @@ async def test_outreach_state_lives_on_goal(ctx, db):
     """Increment 3 + Bob Events §1.4: the goals block and reply-tool gate
     read the active outreach goal, not route metadata; settling clears them.
     The outreach requestor/message ride in the goal's legacy state."""
-    from bob_server.services.context_assembler import ContextAssembler
-    from bob_server.services.goal_service import create_goal, settle_goal
+    from server.services.context_assembler import ContextAssembler
+    from server.services.goal_service import create_goal, settle_goal
 
     target = "agent:main:whatsapp:dm:61400000099"
     goal = await create_goal(

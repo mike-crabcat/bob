@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from bob_server.cron import (
+from server.cron import (
     next_cron_occurrence,
     validate_cron_expression,
 )

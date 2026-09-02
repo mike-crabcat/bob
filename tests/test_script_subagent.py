@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from bob_server.services.subagent_service import SubagentService, _running_tasks
+from server.services.subagent_service import SubagentService, _running_tasks
 
 
 async def _wait_for_status(db, subagent_id, statuses, timeout=5.0):
@@ -37,7 +37,7 @@ async def test_script_subagent_runs_and_wakes_parent(ctx, monkeypatch, tmp_path)
     async def fake_wake(_ctx, conversation_id, content, **kwargs):
         woken.append((conversation_id, content))
 
-    import bob_server.services.wake_service as wake_service
+    import server.services.wake_service as wake_service
     monkeypatch.setattr(wake_service, "wake_conversation", fake_wake)
 
     svc = SubagentService(ctx)
@@ -71,7 +71,7 @@ async def test_script_subagent_failure_wakes_parent_with_error(ctx, monkeypatch,
     async def fake_wake(_ctx, conversation_id, content, **kwargs):
         woken.append(content)
 
-    import bob_server.services.wake_service as wake_service
+    import server.services.wake_service as wake_service
     monkeypatch.setattr(wake_service, "wake_conversation", fake_wake)
 
     svc = SubagentService(ctx)
@@ -89,7 +89,7 @@ async def test_script_subagent_sandbox_blocks_escape(ctx, monkeypatch, tmp_path)
     async def fake_wake(_ctx, conversation_id, content, **kwargs):
         pass
 
-    import bob_server.services.wake_service as wake_service
+    import server.services.wake_service as wake_service
     monkeypatch.setattr(wake_service, "wake_conversation", fake_wake)
 
     svc = SubagentService(ctx)
@@ -107,7 +107,7 @@ async def test_script_with_contact_id_is_not_hijacked_to_voice(ctx, monkeypatch,
     async def fake_wake(_ctx, conversation_id, content, **kwargs):
         pass
 
-    import bob_server.services.wake_service as wake_service
+    import server.services.wake_service as wake_service
     monkeypatch.setattr(wake_service, "wake_conversation", fake_wake)
 
     svc = SubagentService(ctx)

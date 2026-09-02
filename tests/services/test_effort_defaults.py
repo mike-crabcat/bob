@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bob_server.services import model_registry
-from bob_server.services.openai_service import OpenAIService
+from server.services import model_registry
+from server.services.openai_service import OpenAIService
 
 
 YAML = """\

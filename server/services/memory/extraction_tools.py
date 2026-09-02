@@ -18,14 +18,14 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from bob_server.services.memory.claim_types import ENTITY_REF_CLAIM_KEYS
-from bob_server.services.memory.claim_service import validate_claim_for_write, write_claim
-from bob_server.services.memory.entity_tools import (
+from server.services.memory.claim_types import ENTITY_REF_CLAIM_KEYS
+from server.services.memory.claim_service import validate_claim_for_write, write_claim
+from server.services.memory.entity_tools import (
     make_get_entity_tool,
     make_list_entities_tool,
 )
-from bob_server.services.memory.models import Claim
-from bob_server.services.tools import Tool, tool
+from server.services.memory.models import Claim
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 

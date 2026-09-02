@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bob_server.database import Database
+from server.database import Database
 
 _SHOW_STATUSES = ("proposed", "approved", "actioned")
 _MAX_PLANS = 5
@@ -30,7 +30,7 @@ async def build_session_plans_prompt(db: Database, session_key: str, *, dream_en
     if not rows:
         return ""
 
-    from bob_server.services.base import json_loads
+    from server.services.base import json_loads
 
     plans: list[dict] = []
     for r in rows:

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
-from bob_server.repositories.goals import GoalRepository
-from bob_server.repositories.wakeups import WakeupRepository
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.repositories.goals import GoalRepository
+from server.repositories.wakeups import WakeupRepository
 
 
 router = APIRouter()
@@ -45,7 +45,7 @@ async def list_goals(request: Request) -> dict[str, Any]:
     goal_ids = [g["id"] for g in goals]
     children_by_goal = await GoalRepository(db).children_map(goal_ids)
 
-    from bob_server.services.goal_state_service import parse_strategy
+    from server.services.goal_state_service import parse_strategy
     for g, r in zip(goals, rows):
         g["children"] = children_by_goal.get(g["id"], [])
         state = parse_strategy(r)
@@ -111,8 +111,8 @@ async def list_wakeups(request: Request) -> dict[str, Any]:
 async def cancel_goal(goal_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.context import AppContext
-    from bob_server.services.goal_service import settle_goal
+    from server.context import AppContext
+    from server.services.goal_service import settle_goal
 
     ctx = AppContext(db=_db(request), settings=request.app.state.settings)
     ok = await settle_goal(
@@ -129,7 +129,7 @@ async def cancel_goal(goal_id: str, request: Request) -> dict[str, Any]:
 async def cancel_wakeup(wakeup_id: str, request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.repositories.wakeups import WakeupRepository
+    from server.repositories.wakeups import WakeupRepository
 
     ok = await WakeupRepository(_db(request)).cancel(wakeup_id)
     if not ok:

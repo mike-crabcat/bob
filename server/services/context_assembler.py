@@ -26,7 +26,7 @@ class ContextAssembler:
         return "\n\n".join(p for p in parts if p)
 
     async def workspace_prompt(self) -> str:
-        from bob_server.services.prompt_assembler import load_workspace_prompt
+        from server.services.prompt_assembler import load_workspace_prompt
         return await load_workspace_prompt(
             self.ctx.settings.harness.workspace_dir, db=self.db)
 
@@ -43,7 +43,7 @@ class ContextAssembler:
             if rich:
                 return rich
 
-        from bob_server.repositories.participants import ParticipantRepository
+        from server.repositories.participants import ParticipantRepository
         rows = await ParticipantRepository(self.db).list_for(session_key)
         if not rows:
             return ""
@@ -65,11 +65,11 @@ class ContextAssembler:
         return "\n".join(lines)
 
     async def _group_participants_prompt(self, session_key: str) -> str:
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         route = await ConversationRepository(self.db).route_for(session_key)
         if not (route and route["address"]):
             return ""
-        from bob_server.repositories.groups import GroupRepository
+        from server.repositories.groups import GroupRepository
         groups = GroupRepository(self.db)
         group = await groups.get_by_jid(route["address"])
         if not group:
@@ -103,14 +103,14 @@ class ContextAssembler:
         """Person-memory profile block for DM sessions."""
         if not contact_id:
             return ""
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
         entry = await MemoryService(self.ctx).find_person_entry(
             self.ctx.settings.harness.workspace_dir, contact_id=contact_id)
         return f"## Person Profile\n\n{entry}" if entry else ""
 
     async def group_memory_hint(self, session_key: str) -> str:
         """Recall hint for groups with an accumulated memory entity."""
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         eid = await ConversationRepository(self.db).group_memory_entity_id(session_key)
         if not eid:
             return ""
@@ -121,7 +121,7 @@ class ContextAssembler:
         )
 
     async def dream_plans_prompt(self, session_key: str) -> str:
-        from bob_server.services.dream.injection import build_session_plans_prompt
+        from server.services.dream.injection import build_session_plans_prompt
         return await build_session_plans_prompt(
             self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled)
 
@@ -131,9 +131,9 @@ class ContextAssembler:
         within a budget. Replaces the special-cased outreach prompt — the
         outreach requestor/message ride in the goal's legacy_outreach state.
         """
-        from bob_server.repositories.conversations import ConversationRepository
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.services.goal_state_service import (
+        from server.repositories.conversations import ConversationRepository
+        from server.repositories.goals import GoalRepository
+        from server.services.goal_state_service import (
             GoalStrategy, parse_strategy, render_strategy,
         )
 

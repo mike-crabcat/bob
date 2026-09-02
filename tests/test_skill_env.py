@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bob_server.services.skill_env import build_skill_env
+from server.services.skill_env import build_skill_env
 
 
 def test_venv_dir_sets_virtual_env_and_prepends_path(tmp_path: Path) -> None:

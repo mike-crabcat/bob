@@ -27,8 +27,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.services.whatsapp_bridge_service import _service as wa_module
-from bob_server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
+from server.services.whatsapp_bridge_service import _service as wa_module
+from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
 TRUSTED_PHONE = "+614000000010"
 GROUP_JID = "120363000000000001@g.us"
@@ -49,7 +49,7 @@ async def _seed_contact(db, phone: str, *, trusted: int = 1, allow_inbound: int 
 
 def _settings(tmp_path: Path):
     """Real Settings with test paths — build_common_tools walks many fields."""
-    from bob_server.config import Settings
+    from server.config import Settings
     settings = Settings.from_env()
     settings.whatsapp_bridge.media_dir = tmp_path / "media"
     settings.harness.workspace_dir = tmp_path / "workspace"
@@ -81,7 +81,7 @@ def immediate_patience(monkeypatch):
     async def _submit(self, session_key, dispatch_fn, **kwargs):
         await dispatch_fn()
     monkeypatch.setattr(
-        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _submit)
+        "server.services.attention.coordinator.AttentionCoordinator.submit", _submit)
     return _submit
 
 
@@ -102,14 +102,14 @@ def stub_memory(monkeypatch):
         sync_person_display_name_for_contact = staticmethod(
             stub.sync_person_display_name_for_contact)
 
-    import bob_server.services.memory as memory_pkg
+    import server.services.memory as memory_pkg
     monkeypatch.setattr(memory_pkg, "MemoryService", _StubMemoryService)
     return stub
 
 
 def _stub_llm(monkeypatch, behaviour):
     """Replace chat_with_tools; `behaviour(messages, tools)` returns text."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     async def _chat_with_tools(self, messages, tools, **kwargs):
         return await behaviour(messages, tools)
@@ -121,7 +121,7 @@ def _stub_workspace(monkeypatch):
     async def _load(workspace_dir, db=None):
         return "workspace prompt"
     monkeypatch.setattr(
-        "bob_server.services.prompt_assembler.load_workspace_prompt", _load)
+        "server.services.prompt_assembler.load_workspace_prompt", _load)
 
 
 async def _get_tool(tools, name):
@@ -466,7 +466,7 @@ async def test_burst_messages_claimed_by_single_dispatch(
     async def _capture(self, session_key, dispatch_fn, **kwargs):
         dispatch_fns.append(dispatch_fn)
     monkeypatch.setattr(
-        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _capture)
+        "server.services.attention.coordinator.AttentionCoordinator.submit", _capture)
 
     llm_calls = []
 
@@ -533,7 +533,7 @@ async def test_crash_between_store_and_dispatch_leaves_message_recoverable(
     async def _drop(self, session_key, dispatch_fn, **kwargs):
         return  # simulated crash: dispatch never runs
     monkeypatch.setattr(
-        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _drop)
+        "server.services.attention.coordinator.AttentionCoordinator.submit", _drop)
 
     llm_calls = []
 
@@ -553,7 +553,7 @@ async def test_crash_between_store_and_dispatch_leaves_message_recoverable(
     async def _run(self, sk, fn, **kw):
         await fn()
     monkeypatch.setattr(
-        "bob_server.services.attention.coordinator.AttentionCoordinator.submit", _run)
+        "server.services.attention.coordinator.AttentionCoordinator.submit", _run)
     await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "follow-up", msg_id="w-next"))
 
     rows = await _user_messages(ctx.db, "agent:main:whatsapp:dm:%")

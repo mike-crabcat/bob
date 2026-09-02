@@ -7,9 +7,9 @@ audit trail. `record_shadow_decision` remains for channels not yet cut over
 (email records its always-addressed ACT there).
 """
 
-from bob_server.services.attention.tier0 import AddressedResult, detect_addressed
-from bob_server.services.attention.shadow import record_shadow_decision
-from bob_server.services.attention.coordinator import AttentionCoordinator
+from server.services.attention.tier0 import AddressedResult, detect_addressed
+from server.services.attention.shadow import record_shadow_decision
+from server.services.attention.coordinator import AttentionCoordinator
 
 __all__ = ["AddressedResult", "detect_addressed", "record_shadow_decision",
            "AttentionCoordinator"]

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 from .personas import FakeBridge, PersonaDriver, default_personas
 
@@ -124,7 +124,7 @@ class RehearsalScenario:
         self.pod_stub = make_pod_stub()
         self.pod_state = self.pod_stub.state.pod_state
 
-        from bob_server.services import effects as effects_svc
+        from server.services import effects as effects_svc
         # Save ONLY the key we override: a full-registry snapshot captured
         # before lazy imports register their executors would restore an
         # empty registry and break every later test in the process.
@@ -145,7 +145,7 @@ class RehearsalScenario:
         await self._seed_world()
 
     async def _seed_world(self) -> None:
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
 
         conv = ConversationRepository(self.db)
 
@@ -184,8 +184,8 @@ class RehearsalScenario:
 
     # ------------------------------------------------------------------
     async def kickoff(self) -> None:
-        from bob_server.services.goal_tools import make_goal_tools
-        from bob_server.services.whatsapp_outreach_tools import (
+        from server.services.goal_tools import make_goal_tools
+        from server.services.whatsapp_outreach_tools import (
             make_whatsapp_outreach_tools,
         )
 
@@ -218,7 +218,7 @@ class RehearsalScenario:
 
     # ------------------------------------------------------------------
     async def inject(self, persona, channel: str, text: str) -> None:
-        from bob_server.services.session_service import SessionService
+        from server.services.session_service import SessionService
 
         session = persona.dm_session if channel == "dm" else GROUP_KEY
         await SessionService(self.ctx).add_message(
@@ -234,9 +234,9 @@ class RehearsalScenario:
         """One pump round: extraction for dirty sessions (router runs inline
         in the extraction post-loop), outreach completion for answered DMs,
         then effects and wakeups."""
-        from bob_server.services.effects import pump_due_effects
-        from bob_server.services.goal_service import pump_due_wakeups
-        from bob_server.services.memory import MemoryService
+        from server.services.effects import pump_due_effects
+        from server.services.goal_service import pump_due_wakeups
+        from server.services.memory import MemoryService
 
         dirty, self.dirty = self.dirty, set()
         for session in dirty:
@@ -248,7 +248,7 @@ class RehearsalScenario:
         await pump_due_wakeups(self.ctx)
         # Determinism: a tick ends only when every wake dispatch it spawned
         # has fully run (its main-model turn included) — no cross-tick races.
-        from bob_server.services import wake_service as ws
+        from server.services import wake_service as ws
         pending = set(ws._pending_dispatches)
         while pending:
             await asyncio.wait(pending, timeout=10)
@@ -256,8 +256,8 @@ class RehearsalScenario:
         await asyncio.sleep(0)
 
     async def _finish_outreach(self, dm_session: str) -> None:
-        from bob_server.repositories.goals import GoalRepository
-        from bob_server.services.whatsapp_outreach_tools import (
+        from server.repositories.goals import GoalRepository
+        from server.services.whatsapp_outreach_tools import (
             make_outreach_reply_tools,
         )
 
@@ -272,7 +272,7 @@ class RehearsalScenario:
 
     # ------------------------------------------------------------------
     async def announce(self) -> None:
-        from bob_server.services.whatsapp_outreach_tools import (
+        from server.services.whatsapp_outreach_tools import (
             make_group_send_tools,
         )
 
@@ -288,8 +288,8 @@ class RehearsalScenario:
     async def book(self) -> None:
         """Voice leg, scripted at the call-result layer: the real result →
         settle → roll-up → wake → event-memory chain runs end to end."""
-        from bob_server.repositories.phone_calls import PhoneCallRepository
-        from bob_server.services import (
+        from server.repositories.phone_calls import PhoneCallRepository
+        from server.services import (
             goal_service,
             phone_call_result_service as prs,
         )
@@ -327,8 +327,8 @@ class RehearsalScenario:
         merch child settles through the chokepoint. The skill itself lives
         in the workspace, so the harness simulates its HTTP behaviour —
         same key discipline, same external_id idempotency."""
-        from bob_server.repositories.approvals import ApprovalRepository
-        from bob_server.services.approval_tools import make_approval_tools
+        from server.repositories.approvals import ApprovalRepository
+        from server.services.approval_tools import make_approval_tools
 
         row = (await ApprovalRepository(self.db).pending())[0]
         tools = {t.name: t.handler for t in
@@ -346,14 +346,14 @@ class RehearsalScenario:
                 headers={"Authorization": "Bearer rehearsal-key"})
             assert r.status_code < 400, r.text
             order_id = r.json()["result"]["id"]
-        from bob_server.services import goal_service
+        from server.services import goal_service
         await goal_service.settle_goal(
             self.ctx, self.bb["merch"], status="completed",
             result=f"POD order {order_id} placed via the printful skill")
 
     # ------------------------------------------------------------------
     async def _status(self, goal_id: str):
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         row = await GoalRepository(self.db).get(goal_id)
         return row["status"] if row else None
 
@@ -363,12 +363,12 @@ class RehearsalScenario:
         return _cond
 
     async def _pending_purchase(self) -> bool:
-        from bob_server.repositories.approvals import ApprovalRepository
+        from server.repositories.approvals import ApprovalRepository
         return any(r["approval_type"] == "purchase"
                    for r in await ApprovalRepository(self.db).pending())
 
     async def _headcount_updated(self) -> bool:
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
         row = await GoalRepository(self.db).get(self.bb["root"])
         state = json.loads((row or {}).get("strategy_json") or "{}")
         known = " ".join(state.get("known") or [])
@@ -418,7 +418,7 @@ class RehearsalScenario:
                             what="cancellation → headcount update")
 
         await asyncio.sleep(1.1)  # the compressed T-2h reminder becomes due
-        from bob_server.services.goal_service import pump_due_wakeups
+        from server.services.goal_service import pump_due_wakeups
         self.score.reminder_wakeups_fired = await pump_due_wakeups(self.ctx)
         await asyncio.sleep(0.1)  # drain detached dispatch tasks before close
 
@@ -434,7 +434,7 @@ class RehearsalScenario:
         """Formal information-loss metric (§4.3): every scripted ground-truth
         fact must be reflected in goal state (or event memory) and must have
         arrived via a real revision — not just at final state by accident."""
-        from bob_server.repositories.goals import GoalRepository
+        from server.repositories.goals import GoalRepository
 
         repo = GoalRepository(self.db)
         states = []
@@ -479,13 +479,13 @@ class RehearsalScenario:
             self.score.incidents.append("no reviser runs recorded")
 
     def _restore_executors(self) -> None:
-        from bob_server.services import effects as effects_svc
+        from server.services import effects as effects_svc
         if getattr(self, "_saved_send", None) is not None:
             effects_svc._EXECUTORS["whatsapp_send"] = self._saved_send
         # Cross-test hygiene: nothing module-level may outlive the scenario,
         # or later tests in the same process inherit stale loop-bound state.
-        from bob_server.services import wake_service as ws
+        from server.services import wake_service as ws
         ws._pending_dispatches.clear()
-        from bob_server.services import goal_state_service as gss
+        from server.services import goal_state_service as gss
         gss._GOAL_LOCKS.clear()
         gss._REVISER_SEMAPHORES.clear()

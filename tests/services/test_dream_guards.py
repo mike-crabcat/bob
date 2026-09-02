@@ -27,8 +27,8 @@ async def _make_run(store) -> str:
 
 @pytest.mark.asyncio
 async def test_evidence_has_human(ctx):
-    from bob_server.services.dream.models import Evidence
-    from bob_server.services.dream.runner import DreamRunner
+    from server.services.dream.models import Evidence
+    from server.services.dream.runner import DreamRunner
 
     system_only = [Evidence(kind="observed", session_key=SK, at=_iso(minutes=-1), by="")]
     human = system_only + [Evidence(kind="observed", session_key=SK, at=_iso(minutes=-1), by="7c9f0fd7")]
@@ -39,9 +39,9 @@ async def test_evidence_has_human(ctx):
 
 @pytest.mark.asyncio
 async def test_terminal_plan_does_not_reopen_on_system_evidence(ctx, monkeypatch):
-    from bob_server.services.dream.models import Evidence, PlanCandidate
-    from bob_server.services.dream.runner import DreamRunner
-    from bob_server.services.dream.store import DreamStore
+    from server.services.dream.models import Evidence, PlanCandidate
+    from server.services.dream.runner import DreamRunner
+    from server.services.dream.store import DreamStore
 
     store = DreamStore(ctx)
     old_run = await _make_run(store)
@@ -85,10 +85,10 @@ async def test_terminal_plan_does_not_reopen_on_system_evidence(ctx, monkeypatch
 
 @pytest.mark.asyncio
 async def test_announce_factcheck_expires_stale_plan(ctx, monkeypatch):
-    from bob_server.services.dream.announce import AnnounceService
-    from bob_server.services.dream.models import Evidence, PlanCandidate
-    from bob_server.services.dream.store import DreamStore
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.dream.announce import AnnounceService
+    from server.services.dream.models import Evidence, PlanCandidate
+    from server.services.dream.store import DreamStore
+    from server.services.llm_dispatch import LLMDispatchService
 
     store = DreamStore(ctx)
     old_run = await _make_run(store)
@@ -133,10 +133,10 @@ async def test_announce_factcheck_expires_stale_plan(ctx, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_announce_factcheck_ok_still_announces(ctx, monkeypatch):
-    from bob_server.services.dream.announce import AnnounceService
-    from bob_server.services.dream.models import Evidence, PlanCandidate
-    from bob_server.services.dream.store import DreamStore
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.dream.announce import AnnounceService
+    from server.services.dream.models import Evidence, PlanCandidate
+    from server.services.dream.store import DreamStore
+    from server.services.llm_dispatch import LLMDispatchService
 
     store = DreamStore(ctx)
     old_run = await _make_run(store)

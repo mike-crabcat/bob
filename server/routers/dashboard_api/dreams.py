@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
 
 
 def _ctx(request: Request) -> Any:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
     return AppContext(
         db=_db(request),
@@ -27,8 +27,8 @@ async def get_dream_stats(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    from bob_server.services.dream import DreamStore
-    from bob_server.services.dream import config as dream_config
+    from server.services.dream import DreamStore
+    from server.services.dream import config as dream_config
 
     store = DreamStore(_ctx(request))
     settings = _ctx(request).settings.dream
@@ -56,7 +56,7 @@ async def get_dream_stats(request: Request) -> dict[str, Any]:
 async def list_dream_runs(request: Request, limit: int = 20) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.dream import DreamStore
+    from server.services.dream import DreamStore
 
     runs = await DreamStore(_ctx(request)).list_runs(limit)
     return {"runs": runs}
@@ -66,7 +66,7 @@ async def list_dream_runs(request: Request, limit: int = 20) -> dict[str, Any]:
 async def get_dream_run(request: Request, run_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.dream import DreamStore
+    from server.services.dream import DreamStore
 
     run = await DreamStore(_ctx(request)).get_run(run_id)
     if run is None:
@@ -78,7 +78,7 @@ async def get_dream_run(request: Request, run_id: str) -> dict[str, Any]:
 async def list_dream_resolutions(request: Request, status: str = "") -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.dream import DreamStore
+    from server.services.dream import DreamStore
 
     statuses = [s for s in status.split(",") if s.strip()] or None
     rows = await DreamStore(_ctx(request)).list_resolutions(statuses)
@@ -89,7 +89,7 @@ async def list_dream_resolutions(request: Request, status: str = "") -> dict[str
 async def list_dream_plans(request: Request, status: str = "") -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.dream import DreamStore
+    from server.services.dream import DreamStore
 
     statuses = [s for s in status.split(",") if s.strip()] or None
     rows = await DreamStore(_ctx(request)).list_plans(statuses)
@@ -100,9 +100,9 @@ async def list_dream_plans(request: Request, status: str = "") -> dict[str, Any]
 async def approve_dream_plan(request: Request, plan_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.base import iso_utc
-    from bob_server.services.dream import DreamStore
-    from bob_server.services.dream.models import Evidence
+    from server.services.base import iso_utc
+    from server.services.dream import DreamStore
+    from server.services.dream.models import Evidence
 
     store = DreamStore(_ctx(request))
     plan = await store.get_plan(plan_id)
@@ -115,7 +115,7 @@ async def approve_dream_plan(request: Request, plan_id: str) -> dict[str, Any]:
         evidence=Evidence(kind="approved", note="operator approval", at=iso_utc()),
     )
     # Announcement goes out on the next flush (heartbeat sweep) — or now.
-    from bob_server.services.dream.announce import AnnounceService
+    from server.services.dream.announce import AnnounceService
 
     announce = await AnnounceService(_ctx(request)).flush()
     return {"ok": True, "announce": announce}
@@ -125,9 +125,9 @@ async def approve_dream_plan(request: Request, plan_id: str) -> dict[str, Any]:
 async def dismiss_dream_plan(request: Request, plan_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.base import iso_utc
-    from bob_server.services.dream import DreamStore
-    from bob_server.services.dream.models import Evidence
+    from server.services.base import iso_utc
+    from server.services.dream import DreamStore
+    from server.services.dream.models import Evidence
 
     store = DreamStore(_ctx(request))
     plan = await store.get_plan(plan_id)
@@ -146,9 +146,9 @@ async def dismiss_dream_plan(request: Request, plan_id: str) -> dict[str, Any]:
 async def promote_dream_resolution(request: Request, resolution_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.base import iso_utc
-    from bob_server.services.dream import DreamStore
-    from bob_server.services.dream.models import Evidence
+    from server.services.base import iso_utc
+    from server.services.dream import DreamStore
+    from server.services.dream.models import Evidence
 
     store = DreamStore(_ctx(request))
     row = await db_get_resolution(_db(request), resolution_id)
@@ -167,9 +167,9 @@ async def promote_dream_resolution(request: Request, resolution_id: str) -> dict
 async def drop_dream_resolution(request: Request, resolution_id: str) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.base import iso_utc
-    from bob_server.services.dream import DreamStore
-    from bob_server.services.dream.models import Evidence
+    from server.services.base import iso_utc
+    from server.services.dream import DreamStore
+    from server.services.dream.models import Evidence
 
     store = DreamStore(_ctx(request))
     row = await db_get_resolution(_db(request), resolution_id)
@@ -192,7 +192,7 @@ async def set_autoplan(request: Request) -> dict[str, Any]:
     enabled = bool(body.get("enabled"))
     if not session_key:
         return {"error": "session_key required (autoplan is session-scoped)"}
-    from bob_server.services.dream import config as dream_config
+    from server.services.dream import config as dream_config
 
     ok = await dream_config.set_session_autoplan(_db(request), session_key, enabled)
     if not ok:
@@ -206,7 +206,7 @@ async def trigger_dream_run(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     import asyncio
 
-    from bob_server.services.dream import DreamRunner
+    from server.services.dream import DreamRunner
 
     runner = DreamRunner(_ctx(request))
 
@@ -225,12 +225,12 @@ async def trigger_dream_run(request: Request) -> dict[str, Any]:
 async def list_dream_announcements(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.dream import DreamStore
+    from server.services.dream import DreamStore
 
     rows = await DreamStore(_ctx(request)).announce_history()
     return {"announcements": rows}
 
 
 async def db_get_resolution(db: Any, resolution_id: str) -> Any:
-    from bob_server.services.dream import DreamStore
+    from server.services.dream import DreamStore
     return await DreamStore.from_db(db).get_resolution(resolution_id)

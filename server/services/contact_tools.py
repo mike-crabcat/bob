@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from bob_server.services.phone_utils import normalize_phone
-from bob_server.services.tools import tool
+from server.services.phone_utils import normalize_phone
+from server.services.tools import tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def make_contact_tools(ctx: AppContext, *, is_trusted: bool = False) -> list:
         """Search contacts by name, phone number, or email.
         Returns matching contacts with their ID, name, phone, and trusted status."""
         db = ctx.db
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         rows = await ContactRepository(db).search(f"%{query}%", limit)
         results = [
             {
@@ -73,7 +73,7 @@ def make_contact_tools(ctx: AppContext, *, is_trusted: bool = False) -> list:
                 ),
             })
 
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         existing = await ContactRepository(db).get_by_phone(normalized)
         if existing:
             # Never mutate an existing contact from here: a real person must not
@@ -91,11 +91,11 @@ def make_contact_tools(ctx: AppContext, *, is_trusted: bool = False) -> list:
                 "allow_inbound_dm": bool(existing.get("allow_inbound_dm", 1)),
             })
 
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         contact_id = await ContactRepository(db).create(
             name=clean_name, phone_number=normalized, is_trusted=0, allow_inbound_dm=0)
 
-        from bob_server.services.memory import MemoryService
+        from server.services.memory import MemoryService
         try:
             await MemoryService(ctx).ensure_person_entry(
                 ctx.settings.harness.workspace_dir,

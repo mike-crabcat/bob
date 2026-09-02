@@ -34,10 +34,10 @@ from difflib import get_close_matches
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from bob_server.services.tools import tool
+from server.services.tools import tool
 
 if TYPE_CHECKING:
-    from bob_server.context import AppContext
+    from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def _digits(value: str) -> str:
 async def owner_contact(ctx: AppContext) -> dict[str, Any] | None:
     """The operator, via contacts.is_default (exactly-one, DB-enforced).
     Latent until rollout sets it; steering fails closed then."""
-    from bob_server.repositories.contacts import ContactRepository
+    from server.repositories.contacts import ContactRepository
 
     return await ContactRepository(ctx.db).get_default()
 
@@ -69,7 +69,7 @@ async def owner_dm_session_key(
     """``agent:main:whatsapp:dm:{digits}`` for the owner, but only when an
     active dm binding exists — otherwise wake_session would reject the wake
     (no active route) and the approval would sit unseen."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     if owner is None:
         owner = await owner_contact(ctx)
@@ -118,9 +118,9 @@ async def resolve_target(
     groups) ride both the ambiguous and the no-match errors so the
     requesting turn can ask or self-correct instead of guessing.
     """
-    from bob_server.repositories.contacts import ContactRepository
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.repositories.groups import GroupRepository
+    from server.repositories.contacts import ContactRepository
+    from server.repositories.conversations import ConversationRepository
+    from server.repositories.groups import GroupRepository
 
     raw = (target or "").strip()
     if not raw:
@@ -206,7 +206,7 @@ def build_wake_content(
 async def session_label(ctx: AppContext, session_key: str) -> str:
     """Human label for the origin conversation — "the <name> group" / "the
     DM with <name>" — falling back to the raw key for unnamed sessions."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     for row in await ConversationRepository(ctx.db).named_sessions():
         if row["session_key"] == session_key:
@@ -266,7 +266,7 @@ async def create_request(
 
     requester_name = origin_session_key
     if requester_contact_id:
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         requester = await ContactRepository(ctx.db).get(requester_contact_id)
         if requester:
             requester_name = requester["name"]
@@ -278,7 +278,7 @@ async def create_request(
         requester_contact_id=requester_contact_id,
         requester_name=requester_name, origin_session_key=origin_session_key)
 
-    from bob_server.services.effects import emit_and_deliver
+    from server.services.effects import emit_and_deliver
 
     # Owner bypass: self-approval is pure friction. Matches on threaded-in
     # contact id, or on the request coming from the owner's own DM (wake-path
@@ -296,7 +296,7 @@ async def create_request(
     # Dedupe: the approval_request effect key is a fresh uuid per call, so a
     # repeated LLM attempt would otherwise mint a second pending approval
     # (and a second wake once both were approved).
-    from bob_server.repositories.approvals import ApprovalRepository
+    from server.repositories.approvals import ApprovalRepository
 
     for row in await ApprovalRepository(ctx.db).pending_of_type(
             APPROVAL_TYPE, entity_id=target_key):
@@ -370,7 +370,7 @@ async def on_approved(ctx: AppContext, row: dict[str, Any]) -> None:
     # Execution-time binding re-check: a lost binding is terminal — retrying
     # cannot help, and waking a conversation Bob left would violate the
     # membership gate the owner just approved.
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     binding = await ConversationRepository(ctx.db).active_binding(target_key)
     if not binding or binding.get("endpoint_kind") not in ("dm", "group"):
@@ -378,7 +378,7 @@ async def on_approved(ctx: AppContext, row: dict[str, Any]) -> None:
                      row.get("id"), target_key)
         return
 
-    from bob_server.services.effects import emit_and_deliver
+    from server.services.effects import emit_and_deliver
 
     result = await emit_and_deliver(
         ctx, kind="conversation_steer",
@@ -401,11 +401,11 @@ def register() -> None:
     tail re-runs it so the pump can never deliver an approval_respond with
     the hook missing — the lazy-registration quirk that affects kinds
     registered in tool-assembly functions cannot bite."""
-    from bob_server.services import approval_tools
-    from bob_server.services import effects as effects_svc
+    from server.services import approval_tools
+    from server.services import effects as effects_svc
 
     async def _exec_steer(ctx: AppContext, payload: dict[str, Any]):
-        from bob_server.services.wake_service import wake_conversation
+        from server.services.wake_service import wake_conversation
 
         await wake_conversation(
             ctx, payload["target_key"], payload["content"],

@@ -15,7 +15,7 @@ import secrets
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from bob_server.config import Settings
+from server.config import Settings
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 

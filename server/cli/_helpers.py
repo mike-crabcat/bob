@@ -1,7 +1,7 @@
 """Shared helpers for the Bob CLI.
 
 All private helpers and module-level constants used across CLI subapps live
-here. Subapp modules import via ``from bob_server.cli._helpers import *``.
+here. Subapp modules import via ``from server.cli._helpers import *``.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from urllib.request import Request, urlopen
 import typer
 import uvicorn
 
-from bob_server.config import DEFAULT_HOST, DEFAULT_PORT, Settings
-from bob_server.main import create_app
+from server.config import DEFAULT_HOST, DEFAULT_PORT, Settings
+from server.main import create_app
 
 
 SERVICE_NAME = "bob.service"

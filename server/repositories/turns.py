@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bob_server.database import Database
+from server.database import Database
 
 MAX_ATTEMPTS = 3
 

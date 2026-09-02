@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
@@ -17,7 +17,7 @@ async def get_memory_stats(request: Request) -> dict[str, Any]:
     db = _db(request)
 
     # Build stats from database
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     categories = await memory_admin.entity_type_counts(db)
     total_entries = sum(categories.values())
 
@@ -59,7 +59,7 @@ async def get_memory_searches(request: Request) -> dict[str, Any]:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_search_log'"
     )
     if table_exists:
-        from bob_server.services.memory import admin as memory_admin
+        from server.services.memory import admin as memory_admin
         rows = await memory_admin.list_search_log(db, limit=100)
         for row in rows:
             results = []
@@ -98,8 +98,8 @@ async def run_memory_search(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     workspace = settings.harness.workspace_dir
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
+    from server.context import AppContext
+    from server.services.memory import MemoryService
 
     ctx = AppContext(settings=settings, db=db)
     svc = MemoryService(ctx)
@@ -112,7 +112,7 @@ async def run_memory_search(request: Request) -> dict[str, Any]:
     # Log it
     from uuid import uuid4
     try:
-        from bob_server.services.memory import admin as memory_admin
+        from server.services.memory import admin as memory_admin
         await memory_admin.insert_search_log(
             db, log_id=str(uuid4()), query=query, results_json=json.dumps(result),
             session_key=None, result_count=len(result.get("results", [])),
@@ -131,8 +131,8 @@ async def get_memory_category(request: Request, category: str) -> dict[str, Any]
     settings = request.app.state.settings
     workspace = settings.harness.workspace_dir
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
+    from server.context import AppContext
+    from server.services.memory import MemoryService
 
     ctx = AppContext(settings=settings, db=_db(request))
     svc = MemoryService(ctx)
@@ -149,7 +149,7 @@ async def get_memory_entities(request: Request) -> dict[str, Any]:
     db = _db(request)
     entity_type = request.query_params.get("type", "").strip()
 
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     rows = await memory_admin.list_entities(db, entity_type=entity_type)
 
     # Build a summary per entity from key claims
@@ -200,9 +200,9 @@ async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str
     db = _db(request)
     settings = request.app.state.settings
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory.service import MemoryService
-    from bob_server.services.memory.claim_service import get_active_claims
+    from server.context import AppContext
+    from server.services.memory.service import MemoryService
+    from server.services.memory.claim_service import get_active_claims
 
     ctx = AppContext(settings=settings, db=db)
     svc = MemoryService(ctx)
@@ -213,7 +213,7 @@ async def get_memory_entity_detail(request: Request, entity_id: str) -> dict[str
 
     claims = await get_active_claims(db, entity_id)
 
-    from bob_server.services.memory.claim_types import render_entity
+    from server.services.memory.claim_types import render_entity
 
     claim_dicts = [
         {"claim_type_key": c.claim_type_key, "object_id": c.object_id, "value": c.value}
@@ -250,7 +250,7 @@ async def get_memory_questions(request: Request) -> dict[str, Any]:
     db = _db(request)
 
     status_filter = request.query_params.get("status", "open").strip()
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     rows = await memory_admin.list_questions(db, status=status_filter, limit=100)
     questions = [
         {
@@ -279,8 +279,8 @@ async def answer_memory_question(request: Request, question_id: str) -> dict[str
     if not answer:
         return {"error": "answer is required"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
+    from server.context import AppContext
+    from server.services.memory import MemoryService
 
     ctx = AppContext(db=_db(request), settings=request.app.state.settings)
     svc = MemoryService(ctx)
@@ -293,8 +293,8 @@ async def dismiss_memory_question(request: Request, question_id: str) -> dict[st
     if not _check_auth(request):
         return {"error": "unauthorized"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
+    from server.context import AppContext
+    from server.services.memory import MemoryService
 
     ctx = AppContext(db=_db(request), settings=request.app.state.settings)
     svc = MemoryService(ctx)
@@ -307,7 +307,7 @@ async def get_memory_claims(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     rows = await memory_admin.list_claims(
         db,
         claim_type=request.query_params.get("type", "").strip(),
@@ -344,19 +344,19 @@ async def merge_entities(request: Request) -> dict[str, Any]:
     db = _db(request)
 
     # Verify both entities exist
-    from bob_server.services.memory import admin as memory_admin
+    from server.services.memory import admin as memory_admin
     for eid in (canonical_id, loser_id):
         row = await memory_admin.get_active_entity(db, eid)
         if not row:
             return {"error": f"entity not found: {eid}"}
 
-    from bob_server.services.memory.merge import _execute_merge
+    from server.services.memory.merge import _execute_merge
     result = await _execute_merge(db, canonical_id, loser_id)
 
     # Rebuild FTS + embedding for canonical
     settings = request.app.state.settings
-    from bob_server.context import AppContext
-    from bob_server.services.memory import MemoryService
+    from server.context import AppContext
+    from server.services.memory import MemoryService
     ctx = AppContext(settings=settings, db=db)
     svc = MemoryService(ctx)
     await svc._update_entity_fts(canonical_id)
@@ -380,7 +380,7 @@ async def routing_log(request: Request) -> dict[str, Any]:
     analogue of the attention shadow table."""
     if not _check_auth(request):
         return {"error": "unauthorized"}
-    from bob_server.services.memory.claim_router import recent_routing_log
+    from server.services.memory.claim_router import recent_routing_log
 
     rows = await recent_routing_log(_db(request), limit=50)
     import json as _json

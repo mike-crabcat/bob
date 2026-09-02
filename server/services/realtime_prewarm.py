@@ -76,9 +76,9 @@ def start_prewarm(
     """Create + configure a Realtime session for an outbound call, to be
     claimed by the media handler at answer. Fire-and-forget: every failure
     path degrades to the old connect-at-answer behaviour."""
-    from bob_server.context import AppContext
-    from bob_server.services.realtime_bridge import RealtimeBridge
-    from bob_server.services.realtime_tools import make_realtime_tools
+    from server.context import AppContext
+    from server.services.realtime_bridge import RealtimeBridge
+    from server.services.realtime_tools import make_realtime_tools
 
     rt = settings.openai_realtime
     meta = meta or {}
@@ -94,7 +94,7 @@ def start_prewarm(
     )
 
     async def on_turn(transcript: str) -> None:
-        from bob_server.services.voice_dispatch_service import persist_call_transcript
+        from server.services.voice_dispatch_service import persist_call_transcript
         await persist_call_transcript(db, call_id, transcript)
 
     # Outbound calls are callee-first; the audio source is attached when the

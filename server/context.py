@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from bob_server.config import Settings
-from bob_server.database import Database
+from server.config import Settings
+from server.database import Database
 
 
 @dataclass

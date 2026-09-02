@@ -14,8 +14,8 @@ import asyncio
 
 import pytest
 
-import bob_server.services.attention.coordinator as coord_mod
-from bob_server.services.attention import AttentionCoordinator
+import server.services.attention.coordinator as coord_mod
+from server.services.attention import AttentionCoordinator
 
 SESSION = "agent:main:whatsapp:group:120363000000000001"
 

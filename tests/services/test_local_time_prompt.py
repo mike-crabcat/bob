@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from bob_server.services.prompt_assembler import build_chat_messages, local_now_prompt_line
+from server.services.prompt_assembler import build_chat_messages, local_now_prompt_line
 
 
 def test_line_has_stamp_timezone_and_recheck_command():
@@ -73,7 +73,7 @@ async def test_clock_injection_is_idempotent():
 
 
 async def test_inbound_spec_no_longer_carries_the_clock(ctx):
-    from bob_server.services.whatsapp_bridge_service._service import (
+    from server.services.whatsapp_bridge_service._service import (
         WhatsAppBridgeService,
     )
 

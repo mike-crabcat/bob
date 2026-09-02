@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Any
 
-from bob_server.services.dispatch_runner import is_no_reply
+from server.services.dispatch_runner import is_no_reply
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ async def probe_decide(
     (``bob replay probe-matrix``) so both score the exact same prompt,
     parameters, and parsing."""
     try:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         result = await LLMDispatchService(ctx).chat(
             [{"role": "system", "content": probe_system_prompt(bot_name)},
@@ -141,9 +141,9 @@ async def probe_decide(
 async def _build_context(ctx: Any, session_key: str, max_context: int,
                          *, bot_name: str = "Bob") -> str:
     """Session agenda + recent dispatched dialogue + the pending batch."""
-    from bob_server.repositories.history import HistoryRepository
-    from bob_server.repositories.participants import ParticipantRepository
-    from bob_server.services.session_agenda_service import SessionAgendaService
+    from server.repositories.history import HistoryRepository
+    from server.repositories.participants import ParticipantRepository
+    from server.services.session_agenda_service import SessionAgendaService
 
     parts: list[str] = []
 

@@ -14,9 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from bob_server.services import realtime_prewarm
-from bob_server.services import realtime_bridge as bridge_mod
-from bob_server.services.realtime_bridge import RealtimeBridge
+from server.services import realtime_prewarm
+from server.services import realtime_bridge as bridge_mod
+from server.services.realtime_bridge import RealtimeBridge
 
 
 class FakeWs:

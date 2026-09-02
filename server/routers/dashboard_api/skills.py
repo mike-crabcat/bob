@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bob_server.routers.dashboard_api._common import *  # noqa: F403,F405
+from server.routers.dashboard_api._common import *  # noqa: F403,F405
 
 
 router = APIRouter()
@@ -20,7 +20,7 @@ async def get_installed_skills(request: Request) -> dict[str, Any]:
     if not skills_dir.is_dir():
         return {"skills": []}
 
-    from bob_server.services.skill_loader import _parse_frontmatter
+    from server.services.skill_loader import _parse_frontmatter
 
     skills: list[dict[str, Any]] = []
     for child in sorted(skills_dir.iterdir()):
@@ -48,7 +48,7 @@ async def get_skill_delegations(request: Request) -> dict[str, Any]:
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.services.skill_developer_service import SkillDeveloperService
+    from server.services.skill_developer_service import SkillDeveloperService
     table_exists = await db.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_delegations'"
     )
@@ -85,7 +85,7 @@ async def get_skill_delegation_detail(request: Request, delegation_id: str) -> d
     if not _check_auth(request):
         return {"error": "unauthorized"}
     db = _db(request)
-    from bob_server.services.skill_developer_service import SkillDeveloperService
+    from server.services.skill_developer_service import SkillDeveloperService
     row = await SkillDeveloperService.from_db(db).get_delegation(delegation_id)
     if not row:
         return {"error": "not found"}
@@ -115,8 +115,8 @@ async def implement_skill_delegation(request: Request, delegation_id: str) -> di
     if not _check_auth(request):
         return {"error": "unauthorized"}
 
-    from bob_server.context import AppContext
-    from bob_server.services.skill_developer_service import SkillDeveloperService
+    from server.context import AppContext
+    from server.services.skill_developer_service import SkillDeveloperService
 
     ctx = AppContext(
         db=_db(request),
@@ -139,8 +139,8 @@ async def reject_skill_delegation(request: Request, delegation_id: str) -> dict[
     body = await request.json()
     reason = (body.get("reason") or "").strip()
 
-    from bob_server.context import AppContext
-    from bob_server.services.skill_developer_service import SkillDeveloperService
+    from server.context import AppContext
+    from server.services.skill_developer_service import SkillDeveloperService
 
     ctx = AppContext(
         db=_db(request),

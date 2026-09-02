@@ -11,9 +11,9 @@ from fastapi.testclient import TestClient
 
 from pathlib import Path
 
-from bob_server.config import Settings
-from bob_server.main import create_app
-from bob_server.services.webhook_service import (
+from server.config import Settings
+from server.main import create_app
+from server.services.webhook_service import (
     WebhookConfig,
     WebhookEvent,
     WebhookPayload,
@@ -102,7 +102,7 @@ class TestWebhookServiceSignatures:
         """Test HMAC signature generation."""
         with make_client(tmp_path) as client:
             # Get the app state to access database
-            from bob_server.database import Database
+            from server.database import Database
             db = client.app.state.db
             
             webhook_service = WebhookService(db)
@@ -126,7 +126,7 @@ class TestWebhookServiceSignatures:
     def test_verify_signature(self, tmp_path: Path):
         """Test HMAC signature verification."""
         with make_client(tmp_path) as client:
-            from bob_server.database import Database
+            from server.database import Database
             db = client.app.state.db
             
             webhook_service = WebhookService(db)
@@ -300,7 +300,7 @@ class TestWebhookDelivery:
             )
 
             # Create a task via TaskService using the app's connected database
-            from bob_server.services.task_service import TaskService
+            from server.services.task_service import TaskService
             import asyncio
             db = client.app.state.db
             task = asyncio.run(TaskService(db).create_task({
@@ -338,7 +338,7 @@ class TestWebhookHeaders:
     def test_signature_generation(self, tmp_path: Path):
         """Test that signatures are generated correctly."""
         with make_client(tmp_path) as client:
-            from bob_server.database import Database
+            from server.database import Database
             db = client.app.state.db
             webhook_service = WebhookService(db)
             

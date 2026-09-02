@@ -6,14 +6,14 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService, iso_utc, json_loads, utcnow
-from bob_server.services.dream.models import (
+from server.context import AppContext
+from server.services.base import BaseService, iso_utc, json_loads, utcnow
+from server.services.dream.models import (
     PLAN_ACTIVE_STATUSES,
     RESOLUTION_ACTIVE_STATUSES,
     Evidence,
 )
-from bob_server.services.dream.review import ReviewService
+from server.services.dream.review import ReviewService
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class ProspectiveService(BaseService):
 
     def __init__(self, ctx: AppContext) -> None:
         super().__init__(ctx)
-        from bob_server.services.dream.store import DreamStore
+        from server.services.dream.store import DreamStore
 
         self.store = DreamStore(ctx)
 
@@ -64,7 +64,7 @@ class ProspectiveService(BaseService):
         for item in items:
             contexts.append(await self._item_context(item))
 
-        from bob_server.services.dream.prompts import PROSPECTIVE_SYSTEM
+        from server.services.dream.prompts import PROSPECTIVE_SYSTEM
 
         user_prompt = self._build_prompt(contexts)
         review = ReviewService(self.ctx)
@@ -280,6 +280,6 @@ class ProspectiveService(BaseService):
         return count
 
     async def _llm(self):
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         return LLMDispatchService(self.ctx)

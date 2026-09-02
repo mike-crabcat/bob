@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.repositories.history import HistoryRepository
-from bob_server.services.session_service import SessionService
+from server.repositories.history import HistoryRepository
+from server.services.session_service import SessionService
 
 
 @pytest.mark.asyncio

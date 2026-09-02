@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from bob_server.services.base import BaseService
+from server.services.base import BaseService
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class DocsService(BaseService):
         )
         user_prompt = f"Query: {query}\n\nCatalog:\n{catalog}"
 
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         llm = LLMDispatchService(self.ctx)
         response = await llm.chat(

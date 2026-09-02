@@ -8,8 +8,8 @@ import logging
 import mimetypes
 from pathlib import Path
 
-from bob_server.context import AppContext
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
@@ -17,17 +17,17 @@ logger = logging.getLogger(__name__)
 def _register_email_executors() -> None:
     """Bob3 Phase IV: email sends are effects. Executors call the delivery
     service, so test patches on EmailDeliveryService methods keep working."""
-    from bob_server.services import effects as effects_svc
+    from server.services import effects as effects_svc
 
     async def _exec_reply(ctx, payload):
-        from bob_server.services.email_delivery_service import EmailDeliveryService
+        from server.services.email_delivery_service import EmailDeliveryService
         result = await EmailDeliveryService(ctx).send_reply(
             inbox_id=payload["inbox_id"], thread_id=payload["thread_id"],
             text=payload["text"], attachments=payload.get("attachments"))
         return (result or {}).get("message_id") or (result or {}).get("thread_id")
 
     async def _exec_send(ctx, payload):
-        from bob_server.services.email_delivery_service import EmailDeliveryService
+        from server.services.email_delivery_service import EmailDeliveryService
         result = await EmailDeliveryService(ctx).send_new_email(
             inbox_id=payload["inbox_id"], to=payload["to"],
             subject=payload["subject"], text=payload["text"],
@@ -125,7 +125,7 @@ def make_email_tools(
     @tool
     async def email_reply(body: str, attachments: list[str] | None = None) -> str:
         """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Optionally attach files by providing their paths as a list (workspace-relative or absolute)."""
-        from bob_server.services.email_delivery_service import EmailDeliveryService
+        from server.services.email_delivery_service import EmailDeliveryService
 
         if isinstance(attachments, str):
             s = attachments.strip()
@@ -150,7 +150,7 @@ def make_email_tools(
 
         from uuid import uuid4 as _uuid4
 
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         outcome = await emit_and_deliver(
             ctx, kind="email_reply",
@@ -179,7 +179,7 @@ def make_email_tools(
         """List all attachments across all messages in this email thread.
         Shows filename, content type, size, download status, and attachment_id.
         Use download_attachment with the attachment_id to save a file to the workspace."""
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         messages = await EmailStore(ctx.db).attachment_messages(thread_id)
 
         if not messages:
@@ -228,7 +228,7 @@ def make_email_tools(
             return "Error: attachment_id is required."
 
         # Find the message that owns this attachment_id
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         _store = EmailStore(ctx.db)
         messages = await _store.attachment_messages(thread_id)
 
@@ -269,7 +269,7 @@ def make_email_tools(
                 })
 
         # Download via AgentMail
-        from bob_server.services.agentmail_client import AgentMailClient
+        from server.services.agentmail_client import AgentMailClient
 
         settings = ctx.settings
         client = AgentMailClient(
@@ -343,7 +343,7 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
         attachments: list[str] | None = None,
     ) -> str:
         """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. Optionally attach files by providing their paths as a list (workspace-relative or absolute)."""
-        from bob_server.services.email_delivery_service import EmailDeliveryService
+        from server.services.email_delivery_service import EmailDeliveryService
 
         if isinstance(attachments, str):
             s = attachments.strip()
@@ -367,14 +367,14 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
                 return f"Error with attachments: {'; '.join(errors)}"
 
         # Resolve default inbox
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         inbox = await EmailStore(ctx.db).first_active_inbox()
         if inbox is None:
             return "Error: no active email inbox configured"
 
         from uuid import uuid4 as _uuid4
 
-        from bob_server.services.effects import emit_and_deliver
+        from server.services.effects import emit_and_deliver
 
         outcome = await emit_and_deliver(
             ctx, kind="email_send",
@@ -411,7 +411,7 @@ def make_email_thread_tools(
         """Read the full transcript of an email thread by its agentmail thread ID.
         Returns subject, participants, and all messages in chronological order.
         Use this to look up the original context behind an email-sourced memory bulletin."""
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(ctx.db)
         thread = await store.thread_by_agentmail_any(thread_id)
         if thread is None:
@@ -454,7 +454,7 @@ def make_email_thread_tools(
         if not terms:
             return json.dumps({"error": "Empty query", "results": []})
 
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         # Scope: untrusted contacts only see their own threads
         scope_contact = contact_id if (not is_trusted and contact_id) else None
         rows = await EmailStore(ctx.db).search_threads(terms, contact_id=scope_contact)
@@ -494,16 +494,16 @@ def make_email_thread_result_tools(
         Call when you have achieved the objective from the email conversation.
         The result will be dispatched to the originating session, which will decide
         how to relay it."""
-        from bob_server.services.wake_service import wake_conversation
+        from server.services.wake_service import wake_conversation
 
         db = ctx.db
-        from bob_server.services.email_store import EmailStore
+        from server.services.email_store import EmailStore
         store = EmailStore(db)
         thread_row = await store.thread_by_id_or_agentmail(thread_id)
         subject = thread_row["subject"] if thread_row else "unknown"
         contact_name = "unknown"
         if thread_row and thread_row.get("contact_id"):
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             contact = await ContactRepository(db).get(thread_row["contact_id"])
             if contact:
                 contact_name = contact["name"]

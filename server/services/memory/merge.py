@@ -7,12 +7,12 @@ import logging
 import math
 from typing import Any
 
-from bob_server.services.memory.claim_types import render_entity
-from bob_server.services.memory.cleanup import (
+from server.services.memory.claim_types import render_entity
+from server.services.memory.cleanup import (
     rewrite_claims,
     rewrite_entity_relations,
 )
-from bob_server.services.memory.embedding import delete_embedding, _unpack_embedding
+from server.services.memory.embedding import delete_embedding, _unpack_embedding
 
 logger = logging.getLogger(__name__)
 

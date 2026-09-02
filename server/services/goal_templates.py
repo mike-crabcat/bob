@@ -17,7 +17,7 @@ import logging
 import re
 from typing import Any
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -157,9 +157,9 @@ async def instantiate_template(
     """Create the template's goal tree under ``session_key`` (the working
     conversation). Registers holder conversations (e.g. the group chat) so
     Phase-2 routing and §2.0 seeding cover replies given there."""
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.repositories.goals import GoalRepository
-    from bob_server.services import goal_service
+    from server.repositories.conversations import ConversationRepository
+    from server.repositories.goals import GoalRepository
+    from server.services import goal_service
 
     templates = load_templates(ctx.settings.config_dir)
     tpl = templates.get(template_name)

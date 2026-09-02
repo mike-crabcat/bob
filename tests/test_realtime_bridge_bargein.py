@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from bob_server.services.realtime_bridge import RealtimeBridge
+from server.services.realtime_bridge import RealtimeBridge
 
 
 class FakeOai:
@@ -188,7 +188,7 @@ async def test_cancelled_run_session_unwinds_child_tasks(caplog):
         pass
     assert task.cancelled()  # the cancellation propagated through _run_session
 
-    with caplog.at_level(logging.INFO, logger="bob_server.services.realtime_bridge"):
+    with caplog.at_level(logging.INFO, logger="server.services.realtime_bridge"):
         await asyncio.sleep(0.15)  # past the 0.05s duration window
     assert not any("max duration" in r.message for r in caplog.records)
 
@@ -199,7 +199,7 @@ async def test_relay_end_completes_session_normally(caplog):
     source = TrackingSource(mic_chunks=1, block_after_drain=False)  # relay ends
     bridge = _bridge(source, max_duration_seconds=0.05)
 
-    with caplog.at_level(logging.INFO, logger="bob_server.services.realtime_bridge"):
+    with caplog.at_level(logging.INFO, logger="server.services.realtime_bridge"):
         await asyncio.wait_for(bridge._run_session(FakeOai()), timeout=5.0)
 
     assert any("Bridge session ending" in r.message for r in caplog.records)

@@ -13,10 +13,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.repositories.event_log import Event, EventLogRepository
-from bob_server.repositories.goals import GoalRepository
-from bob_server.repositories.wakeups import WakeupRepository
+from server.context import AppContext
+from server.repositories.event_log import Event, EventLogRepository
+from server.repositories.goals import GoalRepository
+from server.repositories.wakeups import WakeupRepository
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ async def create_goal(
     registers its working conversation (worker) and origin (origin) as
     holders; a child goal's deadline wakeup targets the ROOT goal's working
     conversation, never the child's own channel endpoint."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     repo = GoalRepository(ctx.db)
     conv_repo = ConversationRepository(ctx.db)
@@ -160,7 +160,7 @@ async def settle_goal(
 
     origin = goal["origin_conversation_id"]
     if wake_origin and origin and origin != goal["conversation_id"]:
-        from bob_server.services.wake_service import wake_conversation
+        from server.services.wake_service import wake_conversation
 
         content = wake_content or (
             f"## Goal {status}\n"
@@ -186,7 +186,7 @@ async def _roll_up_to_parent(
     parent with the child's outcome as the stimulus. If effect enqueueing
     itself fails, degrade to a direct wake of the parent's working
     conversation — information must not be lost to infrastructure."""
-    from bob_server.services.goal_state_service import enqueue_revision
+    from server.services.goal_state_service import enqueue_revision
 
     stimulus = (
         f"## Child goal {status}\n"
@@ -204,7 +204,7 @@ async def _roll_up_to_parent(
     except Exception:
         logger.exception("goal %s: roll-up enqueue failed; degrading to direct wake",
                          child["id"])
-        from bob_server.services.wake_service import wake_conversation
+        from server.services.wake_service import wake_conversation
 
         parent = await GoalRepository(ctx.db).get(child["parent_goal_id"])
         if parent is None:
@@ -267,10 +267,10 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
                     schedule_due_action_wakes; payload carries the action).
       wake        — goal-deadline or plain scheduled wake for a conversation.
     """
-    from bob_server.services.wake_service import wake_conversation
+    from server.services.wake_service import wake_conversation
 
     if wakeup.get("kind") == "routine":
-        from bob_server.services import routine_service as routines
+        from server.services import routine_service as routines
 
         payload = json.loads(wakeup.get("payload_json") or "{}")
         routine = await routines.RoutineService(ctx).get_by_id(
@@ -343,7 +343,7 @@ def _next_occurrence(wakeup: dict[str, Any]) -> str | None:
             return (datetime.now(timezone.utc)
                     + timedelta(minutes=minutes)).isoformat()
         if rec.startswith("cron:"):
-            from bob_server.cron import next_cron_occurrence
+            from server.cron import next_cron_occurrence
             occurrence = next_cron_occurrence(rec[5:], timezone=wakeup.get("tz"))
             return occurrence.astimezone(timezone.utc).isoformat()
     except (ValueError, TypeError):
@@ -397,7 +397,7 @@ async def schedule_due_action_wakes(
     turn can act early or schedule a precise one-shot. Idempotent per
     (goal, normalized due) across scheduled AND fired rows; dues older than
     the overdue window are left to GoalReviewTask's stall escalation."""
-    from bob_server.services.goal_state_service import parse_strategy
+    from server.services.goal_state_service import parse_strategy
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=overdue_hours)

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bob_server.services.openai_service import (
+from server.services.openai_service import (
     OpenAIService,
     _SELF_WRAP_FINAL,
     _SELF_WRAP_NUDGE,
@@ -88,7 +88,7 @@ def install_client(monkeypatch):
         monkeypatch.setattr(
             OpenAIService, "client", property(lambda self: fake_client))
         # the service module reads time.monotonic(); pin it to the fake clock
-        import bob_server.services.openai_service as svc_mod
+        import server.services.openai_service as svc_mod
         monkeypatch.setattr(
             svc_mod, "time", SimpleNamespace(monotonic=clock.monotonic))
         return calls, clock

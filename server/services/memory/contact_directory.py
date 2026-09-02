@@ -31,7 +31,7 @@ class ContactDirectory:
 
     @classmethod
     async def load(cls, db: Any) -> "ContactDirectory":
-        from bob_server.repositories.contacts import ContactRepository
+        from server.repositories.contacts import ContactRepository
         rows = [r for r in await ContactRepository(db).list_active() if (r["name"] or "").strip()]
         records = []
         for r in rows:

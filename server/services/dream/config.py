@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import logging
 
-from bob_server.database import Database
-from bob_server.services.base import iso_utc
+from server.database import Database
+from server.services.base import iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ ROUTE_META_KEY = "dream_autoplan"
 
 async def get_session_autoplan(db: Database, session_key: str, boot_default: bool = False) -> bool:
     """Auto-approve state for one conversation; falls back to the boot default."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     policy = await ConversationRepository(db).get_policy(session_key)
     flag = policy.get(ROUTE_META_KEY)
@@ -33,7 +33,7 @@ async def get_session_autoplan(db: Database, session_key: str, boot_default: boo
 
 async def set_session_autoplan(db: Database, session_key: str, enabled: bool) -> bool:
     """Set the per-conversation flag. Returns False for unknown conversations."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     return await ConversationRepository(db).set_policy(
         session_key, {ROUTE_META_KEY: bool(enabled)})

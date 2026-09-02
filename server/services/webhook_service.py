@@ -12,9 +12,9 @@ from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.services.base import BaseService, json_dumps, json_loads, utcnow
+from server.context import AppContext
+from server.database import Database
+from server.services.base import BaseService, json_dumps, json_loads, utcnow
 
 
 class WebhookEvent:

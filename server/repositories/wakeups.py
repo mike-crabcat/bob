@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from bob_server.database import Database
+from server.database import Database
 
 
 def _now_iso() -> str:

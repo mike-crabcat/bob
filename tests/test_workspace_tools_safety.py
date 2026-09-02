@@ -1,6 +1,6 @@
 """Unit tests for the bash sandbox guardrail in workspace_tools.
 
-Run with: uv run pytest packages/bob-server/bob_server/services/workspace_tools_safety_test.py
+Run with: uv run pytest packages/bob-server/server/services/workspace_tools_safety_test.py
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from bob_server.services.workspace_tools import _check_command_safety
+from server.services.workspace_tools import _check_command_safety
 
 
 @pytest.fixture

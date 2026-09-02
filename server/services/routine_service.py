@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from bob_server.services.base import BaseService
+from server.services.base import BaseService
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ class RoutineService(BaseService):
 
     async def _sync_wakeup(self, routine: dict[str, Any]) -> None:
         """Keep exactly one scheduled routine-wakeup per enabled routine."""
-        from bob_server.repositories.wakeups import WakeupRepository
+        from server.repositories.wakeups import WakeupRepository
 
         repo = WakeupRepository(self.db)
         await repo.cancel_for_routine(routine["id"])
@@ -174,7 +174,7 @@ class RoutineService(BaseService):
             (session_key, name),
         )
         if existing:
-            from bob_server.repositories.wakeups import WakeupRepository
+            from server.repositories.wakeups import WakeupRepository
             await WakeupRepository(self.db).cancel_for_routine(existing["id"])
         return count > 0
 
@@ -203,7 +203,7 @@ class RoutineService(BaseService):
         yesterday's 9am; date arithmetic followed it astray). Computed the
         same way as the pump's _next_occurrence (from now, routine tz) so the
         mirror tracks the series."""
-        from bob_server.cron import next_cron_occurrence
+        from server.cron import next_cron_occurrence
 
         try:
             next_at = next_cron_occurrence(
@@ -225,7 +225,7 @@ async def append_fired_event(ctx: Any, routine: dict[str, Any], slot: str) -> No
     so a crashed-and-replayed claim can't double-append. Best-effort — an
     append failure must never block the routine."""
     try:
-        from bob_server.repositories import Event, EventLogRepository
+        from server.repositories import Event, EventLogRepository
 
         session_key = routine["session_key"]
         await EventLogRepository(ctx.db).append(Event(
@@ -252,16 +252,16 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
     tools. Moved from the deleted RoutineSchedulerTask."""
     from uuid import uuid4
 
-    from bob_server.services.dispatch_runner import is_no_reply, resolve_session_model
-    from bob_server.services.llm_dispatch import LLMDispatchService
-    from bob_server.services.prompt_assembler import (
+    from server.services.dispatch_runner import is_no_reply, resolve_session_model
+    from server.services.llm_dispatch import LLMDispatchService
+    from server.services.prompt_assembler import (
         build_chat_messages,
         load_workspace_prompt,
     )
-    from bob_server.services.session_service import SessionService
-    from bob_server.services.tool_registry import build_common_tools
-    from bob_server.services.tools import Tool
-    from bob_server.services.wake_service import session_key_to_chat_id
+    from server.services.session_service import SessionService
+    from server.services.tool_registry import build_common_tools
+    from server.services.tools import Tool
+    from server.services.wake_service import session_key_to_chat_id
 
     session_key = routine["session_key"]
     prompt = routine["prompt"]
@@ -277,12 +277,12 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=ctx.db)
 
         # Resolve session trust level for correct tool set
-        from bob_server.repositories.conversations import ConversationRepository
+        from server.repositories.conversations import ConversationRepository
         route = await ConversationRepository(ctx.db).route_for(session_key)
         is_trusted = False
         contact_id = route["contact_id"] if route else None
         if route and contact_id:
-            from bob_server.repositories.contacts import ContactRepository
+            from server.repositories.contacts import ContactRepository
             trusted = await ContactRepository(ctx.db).is_trusted(contact_id)
             if trusted is not None:
                 is_trusted = trusted

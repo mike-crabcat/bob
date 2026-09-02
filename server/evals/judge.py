@@ -7,14 +7,14 @@ import logging
 import time
 from typing import Any
 
-from bob_server.evals.case import (
+from server.evals.case import (
     EvalCase,
     JudgeCriteria,
     JudgeResult,
     StructuralCheck,
     StructuralCheckResult,
 )
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ class LLMJudge:
         threshold: float = 0.7,
         input_messages: list[dict[str, Any]] | None = None,
     ) -> JudgeResult:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         dimensions = []
         if case.judge_criteria.correctness:

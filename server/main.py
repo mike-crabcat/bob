@@ -12,13 +12,13 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from bob_server import __version__
-from bob_server.api_auth import ApiAuthMiddleware
-from bob_server.config import Settings
-from bob_server.context import AppContext
-from bob_server.database import Database
-from bob_server.exceptions import ServiceError
-from bob_server.heartbeat import (
+from server import __version__
+from server.api_auth import ApiAuthMiddleware
+from server.config import Settings
+from server.context import AppContext
+from server.database import Database
+from server.exceptions import ServiceError
+from server.heartbeat import (
     CallCleanupTask,
     DreamTask,
     EmailPollingTask,
@@ -40,13 +40,13 @@ from bob_server.heartbeat import (
     MemoryReconciliationTask,
     SessionIdleSummaryTask,
 )
-from bob_server.models import HealthResponse
-from bob_server.routers import (
+from server.models import HealthResponse
+from server.routers import (
     calendars, contacts, context, dashboard_api, dashboard_ws, email,
     persona, published_files, webhooks, whatsapp,
 )
-from bob_server.services.event_bus import EventBus
-from bob_server.structured_logging import configure_logging, CorrelationIdMiddleware
+from server.services.event_bus import EventBus
+from server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # previous process — nothing survives a restart. Fail them now so
         # the dashboard never shows dead calls as live.
         try:
-            from bob_server.repositories.llm_call_log import LlmCallLogRepository
+            from server.repositories.llm_call_log import LlmCallLogRepository
             swept = await LlmCallLogRepository(database).cancel_running()
             if swept:
                 logger.info("Boot sweep cancelled %d zombie LLM call(s)", swept)
@@ -88,8 +88,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # sat unanswered until an unrelated nudge 10 minutes later). Restore
         # the claims, then fail the turn; the WhatsApp +10s sweep re-arms.
         try:
-            from bob_server.repositories.history import HistoryRepository
-            from bob_server.repositories.turns import TurnRepository
+            from server.repositories.history import HistoryRepository
+            from server.repositories.turns import TurnRepository
             turn_repo = TurnRepository(database)
             zombie_ids = await turn_repo.nonterminal_ids()
             restored = 0
@@ -111,7 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # Clean up stale subagents from previous runs
         try:
-            from bob_server.services.subagent_service import SubagentService
+            from server.services.subagent_service import SubagentService
             await SubagentService(app_ctx).cleanup_stale()
         except Exception:
             logger.debug("Subagent cleanup skipped (table may not exist yet)")
@@ -121,21 +121,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # still-active goals so they stop riding every prompt, waking each
         # conversation to own the loss.
         try:
-            from bob_server.services.backburner import BackburnerService
+            from server.services.backburner import BackburnerService
             await BackburnerService(app_ctx).recover_orphaned_goals()
         except Exception:
             logger.warning("Backburner recovery sweep failed", exc_info=True)
 
         # Clean up stale voice sessions (bridges are gone after restart)
         try:
-            from bob_server.services.voice_session_service import VoiceSessionService
+            from server.services.voice_session_service import VoiceSessionService
             await VoiceSessionService(app_ctx).cleanup_stale()
         except Exception:
             logger.debug("Voice session cleanup skipped (table may not exist yet)")
 
         # Ensure the self-bob singleton exists so self-relevant claims have a target
         try:
-            from bob_server.services.memory.service import MemoryService
+            from server.services.memory.service import MemoryService
             await MemoryService(app_ctx).ensure_self_entity()
         except Exception:
             logger.exception("Failed to ensure self-bob entity on startup")
@@ -148,7 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         wa_bridge_service = None
         if resolved_settings.whatsapp_bridge.enabled:
             try:
-                from bob_server.services.whatsapp_bridge_service import WhatsAppBridgeService
+                from server.services.whatsapp_bridge_service import WhatsAppBridgeService
                 wa_bridge_service = WhatsAppBridgeService(app_ctx)
                 await wa_bridge_service.start()
                 app.state.whatsapp_bridge_service = wa_bridge_service
@@ -277,13 +277,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Conditional voice chat router
     if resolved_settings.voice.enabled:
-        from bob_server.routers import voice as voice_router
+        from server.routers import voice as voice_router
         app.include_router(voice_router.router, prefix="/voice")
         voice_router.mount_frontend(app, resolved_settings.voice.frontend_dir)
 
     # Conditional phone/telephony router (requires voice)
     if resolved_settings.phone.enabled:
-        from bob_server.routers import phone as phone_router
+        from server.routers import phone as phone_router
         app.include_router(phone_router.router, prefix="/phone")
 
     # Conditional WhatsApp bridge router
@@ -293,9 +293,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Conditional OpenAI evaluation router
     if resolved_settings.openai.enabled:
         try:
-            from bob_server.routers import openai_llm as openai_router
+            from server.routers import openai_llm as openai_router
             app.include_router(openai_router.router)
         except ImportError:
-            logger.warning("OpenAI SDK not installed — install with: pip install bob-server[openai]")
+            logger.warning("OpenAI SDK not installed")
 
     return app

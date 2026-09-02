@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bob_server.cli._helpers import *  # noqa: F403,F405
+from server.cli._helpers import *  # noqa: F403,F405
 
 
 app = typer.Typer(help="LLM eval framework")
@@ -19,7 +19,7 @@ def eval_list(
 
 
 async def _eval_list(category: str | None) -> None:
-    from bob_server.evals.registry import get_all_cases, get_cases_by_category
+    from server.evals.registry import get_all_cases, get_cases_by_category
     cases = get_cases_by_category(category) if category else get_all_cases()
     if not cases:
         typer.echo("No eval cases found.")
@@ -48,9 +48,9 @@ async def _eval_run(
     threshold: float,
     skip_judge: bool,
 ) -> None:
-    from bob_server.config import Settings
-    from bob_server.context import AppContext
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"
@@ -60,7 +60,7 @@ async def _eval_run(
     ctx = AppContext(settings=settings, db=db)
 
     try:
-        from bob_server.evals.runner import EvalRunner
+        from server.evals.runner import EvalRunner
         runner = EvalRunner(ctx)
         results = await runner.run_all(
             category=category,
@@ -107,8 +107,8 @@ def eval_history(
 
 
 async def _eval_history(limit: int) -> None:
-    from bob_server.config import Settings
-    from bob_server.database import Database
+    from server.config import Settings
+    from server.database import Database
 
     settings = Settings.from_env()
     schema_dir = Path(__file__).parent / "schemas"

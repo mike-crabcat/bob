@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.services import effects as effects_svc
-from bob_server.services.attention import coordinator as coord_mod
+from server.services import effects as effects_svc
+from server.services.attention import coordinator as coord_mod
 from tests.services.test_whatsapp_inbound_characterization import (  # noqa: F401
     _dm_payload,
     _group_payload,
@@ -73,7 +73,7 @@ async def replay_episode(
 
     if "probe_decision" in episode:
         monkeypatch.setattr(
-            "bob_server.services.attention.tier2.probe_actionability",
+            "server.services.attention.tier2.probe_actionability",
             AsyncMock(return_value=episode["probe_decision"]))
         # Probe path is gated by conversation policy; enable per session below.
 
@@ -92,7 +92,7 @@ async def replay_episode(
         if "probe_decision" in episode:
             # Enable the Tier 2 probe via conversation policy (conversation
             # exists after the first message).
-            from bob_server.repositories.conversations import ConversationRepository
+            from server.repositories.conversations import ConversationRepository
             repo = ConversationRepository(ctx.db)
             for sk in session_keys:
                 await repo.ensure(sk)
@@ -155,8 +155,8 @@ async def test_fake_sink_intercepts_every_kind(ctx, replay_environment):
 async def test_deletion_propagation_redacts_event_payloads(ctx, db):
     """Decision 7: deleting a contact tombstones related event payloads while
     keeping event identity and ordering."""
-    import bob_server.heartbeat as hb
-    from bob_server.repositories.event_log import Event, EventLogRepository
+    import server.heartbeat as hb
+    from server.repositories.event_log import Event, EventLogRepository
 
     await db.execute(
         """INSERT INTO contacts (id, name, phone_number, deleted_at, created_at, updated_at)

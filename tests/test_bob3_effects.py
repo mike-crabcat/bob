@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.repositories.effects import EffectRepository
-from bob_server.services import effects as effects_svc
+from server.repositories.effects import EffectRepository
+from server.services import effects as effects_svc
 
 
 @pytest.fixture(autouse=True)

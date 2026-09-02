@@ -34,7 +34,7 @@ import os
 from typing import Any
 from uuid import uuid4
 
-from bob_server.context import AppContext
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,8 @@ async def refresh_mentions_for_turn(db: Any, turn_message_id: str) -> None:
     synthetic marker message, which only exists once the turn commits — so
     the write_claim-time index update skipped them. One pass over the turn's
     claims (subjects + entity-ref objects) upserts their intervals."""
-    from bob_server.repositories.history import HistoryRepository
-    from bob_server.services.memory.claim_service import update_entity_mentions
+    from server.repositories.history import HistoryRepository
+    from server.services.memory.claim_service import update_entity_mentions
 
     marker = await HistoryRepository(db).messages_by_ids([turn_message_id])
     if not marker:
@@ -78,7 +78,7 @@ async def refresh_mentions_for_turn(db: Any, turn_message_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 async def _participant_overlapping_conversations(db: Any, cid: str) -> list[str]:
-    from bob_server.repositories.participants import ParticipantRepository
+    from server.repositories.participants import ParticipantRepository
     return await ParticipantRepository(db).conversations_sharing_contacts(cid)
 
 
@@ -86,9 +86,9 @@ async def candidate_entity_ids(db: Any, session_key: str) -> list[tuple[str, str
     """(entity_id, purpose) candidates for the extractor: refs of active goals
     held by this conversation, plus refs of goals held by conversations
     sharing human participants. Bounded to _MAX_CANDIDATE_ENTITIES."""
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.repositories.goals import GoalRepository
-    from bob_server.services.goal_state_service import parse_strategy
+    from server.repositories.conversations import ConversationRepository
+    from server.repositories.goals import GoalRepository
+    from server.services.goal_state_service import parse_strategy
 
     repo = GoalRepository(db)
     cid = await ConversationRepository(db).resolve_cid(session_key)
@@ -163,14 +163,14 @@ async def handle_extraction_batch(
     The event_log row is appended BEFORE routing (accept-once on
     turn_message_id). If routing is disabled or crashes, the heartbeat sweep
     replays from the watermark once re-enabled/recovered."""
-    from bob_server.repositories.event_log import Event, EventLogRepository
+    from server.repositories.event_log import Event, EventLogRepository
 
     db = ctx.db
     batch = await _batch_for_turn(db, turn_message_id)
     if not batch["claim_ids"]:
         return {"status": "no_claims"}
 
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     cid = await ConversationRepository(db).resolve_cid(session_key)
 
     event_id = await EventLogRepository(db).append(Event(
@@ -234,7 +234,7 @@ async def _candidate_goals(
     the probe; participant overlap is weak and probed. The originating
     conversation is excluded from holder-based matching (echo suppression).
     Cross-domain reads go through the owning repositories."""
-    from bob_server.repositories.goals import GoalRepository
+    from server.repositories.goals import GoalRepository
 
     repo = GoalRepository(db)
     candidates: dict[str, str] = {}
@@ -277,7 +277,7 @@ async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
     """Cheap relevance gate for weak (participant-only) matches. Fails open
     to 'relevant' on any error (plan §2.3 asymmetry)."""
     try:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         result = await LLMDispatchService(ctx).chat(
             [{"role": "system", "content": _PROBE_SYSTEM},
@@ -307,7 +307,7 @@ async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
 async def _render_stimulus(
     db: Any, session_key: str, cid: str, batch: dict[str, Any],
 ) -> str:
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
     lines = [f"New memory extracted from conversation `{session_key}`:"]
     display = await _entity_display_names(db, batch["entity_ids"])
     for c in batch["claims"]:
@@ -342,8 +342,8 @@ async def _route_batch(
     ctx: AppContext, *, session_key: str, cid: str, turn_message_id: str,
     batch: dict[str, Any],
 ) -> dict[str, Any]:
-    from bob_server.repositories.goals import GoalRepository
-    from bob_server.services.goal_state_service import enqueue_revision
+    from server.repositories.goals import GoalRepository
+    from server.services.goal_state_service import enqueue_revision
 
     stimulus = await _render_stimulus(ctx.db, session_key, cid, batch)
     goals = await _candidate_goals(ctx.db, cid, batch["entity_ids"])
@@ -439,7 +439,7 @@ async def recent_routing_log(db: Any, *, limit: int = 50) -> list[dict[str, Any]
 
 
 async def advance_watermark(db: Any, event_id: str) -> None:
-    from bob_server.services.base import utcnow
+    from server.services.base import utcnow
     await db.execute(
         """INSERT INTO claim_router_watermark (id, event_id, updated_at)
            VALUES (1, ?, ?)
@@ -465,7 +465,7 @@ async def replay_pending(ctx: AppContext, *, limit: int = 20) -> int:
         await advance_watermark(ctx.db, "")
         wm = ""
 
-    from bob_server.repositories.event_log import EventLogRepository
+    from server.repositories.event_log import EventLogRepository
 
     rows = await EventLogRepository(ctx.db).events_after(
         ROUTED_EVENT_TYPE, wm, limit=limit)

@@ -7,10 +7,10 @@ import logging
 import time
 from uuid import uuid4
 
-from bob_server.evals.case import EvalCase, EvalCaseResult
-from bob_server.evals.judge import LLMJudge, StructuralJudge
-from bob_server.evals.registry import get_all_cases, get_cases_by_category, get_case_by_id
-from bob_server.context import AppContext
+from server.evals.case import EvalCase, EvalCaseResult
+from server.evals.judge import LLMJudge, StructuralJudge
+from server.evals.registry import get_all_cases, get_cases_by_category, get_case_by_id
+from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 

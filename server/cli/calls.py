@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bob_server.cli._helpers import *  # noqa: F403,F405
+from server.cli._helpers import *  # noqa: F403,F405
 
 
 app = typer.Typer(help="Phone call operations")

@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.services.dispatch_runner import DispatchRunner, DispatchSpec
-from bob_server.services.session_service import SessionService
+from server.services.dispatch_runner import DispatchRunner, DispatchSpec
+from server.services.session_service import SessionService
 
 
 class _FakeSendTool:
@@ -50,7 +50,7 @@ def _spec(session_key: str, send_tool: _FakeSendTool) -> DispatchSpec:
 def stub_llm(monkeypatch):
     """chat_with_tools returns un-sent text; captures the built messages.
     Swap the canned reply via ``stub_llm["reply"] = …``."""
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
     seen: dict = {"reply": "Folded. Blair's preferences recorded; no group post."}
 
     async def _chat_with_tools(self, messages, tools, **kwargs):
@@ -67,7 +67,7 @@ def stub_history(monkeypatch):
         return [{"role": "user", "content": "nudge"}]
 
     monkeypatch.setattr(
-        "bob_server.services.prompt_assembler.build_chat_messages", _build)
+        "server.services.prompt_assembler.build_chat_messages", _build)
 
 
 async def _assistant_rows(db, session_key: str) -> list:

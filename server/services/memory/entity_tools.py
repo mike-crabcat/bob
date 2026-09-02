@@ -11,8 +11,8 @@ import json
 import logging
 from typing import Any
 
-from bob_server.services.memory.claim_types import ENTITY_TYPES, render_entity
-from bob_server.services.tools import Tool, tool
+from server.services.memory.claim_types import ENTITY_TYPES, render_entity
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 

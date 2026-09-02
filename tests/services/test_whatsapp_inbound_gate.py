@@ -15,7 +15,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from bob_server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
+from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
 HUMAN_DM = "+614000000001"      # trusted, inbound allowed
 OUTBOUND_ONLY = "+614000000002"  # untrusted, inbound disabled
@@ -118,7 +118,7 @@ async def test_outreach_tool_refuses_outbound_only_contact(db):
     """
     import json
 
-    from bob_server.services.whatsapp_outreach_tools import (
+    from server.services.whatsapp_outreach_tools import (
         make_whatsapp_outreach_tools,
     )
 

@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 import json
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.database import Database
+from server.context import AppContext
+from server.database import Database
 
 
 def utcnow() -> datetime:

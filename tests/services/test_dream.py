@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from bob_server.services.base import iso_utc
-from bob_server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
+from server.services.base import iso_utc
+from server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
 
 SK = "wa:contact:whatsapp:dm:61412345678"
 SK_GROUP = "wa:group:whatsapp:group:1203634"
@@ -70,7 +70,7 @@ def _messages(n: int = 6) -> list[dict]:
 
 async def _seed_route(db, session_key: str, autoplan: bool | None = None) -> None:
     """Seed the conversation + binding an ingress path would register."""
-    from bob_server.repositories.conversations import ConversationRepository
+    from server.repositories.conversations import ConversationRepository
 
     repo = ConversationRepository(db)
     await repo.register_endpoint(
@@ -133,9 +133,9 @@ def stub_env(monkeypatch, ctx):
     """Patch LLM + embeddings + bridge; return handles for assertions."""
     stub_llm = _StubLLM()
     stub_bridge = _StubBridge()
-    monkeypatch.setattr("bob_server.services.llm_dispatch.LLMDispatchService.chat", stub_llm.chat)
+    monkeypatch.setattr("server.services.llm_dispatch.LLMDispatchService.chat", stub_llm.chat)
     monkeypatch.setattr(
-        "bob_server.services.memory.embedding.embed_text",
+        "server.services.memory.embedding.embed_text",
         lambda text: _async_none(),
     )
     ctx.whatsapp_bridge = stub_bridge
@@ -151,7 +151,7 @@ async def _async_none():
 # ---------------------------------------------------------------- validation
 
 async def test_transcript_tags_speaker_names(ctx):
-    from bob_server.services.dream.review import ReviewService
+    from server.services.dream.review import ReviewService
 
     svc = ReviewService(ctx)
     msgs = [
@@ -167,7 +167,7 @@ async def test_transcript_tags_speaker_names(ctx):
     assert lines[3] == "[4] [BOB] hi!"
 
 async def test_review_validates_evidence_and_rejects_fabricated(ctx, stub_env):
-    from bob_server.services.dream.review import ReviewService
+    from server.services.dream.review import ReviewService
 
     result = await ReviewService(ctx).review_session(session_key=SK, messages=_messages())
     # fabricated line 99 rejected; valid line 2 accepted
@@ -177,12 +177,12 @@ async def test_review_validates_evidence_and_rejects_fabricated(ctx, stub_env):
 
 
 async def test_review_rejects_vacuous_success_signal(ctx, stub_env, monkeypatch):
-    from bob_server.services.dream.review import ReviewService
+    from server.services.dream.review import ReviewService
 
     payload = json.loads(json.dumps(REVIEW_PAYLOAD))
     payload["resolutions"][0]["success_signal"] = "be better"
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat",
+        "server.services.llm_dispatch.LLMDispatchService.chat",
         _StubLLM(review=payload).chat,
     )
     result = await ReviewService(ctx).review_session(session_key=SK, messages=_messages())
@@ -193,7 +193,7 @@ async def test_review_rejects_vacuous_success_signal(ctx, stub_env, monkeypatch)
 # ------------------------------------------------------------- runner e2e
 
 async def test_runner_end_to_end_creates_items_and_advances_cursor(ctx, stub_env):
-    from bob_server.services.dream.runner import DreamRunner
+    from server.services.dream.runner import DreamRunner
 
     await _seed_messages(ctx.db, SK, _messages())
     result = await DreamRunner(ctx).maybe_run(trigger="cli")
@@ -224,7 +224,7 @@ async def test_runner_end_to_end_creates_items_and_advances_cursor(ctx, stub_env
 
 
 async def test_runner_autoapprove_with_backlog_guard(ctx, stub_env, monkeypatch):
-    from bob_server.services.dream.runner import DreamRunner
+    from server.services.dream.runner import DreamRunner
 
     await _seed_route(ctx.db, SK, autoplan=True)
 
@@ -245,12 +245,12 @@ async def test_runner_autoapprove_with_backlog_guard(ctx, stub_env, monkeypatch)
 
 
 async def test_dedup_merge_on_reobservation(ctx, stub_env, monkeypatch):
-    from bob_server.services.dream.runner import DreamRunner
+    from server.services.dream.runner import DreamRunner
 
     async def _const_vec(text):
         return [0.1] * 1536
 
-    monkeypatch.setattr("bob_server.services.memory.embedding.embed_text", _const_vec)
+    monkeypatch.setattr("server.services.memory.embedding.embed_text", _const_vec)
 
     await _seed_messages(ctx.db, SK, _messages())
     await DreamRunner(ctx).maybe_run(trigger="cli")
@@ -272,12 +272,12 @@ async def test_dedup_merge_on_reobservation(ctx, stub_env, monkeypatch):
 
 
 async def test_recently_terminal_suppression_and_reopen(ctx, stub_env):
-    from bob_server.services.dream.runner import DreamRunner
+    from server.services.dream.runner import DreamRunner
 
     async def _const_vec(text):
         return [0.2] * 1536
 
-    import bob_server.services.memory.embedding as emb
+    import server.services.memory.embedding as emb
 
     original = emb.embed_text
     emb.embed_text = _const_vec
@@ -305,7 +305,7 @@ async def test_recently_terminal_suppression_and_reopen(ctx, stub_env):
 
 async def test_prospective_engagement_guard_blocks_expiry(ctx, stub_env, monkeypatch):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.prospective import ProspectiveService
+    from server.services.dream.prospective import ProspectiveService
 
     plan_id = "plan-test0001"
     now = iso_utc()
@@ -325,7 +325,7 @@ async def test_prospective_engagement_guard_blocks_expiry(ctx, stub_env, monkeyp
 
     prospective_payload = {"decisions": [{"item_type": "plan", "item_id": plan_id, "action": "expire", "reason": "due passed"}]}
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat",
+        "server.services.llm_dispatch.LLMDispatchService.chat",
         _StubLLM(prospective=prospective_payload).chat,
     )
     await ProspectiveService(ctx).run(run_id="dream-x", settings=ctx.settings.dream)
@@ -335,7 +335,7 @@ async def test_prospective_engagement_guard_blocks_expiry(ctx, stub_env, monkeyp
 
 async def test_resolution_kept_requires_consecutive_signals(ctx, stub_env, monkeypatch):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.prospective import ProspectiveService
+    from server.services.dream.prospective import ProspectiveService
 
     res_id = "resolution-ke1"
     now = iso_utc()
@@ -347,7 +347,7 @@ async def test_resolution_kept_requires_consecutive_signals(ctx, stub_env, monke
     )
     payload = {"decisions": [{"item_type": "resolution", "item_id": res_id, "action": "kept", "reason": "signal observed"}]}
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat",
+        "server.services.llm_dispatch.LLMDispatchService.chat",
         _StubLLM(prospective=payload).chat,
     )
     settings = ctx.settings.dream
@@ -368,7 +368,7 @@ async def test_resolution_kept_requires_consecutive_signals(ctx, stub_env, monke
 
 async def test_announce_flush_batches_guards_and_records(ctx, stub_env):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.announce import AnnounceService
+    from server.services.dream.announce import AnnounceService
 
     now = iso_utc()
     for i in range(2):
@@ -398,7 +398,7 @@ async def test_announce_flush_batches_guards_and_records(ctx, stub_env):
 
 async def test_announce_hot_session_defer(ctx, stub_env):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.announce import AnnounceService
+    from server.services.dream.announce import AnnounceService
 
     now = iso_utc()
     await ctx.db.execute(
@@ -417,7 +417,7 @@ async def test_announce_hot_session_defer(ctx, stub_env):
 
 async def test_announce_daily_cap(ctx, stub_env):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.announce import AnnounceService
+    from server.services.dream.announce import AnnounceService
 
     now = iso_utc()
     await ctx.db.execute(
@@ -438,8 +438,8 @@ async def test_announce_daily_cap(ctx, stub_env):
 
 async def test_reannounce_single_followup_cap(ctx, stub_env):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.announce import AnnounceService
-    from bob_server.services.dream.prospective import ProspectiveService
+    from server.services.dream.announce import AnnounceService
+    from server.services.dream.prospective import ProspectiveService
 
     now = iso_utc()
     await ctx.db.execute(
@@ -453,10 +453,10 @@ async def test_reannounce_single_followup_cap(ctx, stub_env):
         "UPDATE dream_plans SET announced_at = datetime('now', '-10 days') WHERE id = 'plan-rea1'"
     )
     payload = {"decisions": [{"item_type": "plan", "item_id": "plan-rea1", "action": "reannounce", "reason": "silent"}]}
-    import bob_server.services.llm_dispatch as ld
+    import server.services.llm_dispatch as ld
 
     stub = _StubLLM(prospective=payload)
-    import bob_server.services.dream.prospective as pros
+    import server.services.dream.prospective as pros
 
     monkeypatch_holder = pytest.MonkeyPatch()
     monkeypatch_holder.setattr(ld.LLMDispatchService, "chat", stub.chat)
@@ -477,7 +477,7 @@ async def test_reannounce_single_followup_cap(ctx, stub_env):
 
 async def test_plan_tools_session_bound(ctx):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.tools import make_dream_tools
+    from server.services.dream.tools import make_dream_tools
 
     now = iso_utc()
     await ctx.db.execute(
@@ -511,7 +511,7 @@ async def test_plan_tools_session_bound(ctx):
 
 async def test_plan_update_progress_moves_to_actioned(ctx):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.tools import make_dream_tools
+    from server.services.dream.tools import make_dream_tools
 
     now = iso_utc()
     await ctx.db.execute(
@@ -535,7 +535,7 @@ async def test_plan_update_progress_moves_to_actioned(ctx):
 
 async def test_injection_gated_and_compact(ctx):
     await _seed_run_row(ctx.db)
-    from bob_server.services.dream.injection import build_session_plans_prompt
+    from server.services.dream.injection import build_session_plans_prompt
 
     now = iso_utc()
     await ctx.db.execute(
@@ -564,7 +564,7 @@ async def test_injection_gated_and_compact(ctx):
 # ------------------------------------------------------------- heartbeat
 
 async def test_dream_task_does_not_block_heartbeat(ctx, stub_env, monkeypatch):
-    from bob_server.heartbeat import DreamTask
+    from server.heartbeat import DreamTask
 
     await _seed_messages(ctx.db, SK, _messages())
 
@@ -577,7 +577,7 @@ async def test_dream_task_does_not_block_heartbeat(ctx, stub_env, monkeypatch):
         await asyncio.sleep(0.25)
         return {"run_id": "dream-x", "stats": {}}
 
-    import bob_server.services.dream.runner as runner_mod
+    import server.services.dream.runner as runner_mod
 
     monkeypatch.setattr(runner_mod.DreamRunner, "run", _slow_run)
     task = DreamTask()
@@ -595,7 +595,7 @@ import asyncio  # noqa: E402  (used by the test above)
 
 
 async def test_recall_augmentation_appends_dream_items(ctx, db):
-    from bob_server.services.memory.tools import recall
+    from server.services.memory.tools import recall
 
     await _seed_run_row(db)
     now = iso_utc()
@@ -628,7 +628,7 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
     and merges don't consume cap slots."""
     import dataclasses
 
-    from bob_server.services.dream.runner import DreamRunner
+    from server.services.dream.runner import DreamRunner
 
     # Cap of 1: first run creates one plan, defers the second
     ctx.settings.dream.max_new_items_per_type = 1
@@ -643,7 +643,7 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
         "related_entities": [],
     })
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat",
+        "server.services.llm_dispatch.LLMDispatchService.chat",
         _StubLLM(review=payload).chat,
     )
     await _seed_messages(ctx.db, SK, _messages())
@@ -669,8 +669,8 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
 
 async def test_autoplan_is_session_scoped(ctx, stub_env):
     """Autoplan lives on conversations.policy_json: one chat on, others unaffected."""
-    from bob_server.repositories.conversations import ConversationRepository
-    from bob_server.services.dream import config as dream_config
+    from server.repositories.conversations import ConversationRepository
+    from server.services.dream import config as dream_config
 
     other = "wa:contact:whatsapp:dm:61400000000"
     await _seed_route(ctx.db, SK, autoplan=False)

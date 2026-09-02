@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from bob_server.repositories.conversations import ConversationRepository
+from server.repositories.conversations import ConversationRepository
 from tests.services.test_whatsapp_inbound_characterization import (  # noqa: F401
     immediate_patience,
     stub_memory,
@@ -106,7 +106,7 @@ async def test_unmerge_of_unmerged_binding_is_noop(ctx, db):
 async def test_premerge_events_follow_binding_on_unmerge(ctx, db):
     """Events are keyed by binding (invariant 3): after unmerge, querying by
     the restored conversation_id returns the pre-merge events unchanged."""
-    from bob_server.repositories.event_log import Event, EventLogRepository
+    from server.repositories.event_log import Event, EventLogRepository
 
     repo = ConversationRepository(db)
     em = await repo.ensure("agent:main:email:dm:k@x.com")
@@ -207,7 +207,7 @@ async def test_inbound_on_unmerged_binding_unchanged(
 async def test_wake_channel_resolution_uses_bindings_after_merge(ctx, db):
     """Outbound seam: a survivor whose id is not channel-shaped resolves its
     channel via the binding map (prefer WhatsApp)."""
-    from bob_server.services.wake_service import conversation_channel
+    from server.services.wake_service import conversation_channel
 
     repo = ConversationRepository(db)
     # Channel-shaped id: key parsing wins, no lookup needed.

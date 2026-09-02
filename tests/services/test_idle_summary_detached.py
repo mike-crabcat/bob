@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from bob_server.heartbeat import SessionIdleSummaryTask
+from server.heartbeat import SessionIdleSummaryTask
 
 
 @pytest.mark.asyncio
@@ -30,8 +30,8 @@ async def test_extraction_runs_detached(ctx, monkeypatch):
     async def _fake_candidates(self, idle_threshold_minutes):
         return [{"session_key": "test:idle:1"}]
 
-    from bob_server.repositories.history import HistoryRepository
-    from bob_server.services import memory as memory_pkg
+    from server.repositories.history import HistoryRepository
+    from server.services import memory as memory_pkg
     monkeypatch.setattr(memory_pkg, "MemoryService", _FakeMemoryService)
     monkeypatch.setattr(HistoryRepository, "extraction_candidates",
                         _fake_candidates)
@@ -67,8 +67,8 @@ async def test_one_extraction_per_session_per_tick(ctx, monkeypatch):
     async def _fake_candidates(self, idle_threshold_minutes):
         return [{"session_key": "test:idle:2"}]
 
-    from bob_server.repositories.history import HistoryRepository
-    from bob_server.services import memory as memory_pkg
+    from server.repositories.history import HistoryRepository
+    from server.services import memory as memory_pkg
     monkeypatch.setattr(memory_pkg, "MemoryService", _FakeMemoryService)
     monkeypatch.setattr(HistoryRepository, "extraction_candidates",
                         _fake_candidates)

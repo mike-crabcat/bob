@@ -27,14 +27,14 @@ from typing import Any, Protocol, runtime_checkable
 
 import websockets
 
-from bob_server.services.mulaw import (
+from server.services.mulaw import (
     AntiAliasedDownsampler,
     apply_gain,
     mulaw_to_pcm16,
     pcm16_to_mulaw,
     resample_8k_to_24k,
 )
-from bob_server.services.tools import ImageInjection, Tool
+from server.services.tools import ImageInjection, Tool
 
 logger = logging.getLogger(__name__)
 

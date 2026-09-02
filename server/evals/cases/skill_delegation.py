@@ -2,12 +2,12 @@
 
 import json
 
-from bob_server.evals.case import JudgeCriteria, StructuralCheck
-from bob_server.evals.registry import eval_case
+from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.registry import eval_case
 
 
 def _make_mock_subagent_tools():
-    from bob_server.services.tools import tool
+    from server.services.tools import tool
 
     _subagents: dict[str, dict] = {}
 
@@ -65,7 +65,7 @@ def _make_mock_subagent_tools():
 
 
 def _make_mock_workspace_tools():
-    from bob_server.services.tools import tool
+    from server.services.tools import tool
 
     @tool
     async def ls(path: str = "") -> str:
@@ -139,7 +139,7 @@ AVAILABLE CAPABILITIES:
     ),
 )
 async def subagent_create_task(ctx):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     messages = [
         {"role": "system", "content": AGENDA},
@@ -170,7 +170,7 @@ async def subagent_create_task(ctx):
     ),
 )
 async def subagent_follow_up(ctx):
-    from bob_server.services.llm_dispatch import LLMDispatchService
+    from server.services.llm_dispatch import LLMDispatchService
 
     messages = [
         {"role": "system", "content": AGENDA},
@@ -212,7 +212,7 @@ async def subagent_follow_up(ctx):
 )
 async def subagent_hello_world(ctx):
     import asyncio
-    from bob_server.services.subagent_service import SubagentService
+    from server.services.subagent_service import SubagentService
 
     svc = SubagentService(ctx)
     result = await svc.create_subagent(

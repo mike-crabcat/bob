@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import bob_server.heartbeat as heartbeat
-from bob_server.heartbeat import LlmLogRetentionTask
+import server.heartbeat as heartbeat
+from server.heartbeat import LlmLogRetentionTask
 
 
 async def _insert_call(db, call_id: str, created_at: str) -> None:
@@ -65,7 +65,7 @@ async def test_boot_sweep_cancels_zombie_running_rows(ctx):
     """At startup every 'running' row is a zombie (nothing from the previous
     process survives a restart). The sweep cancels exactly those — completed
     and failed rows untouched, including the staleness task's own 'failed'."""
-    from bob_server.repositories.llm_call_log import LlmCallLogRepository
+    from server.repositories.llm_call_log import LlmCallLogRepository
 
     now = datetime.now(timezone.utc)
     await _insert_call(ctx.db, "zombie-call", now.strftime("%Y-%m-%d %H:%M:%S"))

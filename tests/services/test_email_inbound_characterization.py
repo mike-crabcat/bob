@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bob_server.services.email_polling_service import (
+from server.services.email_polling_service import (
     KNOWN_UNTRUSTED_AGENDA,
     UNTRUSTED_EXTERNAL_AGENDA,
     EmailPollingService,
@@ -123,7 +123,7 @@ async def _run_dispatch_and_capture(ctx, db, monkeypatch, *, trusted: int, resul
         return result
 
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
+        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
 
@@ -281,11 +281,11 @@ async def test_assistant_history_is_written_after_successful_email_reply_send(ct
         return "Model text"
 
     monkeypatch.setattr(
-        "bob_server.services.email_delivery_service.EmailDeliveryService.send_reply",
+        "server.services.email_delivery_service.EmailDeliveryService.send_reply",
         fake_send_reply,
     )
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
+        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
 
@@ -314,11 +314,11 @@ async def test_failed_email_reply_is_not_marked_sent_but_error_text_is_recorded(
         return await reply_tool.handler("Body that fails")
 
     monkeypatch.setattr(
-        "bob_server.services.email_delivery_service.EmailDeliveryService.send_reply",
+        "server.services.email_delivery_service.EmailDeliveryService.send_reply",
         fake_send_reply,
     )
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
+        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
 
@@ -342,7 +342,7 @@ async def test_quota_like_llm_failure_has_no_email_retry_restoration(ctx, db, mo
         raise RuntimeError("insufficient_quota")
 
     monkeypatch.setattr(
-        "bob_server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
+        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
         fake_chat_with_tools,
     )
 

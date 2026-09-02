@@ -6,9 +6,9 @@ import json
 import logging
 from typing import Any
 
-from bob_server.context import AppContext
-from bob_server.services.base import BaseService
-from bob_server.services.tools import Tool, tool
+from server.context import AppContext
+from server.services.base import BaseService
+from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class ReflectionService(BaseService):
     """Dispatches reflection LLM calls that analyze session history."""
 
     async def reflect(self, session_key: str, query: str) -> dict[str, Any]:
-        from bob_server.services.llm_dispatch import LLMDispatchService
+        from server.services.llm_dispatch import LLMDispatchService
 
         transcript = await self._build_transcript(session_key)
         system = _REFLECTION_SYSTEM_PROMPT + f"\n\n---\nSession transcript:\n\n{transcript}"
@@ -57,7 +57,7 @@ class ReflectionService(BaseService):
         parts: list[str] = []
 
         # LLM call history — get the latest N, then display chronologically
-        from bob_server.repositories.llm_call_log import LlmCallLogRepository
+        from server.repositories.llm_call_log import LlmCallLogRepository
         call_rows = await LlmCallLogRepository(self.db).recent_for_transcript(
             session_key, limit=_MAX_CALLS)
         if call_rows:
@@ -78,7 +78,7 @@ class ReflectionService(BaseService):
                     parts.append(f"    Tool calls:\n{tool_log}")
 
         # Session messages
-        from bob_server.repositories.history import HistoryRepository
+        from server.repositories.history import HistoryRepository
         msg_rows = await HistoryRepository(self.db).messages(
             session_key, limit=_MAX_MESSAGES)
         if msg_rows:

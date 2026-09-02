@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from bob_server.services.contact_tools import make_contact_tools
+from server.services.contact_tools import make_contact_tools
 
 
 def _tool_map(ctx, *, trusted: bool):
