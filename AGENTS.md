@@ -2,7 +2,7 @@
 
 ## Architecture
 
-This is a Python monorepo managed with `uv`. The main package is `bob-server`, a FastAPI application.
+A single FastAPI application plus a Go WhatsApp bridge. Distributed via Docker (see `docs/bob-docker-plan.md`); the primary instance on this box runs from this checkout under systemd.
 
 ## Database
 
@@ -12,26 +12,30 @@ This is a Python monorepo managed with `uv`. The main package is `bob-server`, a
 - **Data directory**: `~/data/` (override with `BOB_DATA_DIR`)
 - **Config directory**: `~/config/` (override with `BOB_CONFIG_DIR`)
 - **Connection pool**: 4 connections by default (override with `BOB_DB_POOL_SIZE`)
-- **Migrations**: SQL files in `packages/bob-server/bob_server/schemas/`, numbered and applied automatically on startup via `apply_migrations()`
+- **Migrations**: SQL files in `server/schemas/`, numbered and applied automatically on startup via `apply_migrations()`
 
 ## Server
 
 - **Default host/port**: `127.0.0.1:8420` (override with `BOB_HOST` / `BOB_PORT`)
-- **Entry point**: `packages/bob-server/bob_server/main.py`
-- **Dashboard**: React SPA built into `ui_dist/` and served at `/dashboard`. Dev server runs from `packages/bob-server/bob_server/ui_app/`.
+- **Entry point**: `server/main.py`
+- **Dashboard**: React SPA built into `server/ui_dist/` (by `deploy.sh` or the Docker build; `npm run build` in `ui/`) and served at `/dashboard`. Dev server runs from `ui/`.
 - **API**: REST endpoints under `/api/v1/` plus `/dashboard/api/*` for the SPA
 
 ## Key Directories
 
-- `packages/bob-server/bob_server/` - Main server package
+- `server/` - FastAPI app (plain source dir, import package `server`)
   - `routers/` - FastAPI routers (dashboard_api is itself a package split by domain)
-  - `cli/` - Typer CLI split by subapp
-  - `models.py` - Pydantic models
-  - `config.py` - Settings (env vars, paths)
-  - `database.py` - Database connection pool
+  - `services/` - Domain services (dispatch, memory, realtime bridge, subagents, …)
+  - `cli/` - Typer CLI split by subapp (`bob serve`, `bob dream`, …)
+  - `repositories/` - one module per table family (SQL-ownership rule)
   - `schemas/` - SQL migration files
-  - `ui_app/` - React SPA source (Vite + TypeScript + Tailwind)
-  - `services/` - Background services (email polling, whatsapp bridge, etc.)
+  - `voice_frontend/` - static voice/realtime session pages
+  - `models.py`, `config.py`, `database.py`, `heartbeat.py`, …
+- `ui/` - Dashboard SPA source (Vite + TypeScript + Tailwind), builds to `server/ui_dist/`
+- `bridge/` - Go WhatsApp bridge (`make build` → `bridge/bin/whatsappbridge`)
+- `skills/` - core skill bundle captured from the live workspace (seeded into fresh instances; `scripts` per `docs/bob-docker-plan.md`)
+- `tests/` - pytest suite (deploy gate; `tests/legacy/` is quarantined, uncollected)
+- `docs/` - design docs, plans, datamodel reference
 
 ## Phone & voice
 
@@ -52,5 +56,7 @@ Config directory is `/home/bob/config`
 
 ## Development
 
-- Package manager: `uv`
-- Python version: check `pyproject.toml`
+- Package manager: `uv` (Python 3.12 pinned via `.python-version`); single project at the repo root
+- UI: `npm` in `ui/`
+- Deploy (primary): `./deploy.sh` — tests → SPA build → venv sync → push master → restart → healthcheck
+- Test: `uv run pytest tests -q`

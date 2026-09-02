@@ -56,7 +56,7 @@
   prompt: |
           This document is the canonical reference for Bob's SQLite schema. It should start with a one-paragraph purpose
           statement: that the schema is the persistent backbone of the system (every channel — WhatsApp, email, voice,
-          phone — writes here), that migrations live under packages/bob-server/bob_server/schemas/ as numbered .sql files
+          phone — writes here), that migrations live under server/schemas/ as numbered .sql files
           applied in order at startup via Database.apply_migrations(), and that the document is grouped by domain so a
           reader can find the tables they care about without scanning a 500-line CREATE TABLE dump.
           The body must cover, grouped by domain (sessions & messaging, dispatches, phone calls, email, calendars & events,

@@ -2,6 +2,15 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-09-02 – 2026-09-03
+
+### Changed
+- Repo restructure to top-level `server/` + `ui/` + `bridge/` (was `packages/bob-server/bob_server/…`), retiring the installable-package model: single root pyproject (project `bob`), Python 3.12 pinned (the old package venv had drifted to brew 3.14 with a broken SSL CA bundle and no PIL — email polling and image resizing had been failing in prod; both fixed by the pinned venv), import package renamed `bob_server` → `server`, dashboard SPA now built by `deploy.sh` itself (deploys previously served a stale hand-built `ui_dist`), and deploy pushes `master` (was long-dead `bobv3`)
+
+### Removed
+- `ui_app/node_modules` untracked from git (was 21,361 of 21,945 tracked files); stale `cyborg_server` wheels, stray dev DB, `pnpm-lock.yaml`, legacy `schema.sql`
+- Rotted root test suite quarantined to `tests/legacy/` (uncollected): it predated the OpenClaw → OpenAI/OpenRouter architecture shift and had not run under any gate — salvage or drop
+
 ## 2026-08-24 – 2026-08-25
 
 ### Added

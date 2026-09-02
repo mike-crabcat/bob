@@ -122,7 +122,7 @@ One FastAPI process (`bob-server`, port 8420) owns the whole pipeline. All state
 ```bash
 git clone <repo-url> bob
 cd bob
-uv sync --extra dev
+uv sync
 ```
 
 ### Configure Environment
@@ -225,10 +225,10 @@ The service listens on `127.0.0.1:8420` by default.
 
 ### Dashboard Development
 
-The dashboard is a React SPA (Vite + TypeScript + Tailwind) in `packages/bob-server/bob_server/ui_app/`.
+The dashboard is a React SPA (Vite + TypeScript + Tailwind) in `ui/`.
 
 ```bash
-cd packages/bob-server/bob_server/ui_app
+cd ui
 npm install
 npm run dev
 ```
@@ -444,7 +444,7 @@ Skills run as subprocesses and need API keys in standard env var names (e.g. `OP
 echo 'BOB_GOOGLE_PLACES_API_KEY=AIza...' >> ~/config/.env
 ```
 
-2. Register the mapping in `packages/bob-server/bob_server/services/skill_env.py` so the subprocess sees the standard name:
+2. Register the mapping in `server/services/skill_env.py` so the subprocess sees the standard name:
 
 ```python
 ENV_MAPPINGS: dict[str, str] = {
