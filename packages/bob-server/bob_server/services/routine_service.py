@@ -192,6 +192,33 @@ class RoutineService(BaseService):
             (now, now, routine_id),
         )
 
+    async def advance_next_run(self, routine: dict[str, Any]) -> None:
+        """Roll the routines-row next_run_at to the next cron occurrence.
+
+        The wakeups table owns the real schedule — pump_due_wakeups reschedules
+        the next wakeup from now at fire time — but nothing advanced this row,
+        and it is what read_routine/write_routine echo as next_fire. A stale
+        mirror showed the model 'next_fire' in the past while the real wakeup
+        was correctly scheduled (2026-09-02 crypto group: next_fire read
+        yesterday's 9am; date arithmetic followed it astray). Computed the
+        same way as the pump's _next_occurrence (from now, routine tz) so the
+        mirror tracks the series."""
+        from bob_server.cron import next_cron_occurrence
+
+        try:
+            next_at = next_cron_occurrence(
+                routine["schedule"], timezone=routine.get("timezone") or None)
+        except (ValueError, TypeError):
+            logger.warning(
+                "routine %s: cannot advance next_run_at (schedule=%r)",
+                routine.get("name"), routine.get("schedule"))
+            return
+        now = datetime.now().astimezone().isoformat()
+        await self.db.execute(
+            "UPDATE routines SET next_run_at = ?, updated_at = ? WHERE id = ?",
+            (next_at.astimezone(UTC).isoformat(), now, routine["id"]),
+        )
+
 
 async def append_fired_event(ctx: Any, routine: dict[str, Any], slot: str) -> None:
     """Append routine.fired (audit-only). Idempotent per routine id + run slot,

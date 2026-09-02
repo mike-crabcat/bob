@@ -478,3 +478,71 @@ async def test_write_routine_tool_accepts_operational_prompt_with_guard_clause(s
         )
     )
     assert "error" not in result
+
+
+# ---------------------------------------------------------------------------
+# advance_next_run — the pump keeps the routines-row mirror in step
+# ---------------------------------------------------------------------------
+
+
+async def test_advance_next_run_rolls_stale_mirror_forward(svc, session_key):
+    """Live 2026-09-02 (Crypto-Bob group): fire_routine only wrote last_run_at,
+    so next_run_at went stale after the first fire and the routine tools echoed
+    next_fire a full day in the past while the wakeup series was correct."""
+    await svc.upsert_routine(
+        session_key, "crypto-morning-trade", "0 9 * * *", "do the thing",
+        next_run_at="2026-09-01T01:00:00+00:00", timezone="Australia/Perth")
+    row = await svc.get_routine(session_key, "crypto-morning-trade")
+
+    await svc.advance_next_run(row)
+
+    rolled = await svc.get_routine(session_key, "crypto-morning-trade")
+    when = datetime.fromisoformat(rolled["next_run_at"])
+    assert when > datetime.now(UTC)
+    assert when.astimezone(ZoneInfo("Australia/Perth")).strftime("%H:%M") == "09:00"
+
+
+async def test_advance_next_run_leaves_mirror_alone_on_bad_cron(svc, session_key):
+    await svc.upsert_routine(
+        session_key, "broken", "not a cron", "do the thing",
+        next_run_at="2026-09-01T01:00:00+00:00", timezone="Australia/Perth")
+    row = await svc.get_routine(session_key, "broken")
+
+    await svc.advance_next_run(row)
+
+    unchanged = await svc.get_routine(session_key, "broken")
+    assert unchanged["next_run_at"] == "2026-09-01T01:00:00+00:00"
+
+
+async def test_fire_wakeup_advances_the_mirror(ctx, svc, session_key, monkeypatch):
+    """The pump's routine branch must roll the mirror when it fires (and on the
+    validity-skip path, which also reschedules the wakeup)."""
+    import json as _json
+    from uuid import uuid4
+
+    from bob_server.services import goal_service, routine_service
+
+    # never dispatch an LLM turn from the test
+    monkeypatch.setattr(routine_service, "fire_routine_detached",
+                        lambda ctx, routine: None)
+
+    row = await svc.upsert_routine(
+        session_key, "crypto-morning-trade", "0 9 * * *", "do the thing",
+        next_run_at="2026-09-01T01:00:00+00:00", timezone="Australia/Perth")
+
+    wakeup = {
+        "id": str(uuid4()),
+        "conversation_id": session_key,
+        "goal_id": None,
+        "not_before": "2026-09-01T01:00:00+00:00",
+        "recurrence": "cron:0 9 * * *",
+        "tz": "Australia/Perth",
+        "status": "fired",
+        "kind": "routine",
+        "payload_json": _json.dumps({"routine_id": row["id"]}),
+    }
+
+    assert await goal_service.fire_wakeup(ctx, wakeup) is True
+
+    rolled = await svc.get_routine(session_key, "crypto-morning-trade")
+    assert datetime.fromisoformat(rolled["next_run_at"]) > datetime.now(UTC)
