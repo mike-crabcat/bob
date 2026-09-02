@@ -15,7 +15,7 @@ RUN npm run build -- --outDir dist --emptyOutDir
 FROM python:3.12-slim-bookworm AS deps
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
-COPY pyproject.toml uv.lock .python-version ./
+COPY pyproject.toml uv.lock .python-version README.md ./
 COPY server/ ./server/
 RUN uv sync --frozen --no-dev
 
@@ -42,7 +42,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     TZ=UTC \
     PYTHONUNBUFFERED=1
 
-USER bob
+# NOTE: no USER — the entrypoint drops to BOB_UID/BOB_GID (default 1000)
 EXPOSE 8420
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bob", "serve", "--host", "0.0.0.0", "--port", "8420", \

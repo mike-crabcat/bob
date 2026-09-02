@@ -247,7 +247,12 @@ The ephemeral override swaps bind mounts for named volumes, so `docker compose -
 3. `BOB_INSTANCE_DIR=~/bob BOB_PORT=8420 docker compose -p bob up -d`
 4. Healthcheck: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8420/dashboard` → 307/200.
 
-What each instance gets: its own SQLite DB and workspace (bind mounts under `~/bob`), its own claude volume, the browser sidecar (`BU_CDP_URL` is pre-wired), and the seeded core skills. Upgrades: `docker compose pull && docker compose up -d` — migrations run on boot. Their backup: `sqlite3 ~/bob/data/bob.db ".backup ..." ` plus tar of the instance dir.
+What each instance gets: its own SQLite DB and workspace (bind mounts under `~/bob`), its own claude volume, the browser sidecar (`BU_CDP_URL` is pre-wired — the chrome container shares bob's network namespace, so CDP is plain localhost and never exposed), and the seeded core skills.
+
+Notes:
+- **uid matching**: the entrypoint drops to `BOB_UID`/`BOB_GID` (default 1000) so container writes match the host user owning the bind mounts — set them if your uid differs (e.g. `BOB_UID=1001`).
+- **claude auth/CLI** must run via `docker compose run --rm bob …` (through the entrypoint's uid drop), not `exec`, or files land root-owned.
+- **LLM routing**: instances call OpenAI/OpenRouter directly. A co-located openclaw gateway is only reachable if it binds beyond localhost — `host.docker.internal` is pre-mapped for that case. Upgrades: `docker compose pull && docker compose up -d` — migrations run on boot. Their backup: `sqlite3 ~/bob/data/bob.db ".backup ..." ` plus tar of the instance dir.
 
 Voice/WhatsApp need the instance's own Twilio number + public webhook URL (`--profile whatsapp` for the bridge); leave off otherwise.
 

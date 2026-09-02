@@ -17,13 +17,15 @@ services:
     extra_hosts:
       # reach a co-located openclaw gateway via http://host.docker.internal:<port>
       - "host.docker.internal:host-gateway"
-    user: "1000:1000"
     env_file:
       - path: ${BOB_INSTANCE_DIR:-./instance}/config/.env
         required: false
     environment:
+      # match the host user owning the bind mounts (this box: 1001)
+      BOB_UID: ${BOB_UID:-1000}
+      BOB_GID: ${BOB_GID:-1000}
       # browser sidecar endpoint; overrides to reuse a host chrome if preferred
-      BU_CDP_URL: ${BU_CDP_URL:-http://chrome:9222}
+      BU_CDP_URL: ${BU_CDP_URL:-http://127.0.0.1:9222}
     volumes:
       - ${BOB_INSTANCE_DIR:-./instance}/data:/home/bob/data
       - ${BOB_INSTANCE_DIR:-./instance}/config:/home/bob/config
@@ -34,9 +36,14 @@ services:
 
   chrome:
     # browser sidecar — CDP attach; bob's image carries no browser payload.
-    # headless-shell accepts chromium flags; profile persists in the named volume.
+    # Shares bob's network namespace so CDP is plain localhost (chrome's
+    # Host-header protection rejects container hostnames) and the browser is
+    # never exposed beyond bob. run.sh handles ports (socat 9222 -> 9223):
+    # pass additive flags only. Profile persists in the named volume.
     image: chromedp/headless-shell:latest
-    command: ["--remote-debugging-port=9222", "--user-data-dir=/data/profile", "--no-first-run", "--disable-dev-shm-usage"]
+    network_mode: "service:bob"
+    depends_on: [bob]
+    command: ["--user-data-dir=/data/profile", "--no-first-run", "--disable-dev-shm-usage"]
     volumes:
       - chrome-profile:/data
     restart: unless-stopped
@@ -44,10 +51,10 @@ services:
   whatsappbridge:
     build: ./bridge
     profiles: ["whatsapp"] # opt-in: only instances with their own number
+    user: "${BOB_UID:-1000}:${BOB_GID:-1000}"
     environment:
       BOB_CONFIG_DIR: /home/bob/config
       BOB_WS_URL: ${BOB_WS_URL:-ws://bob:8420/ws}
-    user: "1000:1000"
     volumes:
       - ${BOB_INSTANCE_DIR:-./instance}/data:/home/bob/data
       - ${BOB_INSTANCE_DIR:-./instance}/workspace:/home/bob/workspace
