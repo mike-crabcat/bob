@@ -3,13 +3,18 @@ set -euo pipefail
 
 TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
 BACKUP_NAME="bob_backup_${TIMESTAMP}.zip"
-BACKUP_PATH="$HOME/${BACKUP_NAME}"
+# Write to data2 so backups never contend with (or fill) the root disk
+BACKUP_DIR="/mnt/data2/bob-backups"
+mountpoint -q /mnt/data2 || { echo "ERROR: /mnt/data2 is not mounted, aborting"; exit 1; }
+mkdir -p "$BACKUP_DIR"
+BACKUP_PATH="${BACKUP_DIR}/${BACKUP_NAME}"
 CONFIG_DIR="$HOME/config"
 DATA_DIR="$HOME/data"
 WORKSPACE_DIR="$HOME/workspace"
 
 # Collect files into a temp staging dir
-STAGE=$(mktemp -d)
+# Stage on data2 too — /tmp sits on the root disk and fills it mid-backup
+STAGE=$(mktemp -d "${BACKUP_DIR}/.staging.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 
 # Databases (grab WAL/SHM alongside bob.db so the snapshot is crash-consistent)
@@ -39,7 +44,7 @@ fi
 
 # Data directory (non-code runtime data)
 if [ -d "$DATA_DIR" ]; then
-  rsync -a --exclude='*.log' --exclude='backups/' "$DATA_DIR/" "$STAGE/data/" 2>/dev/null || \
+  rsync -a --exclude='*.log' --exclude='backups/' --exclude='bob.db.pre-bob-events-*' "$DATA_DIR/" "$STAGE/data/" 2>/dev/null || \
     cp -r "$DATA_DIR" "$STAGE/data/"
 fi
 
