@@ -51,6 +51,7 @@ REACTION_CLIPS: dict[str, str] = {
     "bob-awkward-standing": "nothing to add here",
     "bob-typing-desk-fire": "inbox on fire",
     "bob-typing-desk-fire-closeup": "inbox on fire, closer",
+    "bob-fail": "something failed, epically",
 }
 
 

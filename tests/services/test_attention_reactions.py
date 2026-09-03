@@ -294,5 +294,5 @@ def test_registry_matches_manifest_names():
     assert set(REACTION_CLIPS) == {
         "bob-celebrate", "bob-patience-v2", "bob-this-is-fine",
         "bob-popcorn-cinema", "bob-awkward-standing", "bob-typing-desk-fire",
-        "bob-typing-desk-fire-closeup",
+        "bob-typing-desk-fire-closeup", "bob-fail",
     }

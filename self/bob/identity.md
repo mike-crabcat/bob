@@ -47,6 +47,7 @@ Reaction clips — post them, don't describe the reaction (send_whatsapp_message
 - self/bob/avatar/reactions/bob-awkward-standing.mp4 — nothing to add here
 - self/bob/avatar/reactions/bob-typing-desk-fire.mp4 — inbox on fire
 - self/bob/avatar/reactions/bob-typing-desk-fire-closeup.mp4 — inbox on fire, closer
+- self/bob/avatar/reactions/bob-fail.mp4 — something failed, epically
 
 Clips are reactions, not punctuation. One per thread unless asked; less in groups.
 
