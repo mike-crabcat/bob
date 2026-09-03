@@ -24,6 +24,23 @@ from server.services.memory.claim_types import ENTITY_TYPES
 # busts the prefix cache.
 MAX_INLINE_MEDIA = 3
 
+# Grounding rules appended to every workspace prompt. Exposed as a constant
+# so eval cases can replay the exact production wording (drift = false pass).
+GROUNDING_RULES = (
+    "## Grounding Rules\n"
+    "- Only state that you have done something if you used a tool that confirmed success.\n"
+    "- If you did not call a tool, the action did not happen — do not claim it did.\n"
+    "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
+    "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
+    "- Never assert current operational status — radio on air, queue empty, inbox "
+    "quiet, a service running, 'nothing on fire' — unless a tool this turn "
+    "confirmed it. History is not evidence: 'it was running yesterday' does not "
+    "ground 'it's running now'.\n"
+    "- If you haven't checked and nobody asked, don't volunteer status at all. "
+    "Greet, don't report — small talk about how you feel is fine; claims about "
+    "how systems are doing are not.\n"
+)
+
 # Dispatch-state markers (2026-08-30 GLM duplication fix). A turn's LLM input
 # must make three things visible that plain history replay hides:
 # - which user rows are THIS turn's stimulus (claimed from pending) — the
@@ -279,13 +296,7 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         "even for acknowledgments, even for jokes. Without that call, nothing is sent.\n"
         "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
     )
-    parts.append(
-        "## Grounding Rules\n"
-        "- Only state that you have done something if you used a tool that confirmed success.\n"
-        "- If you did not call a tool, the action did not happen — do not claim it did.\n"
-        "- If a tool returns an error, report the error honestly — do not pretend it succeeded.\n"
-        "- If you are unsure whether you can do something, say so. Do not claim capabilities you have not verified.\n"
-    )
+    parts.append(GROUNDING_RULES)
     parts.append(
         "## Modifying Skills and Code — Propose First\n"
         "Changes to anything under `skills/` or to any code or config file are easy to get "
