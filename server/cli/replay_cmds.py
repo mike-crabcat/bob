@@ -252,9 +252,9 @@ async def _probe_matrix(golden: Path | None, model: str) -> None:
     failures = []
     try:
         for case in cases:
-            predicted = await probe_decide(
+            predicted = (await probe_decide(
                 ctx, case["context"], bot_name=bot_name, model=model,
-                session_key=f"eval:{case['name']}")
+                session_key=f"eval:{case['name']}"))["decision"]
             gold = case["label"].upper()
             matrix[gold][predicted] += 1
             mark = "ok " if predicted == gold else "MISS"

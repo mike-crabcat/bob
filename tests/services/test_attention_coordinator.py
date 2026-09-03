@@ -88,7 +88,7 @@ async def test_probe_stand_down_flushes_without_dispatch(ctx, db):
         "VALUES ('m1', ?, 'user', 'blah', 0)", (SESSION,))
     dispatch = AsyncMock()
     with patch("server.services.attention.tier2.probe_actionability",
-               new=AsyncMock(return_value="STAND_DOWN")):
+               new=AsyncMock(return_value={"decision": "STAND_DOWN", "react": None})):
         await AttentionCoordinator(ctx).submit(
             SESSION, dispatch, text="lol", chat_kind="group",
             probe_enabled=True)
@@ -101,7 +101,7 @@ async def test_probe_stand_down_flushes_without_dispatch(ctx, db):
 async def test_probe_act_dispatches(ctx):
     dispatch = AsyncMock()
     with patch("server.services.attention.tier2.probe_actionability",
-               new=AsyncMock(return_value="ACT")):
+               new=AsyncMock(return_value={"decision": "ACT", "react": None})):
         await AttentionCoordinator(ctx).submit(
             SESSION, dispatch, text="what's the capital of france",
             chat_kind="group", probe_enabled=True)
@@ -111,7 +111,7 @@ async def test_probe_act_dispatches(ctx):
 
 async def test_probe_wait_extends_once_then_forces_act(ctx):
     dispatch = AsyncMock()
-    probe = AsyncMock(return_value="WAIT")
+    probe = AsyncMock(return_value={"decision": "WAIT", "react": None})
     with patch("server.services.attention.tier2.probe_actionability", new=probe):
         await AttentionCoordinator(ctx).submit(
             SESSION, dispatch, text="hmm...", chat_kind="group",
@@ -124,7 +124,7 @@ async def test_probe_wait_extends_once_then_forces_act(ctx):
 async def test_kill_switch_bypasses_probe(ctx, monkeypatch):
     monkeypatch.setenv("BOB_ATTENTION_ALWAYS_ACT", "1")
     dispatch = AsyncMock()
-    probe = AsyncMock(return_value="STAND_DOWN")
+    probe = AsyncMock(return_value={"decision": "STAND_DOWN", "react": None})
     with patch("server.services.attention.tier2.probe_actionability", new=probe):
         await AttentionCoordinator(ctx).submit(
             SESSION, dispatch, text="lol", chat_kind="group",
@@ -136,7 +136,7 @@ async def test_kill_switch_bypasses_probe(ctx, monkeypatch):
 
 async def test_probe_not_consulted_for_addressed_batch(ctx):
     dispatch = AsyncMock()
-    probe = AsyncMock(return_value="STAND_DOWN")
+    probe = AsyncMock(return_value={"decision": "STAND_DOWN", "react": None})
     with patch("server.services.attention.tier2.probe_actionability", new=probe):
         await AttentionCoordinator(ctx).submit(
             SESSION, dispatch, text="@bob status?", chat_kind="group",

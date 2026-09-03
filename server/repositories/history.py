@@ -101,6 +101,20 @@ class HistoryRepository:
                 (cid,))
         return int(row["n"]) if row and row["n"] else 0
 
+    async def probe_reaction_within(self, session_key: str, minutes: float) -> bool:
+        """Has the attention probe posted a reaction clip in this session
+        within the window? The STAND_DOWN reaction tier's per-chat cooldown —
+        reaction rows are assistant messages recorded with provenance
+        'probe_reaction' and a '[reaction] ' content prefix."""
+        cid = await self._cid(session_key)
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM messages "
+            "WHERE conversation_id = ? AND role = 'assistant' "
+            "AND content LIKE '[reaction] %' "
+            "AND datetime(created_at) > datetime('now', ?)",
+            (cid, f"-{minutes} minutes"))
+        return bool(row and row["n"])
+
     async def messages(
         self, session_key: str, *, limit: int = 50, roles: list[str] | None = None,
         include_internal: bool = True,

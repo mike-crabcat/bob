@@ -48,9 +48,18 @@ TYPING_EXTEND_S = 5.0        # a typing indicator pushes the close out this far
 MAX_WAIT_S = 90.0            # hard cap from first pending stimulus to decision
 WAIT_EXTEND_S = 30.0         # Tier 2 WAIT extends the window this much, once
 
+# STAND_DOWN reaction tier: a probe-recommended clip posts at most this often
+# per chat (hours, by design — clips are for rare beats, not presence), and
+# BOB_PROBE_REACTIONS=off kills the whole tier.
+REACTION_COOLDOWN_MIN = float(os.environ.get("BOB_PROBE_REACTION_COOLDOWN_MIN", "180"))
+
 
 def _always_act() -> bool:
     return os.environ.get("BOB_ATTENTION_ALWAYS_ACT", "") == "1"
+
+
+def _reactions_enabled() -> bool:
+    return os.environ.get("BOB_PROBE_REACTIONS", "on").strip().lower() != "off"
 
 
 @dataclass
@@ -238,10 +247,14 @@ class AttentionCoordinator:
             return
 
         decision = "ACT"
+        react: str | None = None
         if (not w.addressed_any) and probe_enabled and not _always_act():
             from server.services.attention.tier2 import probe_actionability
-            decision = await probe_actionability(
+            result = await probe_actionability(
                 self.ctx, session_key, bot_name=bot_name, model=probe_model)
+            decision = result["decision"]
+            # A clip only ever decorates silence — it never rides ACT/WAIT.
+            react = result.get("react") if decision == "STAND_DOWN" else None
             if decision == "WAIT" and not w.wait_extended:
                 w.wait_extended = True
                 self._arm(session_key, w, WAIT_EXTEND_S, dispatch_fn,
@@ -253,6 +266,8 @@ class AttentionCoordinator:
 
         if decision == "STAND_DOWN":
             await self._flush_without_dispatch(session_key)
+            if react:
+                await self._send_probe_reaction(session_key, react)
             self._reset_window(session_key)
             return
 
@@ -284,6 +299,62 @@ class AttentionCoordinator:
         claimed = await SessionService(self.ctx).mark_dispatched(session_key)
         logger.info("attention: STAND_DOWN for %s — %d message(s) flushed without main LLM",
                     session_key, claimed)
+
+    async def _send_probe_reaction(self, session_key: str, clip: str) -> None:
+        """Post a reaction clip the probe recommended on STAND_DOWN — the
+        gate's one send capability. Decorates silence, never replaces a
+        reply (the caller only reaches here with decision STAND_DOWN), and
+        every failure path skips quietly: probe infrastructure must never
+        break the gate."""
+        if not _reactions_enabled():
+            return
+        try:
+            from server.services.attention.tier2 import REACTION_CLIPS
+            if clip not in REACTION_CLIPS:
+                return
+            from server.repositories.history import HistoryRepository
+            if await HistoryRepository(self.ctx.db).probe_reaction_within(
+                    session_key, REACTION_COOLDOWN_MIN):
+                logger.info("attention: reaction %s skipped for %s (cooldown)",
+                            clip, session_key)
+                return
+
+            from server.services.wake_service import session_key_to_chat_id
+            chat_id = session_key_to_chat_id(session_key)
+            if not chat_id:
+                return
+            path = (self.ctx.settings.harness.workspace_dir.expanduser()
+                    / "self" / "bob" / "avatar" / "reactions" / f"{clip}.mp4")
+            if not path.is_file():
+                logger.info("attention: reaction clip missing: %s", path)
+                return
+            from server.services.whatsapp_bridge_service._media import _prepare_media
+            prepared = await _prepare_media(str(path))
+            if prepared is None:
+                logger.warning("attention: reaction prep failed for %s", clip)
+                return
+
+            from uuid import uuid4
+            from server.services.effects import emit_and_deliver
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send_media",
+                idempotency_key=f"probe_reaction:{session_key}:{uuid4().hex[:12]}",
+                payload={"chat_id": chat_id, "file_path": prepared, "caption": ""})
+            if not result.get("ok"):
+                logger.warning("attention: reaction effect failed for %s: %s",
+                               clip, result.get("error"))
+                return
+
+            # Record it as an assistant row: future probes read it as Bob
+            # having spoken (engagement signal) and the cooldown keys on it.
+            from server.services.session_service import SessionService
+            await SessionService(self.ctx).add_message(
+                session_key, "assistant", f"[reaction] {clip}.mp4",
+                channel="whatsapp", provenance="probe_reaction")
+            logger.info("attention: probe reaction %s sent to %s", clip, session_key)
+        except Exception:
+            logger.warning("attention: probe reaction failed for %s (%s)",
+                           session_key, clip, exc_info=True)
 
     def _reset_window(self, session_key: str) -> None:
         w = self._windows.get(session_key)

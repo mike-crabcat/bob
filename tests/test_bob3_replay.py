@@ -74,7 +74,7 @@ async def replay_episode(
     if "probe_decision" in episode:
         monkeypatch.setattr(
             "server.services.attention.tier2.probe_actionability",
-            AsyncMock(return_value=episode["probe_decision"]))
+            AsyncMock(return_value={"decision": episode["probe_decision"], "react": None}))
         # Probe path is gated by conversation policy; enable per session below.
 
     await _seed_contact(ctx.db, "+614000000010")
