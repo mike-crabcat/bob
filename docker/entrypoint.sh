@@ -18,6 +18,16 @@ if [ "$(id -u)" = "0" ]; then
   for d in /home/bob/.claude /home/bob/bobenv; do
     if [ -d "$d" ]; then chown -R "$uid:$gid" "$d" 2>/dev/null || true; fi
   done
+  # data/config/workspace mountpoints absent from the image mount as
+  # root-owned dirs on a fresh named volume (ephemeral instances), which the
+  # uid-dropped path below cannot write into. Realign only roots that are
+  # still root-owned — a fresh named volume; bind mounts arrive owned by the
+  # host user and are never touched (incl. the data bind).
+  for d in /home/bob/data /home/bob/config /home/bob/workspace; do
+    if [ -d "$d" ] && [ "$(stat -c %u "$d" 2>/dev/null)" = "0" ]; then
+      chown "$uid:$gid" "$d" 2>/dev/null || true
+    fi
+  done
   exec setpriv --reuid="$uid" --regid="$gid" --clear-groups -- /entrypoint.sh "$@"
 fi
 
