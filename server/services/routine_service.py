@@ -287,11 +287,19 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
             if trusted is not None:
                 is_trusted = trusted
 
+        # Routine replies are user-visible conversation turns — they follow the
+        # session's /model override, same as main dispatch turns. Resolved
+        # before the messages are built so the turn-scoped model line can ride
+        # the system message.
+        model_arg = await resolve_session_model(ctx.db, ctx.settings, session_key)
+
         # Routines carry their own self-contained prompt — skip session history
         # (which includes the original "set up this routine" conversation)
         messages = await build_chat_messages(
             prompt, "",
             system_content=workspace_prompt,
+            current_model=model_arg or settings.openai.default_model,
+            current_model_override=model_arg is not None,
         )
         tools = build_common_tools(
             ctx, session_key=session_key, is_trusted=is_trusted,
@@ -325,9 +333,6 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
             ))
 
         dispatch_id = str(uuid4())
-        # Routine replies are user-visible conversation turns — they follow the
-        # session's /model override, same as main dispatch turns.
-        model_arg = await resolve_session_model(ctx.db, ctx.settings, session_key)
         response = await LLMDispatchService(ctx).chat_with_tools(
             messages, tools,
             model=model_arg,

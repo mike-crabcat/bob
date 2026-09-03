@@ -225,7 +225,7 @@ The service listens on `127.0.0.1:8420` by default.
 
 ## Bob Instances (Docker)
 
-The primary instance runs from this checkout under systemd (deploy = `systemctl --user restart bob.service`; the dashboard is the vite dev server in `ui/`). Additional Bob instances run via Docker — the image bundles the server, the built dashboard, the claude CLI harness, and the core skill bundle. Registry: `ghcr.io/mike-crabcat/bob` (public). Full design: `docs/bob-docker-plan.md`.
+The primary instance runs from this checkout under systemd (deploy = `systemctl --user restart bob.service`; the dashboard is the vite dev server in `ui/`). Additional Bob instances run via Docker — the image bundles the server, the built dashboard, the claude CLI harness, the core skill bundle, and the persona + avatar bundle (`self/` — persona files and avatar pack healed into the workspace at every boot; `user.md`, the owner profile, is seeded once and then owned by the instance). Registry: `ghcr.io/mike-crabcat/bob` (public). Full design: `docs/bob-docker-plan.md`.
 
 ### Throwaway test instance (this box)
 
@@ -247,7 +247,7 @@ The ephemeral override swaps bind mounts for named volumes, so `docker compose -
 3. `BOB_INSTANCE_DIR=~/bob BOB_PORT=8420 docker compose -p bob up -d`
 4. Healthcheck: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8420/dashboard` → 307/200.
 
-What each instance gets: its own SQLite DB and workspace (bind mounts under `~/bob`), its own claude volume, the browser sidecar (`BU_CDP_URL` is pre-wired — the chrome container shares bob's network namespace, so CDP is plain localhost and never exposed), and the seeded core skills.
+What each instance gets: its own SQLite DB and workspace (bind mounts under `~/bob`), its own claude volume, the browser sidecar (`BU_CDP_URL` is pre-wired — the chrome container shares bob's network namespace, so CDP is plain localhost and never exposed), the seeded core skills, and the persona + avatar pack (`workspace/self/bob/`, healed from the image at every boot — the avatar manifest lives in the persona's identity file; `workspace/user.md` seeds as a boilerplate owner profile for the instance's owner to fill in).
 
 Notes:
 - **uid matching**: the entrypoint drops to `BOB_UID`/`BOB_GID` (default 1000) so container writes match the host user owning the bind mounts — set them if your uid differs (e.g. `BOB_UID=1001`).

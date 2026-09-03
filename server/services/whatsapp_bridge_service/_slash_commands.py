@@ -10,7 +10,7 @@ import json
 import logging
 
 from server.services.base import utcnow
-from server.services.whatsapp_bridge_service._media import _format_created_at
+from server.services.whatsapp_bridge_service._media import _format_created_at  # noqa: F401 — re-exported via __init__
 
 
 logger = logging.getLogger(__name__)
@@ -92,14 +92,13 @@ class SlashCommandsMixin:
         await self.send_message(chat_id, f"Relevance gate {status}{note}")
 
     async def _cmd_who(self, chat_id: str) -> None:
-        """Reply with the active persona revision and creation timestamp."""
-        from server.services import persona as persona_service
-        row = await persona_service.active_record(self.db)
-        if row is None:
-            await self.send_message(chat_id, "no active persona — using built-in defaults")
-            return
-        created = _format_created_at(row["created_at"])
-        await self.send_message(chat_id, f"r{row['revision']} (created {created})")
+        """Reply with the persona's provenance. The persona is file-based
+        now (self/bob/*.md healed from the repo bundle at boot) — there is
+        no runtime revision number; git history is the history."""
+        await self.send_message(
+            chat_id,
+            "persona: workspace/self/bob (files, healed from the repo bundle "
+            "at boot — history is git)")
 
     async def _cmd_verbose(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle verbose memory-extraction notices for this session.

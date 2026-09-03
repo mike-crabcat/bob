@@ -15,7 +15,6 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
 import { Route as SkillsIndexRouteImport } from './routes/skills/index'
 import { Route as PhoneIndexRouteImport } from './routes/phone/index'
-import { Route as PersonaIndexRouteImport } from './routes/persona/index'
 import { Route as MemoryIndexRouteImport } from './routes/memory/index'
 import { Route as DreamsIndexRouteImport } from './routes/dreams/index'
 import { Route as ConversationsIndexRouteImport } from './routes/conversations/index'
@@ -56,11 +55,6 @@ const SkillsIndexRoute = SkillsIndexRouteImport.update({
 const PhoneIndexRoute = PhoneIndexRouteImport.update({
   id: '/phone/',
   path: '/phone/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PersonaIndexRoute = PersonaIndexRouteImport.update({
-  id: '/persona/',
-  path: '/persona/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MemoryIndexRoute = MemoryIndexRouteImport.update({
@@ -133,7 +127,6 @@ export interface FileRoutesByFullPath {
   '/conversations/': typeof ConversationsIndexRoute
   '/dreams/': typeof DreamsIndexRoute
   '/memory/': typeof MemoryIndexRoute
-  '/persona/': typeof PersonaIndexRoute
   '/phone/': typeof PhoneIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
@@ -152,7 +145,6 @@ export interface FileRoutesByTo {
   '/conversations': typeof ConversationsIndexRoute
   '/dreams': typeof DreamsIndexRoute
   '/memory': typeof MemoryIndexRoute
-  '/persona': typeof PersonaIndexRoute
   '/phone': typeof PhoneIndexRoute
   '/skills': typeof SkillsIndexRoute
   '/workspace': typeof WorkspaceIndexRoute
@@ -173,7 +165,6 @@ export interface FileRoutesById {
   '/conversations/': typeof ConversationsIndexRoute
   '/dreams/': typeof DreamsIndexRoute
   '/memory/': typeof MemoryIndexRoute
-  '/persona/': typeof PersonaIndexRoute
   '/phone/': typeof PhoneIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/workspace/': typeof WorkspaceIndexRoute
@@ -195,7 +186,6 @@ export interface FileRouteTypes {
     | '/conversations/'
     | '/dreams/'
     | '/memory/'
-    | '/persona/'
     | '/phone/'
     | '/skills/'
     | '/workspace/'
@@ -214,7 +204,6 @@ export interface FileRouteTypes {
     | '/conversations'
     | '/dreams'
     | '/memory'
-    | '/persona'
     | '/phone'
     | '/skills'
     | '/workspace'
@@ -234,7 +223,6 @@ export interface FileRouteTypes {
     | '/conversations/'
     | '/dreams/'
     | '/memory/'
-    | '/persona/'
     | '/phone/'
     | '/skills/'
     | '/workspace/'
@@ -254,7 +242,6 @@ export interface RootRouteChildren {
   ConversationsIndexRoute: typeof ConversationsIndexRoute
   DreamsIndexRoute: typeof DreamsIndexRoute
   MemoryIndexRoute: typeof MemoryIndexRoute
-  PersonaIndexRoute: typeof PersonaIndexRoute
   PhoneIndexRoute: typeof PhoneIndexRoute
   SkillsIndexRoute: typeof SkillsIndexRoute
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
@@ -303,13 +290,6 @@ declare module '@tanstack/react-router' {
       path: '/phone'
       fullPath: '/phone/'
       preLoaderRoute: typeof PhoneIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/persona/': {
-      id: '/persona/'
-      path: '/persona'
-      fullPath: '/persona/'
-      preLoaderRoute: typeof PersonaIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/memory/': {
@@ -432,7 +412,6 @@ const rootRouteChildren: RootRouteChildren = {
   ConversationsIndexRoute: ConversationsIndexRoute,
   DreamsIndexRoute: DreamsIndexRoute,
   MemoryIndexRoute: MemoryIndexRoute,
-  PersonaIndexRoute: PersonaIndexRoute,
   PhoneIndexRoute: PhoneIndexRoute,
   SkillsIndexRoute: SkillsIndexRoute,
   WorkspaceIndexRoute: WorkspaceIndexRoute,

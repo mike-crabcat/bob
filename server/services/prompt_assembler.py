@@ -118,6 +118,15 @@ def local_now_prompt_line(*, tools_hint: bool = True) -> str:
     return line
 
 
+def model_serving_prompt_line(model: str, *, override: bool = False) -> str:
+    """Turn-scoped model line. The persona used to claim a static model, but
+    the model is dynamic (global default + per-chat /model override), so the
+    identity no longer names one and this line states the exact slug serving
+    the turn — and whether a chat-level override set it."""
+    src = "per-chat /model override" if override else "global default"
+    return f"Model serving this turn: {model} ({src})."
+
+
 async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     """Load and concatenate workspace files. Cached until any file changes."""
     global _cached_prompt, _cached_mtime
@@ -140,22 +149,31 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             if md.is_file():
                 mtimes[f"skills/{skill_path.name}"] = md.stat().st_mtime
 
+    # Persona files: healed from the repo bundle at boot, and only rewritten
+    # on content change — an mtime move means the persona actually changed.
+    from server.services.persona import persona_file_paths
+    for rel in persona_file_paths():
+        path = workspace_dir / rel
+        mtimes[f"self:{rel}"] = path.stat().st_mtime if path.is_file() else 0.0
+
     mtime_hash = tuple(mtimes.items())
     if _cached_prompt is not None and _cached_prompt[0] == mtime_hash:
         return _cached_prompt[1]
 
     parts: list[str] = []
 
-    # Load embedded persona from codebase (with DB-configured values)
+    # Persona: rendered from the healed workspace files (self/<name>/*.md +
+    # user.md) — the repo bundle is the source of truth, git the history.
     from server.services.persona import get_persona
-    rendered_persona = await get_persona(db)
+    rendered_persona = await get_persona(db, workspace_dir=workspace_dir)
     parts.append(rendered_persona)
 
     for name in _DEPRECATED_WORKSPACE_FILES:
         path = workspace_dir / name
         if path.is_file():
             logger.warning(
-                "Deprecated workspace file %s exists — persona is now embedded in codebase",
+                "Deprecated workspace file %s exists — the persona lives in "
+                "self/bob/*.md + user.md now",
                 name,
             )
 
@@ -348,6 +366,8 @@ async def build_chat_messages(
     claimed_ids: set[str] | frozenset[str] | None = None,
     send_tool_name: str = "",
     include_time: bool = True,
+    current_model: str | None = None,
+    current_model_override: bool = False,
 ) -> list[dict[str, Any]]:
     """Build a messages array: system prompt + session history + optional user message.
 
@@ -361,6 +381,9 @@ async def build_chat_messages(
     ``send_tool_name`` names the turn's delivery tool in those trailers.
     ``include_time`` appends the turn-start local clock to the system message
     (2026-09-01 fan-out: every channel's turns ground date-relative reasoning).
+    ``current_model`` appends the turn's serving model beside the clock — the
+    persona stopped naming a model when switching went live; only callers that
+    actually resolve a per-turn model pass it (dispatch, routines).
     A system message is therefore emitted even when system_content and
     voice_instructions are both empty; include_time=False restores the
     pre-clock shape exactly.
@@ -376,6 +399,11 @@ async def build_chat_messages(
     # injection idempotent for callers that already carry the line.
     if include_time and not any("Local time now:" in p for p in system_parts):
         system_parts.append(local_now_prompt_line())
+    # Same appended-last slot, same idempotency guard pattern: the model can
+    # change turn-to-turn (/model), so it must never sit in the stable prefix.
+    if current_model and not any("Model serving this turn:" in p for p in system_parts):
+        system_parts.append(model_serving_prompt_line(
+            current_model, override=current_model_override))
 
     messages: list[dict[str, Any]] = []
     if system_parts:

@@ -183,6 +183,11 @@ class DispatchRunner:
             except Exception:
                 logger.warning("turn claim failed for %s", session_key, exc_info=True)
 
+            # Resolved before the messages are built so the turn-scoped model
+            # line can ride the system message — the persona no longer names
+            # a model (switching went live), the per-turn line does.
+            model_arg = await self._resolve_model_override(session_key)
+
             messages = await build_chat_messages(
                 None, session_key,
                 db=self.db,
@@ -194,11 +199,11 @@ class DispatchRunner:
                 # replay ends with a prior turn's reply (see prompt_assembler).
                 claimed_ids=set(claimed_ids),
                 send_tool_name=spec.send_tool_name,
+                current_model=model_arg or self.ctx.settings.openai.default_model,
+                current_model_override=model_arg is not None,
             )
             if spec.transform_messages is not None:
                 messages = spec.transform_messages(messages)
-
-            model_arg = await self._resolve_model_override(session_key)
 
             # Turn-lease heartbeat (bug fix alongside Backburner): a slow
             # model can outrun the claim's 300s lease, after which the next

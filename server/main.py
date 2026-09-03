@@ -43,7 +43,7 @@ from server.heartbeat import (
 from server.models import HealthResponse
 from server.routers import (
     calendars, contacts, context, dashboard_api, dashboard_ws, email,
-    persona, published_files, webhooks, whatsapp,
+    published_files, webhooks, whatsapp,
 )
 from server.services.event_bus import EventBus
 from server.structured_logging import configure_logging, CorrelationIdMiddleware
@@ -68,6 +68,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         await database.connect()
         await database.apply_migrations()
+
+        # Boot heal: mirror the bundled persona/avatar pack (self/) into the
+        # workspace — the bundle is the source of truth, so corruption
+        # self-heals at every restart and extras are pruned. user.md seeds
+        # only-if-missing (it is the instance's own file).
+        try:
+            from server.services.self_bundle import refresh_bundled_assets
+            heal = refresh_bundled_assets(resolved_settings)
+            logger.info("self bundle heal: %s", heal)
+        except Exception:
+            logger.warning("self bundle heal failed", exc_info=True)
 
         # Boot sweep: any 'running' llm_call_log row is a zombie from the
         # previous process — nothing survives a restart. Fail them now so
@@ -258,7 +269,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
-    app.include_router(persona.router, prefix="/api/v1")
     app.include_router(email.router)
     # Public (Funnel) design-file publishing for the printful skill —
     # token-gated, images/print files only.

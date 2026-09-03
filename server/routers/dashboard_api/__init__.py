@@ -12,7 +12,7 @@ from fastapi import APIRouter
 
 from server.routers.dashboard_api import (
     home, contacts, calls, workspace, memory,
-    frontend_errors, skills, subagents, phone, persona, dreams, auth, ops,
+    frontend_errors, skills, subagents, phone, dreams, auth, ops,
     conversations, goals as goals_api,
 )
 
@@ -32,7 +32,6 @@ router.include_router(frontend_errors.router)
 router.include_router(skills.router)
 router.include_router(subagents.router)
 router.include_router(phone.router)
-router.include_router(persona.router)
 router.include_router(dreams.router)
 
 

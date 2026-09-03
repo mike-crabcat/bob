@@ -34,6 +34,7 @@ A single FastAPI application plus a Go WhatsApp bridge. Distributed via Docker (
 - `ui/` - Dashboard SPA source (Vite + TypeScript + Tailwind), builds to `server/ui_dist/`
 - `bridge/` - Go WhatsApp bridge (`make build` → `bridge/bin/whatsappbridge`)
 - `skills/` - core skill bundle captured from the live workspace (seeded into fresh instances; `scripts` per `docs/bob-docker-plan.md`)
+- `self/` - persona + avatar bundle (`self/bob/`: soul/identity/agents markdown + avatar canon refs and reaction clips; plus `user.md` boilerplate at the repo root). Single source of truth for the persona — at every boot `services/self_bundle.py` heals it into `workspace/self/bob/` (changed files restored, extras pruned, read-only bits). Git history is the persona history; the dashboard persona editor and `persona_records` API are retired (the DB table sits dormant as an archive of revisions 1-10). `workspace/user.md` is the one persona-ish file an instance owns: seeded only-if-missing, then its own (the owner profile).
 - `tests/` - pytest suite (deploy gate; `tests/legacy/` is quarantined, uncollected)
 - `docs/` - design docs, plans, datamodel reference
 

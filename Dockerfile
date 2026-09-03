@@ -34,6 +34,11 @@ COPY --from=deps /app/.venv /app/.venv
 COPY server/ /app/server/
 COPY --from=ui /build/dist/ /app/ui_dist/
 COPY skills/ /app/skills/
+# Persona + avatar bundle: the server's boot heal mirrors /app/self into the
+# workspace volume (only-if-changed; user.md seeds only-if-missing), so no
+# entrypoint seeding is needed for these.
+COPY self/ /app/self/
+COPY user.md /app/user.md
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && chown -R bob:bob /app /home/bob /entrypoint.sh
 

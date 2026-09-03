@@ -17,7 +17,6 @@ const OVERFLOW_ITEMS = [
   { to: "/goals" as const, label: "Goals", icon: "target" },
   { to: "/skills" as const, label: "Skills", icon: "zap" },
   { to: "/phone" as const, label: "Phone", icon: "phone" },
-  { to: "/persona" as const, label: "Persona", icon: "user" },
   { to: "/dreams" as const, label: "Dreams", icon: "moon" },
 ] as const;
 

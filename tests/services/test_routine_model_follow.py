@@ -26,6 +26,7 @@ def _ctx(db, tmp_path):
         settings=SimpleNamespace(
             harness=SimpleNamespace(workspace_dir=tmp_path),
             config_dir=tmp_path,
+            openai=SimpleNamespace(default_model="gpt-test-default"),
             openrouter=SimpleNamespace(enabled=True),
         ),
         whatsapp_bridge=None,
@@ -64,7 +65,11 @@ async def _fire(db, tmp_path, monkeypatch, captured):
     async def _fake_mark_run(self, routine_id):
         return None
 
-    async def _fake_build_messages(prompt, user_message, *, system_content=None, **k):
+    async def _fake_build_messages(prompt, user_message, *, system_content=None,
+                                   current_model=None,
+                                   current_model_override=None, **k):
+        captured["current_model"] = current_model
+        captured["current_model_override"] = current_model_override
         return [{"role": "user", "content": prompt}]
 
     async def _fake_workspace_prompt(*a, **k):
@@ -107,6 +112,9 @@ async def test_routine_uses_override_model(db, tmp_path, monkeypatch):
     await _fire(db, tmp_path, monkeypatch, captured)
     assert captured.get("model") == "z-ai/glm-5.3-flash"
     assert captured.get("call_category") == "routine"
+    # The turn-scoped model line rides the system message with the override.
+    assert captured.get("current_model") == "z-ai/glm-5.3-flash"
+    assert captured.get("current_model_override") is True
 
 
 @pytest.mark.asyncio
@@ -131,3 +139,6 @@ async def test_routine_without_override_uses_default(db, tmp_path, monkeypatch):
     captured: dict = {}
     await _fire(db, tmp_path, monkeypatch, captured)
     assert captured.get("model") is None
+    # No override: the model line reports the global default.
+    assert captured.get("current_model") == "gpt-test-default"
+    assert captured.get("current_model_override") is False
