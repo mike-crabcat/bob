@@ -16,8 +16,12 @@ from typing import Any
 from server.services.dispatch_runner import is_no_reply
 from server.services.memory.claim_types import ENTITY_TYPES
 
-# Only the N most recent media attachments are base64-inlined into replayed
-# history; older ones are text stubs (path only) to keep prompt size bounded.
+# Only media rows claimed as THIS turn's stimulus are base64-inlined (the
+# newest N of them — a photo-burst claim still shouldn't balloon the prompt).
+# Every other media row replays as a text stub naming read_image, so pixels
+# are fetched on demand instead of re-billed on every turn; stubs are also
+# byte-stable, where an inline window rewrites rows as media ages out and
+# busts the prefix cache.
 MAX_INLINE_MEDIA = 3
 
 # Dispatch-state markers (2026-08-30 GLM duplication fix). A turn's LLM input
@@ -448,27 +452,30 @@ async def build_chat_messages(
                 if seen >= 3:
                     break
 
-        # Indices of the most recent user rows with media attachments — only
-        # these get base64-inlined images/frames. Older media rows replay as
-        # text stubs with the file path (re-viewable via tools), otherwise
-        # every past photo is re-billed on every turn for max_history turns.
+        # Indices of the media rows claimed as this turn's stimulus — the
+        # only rows that get base64-inlined images/frames, capped at the N
+        # newest. All other media rows (and all media on claim-less replays,
+        # e.g. subagents and wake turns) replay as text stubs naming
+        # read_image, so the model fetches pixels on demand instead of every
+        # past photo riding every turn.
         inline_media_indices: set[int] = set()
-        media_seen = 0
-        for i in range(len(rows) - 1, -1, -1):
-            if rows[i]["role"] != "user":
-                continue
-            raw = rows[i].get("metadata")
-            if not raw:
-                continue
-            try:
-                m = json.loads(raw) if isinstance(raw, str) else raw
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if m.get("image_path") or m.get("video_path"):
-                inline_media_indices.add(i)
-                media_seen += 1
-                if media_seen >= MAX_INLINE_MEDIA:
-                    break
+        if claimed_ids is not None:
+            media_seen = 0
+            for i in range(len(rows) - 1, -1, -1):
+                if rows[i]["role"] != "user" or rows[i].get("id") not in claimed_ids:
+                    continue
+                raw = rows[i].get("metadata")
+                if not raw:
+                    continue
+                try:
+                    m = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if m.get("image_path") or m.get("video_path"):
+                    inline_media_indices.add(i)
+                    media_seen += 1
+                    if media_seen >= MAX_INLINE_MEDIA:
+                        break
 
         for i, row in enumerate(rows):
             if not row["content"]:
@@ -536,7 +543,7 @@ async def build_chat_messages(
                 attachment_note = "[GIF attached]" if is_gif else "[Video attached]"
                 text_content = text_prefix + (content if content and content not in ("[GIF]", "[Video]") else attachment_note)
                 if i not in inline_media_indices:
-                    messages.append({"role": "user", "content": f"{text_content} (file at {video_path})"})
+                    messages.append({"role": "user", "content": f"{text_content} (video file at {video_path} — view its first frame with read_image)"})
                     continue
                 frame_path = _extract_video_frame(video_path)
                 if frame_path and os.path.isfile(frame_path):
@@ -550,7 +557,7 @@ async def build_chat_messages(
                         ],
                     })
                 else:
-                    messages.append({"role": "user", "content": f"{text_content} (file at {video_path})"})
+                    messages.append({"role": "user", "content": f"{text_content} (video file at {video_path} — view its first frame with read_image)"})
                 continue
 
             if image_path and row["role"] == "user" and os.path.isfile(image_path):
@@ -562,7 +569,7 @@ async def build_chat_messages(
                 if i not in inline_media_indices:
                     messages.append({
                         "role": "user",
-                        "content": f"{text_prefix}{content} (image file at {image_path} — view it with a tool if needed)",
+                        "content": f"{text_prefix}{content} (image file at {image_path} — view it with read_image)",
                     })
                     continue
                 with open(image_path, "rb") as f:

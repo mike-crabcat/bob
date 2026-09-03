@@ -215,7 +215,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
     async def read_image(
         path: str,
     ) -> ImageInjection:
-        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP. Path can be absolute (within workspace) or relative to workspace root."""
+        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP; for MP4/MOV/M4V videos the first frame is shown. Path can be absolute (within workspace) or relative to workspace root."""
         resolved = _resolve_path(ctx, path)
         if not resolved.is_file():
             return ImageInjection(text=f"Error: '{path}' is not a file", data_url="")
@@ -225,9 +225,25 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
         }
+        if suffix in (".mp4", ".mov", ".m4v"):
+            # History stubs point at videos too — serve the same cached first
+            # frame the prompt assembler would have inlined.
+            from server.services.prompt_assembler import _extract_video_frame
+            frame_path = _extract_video_frame(str(resolved))
+            if not frame_path:
+                return ImageInjection(
+                    text=f"Error: could not extract a frame from '{path}'",
+                    data_url="",
+                )
+            data = Path(frame_path).read_bytes()
+            b64 = base64.b64encode(data).decode()
+            return ImageInjection(
+                text=f"First frame of video at {path} ({len(data)} bytes)",
+                data_url=f"data:image/jpeg;base64,{b64}",
+            )
         mime = _MIME_MAP.get(suffix)
         if not mime:
-            return ImageInjection(text=f"Error: '{path}' is not a supported image format (use png, jpg, gif, webp, or bmp)", data_url="")
+            return ImageInjection(text=f"Error: '{path}' is not a supported image format (use png, jpg, gif, webp, bmp, mp4, mov, or m4v)", data_url="")
 
         data = resolved.read_bytes()
         b64 = base64.b64encode(data).decode()

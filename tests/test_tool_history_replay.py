@@ -260,19 +260,21 @@ async def test_dispatch_failure_clears_trace():
     assert Dispatch.pop_tool_trace("doomed") is None
 
 
-async def test_replay_inlines_only_recent_media(ctx, db, tmp_path):
-    """Only the MAX_INLINE_MEDIA most recent image rows get base64 inlined;
-    older ones replay as text stubs with the file path (cost control)."""
+async def _seed_media_session(ctx, db, tmp_path, n_photos=5):
+    """Seed a session with n_photos user photo rows (plus replies).
+
+    Returns (session_key, message_ids, paths), oldest first.
+    """
     session_key = "test:replay:media"
     svc = SessionService(ctx)
-    paths = []
-    for n in range(5):
+    ids, paths = [], []
+    for n in range(n_photos):
         p = tmp_path / f"img{n}.jpg"
         p.write_bytes(b"\xff\xd8fakejpeg" + bytes([n]))
         paths.append(str(p))
-        await svc.add_message(
+        ids.append(await svc.add_message(
             session_key, "user", f"photo {n}",
-            metadata={"image_path": str(p)})
+            metadata={"image_path": str(p)}))
         await svc.add_message(session_key, "assistant", f"nice photo {n}")
 
     # Spread created_at so chronological order is deterministic (production
@@ -282,22 +284,67 @@ async def test_replay_inlines_only_recent_media(ctx, db, tmp_path):
         "datetime('now', '-1 hour', '+' || rowid || ' seconds') "
         "WHERE conversation_id = ?",
         (session_key,))
+    return session_key, ids, paths
 
-    messages = await build_chat_messages(session_key=session_key, db=db)
 
-    inlined = [
+def _inlined(messages):
+    return [
         m for m in messages
         if isinstance(m.get("content"), list)
         and any(p.get("type") == "input_image" for p in m["content"])
     ]
-    assert len(inlined) == 3, f"expected 3 inlined images, got {len(inlined)}"
-    inlined_text = json.dumps(inlined)
-    assert paths[4] in inlined_text and paths[2] in inlined_text
-    assert paths[0] not in inlined_text
 
-    stubs = [
+
+def _stubs(messages):
+    return [
         m for m in messages
         if isinstance(m.get("content"), str) and "image file at" in m["content"]
     ]
-    assert len(stubs) == 2
+
+
+async def test_replay_stubs_all_media_without_claims(ctx, db, tmp_path):
+    """Claim-less replays (subagents, wake turns) have no this-turn stimulus,
+    so every photo rides as a read_image stub — never re-billed base64."""
+    session_key, ids, paths = await _seed_media_session(ctx, db, tmp_path)
+
+    messages = await build_chat_messages(session_key=session_key, db=db)
+
+    assert _inlined(messages) == []
+    stubs = _stubs(messages)
+    assert len(stubs) == 5
+    assert all("read_image" in m["content"] for m in stubs)
+
+
+async def test_replay_inlines_only_claimed_media(ctx, db, tmp_path):
+    """A dispatch turn inlines base64 pixels only for media rows it claimed
+    as this turn's stimulus; all older photos replay as read_image stubs."""
+    session_key, ids, paths = await _seed_media_session(ctx, db, tmp_path)
+
+    messages = await build_chat_messages(
+        session_key=session_key, db=db, claimed_ids={ids[4]})
+
+    inlined = _inlined(messages)
+    assert len(inlined) == 1, f"expected 1 inlined image, got {len(inlined)}"
+    assert paths[4] in json.dumps(inlined)
+
+    stubs = _stubs(messages)
+    assert len(stubs) == 4
     assert any(paths[0] in m["content"] for m in stubs)
+    assert any(paths[3] in m["content"] for m in stubs)
+
+
+async def test_replay_caps_claimed_media_burst(ctx, db, tmp_path):
+    """A burst claim of many photo rows still inlines at most
+    MAX_INLINE_MEDIA (newest first); the rest of the burst stubs."""
+    from server.services.prompt_assembler import MAX_INLINE_MEDIA
+
+    session_key, ids, paths = await _seed_media_session(ctx, db, tmp_path)
+
+    messages = await build_chat_messages(
+        session_key=session_key, db=db, claimed_ids=set(ids))
+
+    inlined_text = json.dumps(_inlined(messages))
+    assert len(_inlined(messages)) == MAX_INLINE_MEDIA
+    assert paths[4] in inlined_text and paths[2] in inlined_text
+    assert paths[0] not in inlined_text and paths[1] not in inlined_text
+    assert len(_stubs(messages)) == 2
