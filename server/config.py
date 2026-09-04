@@ -457,6 +457,10 @@ class Settings:
     goals: GoalsSettings = field(default_factory=GoalsSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
+    # Dedicated token for POST /api/v1/stimulus/events (external feeds).
+    # Deliberately NOT the dashboard secret: worst-case leak of this token
+    # can only post stimulus events. Empty = endpoint refuses everything.
+    stimulus_token: str = ""
     dashboard_secret: str = ""  # Shared secret for dashboard-only operations
     api_auth_disabled: bool = False  # Kill switch: bypass the API token gate
     _api_secret_cache: str | None = field(default=None, init=False, repr=False, compare=False)
@@ -541,6 +545,7 @@ class Settings:
         heartbeat_interval_seconds = float(
             os.getenv("BOB_HEARTBEAT_INTERVAL_SECONDS", "60")
         )
+        stimulus_token = os.getenv("BOB_STIMULUS_TOKEN", "")
 
         # Logging settings
         log_path_value = os.getenv("BOB_LOG_PATH")
@@ -757,6 +762,7 @@ class Settings:
             email_polling_enabled=email_polling_enabled,
             voice=voice,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            stimulus_token=stimulus_token,
             public_url=public_url,
             dashboard_secret=dashboard_secret,
             api_auth_disabled=api_auth_disabled,

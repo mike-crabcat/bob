@@ -48,6 +48,8 @@ OWNERS: dict[str, list[str]] = {
     "outreach_detector_watermark": ["services/outreach_detector.py"],
     "approvals": ["repositories/approvals.py"],
     "wakeups": ["repositories/wakeups.py"],
+    "stimulus_events": ["repositories/stimulus.py"],
+    "stimulus_routes": ["repositories/stimulus.py"],
     "attention_shadow": ["services/attention/"],
     "llm_call_log": ["repositories/llm_call_log.py"],
     "phone_calls": ["repositories/phone_calls.py"],

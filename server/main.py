@@ -32,6 +32,7 @@ from server.heartbeat import (
     ClaimRouterSweepTask,
     OutreachDetectorSweepTask,
     GoalReviewTask,
+    StimulusRouterTask,
     GoalDueTask,
     WakeupPumpTask,
     DeletionPropagationTask,
@@ -43,7 +44,7 @@ from server.heartbeat import (
 from server.models import HealthResponse
 from server.routers import (
     calendars, contacts, context, dashboard_api, dashboard_ws, email,
-    published_files, webhooks, whatsapp,
+    published_files, stimulus, webhooks, whatsapp,
 )
 from server.services.event_bus import EventBus
 from server.structured_logging import configure_logging, CorrelationIdMiddleware
@@ -180,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(ClaimRouterSweepTask())
         runner.register(OutreachDetectorSweepTask())
         runner.register(GoalReviewTask())
+        runner.register(StimulusRouterTask())
         runner.register(GoalDueTask())
         runner.register(DeletionPropagationTask())
         runner.register(GrowthMonitoringTask())
@@ -269,6 +271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(webhooks.router, prefix="/api/v1/webhooks")
     app.include_router(contacts.router, prefix="/api/v1")
+    app.include_router(stimulus.router, prefix="/api/v1")
     app.include_router(email.router)
     # Public (Funnel) design-file publishing for the printful skill —
     # token-gated, images/print files only.

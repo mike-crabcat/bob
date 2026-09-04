@@ -19,10 +19,14 @@ from server.config import Settings
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
-# (method, path) pairs that must stay reachable by external callers without a
-# token: Twilio voice/status callbacks and the public voice pages' log sink.
+# (method, path) pairs that must stay reachable by external callers without
+# the dashboard token: Twilio voice/status callbacks, the public voice pages'
+# log sink, and the stimulus ingest door — which carries its own dedicated
+# bearer token (BOB_STIMULUS_TOKEN) checked inside the handler, so the
+# limited-blast-radius token isn't forced through the dashboard secret.
 PUBLIC_UNAUTHENTICATED: dict[str, frozenset[str]] = {
-    "POST": frozenset({"/phone/twiml", "/phone/status", "/voice/log"}),
+    "POST": frozenset({"/phone/twiml", "/phone/status", "/voice/log",
+                       "/api/v1/stimulus/events"}),
 }
 
 

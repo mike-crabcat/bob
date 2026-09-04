@@ -757,3 +757,22 @@ class GrowthMonitoringTask:
             row = await ctx.db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
             counts[table] = row["n"]
         logger.info("db growth: size=%.1fMB rows=%s", size_mb, counts)
+
+
+class StimulusRouterTask:
+    """Drain pending stimulus_events into steers (docs/stimulus-spine-plan.md).
+
+    Every tick, no self-gating: the drain is one cheap SELECT on an
+    almost-always-empty pending set; the expense (a woken turn) only happens
+    when a real event is due. Detection resolution is the sources' poll
+    cadence (cryptobro quotes: 30s), and batching per target keeps
+    correlated events in one turn."""
+
+    name = "stimulus_router"
+
+    async def run(self, ctx: AppContext) -> None:
+        from server.services.stimulus_router import drain
+
+        counts = await drain(ctx)
+        if counts.get("pending"):
+            logger.info("stimulus router: %s", counts)
