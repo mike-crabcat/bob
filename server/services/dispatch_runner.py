@@ -369,6 +369,36 @@ class DispatchRunner:
                         "is internal (session=%s, dispatch=%s)",
                         session_key, spec.dispatch_id)
 
+            # Relay dead-man switch (live 2026-09-03, AI doom): a task_relay
+            # wake exists to deliver a background result, but the relay turn
+            # can still end with nothing delivered — it NO_REPLIED off a
+            # misread ("that reply already went out", per the result's own
+            # captured-send summary). A NO_REPLY tool call sets the sent
+            # flag without delivering, and delivered_only history records
+            # nothing, so the result evaporated silently. A relay-claimed
+            # turn that delivered nothing gets its payload sent by the
+            # runner: silence on a must-speak turn is a misread, never
+            # intent (the supervisor only wakes non-quiet results).
+            if ("task_relay" in provenances
+                    and not spec.sent_texts
+                    and spec.send_tool_name):
+                payload = await history_repo.relay_payload(claimed_ids)
+                if payload:
+                    send_tool = next(
+                        (t for t in spec.tools if t.name == spec.send_tool_name), None)
+                    if send_tool is not None:
+                        try:
+                            await send_tool.handler(payload)
+                            logger.warning(
+                                "relay dead-man rescue: turn produced no reply — "
+                                "delivered the background-task payload directly "
+                                "(session=%s, dispatch=%s)",
+                                session_key, spec.dispatch_id)
+                        except Exception:
+                            logger.exception(
+                                "relay dead-man rescue failed (session=%s, "
+                                "dispatch=%s)", session_key, spec.dispatch_id)
+
             await self._record_history(spec, session_svc, result)
 
             if turn is not None:

@@ -23,7 +23,11 @@ from server.config import Settings
 from server.context import AppContext
 from server.services.base import BaseService, utcnow
 from server.services.openai_service import strip_citation_markers
-from server.services.whatsapp_bridge_service._media import _jid_to_phone, _prepare_media
+from server.services.whatsapp_bridge_service._media import (
+    _jid_to_phone,
+    _prepare_media,
+    resolve_sendable_media,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -919,6 +923,20 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         backburner_capture: dict[str, Any] = {"enabled": False, "texts": []}
 
         async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+            # Leaked-markup guard (2026-09-04 Bob-management leak): models
+            # sometimes emit their send call as <tool_call> XML text, and
+            # upstream parsing can eat the opening half leaving tag soup.
+            # Never post that raw — strip the markup; a reply that is ONLY
+            # markup is refused so the model restates it as plain text.
+            from server.services.openai_service import strip_leaked_tool_xml
+
+            cleaned = strip_leaked_tool_xml(text)
+            if cleaned.strip() or media_path:
+                text = cleaned
+            else:
+                return ("Error: not sent — the reply contained only leaked "
+                        "tool-call markup. Restate it as a plain message and "
+                        "call this tool again with the text.")
             # Detached turn: capture, don't deliver. The supervisor relays the
             # result to the user via the wake path once the task finishes.
             if backburner_capture["enabled"] and not is_no_reply(text):
@@ -938,12 +956,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             seq = send_seq[0]
             send_seq[0] += 1
             if media_path:
-                workspace = settings.harness.workspace_dir.expanduser().resolve()
-                resolved = (workspace / media_path).resolve()
-                if not str(resolved).startswith(str(workspace)):
-                    return "Error: path escapes workspace"
-                if not resolved.is_file():
-                    return f"Error: file not found: {media_path}"
+                resolved = resolve_sendable_media(
+                    settings.harness.workspace_dir, media_path)
+                if isinstance(resolved, str):
+                    return resolved
                 prepared = await _prepare_media(str(resolved))
                 if prepared is None:
                     return "Error: failed to prepare media for sending"

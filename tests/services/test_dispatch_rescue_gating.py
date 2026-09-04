@@ -24,17 +24,25 @@ from server.services.session_service import SessionService
 
 
 class _FakeSendTool:
-    def __init__(self, name: str):
+    def __init__(self, name: str, spec: DispatchSpec | None = None):
         self.name = name
+        self.spec = spec
         self.delivered: list[str] = []
 
     async def handler(self, text: str) -> str:
         self.delivered.append(text)
+        # Emulate the real handler's bookkeeping: the runner's relay
+        # dead-man switch reads spec.sent_texts to tell a delivered turn
+        # from a silent one.
+        if self.spec is not None:
+            self.spec.message_was_sent[0] = True
+            self.spec.sent_texts.append(text)
         return "sent"
 
 
-def _spec(session_key: str, send_tool: _FakeSendTool) -> DispatchSpec:
-    return DispatchSpec(
+def _spec(session_key: str, send_tool: _FakeSendTool | None = None) -> DispatchSpec:
+    send_tool = send_tool or _FakeSendTool("send_whatsapp_message")
+    spec = DispatchSpec(
         session_key=session_key,
         system_content="system",
         tools=[send_tool],
@@ -44,6 +52,8 @@ def _spec(session_key: str, send_tool: _FakeSendTool) -> DispatchSpec:
         message_was_sent=[False],
         sent_texts=[],
     )
+    send_tool.spec = spec
+    return spec
 
 
 @pytest.fixture

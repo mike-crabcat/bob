@@ -233,9 +233,37 @@ def _strip_hermes_tool_calls(text: str) -> str:
     if "<tool_call>" not in text:
         return text
     cleaned = _HERMES_TOOL_CALL_RE.sub("", text)
+    cleaned = strip_leaked_tool_xml(cleaned)
     # Models often append "Done." or "Done!" after the XML block.
     cleaned = re.sub(r"\s*\b[Dd]one!?\.?\s*", "", cleaned)
     return cleaned.strip()
+
+
+# Any <tool_call> span regardless of inner dialect. The Hermes shape above is
+# recovered as a real call; other dialects (GLM's arg_key/arg_value variant)
+# can only be stripped, never delivered raw — and upstream API parsing can eat
+# just the opening half of a malformed span, leaving an orphaned tail that
+# leaked verbatim into the Bob-management group (2026-09-04).
+_TOOL_CALL_ANY_SPAN_RE = re.compile(r"<tool_call\b[^>]*>.*?(?:</tool_call>|\Z)", re.DOTALL)
+_LEAKED_TOOL_TAG_RE = re.compile(r"</?(?:tool_call|tool_name|parameters|arg_key|arg_value)\b[^>]*/?>")
+
+
+def strip_leaked_tool_xml(text: str) -> str:
+    """Remove tool-call markup a model leaked into message text.
+
+    Full <tool_call> spans go entirely (a malformed call attempt is not
+    prose). Orphaned tags left behind by upstream half-parsing are removed
+    while the text between them is kept:
+    "</arg_key><arg_value>Objective complete…</arg_value></tool_call>"
+    cleans to "Objective complete…".
+    """
+    if not text:
+        return text
+    cleaned = _TOOL_CALL_ANY_SPAN_RE.sub(" ", text)
+    cleaned = _LEAKED_TOOL_TAG_RE.sub(" ", cleaned)
+    if cleaned != text:
+        cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
+    return cleaned
 
 
 def strip_citation_markers(text: str) -> str:
@@ -316,7 +344,7 @@ def _get_cached_client(
 
 def _model_skips_temperature(model: str) -> bool:
     """Return True for models that don't accept the temperature parameter."""
-    return any(model.startswith(p) for p in ("gpt-5.5", "gpt-5.6", "o1", "o3", "o4"))
+    return any(model.startswith(p) for p in ("gpt-5.5", "gpt-5.6", "gpt-6", "o1", "o3", "o4"))
 
 
 def _accepts_reasoning_effort(model: str) -> bool:

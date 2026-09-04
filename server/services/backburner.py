@@ -438,6 +438,38 @@ class BackburnerService(BaseService):
         )
         return subagent_id, str(goal["id"])
 
+    # ------------------------------------------------------ relay content
+
+    @staticmethod
+    def _relay_content(short: str, combined: str, *, failed: bool) -> str:
+        """The wake text that carries a background task's result back to its
+        session.
+
+        The delivery truth must lead: detached runs send through capture
+        mode, so their own summaries honestly say "reply sent" while nothing
+        reached anyone — and a relay turn that believes that preamble
+        NO_REPLIES off it, losing the result entirely (live 2026-09-03,
+        Andrew's video answer never delivered). State that nothing was
+        delivered, defuse any 'sent' claim below, and make NO_REPLY an
+        explicit loss."""
+        if failed:
+            return (
+                f"[Background task {short}] {combined}\n\n"
+                "This background task failed. Tell the user plainly what "
+                "happened and decide whether it's worth retrying — call your "
+                "send tool with the report; replying NO_REPLY loses it "
+                "entirely.")
+        return (
+            f"[Background task {short}] FINISHED — result below. IMPORTANT: "
+            "nothing in it has been delivered to anyone. Background runs "
+            "cannot send messages, so any line below claiming a reply was "
+            "'sent' means it was only captured, waiting for you to deliver "
+            f"it.\n\n{combined}\n\n"
+            "This background task has finished. Relay the result to the user "
+            "now with a short summary in your own voice — call your send "
+            "tool with it; replying NO_REPLY here loses the result "
+            "entirely. If part of it failed, say so plainly.")
+
     # ---------------------------------------------------------- supervisor
 
     def _spawn_supervisor(self, subagent_id: str, goal_id: str, spec: Any,
@@ -534,11 +566,7 @@ class BackburnerService(BaseService):
                                       result="completed with no user-facing output",
                                       wake_origin=False)
                 else:
-                    content = (
-                        f"[Background task {short}] {combined}\n\n"
-                        "This background task has finished. Relay the result to the "
-                        "user with a short summary in your own voice. If part of it "
-                        "failed, say so plainly.")
+                    content = self._relay_content(short, combined, failed=False)
                     await settle_goal(self.ctx, goal_id, status="completed",
                                       result=content, wake_content=content,
                                       wake_provenance="task_relay")
@@ -554,10 +582,7 @@ class BackburnerService(BaseService):
                     subagent_id, status="failed",
                     result=combined or "(failed)", now_iso=now,
                     error=combined[:500])
-                content = (
-                    f"[Background task {short}] {combined}\n\n"
-                    "This background task failed. Tell the user plainly what happened "
-                    "and decide whether it's worth retrying.")
+                content = self._relay_content(short, combined, failed=True)
                 await settle_goal(self.ctx, goal_id, status="failed",
                                   result=content, wake_content=content,
                                   wake_provenance="task_relay")

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -20,6 +21,23 @@ from zoneinfo import ZoneInfo
 from server.services.phone_utils import normalize_phone
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_sendable_media(workspace_dir: Any, media_path: str) -> Path | str:
+    """Resolve a tool-supplied media_path against the workspace directory.
+
+    Returns the resolved Path when it names an existing file inside the
+    workspace, else an error string. Shared by every send_whatsapp_message
+    wrapper (conversation turns, routine turns, group-event turns) so media
+    acceptance is identical everywhere.
+    """
+    workspace = Path(workspace_dir).expanduser().resolve()
+    resolved = (workspace / media_path).resolve()
+    if not str(resolved).startswith(str(workspace)):
+        return "Error: path escapes workspace"
+    if not resolved.is_file():
+        return f"Error: file not found: {media_path}"
+    return resolved
 
 
 def _jid_to_phone(jid: str) -> str | None:

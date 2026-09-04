@@ -255,6 +255,28 @@ class HistoryRepository:
             tuple(message_ids))
         return [str(r["provenance"] or "") for r in rows]
 
+    async def relay_payload(self, message_ids: list[str]) -> str:
+        """Newest task_relay row among a dispatch's claimed ids, trimmed of
+        the relay boilerplate — the fallback body for the dispatch runner's
+        dead-man rescue (a relay turn that ends with nothing delivered)."""
+        if not message_ids:
+            return ""
+        marks = ",".join("?" for _ in message_ids)
+        row = await self.db.fetch_one(
+            f"SELECT content FROM messages WHERE id IN ({marks}) "
+            "AND provenance = 'task_relay' ORDER BY created_at DESC LIMIT 1",
+            tuple(message_ids))
+        if not row or not row["content"]:
+            return ""
+        text = row["content"]
+        # Drop the trailing relay instructions — the rescue delivers the
+        # payload, not the meta-directive around it.
+        for tail in ("\n\nThis background task has finished.",
+                     "\n\nThis background task failed."):
+            text = text.split(tail, 1)[0]
+        text = text.strip()
+        return text if len(text) <= 1800 else text[:1800] + "…"
+
     async def restore_pending(self, message_ids: list[str]) -> None:
         """Undo a dispatch claim (e.g. after LLM quota failure)."""
         if not message_ids:
