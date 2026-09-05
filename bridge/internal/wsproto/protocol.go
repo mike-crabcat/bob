@@ -57,17 +57,17 @@ type PairingCodePayload struct {
 }
 
 type IncomingMessagePayload struct {
-	WhatsAppMessageID string           `json:"whatsapp_message_id"`
-	ChatID            string           `json:"chat_id"`
-	ChatKind          string           `json:"chat_kind"` // "dm" or "group"
-	SenderJID         string           `json:"sender_jid"`
-	SenderName        string           `json:"sender_name,omitempty"`
-	Text              string           `json:"text,omitempty"`
-	QuotedMessageID   string           `json:"quoted_message_id,omitempty"`
-	MentionedJIDs     []string         `json:"mentioned_jids,omitempty"`
-	Media             *MediaInfo       `json:"media,omitempty"`
-	Contacts          []SharedContact  `json:"contacts,omitempty"`
-	Timestamp         string           `json:"timestamp"`
+	WhatsAppMessageID string          `json:"whatsapp_message_id"`
+	ChatID            string          `json:"chat_id"`
+	ChatKind          string          `json:"chat_kind"` // "dm" or "group"
+	SenderJID         string          `json:"sender_jid"`
+	SenderName        string          `json:"sender_name,omitempty"`
+	Text              string          `json:"text,omitempty"`
+	QuotedMessageID   string          `json:"quoted_message_id,omitempty"`
+	MentionedJIDs     []string        `json:"mentioned_jids,omitempty"`
+	Media             *MediaInfo      `json:"media,omitempty"`
+	Contacts          []SharedContact `json:"contacts,omitempty"`
+	Timestamp         string          `json:"timestamp"`
 }
 
 type MediaInfo struct {
@@ -132,10 +132,10 @@ type GroupParticipantPayload struct {
 // --- Downstream messages (bob → bridge) ---
 
 type SendMessagePayload struct {
-	ChatID             string `json:"chat_id"`
-	Text               string `json:"text"`
-	ReplyToMessageID   string `json:"reply_to_message_id,omitempty"`
-	RequestID          string `json:"request_id"`
+	ChatID           string `json:"chat_id"`
+	Text             string `json:"text"`
+	ReplyToMessageID string `json:"reply_to_message_id,omitempty"`
+	RequestID        string `json:"request_id"`
 }
 
 type SendMediaPayload struct {
@@ -162,28 +162,38 @@ type SubscribePresencePayload struct {
 	ChatJID string `json:"chat_id"`
 }
 
+// SendChatPresencePayload is the DOWNSTREAM (bob → bridge) request to publish
+// Bob's own typing state in a chat. Distinct from ChatPresencePayload above,
+// which is the upstream event for a REMOTE participant's presence.
+type SendChatPresencePayload struct {
+	ChatID string `json:"chat_id"`
+	State  string `json:"state"`           // "composing" | "paused"
+	Media  string `json:"media,omitempty"` // "" text | "audio"
+}
+
 type RequestPairingPayload struct {
-	Method      string `json:"method"`       // "qr" or "phone_code"
+	Method      string `json:"method"` // "qr" or "phone_code"
 	PhoneNumber string `json:"phone_number,omitempty"`
 }
 
 // --- Message type constants ---
 
 const (
-	TypeConnected        = "whatsapp.connected"
-	TypeDisconnected     = "whatsapp.disconnected"
-	TypeQRCode           = "whatsapp.qr_code"
-	TypePairingCode      = "whatsapp.pairing_code"
-	TypeIncomingMessage  = "whatsapp.incoming_message"
-	TypeMessageAcked     = "whatsapp.message_acked"
-	TypeBridgeStatus     = "bridge.status"
-	TypeSendMessage      = "send_message"
-	TypeSendMedia        = "send_media"
-	TypeAck              = "ack"
-	TypeRequestPairing   = "request_pairing"
-	TypeSendMessageResult  = "send_message_result"
-	TypeGroupMemberChange  = "whatsapp.group_member_change"
-	TypeGroupSync          = "whatsapp.group_sync"
-	TypeChatPresence       = "whatsapp.chat_presence"
-	TypeSubscribePresence  = "subscribe_presence"
+	TypeConnected         = "whatsapp.connected"
+	TypeDisconnected      = "whatsapp.disconnected"
+	TypeQRCode            = "whatsapp.qr_code"
+	TypePairingCode       = "whatsapp.pairing_code"
+	TypeIncomingMessage   = "whatsapp.incoming_message"
+	TypeMessageAcked      = "whatsapp.message_acked"
+	TypeBridgeStatus      = "bridge.status"
+	TypeSendMessage       = "send_message"
+	TypeSendMedia         = "send_media"
+	TypeAck               = "ack"
+	TypeRequestPairing    = "request_pairing"
+	TypeSendMessageResult = "send_message_result"
+	TypeGroupMemberChange = "whatsapp.group_member_change"
+	TypeGroupSync         = "whatsapp.group_sync"
+	TypeChatPresence      = "whatsapp.chat_presence"
+	TypeSubscribePresence = "subscribe_presence"
+	TypeSendChatPresence  = "send_chat_presence"
 )

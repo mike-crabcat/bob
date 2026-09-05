@@ -717,6 +717,29 @@ func (c *Client) SubscribePresence(chatJID string) error {
 	return c.client.SubscribePresence(context.Background(), jid)
 }
 
+// SendChatPresence publishes Bob's own typing state in a chat ("composing" |
+// "paused"; media "audio" marks voice-recording instead of typing).
+func (c *Client) SendChatPresence(chatJID, state, media string) error {
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("parse jid: %w", err)
+	}
+	var presence types.ChatPresence
+	switch state {
+	case "composing":
+		presence = types.ChatPresenceComposing
+	case "paused":
+		presence = types.ChatPresencePaused
+	default:
+		return fmt.Errorf("invalid chat presence state: %q", state)
+	}
+	mediaKind := types.ChatPresenceMediaText
+	if media == "audio" {
+		mediaKind = types.ChatPresenceMediaAudio
+	}
+	return c.client.SendChatPresence(context.Background(), jid, presence, mediaKind)
+}
+
 func (c *Client) Close() error {
 	c.client.Disconnect()
 	return c.container.Close()

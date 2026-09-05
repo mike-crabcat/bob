@@ -292,6 +292,12 @@ class WhatsAppBridgeSettings:
     token: str = ""
     reconnect_interval_seconds: float = 10.0
     media_dir: Path = Path("~/data/whatsappbridge/media")
+    # Outbound typing indicator (chat presence): cosmetic, kill-switchable.
+    # keepalive re-asserts "composing" while a turn runs (clients time the
+    # indicator out); max is the leak backstop if a settle hook is lost.
+    typing_indicator_enabled: bool = True
+    typing_keepalive_seconds: float = 5.0
+    typing_max_seconds: float = 600.0
 
 
 @dataclass(slots=True)
@@ -700,6 +706,9 @@ class Settings:
             token=os.getenv("BOB_WHATSAPP_BRIDGE_TOKEN", ""),
             reconnect_interval_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_RECONNECT_INTERVAL_SECONDS", "10")),
             media_dir=_env_path("BOB_WHATSAPP_BRIDGE_MEDIA_DIR", Path("~/data/whatsappbridge/media")),
+            typing_indicator_enabled=_env_bool("BOB_WHATSAPP_BRIDGE_TYPING_INDICATOR", True),
+            typing_keepalive_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_TYPING_KEEPALIVE_SECONDS", "5")),
+            typing_max_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_TYPING_MAX_SECONDS", "600")),
         )
 
         patience = PatienceSettings(

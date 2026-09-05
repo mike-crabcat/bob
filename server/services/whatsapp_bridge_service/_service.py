@@ -97,6 +97,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         self._verbose_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._verbose_listener_task: asyncio.Task | None = None
         self._presence_subscribed: set[str] = set()
+        # Live typing-indicator keepalives: chat_id -> asyncio.Task. Strong
+        # refs on purpose — asyncio holds only weak task refs, so the dict is
+        # what keeps an in-flight keepalive alive (same lesson as backburner's
+        # _supervisors). Empty = no chat shows Bob typing.
+        self._typing_tasks: dict[str, asyncio.Task] = {}
         self._register_send_executors()
 
     def _register_send_executors(self) -> None:
@@ -171,6 +176,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         if self._verbose_queue is not None and self.ctx.event_bus:
             self.ctx.event_bus.unsubscribe(self._verbose_queue)
             self._verbose_queue = None
+        # Reap any live typing keepalives before the socket goes away.
+        for task in self.__dict__.get("_typing_tasks", {}).values():
+            task.cancel()
+        self.__dict__.get("_typing_tasks", {}).clear()
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
@@ -404,6 +413,80 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 await self._ws.send(json.dumps(payload))
             except Exception:
                 logger.debug("failed to send presence subscription for %s", chat_id)
+
+    async def _send_chat_presence(self, chat_id: str, state: str, media: str = "") -> None:
+        """Fire-and-forget outbound chat-presence frame. Never raises — the
+        typing indicator is cosmetic and must not break a turn. Self-heals
+        across bridge reconnects: every call re-reads the current socket, so
+        the keepalive resumes on its next tick after a reconnect."""
+        if self._ws is None:
+            return
+        payload = {
+            "type": "send_chat_presence",
+            "id": str(uuid4()),
+            "timestamp": utcnow().isoformat(),
+            "payload": {"chat_id": chat_id, "state": state, "media": media},
+        }
+        try:
+            await self._ws.send(json.dumps(payload))
+        except Exception:
+            logger.debug("failed to send chat presence %s for %s", state, chat_id)
+
+    async def start_typing(self, chat_id: str) -> None:
+        """Show the WhatsApp typing indicator for a chat and keep it alive
+        until stop_typing. No-raise: cosmetic, must never break a turn.
+
+        Chat presence is ephemeral signal, deliberately OUTSIDE the effects
+        outbox and the bridge's outgoing queue — nothing durable, nothing
+        retried; a process crash just lets the indicator fade client-side.
+        """
+        try:
+            wa = self._get_settings().whatsapp_bridge
+            if not getattr(wa, "typing_indicator_enabled", False):
+                return
+            # __dict__.setdefault: tests and BaseService.from_db construct
+            # instances without __init__.
+            tasks = self.__dict__.setdefault("_typing_tasks", {})
+            old = tasks.get(chat_id)
+            if old is not None and not old.done():
+                old.cancel()  # back-to-back turns: restart the cap clock
+            await self._send_chat_presence(chat_id, "composing")
+
+            async def _keepalive(
+                interval: float = wa.typing_keepalive_seconds,
+                cap: float = wa.typing_max_seconds,
+            ) -> None:
+                # Clients time the composing indicator out, so re-assert it
+                # until the turn settles. The cap is the leak backstop for a
+                # lost settle hook; task.cancel() from stop_typing is the
+                # normal exit.
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + cap
+                try:
+                    while loop.time() < deadline:
+                        await asyncio.sleep(interval)
+                        await self._send_chat_presence(chat_id, "composing")
+                except asyncio.CancelledError:
+                    pass
+
+            tasks[chat_id] = asyncio.create_task(
+                _keepalive(), name=f"wa-typing:{chat_id}")
+        except Exception:
+            logger.debug("start_typing failed for %s", chat_id, exc_info=True)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Clear the typing indicator: cancel the keepalive and send 'paused'
+        once iff one was active. No start → clean no-op. No-raise."""
+        try:
+            task = self.__dict__.setdefault("_typing_tasks", {}).pop(chat_id, None)
+            if task is not None and not task.done():
+                # Deliberately NOT awaited: this runs inside the dispatch
+                # runner's finally, where awaiting a cancelled task can
+                # re-raise CancelledError into a normal exit path.
+                task.cancel()
+                await self._send_chat_presence(chat_id, "paused")
+        except Exception:
+            logger.debug("stop_typing failed for %s", chat_id, exc_info=True)
 
     async def _handle_chat_presence(self, payload: dict[str, Any]) -> None:
         """Handle typing/presence events from the bridge."""
@@ -1016,6 +1099,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         async def _on_quota_exhausted() -> None:
             await _notify_quota_exhausted(wa_service, chat_id, session_key)
 
+        # Typing indicator bracket: active when the turn's LLM phase begins,
+        # settled on every turn exit (the runner's finally). Covers inbound,
+        # wake/steering/approval, occupancy drain, crash recovery, and
+        # backburner relays — every path through this spec builder.
+        async def _on_turn_active() -> None:
+            await self.start_typing(chat_id)
+
+        async def _on_turn_settled() -> None:
+            await self.stop_typing(chat_id)
+
         dispatch_spec = DispatchSpec(
             session_key=session_key,
             system_content=system_content,
@@ -1033,6 +1126,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             hold_sender=_send_holding_ack,
             quota_restore=True,
             on_quota_exhausted=_on_quota_exhausted,
+            on_turn_active=_on_turn_active,
+            on_turn_settled=_on_turn_settled,
             event=("whatsapp.message.received", {
                 "session_key": session_key,
                 "sender_name": sender_name,

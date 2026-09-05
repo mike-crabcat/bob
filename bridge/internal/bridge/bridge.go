@@ -365,6 +365,26 @@ func (b *Bridge) handleClientMessage(env wsproto.Envelope) {
 		if err := b.wa.SubscribePresence(payload.ChatJID); err != nil {
 			b.log.Warn("failed to subscribe presence", "chat_id", payload.ChatJID, "error", err)
 		}
+
+	case wsproto.TypeSendChatPresence:
+		// Typing indicator: fire-and-forget, never enqueued in outQ — it's
+		// cosmetic transient state and must not add queue pressure or be
+		// retried after a crash. Debug-level (not Warn) because the Python
+		// keepalive re-fires every few seconds per active chat — a down
+		// WhatsApp must not become journal spam.
+		var payload wsproto.SendChatPresencePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			b.log.Warn("invalid send_chat_presence payload", "error", err)
+			return
+		}
+		if !b.wa.IsConnected() {
+			b.log.Debug("chat presence skipped, whatsapp not connected", "chat_id", payload.ChatID)
+			return
+		}
+		if err := b.wa.SendChatPresence(payload.ChatID, payload.State, payload.Media); err != nil {
+			b.log.Debug("failed to send chat presence",
+				"chat_id", payload.ChatID, "state", payload.State, "error", err)
+		}
 	}
 }
 

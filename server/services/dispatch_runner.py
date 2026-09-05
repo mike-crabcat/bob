@@ -105,6 +105,13 @@ class DispatchSpec:
     hold_sender: Callable[[str], Awaitable[None]] | None = None
     quota_restore: bool = False
     on_quota_exhausted: Callable[[], Awaitable[None]] | None = None
+    # Turn-lifecycle side-channel hooks (channel-neutral; the WhatsApp typing
+    # indicator is the first consumer). on_turn_active fires when the turn's
+    # LLM phase begins; on_turn_settled fires on EVERY exit after that (the
+    # finally in run()). Both must be no-raise; None on specs whose channel
+    # has nothing to signal (email, group events).
+    on_turn_active: Callable[[], Awaitable[None]] | None = None
+    on_turn_settled: Callable[[], Awaitable[None]] | None = None
     transform_messages: Callable[[list], list] | None = None
     event: tuple[str, dict] | None = None  # (event_bus topic, payload)
 
@@ -257,6 +264,17 @@ class DispatchRunner:
                 self.ctx.settings, spec.call_category, session_key))
             bb_mode = backburner_mod.mode(self.ctx.settings)
 
+            # Turn-active side-channel hook (typing indicator). Placement is
+            # load-bearing: every statement that can raise before the LLM
+            # phase sits above this line, and nothing between here and the
+            # try below raises — so the finally there always clears it.
+            if spec.on_turn_active is not None:
+                try:
+                    await spec.on_turn_active()
+                except Exception:
+                    logger.warning("turn-active hook failed (session=%s)",
+                                   session_key, exc_info=True)
+
             try:
                 if not bb_applies:
                     result = await _llm()
@@ -317,6 +335,16 @@ class DispatchRunner:
                 # leaves 'running'.
                 if heartbeat_task is not None and not heartbeat_task.done():
                     heartbeat_task.cancel()
+                # Turn-settled side-channel hook (typing indicator): every
+                # exit after the active hook clears it — normal completion,
+                # detach, quota, exceptions, cancellation. except Exception
+                # deliberately lets CancelledError propagate unchanged.
+                if spec.on_turn_settled is not None:
+                    try:
+                        await spec.on_turn_settled()
+                    except Exception:
+                        logger.warning("turn-settled hook failed (session=%s)",
+                                       session_key, exc_info=True)
 
             # Rescue: the turn wrote a reply but never called its send tool.
             # By the prompt contract ("your text output will NOT be sent…
