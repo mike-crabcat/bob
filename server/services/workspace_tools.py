@@ -64,6 +64,31 @@ _SENSITIVE_PATH_RE = re.compile(
 )
 
 
+async def bash_syntax_check(command: str) -> str | None:
+    """Parse-check a command with `bash -n`; return the parse error, or None.
+
+    Models habitually write `\\'` inside single quotes — valid in Python/JSON,
+    meaningless in bash — so prose arguments with apostrophes die as
+    "unexpected EOF while looking for matching quote" (2026-09-05: the crayon
+    portrait goal failed this way minutes after creation, inside a background
+    script where the model never saw the error). Shared by the bash tool and
+    script subagents so the error surfaces in-turn instead. Checker failures
+    (missing bash, timeout) fail open — never block execution."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-n", "-c", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    if proc.returncode == 0:
+        return None
+    return (stderr.decode("utf-8", errors="replace").strip()
+            or f"bash parse error (exit {proc.returncode})")[:500]
+
+
 def _check_command_safety(command: str, *, db_path: Path | None,
                           data_dir: Path, config_dir: Path) -> str | None:
     """Return a reason string if the command violates sandbox rules, else None.
@@ -173,6 +198,15 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         if violation:
             logger.warning("bash blocked by sandbox: %r — %s", command, violation)
             return f"Error: {violation}"
+        syntax_error = await bash_syntax_check(command)
+        if syntax_error:
+            logger.warning("bash blocked by syntax check: %r — %s", command, syntax_error)
+            return (
+                f"Error: shell syntax — {syntax_error}\n"
+                "Fix the quoting. NOTE: a backslash does NOT escape an apostrophe "
+                "inside single quotes ('\\'' is wrong); for prose arguments with "
+                "apostrophes, write the text to a file and pass it by path "
+                "(e.g. --prompt-file), or use a quoted heredoc.")
         logger.info("bash: %s", command)
         venv_dir = settings.harness.venv_dir.expanduser()
         proc = await asyncio.create_subprocess_exec(

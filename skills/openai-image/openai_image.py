@@ -4,6 +4,9 @@
 Text-to-image:
     python openai_image.py --prompt "A cat wearing sunglasses" --output /tmp/cat.png
 
+Prompt from a file (safe for quotes/apostrophes — no shell quoting issues):
+    python openai_image.py --prompt-file prompt.txt --output /tmp/cat.png
+
 Image-to-image / reference edit:
     python openai_image.py --prompt "Turn this into a tourist map" \
       --image map.png --output tourist-map.png
@@ -49,6 +52,13 @@ def validate_image_path(path: str, label: str) -> Path:
     return p
 
 
+def validate_prompt_file(path: str) -> Path:
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"--prompt-file not found: {p}")
+    return p
+
+
 def output_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "model": args.model,
@@ -83,7 +93,12 @@ def main() -> int:
         description="Generate or edit images with OpenAI GPT Image.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--prompt", required=True, help="Generation/edit instruction")
+    parser.add_argument("--prompt", help="Generation/edit instruction")
+    parser.add_argument(
+        "--prompt-file",
+        help="Read the prompt from this file (preferred for long prompts or any "
+        "prompt containing quotes/apostrophes — immune to shell quoting)",
+    )
     parser.add_argument("--output", required=True, help="Output image path")
     parser.add_argument(
         "--image",
@@ -134,6 +149,11 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if bool(args.prompt) == bool(args.prompt_file):
+            raise ValueError("give exactly one of --prompt or --prompt-file")
+        if args.prompt_file:
+            prompt_path = validate_prompt_file(args.prompt_file)
+            args.prompt = prompt_path.read_text(encoding="utf-8").strip()
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 

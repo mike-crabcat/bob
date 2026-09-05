@@ -570,6 +570,18 @@ class SubagentService(BaseService):
         if violation:
             raise RuntimeError(f"script blocked by sandbox: {violation}")
 
+        # Quoting preflight (2026-09-05 crayon-portrait goal): a command the
+        # shell can't even parse used to surface only as a failed background
+        # goal minutes later. Reject up front — the parent wake then carries
+        # the syntax error, and the retry can fix the quoting.
+        from server.services.workspace_tools import bash_syntax_check
+        syntax_error = await bash_syntax_check(command)
+        if syntax_error:
+            raise RuntimeError(
+                f"script blocked by shell syntax: {syntax_error} — fix the "
+                "quoting (backslash does not escape apostrophes in single "
+                "quotes; use --prompt-file or a heredoc for prose)")
+
         venv_dir = settings.harness.venv_dir.expanduser()
         logger.info("script subagent: %s", command)
         proc = await asyncio.create_subprocess_exec(

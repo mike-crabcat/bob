@@ -16,6 +16,25 @@ It supports:
 
 Prefer image-to-image when the user cares about preserving structure, layout, or content from an existing image. Text-only image generation is charming, but it also lies like a cartographer paid by the landmark.
 
+## REAL PEOPLE: always use their reference photo
+
+Before generating an image **of a real person** (a group member, contact, or
+the owner — "photo of me", "put Ryan in a Dockers beanie", etc.):
+
+1. Check the people galleries for their reference photo — `ls people/` shows
+   one directory per person (`people/mike-cleaver/`, `people/ryan/`, …), or
+   run `skills/faces/.venv/bin/python skills/faces/faces.py gallery` to list
+   every gallery and how each reference was attested.
+2. If a reference exists (`selfie.jpg`, `portrait.jpg`, …), pass it as
+   `--image people/<slug>/<file>` and phrase the prompt as an edit:
+   "keep this exact person's face fully recognisable, …".
+3. Never render a real person from a text description when a reference
+   exists — that produces a generic stranger, and the group will (rightly)
+   roast you for it. If no reference exists, say so and ask them to send a
+   photo — don't guess their face.
+4. Never use a generated/edited image as the reference for a later
+   generation (see the faces skill: originals only).
+
 ## Script
 
 `skills/openai-image/openai_image.py`
@@ -77,6 +96,7 @@ python skills/openai-image/openai_image.py \
 
 Required:
 - `--prompt`: image generation/edit instruction.
+- `--prompt-file`: read the instruction from a file instead of `--prompt` (give exactly one of the two).
 - `--output`: output file path.
 
 Optional:
@@ -89,6 +109,28 @@ Optional:
 - `--output-compression`: `0-100`, for jpeg/webp where supported.
 - `--moderation`: `auto` or `low`.
 - `--dry-run`: validate mode/inputs without calling the API.
+
+## Shell quoting: prefer --prompt-file
+
+Prompts are prose and constantly contain apostrophes ("keep this man's
+face…"), which silently break single-quoted shell commands — the subagent
+task dies with `unexpected EOF while looking for matching '` and the retry
+drops the reference image. For any prompt with an apostrophe (or quotes,
+backticks, dollar signs), write the prompt to a file and use `--prompt-file`:
+
+```bash
+cat > scratch/img-prompt.txt <<'EOF'
+Edit this photo: keep this exact man's face fully recognisable, but he is
+dressed as Morpheus from The Matrix — long black leather coat, small round
+mirror sunglasses, photorealistic film still.
+EOF
+python skills/openai-image/openai_image.py \
+  --prompt-file scratch/img-prompt.txt \
+  --image people/mike-cleaver/selfie.png \
+  --output generated-images/mike-morpheus.png
+```
+
+Short apostrophe-free prompts may still use `--prompt '…'`.
 
 ## Operational rules
 

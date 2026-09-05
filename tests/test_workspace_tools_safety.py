@@ -131,3 +131,40 @@ def test_blocks_privilege_escalation(cmd: str, paths: dict[str, Path]) -> None:
 def test_allows_legitimate_workspace_ops(cmd: str, paths: dict[str, Path]) -> None:
     reason = _check(cmd, paths)
     assert reason is None, f"should allow but got: {reason!r} for cmd: {cmd}"
+
+
+# ---------------------------------------------------------------- syntax
+# bash_syntax_check: the quoting preflight added 2026-09-05 after the
+# crayon-portrait goal died as "unexpected EOF" inside a background script
+# (\' inside single quotes — a Python/JSON habit bash does not honor).
+
+@pytest.mark.asyncio
+async def test_syntax_check_catches_backslash_apostrophe():
+    from server.services.workspace_tools import bash_syntax_check
+
+    bad = ("python skills/openai-image/openai_image.py --prompt 'A crayon "
+           "portrait like a young kid\\'s drawing' --output out.png")
+    err = await bash_syntax_check(bad)
+    assert err is not None
+    assert "unexpected EOF" in err or "matching" in err
+
+
+@pytest.mark.asyncio
+async def test_syntax_check_passes_valid_commands():
+    from server.services.workspace_tools import bash_syntax_check
+
+    for cmd in (
+        "echo hello",
+        "python skills/x.py --prompt-file scratch/p.txt --output o.png",
+        "cat > scratch/p.txt <<'EOF'\nsome prose with an apostrophe: kid's\nEOF\n",
+        "for f in *.png; do echo \"$f\"; done",
+    ):
+        assert await bash_syntax_check(cmd) is None, cmd
+
+
+@pytest.mark.asyncio
+async def test_syntax_check_error_mentions_quote():
+    from server.services.workspace_tools import bash_syntax_check
+
+    err = await bash_syntax_check("echo 'unterminated")
+    assert err is not None and "`'" in err or err is not None
