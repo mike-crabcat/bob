@@ -70,6 +70,20 @@ class ImageInjection:
 
 
 @dataclass
+class VideoInjection:
+    """Returned by a tool handler to inject a video into the LLM conversation.
+
+    Same mechanics as ImageInjection, but the content part is an input_video
+    part — only models whose input modalities include video accept those
+    (model_registry.supports_video); the tool loop degrades to a first frame
+    otherwise. ``path`` keeps the source file so degradation can extract one.
+    """
+    text: str
+    data_url: str  # e.g. "data:video/mp4;base64,..."
+    path: str = ""  # source file path, for first-frame degradation
+
+
+@dataclass
 class Tool:
     """An LLM-callable tool with schema and handler."""
 
@@ -77,7 +91,7 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     required: list[str]
-    handler: Callable[..., Awaitable[str | ImageInjection]]
+    handler: Callable[..., Awaitable[str | ImageInjection | VideoInjection]]
 
     def to_openai_format(self) -> dict[str, Any]:
         """Convert to OpenAI Responses API tool definition format."""

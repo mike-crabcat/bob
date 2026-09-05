@@ -18,6 +18,8 @@ restart):
       z-ai/glm-5.3-flash: [0.075, 0.25]
     effort:             # reasoning-effort hint, applied when a caller pins none
       z-ai/glm-5.3-flash: medium
+    video_input:        # models that accept native input_video parts
+      z-ai/glm-5.3-flash: true
 """
 
 from __future__ import annotations
@@ -120,6 +122,17 @@ def effort_defaults(config_dir: Path) -> dict[str, str]:
                 continue
             out[slug.strip()] = level
     return out
+
+
+def supports_video(config_dir: Path, model: str) -> bool:
+    """True when models.yaml explicitly marks the model as accepting native
+    video input (input_video parts). Unlisted models return False so the
+    tool loop degrades video results to a first frame instead of erroring
+    on a modal mismatch mid-turn."""
+    raw = _load_models(config_dir).get("video_input") or {}
+    if not isinstance(raw, dict):
+        return False
+    return raw.get(model) is True
 
 
 def resolve(name: str, config_dir: Path) -> str:

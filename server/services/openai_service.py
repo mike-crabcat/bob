@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -9,12 +10,13 @@ import time
 from collections.abc import AsyncIterator, Callable, Awaitable
 from httpx import Timeout
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, NoReturn
 
 from server.context import AppContext
 from server.services import model_registry
 from server.services.base import BaseService
-from server.services.tools import ImageInjection
+from server.services.tools import ImageInjection, VideoInjection
 
 try:
     from openai import AsyncOpenAI
@@ -570,7 +572,7 @@ class OpenAIService(BaseService):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection]]],
+        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection | VideoInjection]]],
         *,
         model: str | None = None,
         max_iterations: int = 100,
@@ -705,7 +707,7 @@ class OpenAIService(BaseService):
                                     try:
                                         summary = (
                                             hc_result.text[:200]
-                                            if isinstance(hc_result, ImageInjection)
+                                            if isinstance(hc_result, (ImageInjection, VideoInjection))
                                             else hc_result[:200]
                                         )
                                         await on_tool_call(hc_name, hc_args, summary)
@@ -770,29 +772,19 @@ class OpenAIService(BaseService):
                                 exc_info=True,
                             )
 
-                    if isinstance(result, ImageInjection):
-                        messages.append({
-                            "type": "function_call_output",
-                            "call_id": fc.call_id,
-                            "output": result.text,
-                        })
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": result.text},
-                                {"type": "input_image", "image_url": result.data_url},
-                            ],
-                        })
-                    else:
-                        messages.append({
-                            "type": "function_call_output",
-                            "call_id": fc.call_id,
-                            "output": result,
-                        })
+                    messages.extend(_tool_result_messages(
+                        result, fc.call_id,
+                        video_supported=model_registry.supports_video(
+                            self._get_settings().config_dir, resolved_model),
+                    ))
 
                     if on_tool_call:
                         try:
-                            summary = result.text[:200] if isinstance(result, ImageInjection) else result[:200]
+                            summary = (
+                                result.text[:200]
+                                if isinstance(result, (ImageInjection, VideoInjection))
+                                else result[:200]
+                            )
                             await on_tool_call(fc.name, tool_args, summary)
                         except Exception:
                             pass
@@ -853,7 +845,7 @@ class OpenAIService(BaseService):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection]]],
+        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection | VideoInjection]]],
         *,
         model: str | None = None,
         max_iterations: int = 100,
@@ -965,15 +957,19 @@ class OpenAIService(BaseService):
                             exc_info=True,
                         )
 
-                messages.append({
-                    "type": "function_call_output",
-                    "call_id": fc.call_id,
-                    "output": result,
-                })
+                messages.extend(_tool_result_messages(
+                    result, fc.call_id,
+                    video_supported=model_registry.supports_video(
+                        self._get_settings().config_dir, resolved_model),
+                ))
 
                 if on_tool_call:
                     try:
-                        summary = result.text[:200] if isinstance(result, ImageInjection) else result[:200]
+                        summary = (
+                            result.text[:200]
+                            if isinstance(result, (ImageInjection, VideoInjection))
+                            else result[:200]
+                        )
                         await on_tool_call(fc.name, tool_args, summary)
                     except Exception:
                         pass
@@ -1021,6 +1017,76 @@ class OpenAIService(BaseService):
         if details and hasattr(details, "cached_tokens"):
             return details.cached_tokens
         return None
+
+
+def _tool_result_messages(
+    result: str | ImageInjection | VideoInjection,
+    call_id: str,
+    *,
+    video_supported: bool,
+) -> list[dict[str, Any]]:
+    """Messages to append for a tool result that may carry media.
+
+    Plain-string results become the function_call_output row only.
+    ImageInjection adds a synthetic user block with an input_image part.
+    VideoInjection adds an input_video part when the serving model supports
+    native video; otherwise it degrades to the video's first frame (or a
+    text-only note when no frame can be extracted), so a modal mismatch
+    never crashes the turn. Empty data_urls (error returns from
+    read_image/read_video) append the text row only.
+    """
+    if not isinstance(result, (ImageInjection, VideoInjection)):
+        return [{
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": result,
+        }]
+
+    text = result.text
+    part: dict[str, Any] | None = None
+    if isinstance(result, VideoInjection):
+        if video_supported and result.data_url:
+            part = {"type": "input_video", "video_url": result.data_url}
+        else:
+            # Degrade: the serving model can't watch video — show its first
+            # frame instead, when the source path is available.
+            frame_url = ""
+            if result.path:
+                from server.services.prompt_assembler import _extract_video_frame
+                frame_path = _extract_video_frame(result.path)
+                if frame_path:
+                    try:
+                        frame_url = "data:image/jpeg;base64," + base64.b64encode(
+                            Path(frame_path).read_bytes()).decode()
+                    except OSError:
+                        frame_url = ""
+            if frame_url:
+                text = result.text + " (this model lacks native video input — first frame shown)"
+                part = {"type": "input_image", "image_url": frame_url}
+            else:
+                return [{
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": (result.text + " — this model cannot watch video; extract "
+                               "frames yourself (ffmpeg) and view them with read_image"),
+                }]
+    elif result.data_url:
+        part = {"type": "input_image", "image_url": result.data_url}
+
+    rows: list[dict[str, Any]] = [{
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": text,
+    }]
+    if part is not None:
+        rows.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": text},
+                part,
+            ],
+        })
+    return rows
 
 
 def _raise_openai_error(exc: Exception) -> NoReturn:

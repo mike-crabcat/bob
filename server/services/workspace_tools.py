@@ -16,12 +16,20 @@ from pathlib import Path
 
 from server.context import AppContext
 from server.services.skill_env import build_skill_env
-from server.services.tools import ImageInjection, tool
+from server.services.tools import ImageInjection, VideoInjection, tool
 
 logger = logging.getLogger(__name__)
 
 _BASH_TIMEOUT_SECONDS = 900
 _BASH_MAX_OUTPUT_CHARS = 30_000
+
+# Native video is expensive to serve (base64 payload + per-second tokens) —
+# one modest clip per turn, stills via read_image beyond that.
+_VIDEO_MAX_BYTES = 20 * 1024 * 1024
+_VIDEO_MIME = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".webm": "video/webm", ".mpeg": "video/mpeg", ".mpg": "video/mpeg",
+}
 
 # Sandbox guardrails. The bash tool is not chrooted — these checks catch the
 # obvious escape vectors (direct DB clients, system paths, traversal). The
@@ -261,7 +269,44 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         from server.services.skill_loader import load_skill
         return load_skill(ctx.settings.harness.workspace_dir, skill_name)
 
-    tools = [bash, get_time, read_image, use_skill]
+    # One native-video injection per tool set (≈ per turn): closure state,
+    # since make_workspace_tools is built per dispatch.
+    video_sent = {"n": 0}
+
+    @tool
+    async def read_video(
+        path: str,
+    ) -> VideoInjection | str:
+        """Load a workspace video file (mp4/m4v/mov/webm/mpeg) so you can actually
+        watch it — the model sees the footage itself, motion and sequence, not just
+        a frame. Keep clips small and short (≤20MB; transcode long or high-res
+        video down first, e.g. ffmpeg -vf scale=854:-2,fps=5 -t 120 -crf 30).
+        One video per turn; use read_image for stills and frame sequences."""
+        resolved = _resolve_path(ctx, path)
+        if not resolved.is_file():
+            return f"Error: '{path}' is not a file"
+        mime = _VIDEO_MIME.get(resolved.suffix.lower())
+        if not mime:
+            return (f"Error: '{path}' is not a supported video format "
+                    f"(use mp4, m4v, mov, webm, or mpeg)")
+        size = resolved.stat().st_size
+        if size > _VIDEO_MAX_BYTES:
+            return (f"Error: video is {size} bytes, over the {_VIDEO_MAX_BYTES}-byte cap — "
+                    "transcode it smaller first (ffmpeg -vf scale=854:-2,fps=5 -crf 30, "
+                    "trim duration with -t)")
+        if video_sent["n"]:
+            return ("Error: only one video per turn — one was already loaded. "
+                    "read_image individual extracted frames for more detail.")
+        video_sent["n"] += 1
+        data = resolved.read_bytes()
+        b64 = base64.b64encode(data).decode()
+        return VideoInjection(
+            text=f"Video loaded from {path} ({len(data)} bytes, {mime})",
+            data_url=f"data:{mime};base64,{b64}",
+            path=str(resolved),
+        )
+
+    tools = [bash, get_time, read_image, use_skill, read_video]
 
     if session_key:
         @tool

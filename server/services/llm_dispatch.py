@@ -65,14 +65,18 @@ def _truncate_str(s: Any, limit: int) -> str:
 
 
 def _is_image_user_block(item: dict[str, Any]) -> bool:
-    """Detect the synthetic {role: user, content: [input_image, ...]} block
-    that OpenAIService appends after an ImageInjection tool result."""
+    """Detect the synthetic {role: user, content: [input_image/input_video, ...]}
+    block that OpenAIService appends after an ImageInjection/VideoInjection
+    tool result."""
     if item.get("role") != "user":
         return False
     content = item.get("content")
     if not isinstance(content, list):
         return False
-    return any(isinstance(p, dict) and p.get("type") == "input_image" for p in content)
+    return any(
+        isinstance(p, dict) and p.get("type") in ("input_image", "input_video")
+        for p in content
+    )
 
 
 def _cap_item(item: dict[str, Any]) -> dict[str, Any]:
