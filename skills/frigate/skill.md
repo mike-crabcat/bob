@@ -16,11 +16,13 @@ person events and feeds them into the stimulus spine.
 - **GET-only.** This skill reads the NVR; it never deletes events, toggles
   retention, or changes config. Those are Mike's tasks in the Frigate UI.
 - **Camera imagery is household-private.** Describe in text by default.
-  Send a snapshot or clip only to Mike's DM, only when it clearly helps.
-  Never to group chats. Never into third-party tools beyond the normal
-  vision path.
-- Faces: `whois` against the people/ galleries is fine (local-only, names in
-  Mike's DM only). Never enroll new household members without Mike.
+  Send a snapshot or clip only to Mike's DM or the **Bob Security Guard**
+  group (the designated security channel, Mike-only) — only when it clearly
+  helps. Never to any other group chat. Never into third-party tools beyond
+  the normal vision path.
+- Faces: `whois` against the people/ galleries is fine (local-only; names in
+  Mike's DM or the Bob Security Guard group only). Never enroll new
+  household members without Mike.
 
 ## Commands
 
@@ -80,7 +82,10 @@ and you see the actual footage — motion, sequence, timeline. Then:
   what you can actually see — night footage is grainy; say so rather than
   inventing detail. If the description matters and frames are ambiguous,
   hand the artifact paths to a `create_subagent(agent_type="claude")` for a
-  second look.
+  second look — claude subagents exist only in trusted sessions (Mike's
+  DM); in the Bob Security Guard group only script subagents are available,
+  so describe what you can see, hedge clearly on the unclear parts, and
+  flag it for a DM second look if it matters.
 - If `watch` prints `CLIP_GONE`, retention already purged the clip —
   describe what you can from the snapshot.
 - If `read_video` reports the model cannot watch video, rerun `watch` with
