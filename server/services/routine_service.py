@@ -310,23 +310,41 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         wa_bridge = ctx.whatsapp_bridge
         chat_id = session_key_to_chat_id(session_key)
         if chat_id and wa_bridge and wa_bridge.connected:
-            async def _send_whatsapp_message(text: str) -> str:
+            async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
                 if is_no_reply(text):
                     return "No reply sent."
+                if media_path:
+                    from server.services.whatsapp_bridge_service._media import (
+                        _prepare_media,
+                        resolve_sendable_media,
+                    )
+
+                    resolved = resolve_sendable_media(
+                        settings.harness.workspace_dir, media_path)
+                    if isinstance(resolved, str):
+                        return resolved
+                    prepared = await _prepare_media(str(resolved))
+                    if prepared is None:
+                        return "Error: failed to prepare media for sending"
+                    request_id = await wa_bridge.send_media(
+                        chat_id, prepared, caption=text)
+                    return f"Media sent (request_id={request_id})"
                 request_id = await wa_bridge.send_message(chat_id, text)
                 return f"Message sent (request_id={request_id})"
 
             tools.append(Tool(
                 name="send_whatsapp_message",
                 description=(
-                    "Post a message to the group chat. Only call this when the routine's "
-                    "instructions explicitly say to post to the chat. For one-line "
-                    "confirmations or anything marked 'in this session only', do NOT call "
-                    "it — your final text output is the reply and is logged to the "
-                    "conversation transcript without it."
+                    "Post a message to the group chat, optionally attaching an image or "
+                    "media file (media_path, relative to the workspace). Only call this "
+                    "when the routine's instructions explicitly say to post to the chat. "
+                    "For one-line confirmations or anything marked 'in this session "
+                    "only', do NOT call it — your final text output is the reply and is "
+                    "logged to the conversation transcript without it."
                 ),
                 parameters={
-                    "text": {"type": "string", "description": "The message text to send."},
+                    "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided)."},
+                    "media_path": {"type": "string", "description": "Optional path to an image or media file, relative to the workspace directory."},
                 },
                 required=["text"],
                 handler=_send_whatsapp_message,

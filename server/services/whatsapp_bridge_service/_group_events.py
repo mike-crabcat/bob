@@ -254,7 +254,7 @@ class GroupEventsMixin:
         sent_texts: list[str] = []
         send_seq = [0]
 
-        async def _send_whatsapp_message(text: str) -> str:
+        async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
             from server.services.effects import emit_and_deliver
 
             message_was_sent[0] = True
@@ -262,6 +262,27 @@ class GroupEventsMixin:
                 return "No reply sent."
             seq = send_seq[0]
             send_seq[0] += 1
+            if media_path:
+                from server.services.whatsapp_bridge_service._media import (
+                    _prepare_media,
+                    resolve_sendable_media,
+                )
+
+                resolved = resolve_sendable_media(
+                    settings.harness.workspace_dir, media_path)
+                if isinstance(resolved, str):
+                    return resolved
+                prepared = await _prepare_media(str(resolved))
+                if prepared is None:
+                    return "Error: failed to prepare media for sending"
+                result = await emit_and_deliver(
+                    self.ctx, kind="whatsapp_send_media",
+                    idempotency_key=f"whatsapp_send_media:{dispatch_id}:{seq}",
+                    payload={"chat_id": chat_id, "file_path": prepared, "caption": text})
+                if not result.get("ok"):
+                    return f"Error sending media: {result.get('error', 'delivery failed')}"
+                sent_texts.append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
+                return f"Media sent (request_id={result.get('external_result_id')})"
             result = await emit_and_deliver(
                 self.ctx, kind="whatsapp_send",
                 idempotency_key=f"whatsapp_send:{dispatch_id}:{seq}",
@@ -275,9 +296,13 @@ class GroupEventsMixin:
             name="send_whatsapp_message",
             description=(
                 "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent."
+                "You MUST call this tool to deliver your response — your text output will NOT be sent. "
+                "Optionally attach an image or media file by providing media_path."
             ),
-            parameters={"text": {"type": "string", "description": "The message text to send."}},
+            parameters={
+                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided)."},
+                "media_path": {"type": "string", "description": "Optional path to an image or media file, relative to the workspace directory."},
+            },
             required=["text"],
             handler=_send_whatsapp_message,
         ))
