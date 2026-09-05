@@ -338,6 +338,12 @@ def main() -> int:
                 cursor = max(cursor, max(float(e.get("start_time") or 0)
                                          for e in new_events))
                 fg.state_set(conn, "cursor", str(int(cursor)))
+                fg.state_set(conn, "last_event_ts",
+                             str(int(max(float(e.get("start_time") or 0)
+                                         for e in new_events))))
+                fg.state_set(conn, "quiet_alerted", "0")
+            else:
+                _handle_daytime_quiet(conn, cfg)
             emitted = classify_and_emit(conn, api, cfg)
             if emitted:
                 print(f"cycle: {len(new_events)} fetched, {emitted} envelopes enqueued",
@@ -404,6 +410,54 @@ def _handle_stale(conn: sqlite3.Connection, cfg: dict, api: fg.Frigate,
         enqueue(conn, envelope)
         return now
     return alerted
+
+
+def _daytime_quiet_due(conn: sqlite3.Connection, cfg: dict, now: float,
+                       local_hour: int) -> bool:
+    """A hung detector looks exactly like a quiet night (2026-09-06: zero
+    events for 11.5h looked healthy — detection only runs on motion, so
+    detection_fps==0 proves nothing). True when nothing at all has arrived
+    for daytime_quiet_hours during local waking hours (08:00-20:00)."""
+    if not cfg["feed"]["enabled"]:
+        return False
+    try:
+        hours = float(cfg["health"].get("daytime_quiet_hours", 6))
+    except (TypeError, ValueError):
+        return False
+    if hours <= 0 or not (8 <= local_hour < 20):
+        return False
+    last = float(fg.state_get(conn, "last_event_ts", "0") or 0)
+    if not last:
+        row = conn.execute("SELECT MAX(start_time) m FROM events").fetchone()
+        last = float(row["m"] or 0) if row else 0.0
+        if last:
+            fg.state_set(conn, "last_event_ts", str(int(last)))
+    return bool(last) and (now - last) >= hours * 3600
+
+
+def _handle_daytime_quiet(conn: sqlite3.Connection, cfg: dict,
+                          local_hour: int | None = None) -> None:
+    """One info nudge per quiet episode (dedup absorbs daemon restarts);
+    the arrival of any event clears the flag in the main loop."""
+    hour = datetime.now(fg.local_tz(cfg)).hour if local_hour is None else local_hour
+    if not _daytime_quiet_due(conn, cfg, time.time(), hour):
+        return
+    if fg.state_get(conn, "quiet_alerted", "0") == "1":
+        return
+    last = float(fg.state_get(conn, "last_event_ts", "0") or 0)
+    enqueue(conn, {
+        "source": "frigate", "type": "health.quiet",
+        "level": "info",
+        "dedup_key": f"frigate:quiet:{int(last)}",
+        "ttl_s": int(cfg["feed"]["ttl_info_s"]),
+        "target_hint": "frigate",
+        "summary": (f"no camera events at all for {int((time.time() - last) / 3600)}h "
+                    f"(since {fg.fmt_local(last, cfg)}) — unusually quiet; worth a "
+                    "glance at the NVR if the house should be active"),
+        "body": {"last_event_ts": last},
+    })
+    fg.state_set(conn, "quiet_alerted", "1")
+    print(f"daytime-quiet nudge: last event {fg.fmt_local(last, cfg)}", flush=True)
 
 
 def _handle_recovery(conn: sqlite3.Connection, cfg: dict, stale_since: float) -> None:

@@ -39,6 +39,8 @@ max_clip_mb = 200
 [health]
 stale_action_min = 30      # unreachable this long → one stale envelope
 stale_repeat_info_min = 60 # then hourly info reminders while still stale
+daytime_quiet_hours = 6    # no events at all for this long in 08:00-20:00 → one info nudge
+                           # (a hung detector looks like a quiet night otherwise — 2026-09-06)
 
 [watch]
 out_width = 854            # read_video transcode target (cost lever: tokens ∝ res×fps)

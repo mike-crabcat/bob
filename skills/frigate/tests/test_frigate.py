@@ -590,6 +590,45 @@ class Harness(unittest.TestCase):
         ts = fg._parse_when(local_now, tz)
         self.assertLess(abs(ts - time.time()), 120)  # parsed as local now, not UTC
 
+    def test_daytime_quiet_nudge_once_per_episode(self):
+        cfg = self.cfg()
+        conn = fg.db(cfg)
+        now = time.time()
+        fg.state_set(conn, "last_event_ts", str(int(now - 7 * 3600)))
+        self.assertTrue(watchd._daytime_quiet_due(conn, cfg, now, local_hour=12))
+        self.assertFalse(watchd._daytime_quiet_due(conn, cfg, now, local_hour=21))
+        self.assertFalse(watchd._daytime_quiet_due(conn, cfg, now, local_hour=7))
+        recent = dict(cfg)
+        self.assertTrue(watchd._daytime_quiet_due(conn, cfg, now, local_hour=8))  # boundary
+        # fresh events reset the quiet clock
+        fg.state_set(conn, "last_event_ts", str(int(now - 60)))
+        self.assertFalse(watchd._daytime_quiet_due(conn, cfg, now, local_hour=12))
+        # enqueue path fires once, then the flag holds it
+        fg.state_set(conn, "last_event_ts", str(int(now - 7 * 3600)))
+        watchd._handle_daytime_quiet(conn, cfg, local_hour=12)
+        (p,) = self.outbox_pending()
+        self.assertEqual(p["type"], "health.quiet")
+        self.assertEqual(p["level"], "info")
+        self.assertIn("unusually quiet", p["summary"])
+        watchd._handle_daytime_quiet(conn, cfg, local_hour=12)
+        self.assertEqual(len(self.outbox_pending()), 1)  # no duplicate
+        conn.close()
+
+    def test_daytime_quiet_bootstraps_from_events_table(self):
+        cfg = self.cfg()
+        conn = fg.db(cfg)
+        now = time.time()
+        conn.execute("DELETE FROM state WHERE k='last_event_ts'")
+        watchd.upsert_event(conn, {"event_id": "q1", "camera": "back",
+                                   "label": "person", "sub_label": None,
+                                   "start_time": now - 8 * 3600,
+                                   "end_time": None, "zones": [], "score": 0.5,
+                                   "top_score": 0.6, "has_clip": False,
+                                   "has_snapshot": False})
+        conn.commit()
+        self.assertTrue(watchd._daytime_quiet_due(conn, cfg, now, local_hour=12))
+        conn.close()
+
     def test_prune_respects_age(self):
         self.cache.joinpath("snapshots/202601").mkdir(parents=True, exist_ok=True)
         old = self.cache / "snapshots" / "202601" / "old.jpg"

@@ -64,7 +64,8 @@ def _default_config() -> dict:
                   "action_budget_per_hour": 6},
         "cache": {"snapshot_prune_days": 7, "clip_prune_days": 2,
                   "max_clip_mb": 200},
-        "health": {"stale_action_min": 30, "stale_repeat_info_min": 60},
+        "health": {"stale_action_min": 30, "stale_repeat_info_min": 60,
+                   "daytime_quiet_hours": 6},
         "watch": {"out_width": 854, "out_fps": 5, "max_s": 120,
                   "crf": 30, "keyframes": 2, "sheet_tile_px": 480},
     }
