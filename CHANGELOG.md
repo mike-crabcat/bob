@@ -2,6 +2,20 @@
 
 All notable changes to Bob are documented here. Entries are based on analysis of actual code changes, not just commit messages.
 
+## 2026-09-03 (evening) – 2026-09-04
+
+### Added
+- Stimulus spine — the platform front door for external feeds raising events into conversations: sources POST envelopes to `POST /api/v1/stimulus/events` (dedicated `BOB_STIMULUS_TOKEN` bearer auth, envelope validation, `dedup_key` idempotency), a heartbeat router drains pending `stimulus_events` against DB-owned `stimulus_routes` (priority-ordered match, TTL expiry, batch-per-target so correlated events wake ONE turn, log-only for info/unrouted), and wakes target conversations via steers whose template carries the audit numbers with a mandatory silent-decline line. Failure mode is late, never lost. First consumer live the same day: the cryptobro signal engine (workspace skill) steers the Crypto Bob channel on momentum/breakout/stop signals
+- Reaction clips on probe STAND_DOWN: the attention probe may recommend a rare avatar clip as a "decoration of silence" (a win, a glorious failure, real drama — never a substitute for a reply); the coordinator enforces the clip registry, per-chat cooldown, and the `BOB_PROBE_REACTIONS=off` kill switch. `bob-fail` clip added (rendered by Bob)
+- Grounding eval family: `greeting_no_unverified_status` and `status_question_requires_check` (replaying the exact "station's running overnight" incident), `send_claim_needs_same_turn_receipt` (a failed send must be reported, never "already sent"), `artifact_contents_from_command_output` (chart descriptions must come from the command's own output line), and `stimulus_steer_decision` (alert steers produce a decision, not chatter) — all replaying production prompt text verbatim via the shared `GROUNDING_RULES` constant so wording drift fails the evals, not prod
+
+### Changed
+- Media fetch-on-demand in history replay: only rows claimed as the current turn's stimulus inline base64 pixels (capped on bursts); all other history media — and all media on claim-less replays like subagents and wake turns — replays as a one-line stub naming `read_image`, which also now serves MP4/MOV/M4V first frames. A 338k-char image payload on a text-only "good morning" turn was the trigger; stubs are byte-stable so the prefix cache survives turns that the old inline-window used to bust
+- Grounding rules extended: never assert current operational status (on air, queue empty, "nothing on fire") without a same-turn tool check — history is not evidence — and never volunteer status when nobody asked; greet, don't report
+- Attention probe engagement-first tightening: the ambiguous default flips from ACT to STAND_DOWN (unaddressed group chatter gets silence unless engagement clearly holds), with an Engagement state line computed from history rather than guessed by the model
+- Persona + avatar become repo-bundled files (`self/bob/`) healed into the workspace at boot (changed files restored, extras pruned, read-only bits); the dashboard persona editor and `persona_records` API retire, git history becomes the persona history, and the serving model is stated per-turn instead of in the persona
+- Docker entrypoint realigns root-owned `data`/`config`/`workspace` mount roots (fresh named volumes on ephemeral instances) before the uid drop, without touching host-user-owned bind mounts
+
 ## 2026-09-02 – 2026-09-03
 
 ### Changed (2026-09-03 follow-up)
