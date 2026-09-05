@@ -1,0 +1,49 @@
+# Frigate NVR feed + watch configuration.
+# Edits apply on the next poll cycle (watchd re-reads this every loop) —
+# tuning never needs a restart.
+
+url = "http://127.0.0.1:5000"   # local Frigate 0.14.1 (unauthenticated LAN API)
+# auth: leave empty on the direct :5000 API. If you ever front Frigate with
+# a proxy, put "user:pass" in an `auth` file (mode 600) beside this file.
+user = ""
+pass = ""
+
+poll_s = 30
+labels = ["person"]        # v1: person only; extensible (the NVR also tracks parcels)
+cameras = []               # empty = all (back, doorbell, driveway, garage, laundry)
+timezone = "Australia/Perth"
+backfill_min = 15          # first-run / cursor-reset lookback
+max_backfill_s = 3600      # never emit anything older (post-outage bound)
+overlap_s = 300            # cursor lookback so late-closing events are seen
+
+[feed]
+enabled = false            # fresh instances seed inert (careful-rollouts)
+level = "info"             # flip per instance after shadowing
+ttl_action_s = 900
+ttl_info_s = 600
+
+[rules]
+# All-wake policy (mike, 2026-09-05): every person event is action-eligible.
+# The NVR sees ~90 person events/day, so the valves below carry the load.
+action_zones = []          # "camera:zone" pairs; NVR has no zones configured
+action_hours = "00:00-23:59"
+cooldown_min = 20          # per camera (raised 2026-09-05: DM was too chatty)
+min_duration_s = 2.0       # blips never emit
+action_budget_per_hour = 3 # hard valve; over-budget → downgraded to info (6→3 2026-09-05)
+
+[cache]
+snapshot_prune_days = 7
+clip_prune_days = 2
+max_clip_mb = 200
+
+[health]
+stale_action_min = 30      # unreachable this long → one stale envelope
+stale_repeat_info_min = 60 # then hourly info reminders while still stale
+
+[watch]
+out_width = 854            # read_video transcode target (cost lever: tokens ∝ res×fps)
+out_fps = 5
+max_s = 120
+crf = 30
+keyframes = 2              # --stills fallback keyframe count
+sheet_tile_px = 480
