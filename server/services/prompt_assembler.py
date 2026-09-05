@@ -348,6 +348,23 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         "If bash returns a BLOCKED error, do NOT retry with a different command syntax. Stop, "
         "switch to the appropriate tool. The user will be told if you tried to escape the sandbox."
     )
+    # Capability self-model (2026-09-05: in the AI doom group Bob claimed "no
+    # dialling capability, WhatsApp and email only" with initiate_voice_call
+    # AND create_subagent(openai_voice/phone) attached to the very turn —
+    # weak models assert conservative limits instead of reading the tool
+    # list; both tool descriptions already describe the call path). State the
+    # channels here, in the stable prefix, so the self-model carries it.
+    parts.append(
+        "## Your Channels\n"
+        "You act on three channels. WhatsApp (send_whatsapp_message in this "
+        "chat, send_whatsapp_to_contact / steer_conversation elsewhere), "
+        "email (email_send), and VOICE: you place real outbound phone calls "
+        "with create_subagent(agent_type=\"openai_voice\", modality=\"phone"
+        "\") — it rings the contact's actual number and holds a spoken "
+        "conversation (create the contact first when the number isn't "
+        "saved). initiate_voice_call, DM turns only, sends a browser voice "
+        "link instead of ringing a phone."
+    )
 
     combined = "\n\n".join(parts)
     _cached_prompt = (mtime_hash, combined)
@@ -368,6 +385,19 @@ def _resolve_mentions(text: str, mention_names: dict[str, str]) -> str:
         name = mention_names.get(digits)
         return f"@{name}" if name else m.group(0)
     return re.sub(r"@(\d{7,15})", _replace, text)
+
+
+# Reply-length pair injected into WhatsApp turns by build_chat_messages.
+# Wording is exactly what the 2026-09-05 A/B measured; drift with care and
+# re-run the harness (/tmp/brevity_ab.py pattern) before changing it.
+_REPLY_LENGTH_HEAD = (
+    "## Reply length\nThis is a WhatsApp {kind}. Default reply: 1-2 short "
+    "sentences, under 40 words. Only go longer when someone explicitly "
+    "asks for detail or a list.")
+_REPLY_LENGTH_TAIL = (
+    "## Reply length — HARD RULE\nMaximum 2 sentences and 40 words unless "
+    "the user explicitly asks for detail. No meta-commentary, no asides "
+    "about your own consistency or limitations.")
 
 
 async def build_chat_messages(
@@ -419,6 +449,20 @@ async def build_chat_messages(
     if current_model and not any("Model serving this turn:" in p for p in system_parts):
         system_parts.append(model_serving_prompt_line(
             current_model, override=current_model_override))
+    # Reply-length guidance for WhatsApp turns (2026-09-05 A/B against
+    # glm-5.3-flash on a real AI-doom turn, 5 samples/variant): a soft rule
+    # at the head plus a hard cap at the tail — the last instruction before
+    # generation — cut mean reply length 30-50% with substance and voice
+    # retained. Single-placement and numeric-cap-only variants were weaker;
+    # negative wording ("Do not ramble") measured WORSE than no rule. Both
+    # blocks are constant per channel, so the prefix-stability note above
+    # (prompt caching) still holds for the head; the tail rides the already
+    # turn-volatile suffix alongside the clock and model lines.
+    if ":whatsapp:" in session_key and not any(
+            "## Reply length" in p for p in system_parts):
+        kind = "group chat" if ":group:" in session_key else "chat"
+        system_parts.insert(0, _REPLY_LENGTH_HEAD.format(kind=kind))
+        system_parts.append(_REPLY_LENGTH_TAIL)
 
     messages: list[dict[str, Any]] = []
     if system_parts:
