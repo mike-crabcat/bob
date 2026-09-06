@@ -27,9 +27,11 @@ ttl_info_s = 600
 # The NVR sees ~90 person events/day, so the valves below carry the load.
 action_zones = []          # "camera:zone" pairs; NVR has no zones configured
 action_hours = "00:00-23:59"
-cooldown_min = 20          # per camera (raised 2026-09-05: DM was too chatty)
+cooldown_min = 3           # per camera; rapid returns covered by the digest below
 min_duration_s = 2.0       # blips never emit
-action_budget_per_hour = 3 # hard valve; over-budget → downgraded to info (6→3 2026-09-05)
+action_budget_per_hour = 4 # hard valve; over-budget → downgraded to info
+digest_threshold = 2       # suppressed sightings on a camera within the window →
+digest_window_min = 5      # ONE follow-up steer ('person came back') — 2026-09-06
 
 [cache]
 snapshot_prune_days = 7

@@ -61,7 +61,8 @@ def _default_config() -> dict:
                  "ttl_action_s": 900, "ttl_info_s": 600},
         "rules": {"action_zones": [], "action_hours": "00:00-23:59",
                   "cooldown_min": 10, "min_duration_s": 2.0,
-                  "action_budget_per_hour": 6},
+                  "action_budget_per_hour": 6,
+                  "digest_threshold": 2, "digest_window_min": 5},
         "cache": {"snapshot_prune_days": 7, "clip_prune_days": 2,
                   "max_clip_mb": 200},
         "health": {"stale_action_min": 30, "stale_repeat_info_min": 60,
@@ -335,8 +336,9 @@ def event_summary(ev: dict, snap_rel: str | None, tz: ZoneInfo | None = None) ->
 def build_envelope(ev: dict, *, level: str, snap_rel: str | None,
                    emission: str, ttl_s: int, extra_body: dict | None = None,
                    tz: ZoneInfo | None = None) -> dict:
-    dedup = f"frigate:{ev['event_id']}" if emission == "sighting" \
-        else f"frigate:{ev['event_id']}:close"
+    dedup = (f"frigate:{ev['event_id']}" if emission == "sighting"
+             else f"frigate:{ev['event_id']}:close" if emission == "close"
+             else f"frigate:{emission}:{ev['event_id']}")
     body = dict(ev)
     body["snapshot_path"] = snap_rel
     body["emission"] = emission

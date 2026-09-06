@@ -170,6 +170,71 @@ def upsert_event(conn: sqlite3.Connection, ev: dict) -> None:
     conn.commit()
 
 
+def _maybe_digest(conn: sqlite3.Connection, api: fg.Frigate, cfg: dict,
+                  camera: str, tz) -> int:
+    """Rapid-return digest: when a camera accrues digest_threshold suppressed
+    sightings within digest_window_min, surface them as ONE follow-up action
+    ("person came back"). Fires immediately on reaching the threshold; the
+    suppression list clears so the next episode starts fresh."""
+    rules = cfg["rules"]
+    try:
+        threshold = int(rules.get("digest_threshold", 2))
+        window_s = float(rules.get("digest_window_min", 5)) * 60
+    except (TypeError, ValueError):
+        return 0
+    if threshold <= 0 or window_s <= 0:
+        return 0
+    now = time.time()
+    supp_key = f"supp:{camera}"
+    supp = json.loads(fg.state_get(conn, supp_key, "[]") or "[]")
+    fresh = [s for s in supp if now - float(s[1]) <= window_s]
+    if len(fresh) < threshold:
+        if len(fresh) != len(supp):
+            fg.state_set(conn, supp_key, json.dumps(fresh))
+        return 0
+    latest_id = fresh[-1][0]
+    row = conn.execute("SELECT * FROM events WHERE event_id=?", (latest_id,)).fetchone()
+    if row is None:
+        fg.state_set(conn, supp_key, "[]")
+        return 0
+    snap_rel = row["snapshot_path"]
+    if not snap_rel and row["has_snapshot"]:
+        snap_rel = fg.cache_snapshot(api, {
+            "event_id": latest_id, "has_snapshot": True}, cfg)
+        if snap_rel:
+            conn.execute("UPDATE events SET snapshot_path=? WHERE event_id=?",
+                         (snap_rel, latest_id))
+            conn.commit()
+    ev = {"event_id": latest_id, "camera": camera, "label": row["label"],
+          "sub_label": row["sub_label"], "start_time": row["start_time"],
+          "end_time": row["end_time"],
+          "zones": json.loads(row["zones_json"] or "[]"),
+          "score": row["score"], "top_score": row["top_score"],
+          "has_clip": bool(row["has_clip"]), "has_snapshot": bool(row["has_snapshot"])}
+    first_hhmm = datetime.fromtimestamp(float(fresh[0][1]), tz).strftime("%H:%M")
+    envelope = fg.build_envelope(
+        ev, level=cfg["feed"]["level"], snap_rel=snap_rel,
+        emission=f"followup-{first_hhmm}", ttl_s=int(cfg["feed"]["ttl_action_s"]),
+        extra_body={"follow_up_of": fresh[:-1], "suppressed_count": len(fresh)},
+        tz=tz)
+    envelope["summary"] = (
+        f"{row['label']} back at {camera} within the cooldown window — "
+        f"{len(fresh)} events since {first_hhmm} "
+        f"(came back; check if expected) "
+        f"{'clip=y' if row['has_clip'] else 'clip=n'}"
+        + (f" snap={snap_rel}" if snap_rel else ""))
+    enqueue(conn, envelope)
+    fg.state_set(conn, supp_key, "[]")
+    fg.state_set(conn, f"cd:{camera}", int(now))
+    from datetime import datetime as _dt
+    hour_key = f"budget:{_dt.now(tz).strftime('%Y%m%d%H')}"
+    used = int(fg.state_get(conn, hour_key, "0") or 0)
+    fg.state_set(conn, hour_key, used + 1)
+    print(f"digest: {camera} rapid-return ({len(fresh)} events since {first_hhmm})",
+          flush=True)
+    return 1
+
+
 def classify_and_emit(conn: sqlite3.Connection, api: fg.Frigate, cfg: dict) -> int:
     """One pass over tracked rows: emit action at qualifying sighting,
     info at close. Returns envelopes enqueued."""
@@ -213,7 +278,27 @@ def classify_and_emit(conn: sqlite3.Connection, api: fg.Frigate, cfg: dict) -> i
                 last_cd = float(fg.state_get(conn, cd_key, "0") or 0)
                 cooled = now - last_cd >= float(rules["cooldown_min"]) * 60
                 budget_left = used < int(rules["action_budget_per_hour"])
-                if cams_ok and zone_ok and hours_ok and cooled:
+                if cams_ok and zone_ok and hours_ok and not cooled:
+                    # Inside the per-camera cooldown. The individual wake is
+                    # abandoned (action_sent=1 — no zombie wake 20 min later,
+                    # the 2026-09-06 miss) and the event is recorded for the
+                    # rapid-return digest: same camera again within the window
+                    # means the person CAME BACK — that's one follow-up steer.
+                    if not snap_rel and ev["has_snapshot"]:
+                        snap_rel = fg.cache_snapshot(api, ev, cfg)
+                        if snap_rel:
+                            conn.execute("UPDATE events SET snapshot_path=? WHERE event_id=?",
+                                         (snap_rel, row["event_id"]))
+                            conn.commit()
+                    supp_key = f"supp:{row['camera']}"
+                    supp = json.loads(fg.state_get(conn, supp_key, "[]") or "[]")
+                    supp.append([row["event_id"], row["start_time"]])
+                    fg.state_set(conn, supp_key, json.dumps(supp))
+                    conn.execute("UPDATE events SET action_sent=1 WHERE event_id=?",
+                                 (row["event_id"],))
+                    conn.commit()
+                    emitted += _maybe_digest(conn, api, cfg, row["camera"], tz)
+                elif cams_ok and zone_ok and hours_ok and cooled:
                     # over-budget: keep the trace, lose the wake
                     level = feed["level"] if budget_left else "info"
                     extra = {} if budget_left else {"downgraded": "budget"}
