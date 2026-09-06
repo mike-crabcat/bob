@@ -62,7 +62,10 @@ def _default_config() -> dict:
         "rules": {"action_zones": [], "action_hours": "00:00-23:59",
                   "cooldown_min": 10, "min_duration_s": 2.0,
                   "action_budget_per_hour": 6,
-                  "digest_threshold": 2, "digest_window_min": 5},
+                  "digest_threshold": 2, "digest_window_min": 5,
+                  # per-camera action windows; unlisted cameras use
+                  # action_hours ("22:00-06:00"-style wrap supported)
+                  "camera_hours": {}},
         "cache": {"snapshot_prune_days": 7, "clip_prune_days": 2,
                   "max_clip_mb": 200},
         "health": {"stale_action_min": 30, "stale_repeat_info_min": 60,

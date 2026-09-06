@@ -271,7 +271,9 @@ def classify_and_emit(conn: sqlite3.Connection, api: fg.Frigate, cfg: dict) -> i
                 zone_ok = (not zones_cfg or
                            any(f"{row['camera']}:{z}".lower() in zones_cfg
                                for z in ev["zones"]))
-                hours_ok = in_action_hours(datetime.now(tz), str(rules["action_hours"]))
+                cam_hours = (rules.get("camera_hours") or {}).get(row["camera"])
+                hours_window = str(cam_hours if cam_hours else rules["action_hours"])
+                hours_ok = in_action_hours(datetime.now(tz), hours_window)
                 hour_key = f"budget:{datetime.now(tz).strftime('%Y%m%d%H')}"
                 used = int(fg.state_get(conn, hour_key, "0") or 0)
                 cd_key = f"cd:{row['camera']}"

@@ -693,6 +693,33 @@ class Harness(unittest.TestCase):
         followups = [x for x in self.outbox_pending() if "followup" in x["dedup_key"]]
         self.assertEqual(len(followups), 0)  # aged entry doesn't count toward threshold
 
+
+
+    def test_camera_hours_override(self):
+        """Per-camera action windows (2026-09-07): a camera scoped to a
+        window that excludes now is action-suppressed; an unlisted camera
+        falls back to the global action_hours."""
+        now = time.time()
+        from datetime import datetime as dt
+        local = dt.now(fg.local_tz(self.cfg()))
+        # a window that definitely excludes the current hour
+        start_h = (local.hour + 2) % 24
+        end_h = (local.hour + 3) % 24
+        closed = f"{start_h:02d}:00-{end_h:02d}:00"
+        self.write_config()
+        cfg = self.cfg()
+        cfg["rules"]["camera_hours"] = {"front_door": closed}
+        a = frigate_event("ch1", camera="front_door", start=now - 40)
+        b = frigate_event("ch2", camera="garage", start=now - 35)
+        conn = fg.db(cfg)
+        for raw in (a, b):
+            watchd.upsert_event(conn, fg.norm_event(raw))
+        watchd.classify_and_emit(conn, fg.Frigate(cfg), cfg)
+        conn.close()
+        dedups = {p["dedup_key"] for p in self.outbox_pending()}
+        self.assertNotIn("frigate:ch1", dedups)   # scoped camera: outside window
+        self.assertIn("frigate:ch2", dedups)      # unlisted camera: global 24/7
+
     def test_prune_respects_age(self):
         self.cache.joinpath("snapshots/202601").mkdir(parents=True, exist_ok=True)
         old = self.cache / "snapshots" / "202601" / "old.jpg"
