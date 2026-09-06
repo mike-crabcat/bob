@@ -58,8 +58,11 @@ _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 # speak — its un-sent final text is internal bookkeeping (e.g. a goal-state
 # fold summary), and rescuing it mails internal monologue to the chat.
 # task_relay (background-task results) is deliberately NOT here: those turns
-# exist to speak, so the send-tool rescue covers them.
-_SILENCE_OK_PROVENANCES = {"wake_nudge"}
+# exist to speak, so the send-tool rescue covers them. steer_relay (relays
+# born from a detached STEER turn, 2026-09-06) is here: the spine's steer
+# template makes silent decline the designed majority outcome, so a quiet
+# steer relay is intent, never a misread.
+_SILENCE_OK_PROVENANCES = {"wake_nudge", "steer_relay"}
 
 # Backburner (docs/backburner-plan.md): only turns with a HUMAN stimulus
 # detach. Turns claimed solely by system nudges (goal folds, background-task
@@ -176,6 +179,13 @@ class DispatchRunner:
             provenances = await history_repo.claimed_provenances(claimed_ids)
             expect_send = any(p not in _SILENCE_OK_PROVENANCES for p in provenances)
             human_stimulus = any(p not in _DETACH_QUIET_PROVENANCES for p in provenances)
+            # Steer-only turns detach SILENTLY (2026-09-06): a holding ack
+            # ("give me a sec") answers nobody — the wake was machine-initiated.
+            # The detach itself stays (frees the lock, work continues in the
+            # background) and its relay later lands as steer_relay, which is
+            # silence-ok and rescue-exempt. A steer racing a human message
+            # keeps the ack — the human half still deserves it.
+            steer_only = bool(provenances) and all(p == "steer" for p in provenances)
             await session_svc.mark_dispatched(session_key)
 
             # Durable turn (Bob3 invariants 4-6): claim this conversation's
@@ -299,12 +309,13 @@ class DispatchRunner:
                         if bb_mode == "full":
                             detached = await bb_svc.detach(
                                 spec=spec, turn=turn, session_svc=session_svc,
-                                llm_task=llm_task)
+                                llm_task=llm_task, quiet=steer_only)
                             if detached:
                                 return ""
                             result = await llm_task
                         elif bb_mode == "hold":
-                            await bb_svc.probe_and_maybe_ack(spec, send_ack=True)
+                            await bb_svc.probe_and_maybe_ack(
+                                spec, send_ack=not steer_only)
                             result = await llm_task
                         else:  # shadow
                             await bb_svc.probe_and_maybe_ack(spec, send_ack=False)

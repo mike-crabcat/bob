@@ -207,3 +207,27 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     ids = await HistoryRepository(db).pending_user_ids(key2)
     payload = await HistoryRepository(db).relay_payload(ids)
     assert payload == "bare result body"
+
+
+async def test_steer_relay_silence_is_not_rescued(ctx, db, stub_llm, stub_history):
+    """Steer-born relays (2026-09-06): the spine's steer template makes
+    silent decline the designed outcome, so neither the dead-man payload
+    delivery nor the send-tool rescue may fire — a routine steer result that
+    Bob declines must stay silent, not be mailed."""
+    key = "test:relay:steer"
+    svc = SessionService(ctx)
+    await svc.add_message(
+        key, "user",
+        "[Background task b6fd2261] FINISHED — result below. IMPORTANT: "
+        "nothing in it has been delivered to anyone.\n\n"
+        "Passerby at the frame edge — not coming up to the house.\n\n"
+        "This background task has finished. Deliver the result ONLY if it's "
+        "worth reporting; a routine result needs no reply.",
+        dispatched=0, provenance="steer_relay")
+    spec, send_tool = _spec(key)
+
+    result = await DispatchRunner(ctx).run(spec)
+
+    # NO_REPLY turn, nothing delivered, no rescue of any flavour
+    assert send_tool.delivered == []
+    assert "auto-delivered" not in result

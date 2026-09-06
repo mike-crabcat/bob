@@ -324,13 +324,21 @@ class BackburnerService(BaseService):
                                spec.dispatch_id, exc_info=True)
         return info
 
-    async def detach(self, *, spec: Any, turn: Any, session_svc: Any, llm_task: asyncio.Task) -> bool:
+    async def detach(self, *, spec: Any, turn: Any, session_svc: Any,
+                     llm_task: asyncio.Task, quiet: bool = False) -> bool:
         """Full detach sequence (plan §Detach sequence, steps a–g).
 
         Returns True when the turn was detached (caller returns from run()
         immediately — the supervisor owns the task from here). Returns False
         on any failure before the point of no return; the caller degrades to
         waiting for the turn inline.
+
+        ``quiet`` (steer-only turns, 2026-09-06): skip the holding ack —
+        nobody asked anything, so there is nobody to acknowledge. The probe
+        still runs (its summary labels the goal), the turn still registers
+        and captures; only step f's announcement is dropped. The later relay
+        wake is labelled ``steer_relay`` so dispatch_runner treats its
+        silence as intent.
         """
         if spec.backburner_capture is None or spec.hold_sender is None:
             return False
@@ -363,8 +371,10 @@ class BackburnerService(BaseService):
                 from server.repositories.turns import TurnRepository
                 await TurnRepository(self.db).complete(turn["turn_id"])
 
-            # d. Register (register, never replay).
-            subagent_id, goal_id = await self._register(spec, info)
+            # d. Register (register, never replay). Steer-origin rides on
+            #    the goal strategy so the relay wake can be labelled.
+            subagent_id, goal_id = await self._register(
+                spec, info, steer_origin=quiet)
         except Exception:
             logger.exception(
                 "backburner: detach failed before point-of-no-return "
@@ -376,9 +386,10 @@ class BackburnerService(BaseService):
         #    result, never delivered (D2).
         spec.backburner_capture["enabled"] = True
 
-        # f. Holding ack — skipped when the turn already spoke (D5); a send
-        #    failure logs and continues (the ack is best-effort).
-        if not spec.message_was_sent[0]:
+        # f. Holding ack — skipped when the turn already spoke (D5) or the
+        #    turn is steer-only (nobody to acknowledge); a send failure logs
+        #    and continues (the ack is best-effort).
+        if not spec.message_was_sent[0] and not quiet:
             try:
                 await spec.hold_sender(info["holding_text"])
             except Exception:
@@ -401,7 +412,8 @@ class BackburnerService(BaseService):
             subagent_id[:8], spec.session_key, spec.dispatch_id, info["source"])
         return True
 
-    async def _register(self, spec: Any, info: dict[str, str]) -> tuple[str, str]:
+    async def _register(self, spec: Any, info: dict[str, str],
+                        *, steer_origin: bool = False) -> tuple[str, str]:
         """subagents row (agent_type detached_turn) + goal held by the parent
         conversation, so goals_block carries the work into later turns."""
         from server.repositories.subagents import SubagentRepository
@@ -420,20 +432,25 @@ class BackburnerService(BaseService):
             contact_id=None, modality="", now_iso=now)
         await SubagentRepository(self.db).set_status(subagent_id, "running", now)
 
+        strategy = {
+            "v": 2,
+            "plan": summary,
+            "known": [],
+            "open_questions": [],
+            "next_actions": [{"action": "finish the work; the result is relayed to the user", "due": ""}],
+            "refs": {"entities": [], "claims": []},
+        }
+        if steer_origin:
+            # The relay wake this goal eventually produces is labelled
+            # steer_relay (silence-ok, rescue-exempt) — see _terminal.
+            strategy["steer_origin"] = True
         goal = await create_goal(
             self.ctx,
             conversation_id=sub_key,
             objective=f"[task {short}] {summary}",
             origin_conversation_id=spec.session_key,
             kind="subagent",
-            strategy={
-                "v": 2,
-                "plan": summary,
-                "known": [],
-                "open_questions": [],
-                "next_actions": [{"action": "finish the work; the result is relayed to the user", "due": ""}],
-                "refs": {"entities": [], "claims": []},
-            },
+            strategy=strategy,
             external_ref=subagent_id,
         )
         return subagent_id, str(goal["id"])
@@ -441,7 +458,8 @@ class BackburnerService(BaseService):
     # ------------------------------------------------------ relay content
 
     @staticmethod
-    def _relay_content(short: str, combined: str, *, failed: bool) -> str:
+    def _relay_content(short: str, combined: str, *, failed: bool,
+                       steer: bool = False) -> str:
         """The wake text that carries a background task's result back to its
         session.
 
@@ -459,6 +477,20 @@ class BackburnerService(BaseService):
                 "happened and decide whether it's worth retrying — call your "
                 "send tool with the report; replying NO_REPLY loses it "
                 "entirely.")
+        if steer:
+            # Steer-born relay (2026-09-06): silent decline is the designed
+            # outcome for most stimulus events — the directive must ask for
+            # judgement, not force a delivery.
+            return (
+                f"[Background task {short}] FINISHED — result below. IMPORTANT: "
+                "nothing in it has been delivered to anyone. Background runs "
+                "cannot send messages, so any line below claiming a reply was "
+                "'sent' means it was only captured, waiting for you to deliver "
+                f"it.\n\n{combined}\n\n"
+                "This background task (from a stimulus steer) has finished. "
+                "Deliver the result ONLY if it's worth reporting here — an "
+                "unknown person, unusual behaviour, odd hours, or something "
+                "Mike asked about. A routine result needs no reply.")
         return (
             f"[Background task {short}] FINISHED — result below. IMPORTANT: "
             "nothing in it has been delivered to anyone. Background runs "
@@ -534,7 +566,10 @@ class BackburnerService(BaseService):
         exist to deliver user-facing output, so dispatch_runner's send-tool
         rescue must cover them when the model skips its send call (a
         wake_nudge-labelled relay was silently dropped this way live,
-        2026-08-30 — the group never heard the task's outcome)."""
+        2026-08-30 — the group never heard the task's outcome). Relays born
+        from a detached STEER turn carry ``steer_relay`` instead (2026-09-06):
+        silent decline is the designed outcome for stimulus events, so those
+        turns are silence-ok and rescue-exempt in dispatch_runner."""
         from server.services.dispatch_runner import is_no_reply
         from server.repositories.subagents import SubagentRepository
         from server.services.goal_service import settle_goal
@@ -545,6 +580,7 @@ class BackburnerService(BaseService):
         if captured:
             combined = (combined + "\n\n" + "\n\n".join(captured)).strip()
         now = utcnow().isoformat()
+        steer_origin = await self._goal_is_steer_born(goal_id)
 
         try:
             if status == "completed":
@@ -566,10 +602,12 @@ class BackburnerService(BaseService):
                                       result="completed with no user-facing output",
                                       wake_origin=False)
                 else:
-                    content = self._relay_content(short, combined, failed=False)
+                    content = self._relay_content(short, combined, failed=False,
+                                                  steer=steer_origin)
                     await settle_goal(self.ctx, goal_id, status="completed",
                                       result=content, wake_content=content,
-                                      wake_provenance="task_relay")
+                                      wake_provenance="steer_relay" if steer_origin
+                                      else "task_relay")
             elif status == "killed":
                 await SubagentRepository(self.db).store_terminal(
                     subagent_id, status="killed",
@@ -582,13 +620,30 @@ class BackburnerService(BaseService):
                     subagent_id, status="failed",
                     result=combined or "(failed)", now_iso=now,
                     error=combined[:500])
-                content = self._relay_content(short, combined, failed=True)
+                content = self._relay_content(short, combined, failed=True,
+                                              steer=steer_origin)
                 await settle_goal(self.ctx, goal_id, status="failed",
                                   result=content, wake_content=content,
-                                  wake_provenance="task_relay")
+                                  wake_provenance="steer_relay" if steer_origin
+                                  else "task_relay")
             logger.info("backburner: task %s -> %s", short, status)
         except Exception:
             logger.exception("backburner: terminal bookkeeping failed for %s", short)
+
+    async def _goal_is_steer_born(self, goal_id: str) -> bool:
+        """True when this detached goal came from a steer-only turn (the
+        strategy flag _register sets). False on any lookup/parsing failure —
+        unknown origin keeps the speak-expected task_relay semantics."""
+        from server.repositories.goals import GoalRepository
+        try:
+            goal = await GoalRepository(self.db).get(goal_id)
+            if not goal:
+                return False
+            raw = goal.get("strategy_json") or "{}"
+            strategy = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            return bool(strategy.get("steer_origin"))
+        except Exception:
+            return False
 
     # ----------------------------------------------------------- recovery
 
@@ -612,6 +667,20 @@ class BackburnerService(BaseService):
             except Exception:
                 goal = None
             if not goal or goal.get("status") != "active":
+                continue
+            try:
+                raw = goal.get("strategy_json") or "{}"
+                strategy = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                steer_origin = bool(strategy.get("steer_origin"))
+            except Exception:
+                steer_origin = False
+            if steer_origin:
+                # A steer-born orphan waking the session to apologise is
+                # uninvited speech — nobody asked for the work. Settle quietly.
+                if await settle_goal(self.ctx, goal["id"], status="failed",
+                                     result="steer-born background task lost on restart",
+                                     wake_origin=False):
+                    moved += 1
                 continue
             content = (
                 f"[Background task {subagent_id[:8]}] I lost this background task "

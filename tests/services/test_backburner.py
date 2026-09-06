@@ -578,3 +578,84 @@ async def test_recovery_settles_orphaned_goals(ctx, bb):
 
     # idempotent: nothing left to move
     assert await BackburnerService(ctx).recover_orphaned_goals() == 0
+
+
+# ------------------------------------------- silent steer turns (2026-09-06)
+
+async def test_steer_only_turn_detaches_silently(ctx, bb, stub_llm, stub_history):
+    """A slow steer-only turn still detaches (lock frees, work continues in
+    the background) but sends NO holding ack — nobody asked anything. The
+    relay it later produces is labelled steer_relay (silence-ok)."""
+    from server.services.session_service import SessionService
+
+    await SessionService(ctx).add_message(
+        DM_KEY, "user", "[Stimulus: frigate activity.person] person at doorbell",
+        channel="whatsapp", dispatched=0, provenance="steer")
+    acks: list[str] = []
+    capture = {"enabled": False, "texts": []}
+
+    async def _hold(text: str) -> None:
+        acks.append(text)
+
+    spec = _spec(capture=capture, hold=_hold, dispatch_id="disp-steer")
+    result = await DispatchRunner(ctx).run(spec)
+
+    assert result == ""  # detached — supervisor owns the task
+    assert acks == [], "steer-only turn must not send a holding ack"
+    assert capture["enabled"] is True  # the detach itself happened
+
+    rows = await _subagent_rows(ctx)
+    assert len(rows) == 1, "steer turn must still detach (frees the lock)"
+
+    # wait for the supervisor to settle the goal, then check the wake label
+    goal = None
+    for _ in range(50):
+        goal = await ctx.db.fetch_one(
+            "SELECT * FROM goals WHERE external_ref = ?", (rows[0]["id"],))
+        if goal is None or goal["status"] == "completed":
+            row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?",
+                                         (goal["id"],)) if goal else None
+            if row and row["status"] == "completed":
+                break
+        await asyncio.sleep(0.05)
+    assert goal is not None and goal["status"] == "completed"
+
+    msgs = await _messages(ctx)
+    wake = [m for m in msgs if "Background task" in m["content"]]
+    assert wake, "steer relay should still wake the session with the result"
+    assert wake[0]["provenance"] == "steer_relay", (
+        "steer-born relays are silence-ok/rescue-exempt, not speak-expected")
+    assert "needs no reply" in wake[0]["content"], (
+        "steer relay directive must ask for judgement, not force delivery")
+
+
+async def test_steer_racing_human_message_keeps_the_ack(ctx, bb, stub_llm, stub_history):
+    """A steer claimed in the same turn as a human message is not
+    steer-only: the human half still deserves the holding ack."""
+    from server.services.session_service import SessionService
+
+    await SessionService(ctx).add_message(
+        DM_KEY, "user", "what's happening outside?", channel="whatsapp", dispatched=0)
+    await SessionService(ctx).add_message(
+        DM_KEY, "user", "[Stimulus: frigate activity.person] person at doorbell",
+        channel="whatsapp", dispatched=0, provenance="steer")
+    acks: list[str] = []
+
+    async def _hold(text: str) -> None:
+        acks.append(text)
+
+    spec = _spec(hold=_hold, dispatch_id="disp-mixed")
+    await DispatchRunner(ctx).run(spec)
+
+    assert acks, "human+steer turn keeps the holding ack"
+
+
+def test_relay_content_steer_variant_does_not_force_delivery():
+    plain = BackburnerService._relay_content("abc", "result body", failed=False)
+    steer = BackburnerService._relay_content("abc", "result body", failed=False,
+                                             steer=True)
+    assert "loses the result entirely" in plain
+    assert "loses the result entirely" not in steer
+    assert "needs no reply" in steer
+    # delivery-truth header survives in both (captured sends never reached anyone)
+    assert "nothing in it has been delivered" in steer
