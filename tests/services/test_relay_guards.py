@@ -155,8 +155,7 @@ async def test_relay_no_reply_dead_man_delivers_payload(
     await DispatchRunner(ctx).run(spec)
 
     assert send_tool.delivered == [
-        "[Background task abcd1234] FINISHED — result below. IMPORTANT: "
-        "nothing in it has been delivered to anyone.\n\n"
+        "(auto-delivered background result)\n"
         "Reply sent to Andrew with the deep-dive sources: METR report et al."]
 
 
@@ -183,10 +182,28 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     from server.repositories.history import HistoryRepository
     key = "test:relay:payload"
     svc = SessionService(ctx)
+    # Real relay shape: header paragraph, blank line, result, blank line,
+    # trailing directive. The header must NOT survive into the delivered
+    # payload (2026-09-06: the rescue mailed "IMPORTANT: nothing in it has
+    # been delivered to anyone" to the Bob Security Guard group verbatim).
     await svc.add_message(
-        key, "user", "[Background task abcd1234] payload text\n\n"
+        key, "user",
+        "[Background task abcd1234] FINISHED — result below. IMPORTANT: "
+        "nothing in it has been delivered to anyone. Background runs cannot "
+        "send messages.\n\n"
+        "payload text\n\n"
         "This background task has finished. Relay the result.",
         dispatched=0, provenance="task_relay")
     ids = await HistoryRepository(db).pending_user_ids(key)
     payload = await HistoryRepository(db).relay_payload(ids)
-    assert payload == "[Background task abcd1234] payload text"
+    assert payload == "payload text"
+
+    # Headerless relays (older/hand-rolled shapes) keep their first line
+    key2 = "test:relay:payload:headerless"
+    await svc.add_message(
+        key2, "user", "bare result body\n\n"
+        "This background task has finished. Relay the result.",
+        dispatched=0, provenance="task_relay")
+    ids = await HistoryRepository(db).pending_user_ids(key2)
+    payload = await HistoryRepository(db).relay_payload(ids)
+    assert payload == "bare result body"
