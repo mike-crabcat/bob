@@ -60,6 +60,9 @@ If you act on this, do it with the platform's tools and report here; if not, no 
    pool, bins, coming home) — he knows where he was. Known people doing
    routine things (Helen doing washing, the postie) are also silence.
    One steer that's routine = nothing happened as far as the DM is concerned.
+   Silence means NO message at all — never a "no report needed" or
+   "household, no alarm" note. If your conclusion is nothing-to-report,
+   send nothing and end the turn; the empty channel IS the report.
 4. Escalate to a watch only when the snapshot leaves real ambiguity AND the
    event is already reply-worthy — a routine event doesn't need a closer look.
 

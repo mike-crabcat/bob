@@ -231,3 +231,37 @@ async def test_steer_relay_silence_is_not_rescued(ctx, db, stub_llm, stub_histor
     # NO_REPLY turn, nothing delivered, no rescue of any flavour
     assert send_tool.delivered == []
     assert "auto-delivered" not in result
+
+
+async def test_steer_turn_silence_is_not_mailed(ctx, db, stub_llm, stub_history):
+    """2026-09-07, Bob Security Guard: Bob triaged a steer, concluded
+    'household, no report', wrote it as final text without a send call —
+    correct silent decline — and the send-tool rescue mailed it. A steer-only
+    turn's un-sent text is the decline working, never a compliance failure."""
+    from server.services.session_service import SessionService
+    key = "test:steer:silent"
+    stub_llm["reply"] = ("Household — man in helmet wheeling the cargo bike "
+                         "out. Likely you; staying quiet.")
+    await SessionService(ctx).add_message(
+        key, "user",
+        "[Stimulus: frigate activity.person] person at driveway 08:10 clip=y",
+        dispatched=0, provenance="steer")
+    spec, send_tool = _spec(key)
+    await DispatchRunner(ctx).run(spec)
+    assert send_tool.delivered == [], "steer decline text must not be mailed"
+
+
+async def test_steer_racing_human_still_rescued(ctx, db, stub_llm, stub_history):
+    """A steer claimed alongside a human message keeps the rescue — the human
+    half wrote a reply the model failed to send."""
+    from server.services.session_service import SessionService
+    key = "test:steer:mixed"
+    stub_llm["reply"] = "Here's the answer to your question, Mike."
+    await SessionService(ctx).add_message(
+        key, "user", "what's happening outside?", channel="whatsapp", dispatched=0)
+    await SessionService(ctx).add_message(
+        key, "user", "[Stimulus: frigate activity.person] person at driveway",
+        dispatched=0, provenance="steer")
+    spec, send_tool = _spec(key)
+    await DispatchRunner(ctx).run(spec)
+    assert send_tool.delivered == ["Here's the answer to your question, Mike."]

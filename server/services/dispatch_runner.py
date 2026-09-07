@@ -58,11 +58,14 @@ _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 # speak — its un-sent final text is internal bookkeeping (e.g. a goal-state
 # fold summary), and rescuing it mails internal monologue to the chat.
 # task_relay (background-task results) is deliberately NOT here: those turns
-# exist to speak, so the send-tool rescue covers them. steer_relay (relays
-# born from a detached STEER turn, 2026-09-06) is here: the spine's steer
-# template makes silent decline the designed majority outcome, so a quiet
-# steer relay is intent, never a misread.
-_SILENCE_OK_PROVENANCES = {"wake_nudge", "steer_relay"}
+# exist to speak, so the send-tool rescue covers them. steer and steer_relay
+# (stimulus wakes and their detached relays, 2026-09-06/07) are here: the
+# spine's steer template makes silent decline the designed majority outcome,
+# so an un-sent final text on a steer turn is the DECLINE working — the
+# rescue was mailing Bob's "nothing to report" conclusions to the security
+# group six times a morning (2026-09-07). The send tool call itself remains
+# the intent signal: a steer turn that wants to report calls it explicitly.
+_SILENCE_OK_PROVENANCES = {"wake_nudge", "steer", "steer_relay"}
 
 # Backburner (docs/backburner-plan.md): only turns with a HUMAN stimulus
 # detach. Turns claimed solely by system nudges (goal folds, background-task
