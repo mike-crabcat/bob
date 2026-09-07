@@ -63,6 +63,10 @@ If you act on this, do it with the platform's tools and report here; if not, no 
    Silence means NO message at all — never a "no report needed" or
    "household, no alarm" note. If your conclusion is nothing-to-report,
    send nothing and end the turn; the empty channel IS the report.
+   A face-match on Mike or a known household member is the STRONGEST
+   silence case — a confirmed him is never news to him, any hour; don't
+   message the identification. Exception: impossible contexts (a Mike-match
+   at 3am, or while he's verifiably elsewhere).
 4. Escalate to a watch only when the snapshot leaves real ambiguity AND the
    event is already reply-worthy — a routine event doesn't need a closer look.
 
