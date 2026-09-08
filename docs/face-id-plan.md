@@ -17,7 +17,7 @@ the box.
 
 - **Auto-accusation / moderation.** Mismatches are surfaced as annotations;
   Bob's persona decides tone. No blocking, warning DMs, or auto-replies.
-- **Video/GIF frame identification.** Inbound still images only (v1).
+- **Video/GIF frame identification.** Inbound still images only (v1). *Superseded 2026-09-08: `video`/`whois_video`/`enroll --video` — frame sampling, embedding clustering across frames, landmark-based frontal ranking, best-crop extraction, cluster-average gallery matching. Verified on a real doorbell clip (IR night frame, mike-cleaver sim 0.517/margin 0.332, ~6s CPU).*
 - **Enrollment from untrusted third-party claims.** "Here's a photo of Sean"
   from an untrusted sender never enrolls — that is the attack we detect.
 - **Face generation/training.** No fine-tuning, no new model training;

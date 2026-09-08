@@ -83,8 +83,10 @@ downloads the clip and transcodes it to ~854px/5fps (a few MB — cheap to
 watch). It prints a `read_video <path>` line: run `read_video` on that path
 and you see the actual footage — motion, sequence, timeline. Then:
 
-- Optionally name who: `skills/faces/.venv/bin/python skills/faces/faces.py
-  whois <snapshot path>` (gallery matches only; don't guess names).
+- Optionally name who: prefer `whois_video` on the downloaded clip —
+  `skills/faces/.venv/bin/python skills/faces/faces.py whois_video <clip path>`
+  (best frontal crop + averaged embedding; more reliable than the snapshot).
+  Snapshot `whois` still works when no clip is available (CLIP_GONE).
 - Report factually in-session: who/what, what they did, when. Only state
   what you can actually see — night footage is grainy; say so rather than
   inventing detail. If the description matters and frames are ambiguous,
