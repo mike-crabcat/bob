@@ -56,7 +56,7 @@ func NewClient(sessionDBPath string, mediaDir string, log *slog.Logger) (*Client
 		return nil, fmt.Errorf("get device store: %w", err)
 	}
 
-	client := whatsmeow.NewClient(deviceStore, nil)
+	client := whatsmeow.NewClient(deviceStore, NewSlogLogger(log))
 	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
 
