@@ -56,6 +56,7 @@ REACTION_CLIPS: dict[str, str] = {
     "bob-fail": "something failed, epically",
     "bob-coffee-shower": "tired, exhausted, running on fumes — applies "
                          "caffeine directly to the problem",
+    "bob-thumbs-up": "dry, deadpan approval — a grudging okay, this will do",
 }
 
 
