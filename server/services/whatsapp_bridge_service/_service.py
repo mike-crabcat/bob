@@ -186,6 +186,19 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         self._connected = False
 
     async def send_message(self, chat_id: str, text: str, *, reply_to: str | None = None) -> str:
+        # Choke-point markup guard (2026-09-09): partial <tool_call> XML leaks
+        # reached groups through paths the send-tool guard doesn't cover
+        # (outreach/cross-session sends, steering relays). Every WhatsApp text
+        # funnels through here — strip leaked markup once, centrally. Pure
+        # markup with no surviving text is refused loudly.
+        from server.services.openai_service import strip_leaked_tool_xml
+        cleaned = strip_leaked_tool_xml(text or "")
+        if not cleaned.strip():
+            logger.warning(
+                "send_message refused markup-only text to %s (%d chars of "
+                "tool-call tags, no content)", chat_id, len(text or ""))
+            return "refused: markup-only text"
+        text = cleaned
         request_id = str(uuid4())
         payload = {
             "type": "send_message",

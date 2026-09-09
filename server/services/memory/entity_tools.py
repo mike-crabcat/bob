@@ -21,10 +21,12 @@ def make_list_entities_tool(db: Any) -> Tool:
     """Return a `list_entities` tool bound to the given database connection."""
 
     @tool
-    async def list_entities(entity_type: str) -> str:
+    async def list_entities(entity_type: str = "") -> str:
         """List active entities of a given type. Returns entity IDs and display names.
 
-        Use this to discover related entities (e.g. find all trips, all connections).
+        Required: entity_type (e.g. 'person', 'group', 'task', 'file' — omit
+        and the error lists the valid types). Use this to discover related
+        entities (e.g. find all trips, all connections).
         """
         if entity_type not in ENTITY_TYPES:
             return f"Unknown entity type: {entity_type}. Valid types: {', '.join(ENTITY_TYPES)}"

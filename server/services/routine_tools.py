@@ -57,6 +57,30 @@ def _next_fire_local(routine: dict) -> str:
     return when.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+_GROUP_ID_RE = re.compile(r"\b(\d{15,20})(?:@g\.us)?\b")
+
+
+def _target_session_mismatch(session_key: str, prompt: str) -> str | None:
+    """A group id named in the prompt that differs from the binding session.
+
+    write_routine binds to the CREATING session, so a prompt that targets a
+    different group ("post the report to group-crypto-bob (120363…)") makes
+    every fire run in the wrong conversation: routine replies land there, and
+    the report body rides whatever send tool the run picks — the 8 Sep 2026
+    crypto morning report landed in Pirate Radio this way (routines were born
+    in a radio-group chat). 15-20-digit numbers are WhatsApp group ids for
+    all practical purposes (phones top out ~13 digits)."""
+    if ":whatsapp:group:" in session_key:
+        own = session_key.rsplit(":", 1)[-1]
+    else:
+        own = ""
+    for match in _GROUP_ID_RE.finditer(prompt or ""):
+        gid = match.group(1)
+        if gid != own:
+            return gid + ("@g.us" if "@g.us" not in (prompt or "") else "")
+    return None
+
+
 def _routine_to_yaml(routine: dict) -> str:
     payload: dict = {
         "name": routine["name"],
@@ -201,7 +225,18 @@ def make_routine_tools(
             valid_from=valid_from,
             valid_until=valid_until,
         )
-        return _routine_to_yaml(routine)
+        out = _routine_to_yaml(routine)
+        mismatch = _target_session_mismatch(session_key, str(prompt))
+        if mismatch:
+            out += (
+                "\n# WARNING: this routine is BOUND TO THE SESSION THAT CREATED IT, but "
+                f"its prompt targets group {mismatch}. Every run fires here "
+                f"({session_key}): routine replies land in THIS chat, and any default "
+                "send posts here too — the 2026-09-08 crypto report went to the wrong "
+                "group this way. If the target group is where it belongs, create the "
+                "routine in THAT conversation; if you keep it here, the prompt must "
+                "name an explicit cross-session send every single run.")
+        return out
 
     @tool
     async def delete_routine(name: str) -> str:

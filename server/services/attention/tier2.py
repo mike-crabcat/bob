@@ -43,6 +43,8 @@ VALID = ("ACT", "WAIT", "STAND_DOWN")
 # sync with the manifest in self/bob/identity.md — files live at
 # self/bob/avatar/reactions/<name>.mp4 in the workspace (healed from the
 # repo bundle at boot, so the list is stable across instances).
+# Adding a clip: docs/reaction-clips.md (asset + registry + manifest, the
+# gates, and the ffmpeg conversion line).
 REACTION_CLIPS: dict[str, str] = {
     "bob-celebrate": "something finally worked — a win landed",
     "bob-patience-v2": "deadpan waiting, eye twitch",

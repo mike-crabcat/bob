@@ -546,3 +546,30 @@ async def test_fire_wakeup_advances_the_mirror(ctx, svc, session_key, monkeypatc
 
     rolled = await svc.get_routine(session_key, "crypto-morning-trade")
     assert datetime.fromisoformat(rolled["next_run_at"]) > datetime.now(UTC)
+
+
+# ------------------------------------------------------- binding-target lint
+
+def test_target_session_mismatch_detects_foreign_group_id():
+    """Live 2026-09-08: crypto-report routines were CREATED in the Pirate
+    Radio chat (their prompts named group-crypto-bob's id) — every fire ran
+    in the wrong session and the 8 Sep report body went to the radio group.
+    The lint must flag a prompt-named group id that differs from the binding
+    session, and stay quiet when it matches (or none is named)."""
+    from server.services.routine_tools import _target_session_mismatch
+
+    radio = "agent:main:whatsapp:group:120363408889690088"
+    crypto_gid = "120363410716086644"
+
+    assert _target_session_mismatch(
+        radio, f"produce the morning report to group-crypto-bob ({crypto_gid})"
+    ) is not None
+    assert _target_session_mismatch(
+        "agent:main:whatsapp:dm:61456224867",
+        f"post to {crypto_gid}@g.us") is not None
+    # prompt names the binding session's own group -> quiet
+    assert _target_session_mismatch(
+        f"agent:main:whatsapp:group:{crypto_gid}",
+        f"report to {crypto_gid}") is None
+    # no group id at all (phones are ~12 digits) -> quiet
+    assert _target_session_mismatch(radio, "call Blair on 61401589328") is None

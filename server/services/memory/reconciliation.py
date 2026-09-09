@@ -195,14 +195,17 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
     @tool
     async def supersede_claim_tool(
         subject_id: str,
-        claim_type_key: str,
-        old_value: str,
+        claim_type_key: str = "",
+        old_value: str = "",
         new_value: str = "",
         new_object_id: str = "",
     ) -> str:
         """Replace a claim value. The old claim is superseded and a new one created.
 
-        Provide either new_value (for scalars) or new_object_id (for entity refs).
+        Required: subject_id, claim_type_key (the claim type being replaced,
+        e.g. 'status' or 'description' — find it via get_entity), and old_value
+        (the exact current value). Provide either new_value (for scalars) or
+        new_object_id (for entity refs).
         """
         if not subject_id or not claim_type_key or not old_value:
             return "Error: subject_id, claim_type_key, and old_value are required."
