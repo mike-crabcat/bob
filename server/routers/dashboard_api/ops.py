@@ -103,6 +103,48 @@ async def get_status(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/api/utility_behaviors")
+async def get_utility_behaviors(request: Request) -> dict[str, Any]:
+    """Utility conversations + their sensation routes (the ops view — plan
+    Part 1 hides these from the chats list). Watch logs remain readable in
+    the normal conversation detail page via the session_key link."""
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    db = _db(request)
+    from server.repositories.utility_conversations import (
+        UtilityConversationRepository,
+    )
+    rows = await UtilityConversationRepository(db).dashboard_overview()
+    behaviors: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        b = behaviors.setdefault(r["session_key"], {
+            "session_key": r["session_key"],
+            "title": r["title"],
+            "enabled": bool(r["enabled"]),
+            "model_alias": r["model_alias"],
+            "report_to": r["report_to"],
+            "charter": r["charter"],
+            "created_by": r["created_by"],
+            "last_turn_at": _utc(r["last_turn_at"]) if r["last_turn_at"] else None,
+            "routes": [],
+        })
+        if r["route_id"] is not None:
+            b["routes"].append({
+                "id": r["route_id"],
+                "source": r["source"],
+                "type_pattern": r["type_pattern"],
+                "level": r["level"],
+                "enabled": bool(r["route_enabled"]),
+                "hours": r["hours"],
+                "cooldown_s": r["cooldown_s"],
+                "budget_per_hour": r["budget_per_hour"],
+                "note": r["route_note"],
+                "fires_24h": r["fires_24h"],
+                "last_fire_at": _utc(r["last_fire_at"]) if r["last_fire_at"] else None,
+            })
+    return {"behaviors": list(behaviors.values())}
+
+
 @router.post("/api/turns/{turn_id}/retry")
 async def retry_turn(turn_id: str, request: Request) -> dict[str, Any]:
     """Re-arm dispatch for a stuck turn's conversation. The turn claim path

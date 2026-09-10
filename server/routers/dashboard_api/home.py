@@ -27,8 +27,13 @@ async def get_home(request: Request) -> dict[str, Any]:
     )
     if log_exists:
         rows = await LlmCallLogRepository(db).activity_rollup(limit=50)
+        from server.repositories.utility_conversations import (
+            is_utility_session,
+        )
         for row in rows:
             key = row["session_key"]
+            if is_utility_session(key):
+                continue  # hidden from the chats list — shown under ops
             active_sessions.append({
                 "session_key": key,
                 "channel": _parse_channel(key),
@@ -41,10 +46,13 @@ async def get_home(request: Request) -> dict[str, Any]:
     if msgs_exists_home:
         seen = {s["session_key"] for s in active_sessions}
         from server.repositories.history import HistoryRepository
+        from server.repositories.utility_conversations import (
+            is_utility_session,
+        )
         msg_rows = await HistoryRepository(db).activity_rollup(limit=50)
         for row in msg_rows:
             key = row["session_key"]
-            if key not in seen:
+            if not is_utility_session(key) and key not in seen:
                 active_sessions.append({
                     "session_key": key,
                     "channel": _parse_channel(key),

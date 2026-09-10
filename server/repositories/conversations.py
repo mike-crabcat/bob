@@ -138,7 +138,10 @@ class ConversationRepository:
         return row["name"] if row else None
 
     async def dashboard_overview(self, *, limit: int = 200) -> list[dict[str, Any]]:
-        """Conversation list rollup for the dashboard (cross-domain read-only)."""
+        """Conversation list rollup for the dashboard (cross-domain read-only).
+        Utility conversations are hidden here (plan Part 1: "invisible to
+        the chats list; shown under ops") — they surface via
+        UtilityConversationRepository.dashboard_overview instead."""
         rows = await self.db.fetch_all(
             """SELECT c.id, c.kind, c.title, c.merged_into, c.updated_at,
                       (SELECT COUNT(*) FROM bindings b WHERE b.conversation_id = c.id) AS binding_count,
@@ -148,6 +151,7 @@ class ConversationRepository:
                       (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.id) AS turn_count,
                       (SELECT COUNT(*) FROM goals g WHERE g.conversation_id = c.id AND g.status = 'active') AS active_goals
                FROM conversations c
+               WHERE c.kind != 'utility'
                ORDER BY COALESCE(NULLIF(MAX(COALESCE(last_turn_at, ''), COALESCE(last_llm_at, '')), ''), c.updated_at) DESC
                LIMIT ?""", (limit,))
         return [dict(r) for r in rows] if rows else []

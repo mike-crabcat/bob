@@ -5,6 +5,7 @@ import { SessionList } from "@/components/home/session-list";
 import { LLMChart } from "@/components/home/llm-chart";
 import { MemoryFeed } from "@/components/home/memory-feed";
 import { HealthStrip, NeedsAttention } from "@/components/home/ops-status";
+import { UtilityBehaviors } from "@/components/home/utility-behaviors";
 import { fetchAPI } from "@/lib/api";
 
 interface CostByCategory {
@@ -90,6 +91,7 @@ function HomePage() {
     <div className="flex flex-col gap-4 p-3">
       <HealthStrip />
       <NeedsAttention />
+      <UtilityBehaviors />
       <section>
         <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">llm calls · 24h</h2>
         <LLMChart buckets={home?.chart_buckets ?? []} categories={home?.chart_categories ?? []} />
