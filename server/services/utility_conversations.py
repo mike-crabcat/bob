@@ -38,11 +38,11 @@ APPROVAL_TYPE = "sensation_route"
 
 # ── per-turn spec (wake_service seam) ─────────────────────────────────
 
-async def utility_turn_spec(ctx: AppContext,
-                            session_key: str) -> tuple[str, str] | None:
-    """(charter system block, resolved model) for a utility session, or
-    None when the turn must not run: master kill switch off, conversation
-    missing (denied/deleted) or disabled."""
+async def utility_turn_spec(
+        ctx: AppContext, session_key: str) -> tuple[str, str, str | None] | None:
+    """(charter system block, resolved model, report_to target) for a
+    utility session, or None when the turn must not run: master kill switch
+    off, conversation missing (denied/deleted) or disabled."""
     uc_settings = getattr(ctx.settings, "utility_conversations", None)
     if uc_settings is not None and not uc_settings.enabled:
         return None
@@ -56,7 +56,43 @@ async def utility_turn_spec(ctx: AppContext,
     model = model_registry.resolve(row["model_alias"] or "cheap",
                                    ctx.settings.config_dir)
     charter_block = f"[Charter: {row['title']}]\n{row['charter']}"
-    return charter_block, model
+    return charter_block, model, row.get("report_to")
+
+
+def make_report_to_tool(ctx: AppContext, session_key: str,
+                        report_to: str) -> list:
+    """send_report — the utility turn's alert channel (plan Part 3
+    report_to). Delivery is a wake of the target conversation: its own turn
+    receives the report and decides how to raise it (the guard turn keeps
+    its triage role). No per-message approval — the sensation route itself
+    was owner-approved; the approval IS the safety review."""
+    from server.services.tools import tool
+
+    @tool
+    async def send_report(text: str) -> str:
+        """Send this report/alert to this behavior's report destination
+        (one wake of that conversation). Call ONLY when the charter's
+        alert/report condition is met — it wakes a turn there. Keep it one
+        compact factual message: who/what/where/when, evidence references
+        (clip/snapshot ids), and your confidence."""
+        from server.services.wake_service import wake_conversation
+        try:
+            armed = await wake_conversation(
+                ctx, report_to,
+                f"[Report from {session_key}]\n{text}",
+                call_category="wakeup")
+        except Exception:
+            logger.exception("send_report delivery failed for %s", session_key)
+            return json.dumps({"ok": False, "error":
+                               "delivery failed (logged) — do not retry in "
+                               "a loop; note it in your reply"})
+        if not armed:
+            return json.dumps({"ok": False, "error":
+                               "target conversation could not be dispatched "
+                               "(logged); note it in your reply"})
+        return json.dumps({"ok": True, "delivered_to": report_to})
+
+    return [send_report]
 
 
 # ── spec validation + rendering ───────────────────────────────────────
@@ -384,6 +420,7 @@ def make_sensation_route_tools(ctx: AppContext, session_key: str) -> list:
                 "enabled": bool(u["enabled"]),
                 "charter_chars": len(u["charter"] or ""),
                 "model_alias": u["model_alias"],
+                "report_to": u.get("report_to"),
                 "routes": [{
                     "route_id": r["id"],
                     "pattern": f"{r['source']} / {r['type_pattern']} / {r['level']}",

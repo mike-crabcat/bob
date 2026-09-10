@@ -143,6 +143,9 @@ async def test_migration_shape(db):
     ecols = {r["name"] for r in await db.fetch_all(
         "PRAGMA table_info(stimulus_events)")}
     assert "route_id" in ecols
+    ucols = {r["name"] for r in await db.fetch_all(
+        "PRAGMA table_info(utility_conversations)")}
+    assert "report_to" in ucols  # 004: the alert channel column
 
 
 # ─── router valves ────────────────────────────────────────────────────
@@ -261,10 +264,43 @@ async def test_utility_turn_spec_charter_and_model(db, ctx):
     target, _ = await _make_utility(db)
     spec = await utility_turn_spec(ctx, target)
     assert spec is not None
-    charter_block, model = spec
+    charter_block, model, report_to = spec
     assert charter_block.startswith("[Charter: arrival-herald]\n")
     assert CHARTER in charter_block
     assert model  # alias resolves (pass-through without models.yaml)
+    assert report_to is None  # watch-only until the owner sets one
+
+
+async def test_utility_turn_spec_carries_report_to(db, ctx):
+    target, _ = await _make_utility(db)
+    u_repo = UtilityConversationRepository(db)
+    await u_repo.set_report_to(
+        target, "agent:main:whatsapp:group:120363411751991047")
+    _, _, report_to = await utility_turn_spec(ctx, target)
+    assert report_to == "agent:main:whatsapp:group:120363411751991047"
+    # clearing restores watch-only
+    await u_repo.set_report_to(target, None)
+    assert (await utility_turn_spec(ctx, target))[2] is None
+
+
+async def test_send_report_wakes_target(fake_wake):
+    """report_to delivery is a wake of the target conversation — the target
+    session's own turn decides how to raise it (no approval round-trip; the
+    route approval is the safety review)."""
+    from server.services.utility_conversations import make_report_to_tool
+    tools = {t.name: t for t in make_report_to_tool(
+        None, "agent:frigate-watch:utility",
+        "agent:main:whatsapp:group:120363411751991047")}
+    out = json.loads(await tools["send_report"].handler(
+        "Unknown person at the side gate, 23:41, clip 1735512345 — "
+        "no face match, high confidence it is not household."))
+    assert out["ok"] and out["delivered_to"] == \
+        "agent:main:whatsapp:group:120363411751991047"
+    assert len(fake_wake) == 1
+    target, content = fake_wake[0]
+    assert target == "agent:main:whatsapp:group:120363411751991047"
+    assert content.startswith("[Report from agent:frigate-watch:utility]")
+    assert "side gate" in content
 
 
 async def test_utility_turn_spec_gates(db, ctx):
@@ -275,6 +311,39 @@ async def test_utility_turn_spec_gates(db, ctx):
     ctx.settings.utility_conversations.enabled = False
     await UtilityConversationRepository(db).set_enabled(target, True)
     assert await utility_turn_spec(ctx, target) is None
+
+
+# ─── dashboard ops view ────────────────────────────────────────────────
+
+async def test_dashboard_overview_joins_routes_and_fires(db, ctx):
+    """The ops card's query: utility conversation + route + valves + fire
+    counts in one rollup."""
+    target, route_id = await _make_utility(db, valves=True)
+    await UtilityConversationRepository(db).set_report_to(
+        target, "agent:main:whatsapp:group:120363411751991047")
+    now = datetime.now(timezone.utc).isoformat()
+    await StimulusRepository(db).record_fires([route_id], now)
+    rows = await UtilityConversationRepository(db).dashboard_overview()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["session_key"] == target and r["route_id"] == route_id
+    assert r["report_to"] == "agent:main:whatsapp:group:120363411751991047"
+    assert r["cooldown_s"] == 1800 and r["budget_per_hour"] == 4
+    assert r["hours"] == "09:00-21:00"
+    assert r["fires_24h"] == 1 and r["last_fire_at"] == now
+
+
+async def test_utility_hidden_from_chats_list(db):
+    """Plan Part 1: utility sessions are invisible in the chats list — the
+    ops card is where they live."""
+    from server.repositories.conversations import ConversationRepository
+    await ConversationRepository(db).ensure(
+        "agent:hide-me:utility", title="hide-me")
+    await ConversationRepository(db).ensure(
+        "agent:main:whatsapp:group:friends", title="chat")
+    rows = await ConversationRepository(db).dashboard_overview()
+    assert "utility" not in {r["kind"] for r in rows}
+    assert any(r["id"] == "agent:main:whatsapp:group:friends" for r in rows)
 
 
 # ─── request tool flow ────────────────────────────────────────────────

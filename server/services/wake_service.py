@@ -144,17 +144,23 @@ async def _generic_wake_dispatch(
     # is the turn's behaviour spec and the model tier defaults to cheap. A
     # utility session with no live spec (killed, disabled, denied) stores but
     # never dispatches — the router already logs those as log-only; this is
-    # the defensive second gate.
+    # the defensive second gate. A report_to target adds the send_report
+    # alert channel to the toolset.
     charter_block = ""
     utility_model: str | None = None
+    utility_tools: list = []
     if session_key.startswith("agent:") and session_key.endswith(":utility"):
-        from server.services.utility_conversations import utility_turn_spec
+        from server.services.utility_conversations import (
+            make_report_to_tool, utility_turn_spec,
+        )
         spec = await utility_turn_spec(ctx, session_key)
         if spec is None:
             logger.info("wake: utility %s has no live spec — stored "
                         "undispatched", session_key)
             return False
-        charter_block, utility_model = spec
+        charter_block, utility_model, report_to = spec
+        if report_to:
+            utility_tools = make_report_to_tool(ctx, session_key, report_to)
 
     tools = make_workspace_tools(ctx, session_key=session_key)
     # Bob Events §1.5: goal tools on the generic wake path — a goal_deadline
@@ -164,6 +170,7 @@ async def _generic_wake_dispatch(
     tools.extend(make_goal_tools(ctx, session_key))
     from server.services.approval_tools import make_approval_tools
     tools.extend(make_approval_tools(ctx, session_key))
+    tools.extend(utility_tools)
     dispatch_id = str(uuid4())
 
     async def _run() -> None:

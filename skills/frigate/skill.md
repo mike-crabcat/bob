@@ -39,7 +39,9 @@ python3 skills/frigate/frigate.py status                   # daemon + feed healt
 
 ## The feed (stimulus steers)
 
-Person events arrive as steers like:
+Since 2026-09-10 person events steer into the **frigate-watch utility
+conversation** (`agent:frigate-watch:utility`) — a headless cheap-model turn
+that watches each clip and only escalates when concerning:
 
 ```
 [Stimulus: frigate activity.person, dedup frigate:1788...-da9lzg]
@@ -47,31 +49,47 @@ person at doorbell 14:32 (48s, score 0.87) clip=y snap=skills/frigate/cache/snap
 If you act on this, do it with the platform's tools and report here; if not, no reply is needed.
 ```
 
-**Triage recipe (most steers end here):**
+**frigate-watch turn recipe:** the dedup key holds the event id after
+`frigate:`. `frigate.py watch <id>` preps the clip, then `read_video` it
+(snapshot as fallback when there is no clip). Run `whois_video` on the clip
+to name who it is whenever the footage allows. **The default is silence** —
+call `send_report` (which wakes a guard turn in the Bob Security Guard
+group) ONLY for:
 
-1. `read_image` the `snap=` path from the summary.
-2. Decide reply-worthiness. **The default is silence.** Message Mike ONLY for:
-   - an unknown person (not him, not a known household member/visitor)
-   - genuinely unusual behaviour — someone lingering, trying doors, looking
-     in windows, entering the property the wrong way
-   - unusual hours (late night / very early) where presence itself is notable
-   - something Mike explicitly asked to be told about
-3. **Never message about Mike himself** doing normal things (gardening,
-   pool, bins, coming home) — he knows where he was. Known people doing
-   routine things (Helen doing washing, the postie) are also silence.
-   One steer that's routine = nothing happened as far as the DM is concerned.
-   Silence means NO message at all — never a "no report needed" or
-   "household, no alarm" note. If your conclusion is nothing-to-report,
-   send nothing and end the turn; the empty channel IS the report.
-   A face-match on Mike or a known household member is the STRONGEST
-   silence case — a confirmed him is never news to him, any hour; don't
-   message the identification. Exception: impossible contexts (a Mike-match
-   at 3am, or while he's verifiably elsewhere).
-4. Escalate to a watch only when the snapshot leaves real ambiguity AND the
-   event is already reply-worthy — a routine event doesn't need a closer look.
+- an unknown person (not Mike, not a known household member/visitor)
+- genuinely unusual behaviour — someone lingering, trying doors, looking
+  in windows, entering the property the wrong way
+- unusual hours (late night / very early) where presence itself is notable
+- something Mike explicitly asked to be told about
+
+**Never report Mike himself** doing normal things (gardening, pool, bins,
+coming home) — he knows where he was. Known people doing routine things
+(Helen doing washing, the postie) are also silence. A face-match on Mike or
+a known household member is the STRONGEST silence case — a confirmed him is
+never news to him, any hour. Exception: impossible contexts (a Mike-match
+at 3am, or while he's verifiably elsewhere). Silence means NO send_report —
+your reply text is just the watch log in this conversation's history.
+Night clips degrade recognition: say what you could not determine rather
+than guessing; never fabricate a face match.
+
+**Guard-group turn recipe:** a `[Report from agent:frigate-watch:utility]`
+wake means frigate-watch already watched the clip and judged it concerning.
+Raise it in the group (who/what/where/when + event id); fetch the snapshot
+or clip yourself only if the report leaves ambiguity. The guard turn keeps
+its triage role and its other duties (e.g. music for arrivals).
+
+The route carries spine valves (600s cooldown, 6 wakes/hour) on top of
+watchd's own upstream throttling — a burst of events collapses to fewer
+watches by design.
 
 `health.stale` steers mean the NVR has been unreachable — mention it to
 Mike if he hasn't noticed; nothing else to do.
+
+Person events may ALSO be routed (fan-out) to utility conversations —
+headless charters Mike approved, such as an arrival herald that plays
+music when someone turns up. Those turns are separate from yours: keep
+your triage role exactly as written. If you find herald music playing,
+you may stop or adjust it — pausing was never restricted, only starting.
 
 ## Watching a clip
 
