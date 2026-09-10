@@ -51,10 +51,17 @@ def _summarize_proposal(proposal: Any) -> str:
 # send); vendor actions stay on the agent side, on the wake that follows —
 # the platform records human intent, it doesn't place orders.
 _ON_APPROVED: dict[str, Callable[[Any, dict[str, Any]], Awaitable[None]]] = {}
+# Same shape for rejections (utility-conversations plan: deny deletes the
+# inert rows and tells the requester).
+_ON_REJECTED: dict[str, Callable[[Any, dict[str, Any]], Awaitable[None]]] = {}
 
 
 def register_on_approved(approval_type: str, callback) -> None:
     _ON_APPROVED[approval_type] = callback
+
+
+def register_on_rejected(approval_type: str, callback) -> None:
+    _ON_REJECTED[approval_type] = callback
 
 
 async def _run_on_approved(ctx: Any, row: dict[str, Any]) -> None:
@@ -70,6 +77,20 @@ async def _run_on_approved(ctx: Any, row: dict[str, Any]) -> None:
         await callback(ctx, row)
     except Exception:
         logger.exception("on-approved follow-through failed for %s", row.get("id"))
+
+
+async def _run_on_rejected(ctx: Any, row: dict[str, Any]) -> None:
+    """Best-effort, never raises (mirror of _run_on_approved)."""
+    if row.get("status") != "rejected":
+        return
+    approval_type = row.get("approval_type")
+    callback = _ON_REJECTED.get(approval_type) if approval_type else None
+    if callback is None:
+        return
+    try:
+        await callback(ctx, row)
+    except Exception:
+        logger.exception("on-rejected follow-through failed for %s", row.get("id"))
 
 
 def _register_approval_executors() -> None:
@@ -122,6 +143,7 @@ def _register_approval_executors() -> None:
                 # id, so a send already emitted is suppressed, and one lost to
                 # a crash mid-hook is recovered here.
                 await _run_on_approved(ctx, already)
+                await _run_on_rejected(ctx, already)
                 return already["id"]
             raise RuntimeError("approval already settled or not found")
         # Approving records the decision. Acting on it is the agent's job on
@@ -129,6 +151,7 @@ def _register_approval_executors() -> None:
         # effects (see _ON_APPROVED) are executed here, deterministically,
         # from the stored proposal rather than the LLM's discretion.
         await _run_on_approved(ctx, row)
+        await _run_on_rejected(ctx, row)
         return row["id"]
 
     effects_svc.register_executor("approval_request", _exec_request)
@@ -140,6 +163,8 @@ def _register_approval_executors() -> None:
     # that affects kinds registered in tool-assembly functions cannot bite.
     from server.services import steering as _steering
     _steering.register()
+    from server.services import utility_conversations as _utility
+    _utility.register()
 
 
 _register_approval_executors()

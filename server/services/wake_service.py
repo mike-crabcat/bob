@@ -140,6 +140,22 @@ async def _generic_wake_dispatch(
     if not settings.openai.enabled:
         return False
 
+    # Utility conversations (docs/utility-conversations-plan.md): the charter
+    # is the turn's behaviour spec and the model tier defaults to cheap. A
+    # utility session with no live spec (killed, disabled, denied) stores but
+    # never dispatches — the router already logs those as log-only; this is
+    # the defensive second gate.
+    charter_block = ""
+    utility_model: str | None = None
+    if session_key.startswith("agent:") and session_key.endswith(":utility"):
+        from server.services.utility_conversations import utility_turn_spec
+        spec = await utility_turn_spec(ctx, session_key)
+        if spec is None:
+            logger.info("wake: utility %s has no live spec — stored "
+                        "undispatched", session_key)
+            return False
+        charter_block, utility_model = spec
+
     tools = make_workspace_tools(ctx, session_key=session_key)
     # Bob Events §1.5: goal tools on the generic wake path — a goal_deadline
     # wake tells the LLM to "revise the goal", so it must actually be able to.
@@ -157,13 +173,14 @@ async def _generic_wake_dispatch(
             from server.services.context_assembler import ContextAssembler
             goals_prompt = await ContextAssembler(ctx).goals_block(session_key)
             system_content = "\n\n".join(
-                p for p in (workspace_prompt, goals_prompt) if p)
+                p for p in (workspace_prompt, goals_prompt, charter_block) if p)
             messages = await build_chat_messages(
                 content, session_key, db=ctx.db,
                 system_content=system_content, max_history=20,
             )
             result = await LLMDispatchService(ctx).chat_with_tools(
                 messages, tools,
+                model=utility_model,
                 call_category=call_category,
                 session_key=session_key,
                 dispatch_id=dispatch_id,

@@ -31,6 +31,8 @@ def _kind_of(session_key: str) -> str:
         return "dm"
     if ":thread:" in session_key:
         return "thread"
+    if session_key.startswith("agent:") and session_key.endswith(":utility"):
+        return "utility"
     return "internal"
 
 

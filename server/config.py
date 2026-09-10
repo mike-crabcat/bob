@@ -355,6 +355,35 @@ class SelfWrapSettings:
 
 
 @dataclass(slots=True)
+class UtilityConversationSettings:
+    """Utility conversations (docs/utility-conversations-plan.md): headless
+    behaviors fed by stimulus routes. Master kill switch — the route and
+    conversation ``enabled`` flags are the inner switches; BOB_UTILITY_CONVERSATIONS=off
+    stops every utility turn at once. Charter-model default is the ``cheap``
+    alias (a utility turn must never burn main-model budget)."""
+
+    enabled: bool = True
+
+
+@dataclass(slots=True)
+class ToolLoopSettings:
+    """Tool-loop context folding (2026-09-10): big tool loops re-sent the
+    whole growing transcript every iteration (1.2M cumulative prompt tokens,
+    3-10 min turns). Folding big aged text results + a trimmed history view
+    for intermediate iterations cuts the wire context; small turns are
+    byte-identical to today (thresholds gate both levers). One kill switch:
+    BOB_TOOL_LOOP_FOLDING=off restores the old behavior exactly."""
+
+    folding_enabled: bool = True
+    fold_keep_last: int = 4            # most recent results stay verbatim
+    fold_size_threshold: int = 4000    # only results bigger than this fold
+    fold_head_chars: int = 1500
+    fold_tail_chars: int = 500
+    history_view_keep: int = 20        # recent history messages on the wire
+    history_view_trigger_chars: int = 40000  # below this, no view at all
+
+
+@dataclass(slots=True)
 class ReconciliationSettings:
     """Configuration for memory reconciliation model selection.
 
@@ -458,6 +487,9 @@ class Settings:
     patience: PatienceSettings = field(default_factory=PatienceSettings)
     backburner: BackburnerSettings = field(default_factory=BackburnerSettings)
     self_wrap: SelfWrapSettings = field(default_factory=SelfWrapSettings)
+    utility_conversations: UtilityConversationSettings = field(
+        default_factory=UtilityConversationSettings)
+    tool_loop: ToolLoopSettings = field(default_factory=ToolLoopSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
@@ -796,6 +828,19 @@ class Settings:
                          not in {"off", "0", "false", "no"}),
                 duration_fraction=float(os.getenv("BOB_SELF_WRAP_DURATION_FRACTION", "0.75")),
                 iteration_margin=int(os.getenv("BOB_SELF_WRAP_ITERATION_MARGIN", "3")),
+            ),
+            utility_conversations=UtilityConversationSettings(
+                enabled=_env_bool("BOB_UTILITY_CONVERSATIONS", True),
+            ),
+            tool_loop=ToolLoopSettings(
+                folding_enabled=_env_bool("BOB_TOOL_LOOP_FOLDING", True),
+                fold_keep_last=int(os.getenv("BOB_TOOL_LOOP_FOLD_KEEP_LAST", "4")),
+                fold_size_threshold=int(os.getenv("BOB_TOOL_LOOP_FOLD_THRESHOLD", "4000")),
+                fold_head_chars=int(os.getenv("BOB_TOOL_LOOP_FOLD_HEAD", "1500")),
+                fold_tail_chars=int(os.getenv("BOB_TOOL_LOOP_FOLD_TAIL", "500")),
+                history_view_keep=int(os.getenv("BOB_TOOL_LOOP_HISTORY_KEEP", "20")),
+                history_view_trigger_chars=int(
+                    os.getenv("BOB_TOOL_LOOP_HISTORY_TRIGGER", "40000")),
             ),
             reconciliation=reconciliation,
             dream=dream,

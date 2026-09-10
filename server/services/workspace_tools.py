@@ -354,4 +354,11 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
 
         tools.append(update_agenda)
 
+        # Utility conversations (docs/utility-conversations-plan.md Part 3):
+        # self-serve sensation routing, owner-approved at creation/widening.
+        from server.services.utility_conversations import (
+            make_sensation_route_tools,
+        )
+        tools.extend(make_sensation_route_tools(ctx, session_key))
+
     return tools

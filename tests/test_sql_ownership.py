@@ -50,6 +50,8 @@ OWNERS: dict[str, list[str]] = {
     "wakeups": ["repositories/wakeups.py"],
     "stimulus_events": ["repositories/stimulus.py"],
     "stimulus_routes": ["repositories/stimulus.py"],
+    "stimulus_route_fires": ["repositories/stimulus.py"],
+    "utility_conversations": ["repositories/utility_conversations.py"],
     "attention_shadow": ["services/attention/"],
     "llm_call_log": ["repositories/llm_call_log.py"],
     "phone_calls": ["repositories/phone_calls.py"],
