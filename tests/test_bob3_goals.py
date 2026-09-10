@@ -262,3 +262,55 @@ async def test_outreach_state_lives_on_goal(ctx, db):
 
     await settle_goal(ctx, goal["id"], status="completed", result="done")
     assert await ContextAssembler(ctx).goals_block(target) == ""
+
+
+# ── completed-goal error sentinel (2026-09-10 Meshy incident) ──────────
+
+async def test_completed_with_error_result_flags_wake(ctx, db, monkeypatch):
+    """A completed goal whose result carries an API error (the Meshy
+    insufficientCredits 400 that exited 0) must wake with a loud warning
+    header — the plain '## Goal completed' shape got narrated as success."""
+    wake = AsyncMock()
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="c", objective="meshy test",
+        origin_conversation_id="o")
+    await goal_service.settle_goal(
+        ctx, goal["id"], status="completed",
+        result='exit_code=0 stdout: submitting: meshy:meshy-6 '
+               'HTTP 400 {"errors": [{"code": "insufficientCredits"}]} '
+               'MESHY_DONE')
+    wake.assert_awaited_once()
+    content = wake.await_args.args[2]
+    assert "OUTPUT CONTAINS AN ERROR" in content
+    assert "insufficientcredits" in content.lower()
+    assert "did NOT succeed" in content
+
+
+async def test_completed_clean_result_wakes_normally(ctx, db, monkeypatch):
+    wake = AsyncMock()
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="c", objective="clean job",
+        origin_conversation_id="o")
+    await goal_service.settle_goal(ctx, goal["id"], status="completed",
+                                   result="saved scratch/out.glb 5 MB")
+    content = wake.await_args.args[2]
+    assert content.startswith("## Goal completed\n")
+    assert "OUTPUT CONTAINS AN ERROR" not in content
+
+
+async def test_failed_status_never_flags(ctx, db, monkeypatch):
+    """Failed goals already say they failed — the sentinel is for the
+    completed-with-error shape only."""
+    from server.services.goal_service import result_error_signature
+    assert result_error_signature("Traceback (most recent call last): boom") \
+        is not None
+    wake = AsyncMock()
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="c", objective="x", origin_conversation_id="o")
+    await goal_service.settle_goal(ctx, goal["id"], status="failed",
+                                   result="Traceback (most recent call last)")
+    content = wake.await_args.args[2]
+    assert content.startswith("## Goal failed\n")

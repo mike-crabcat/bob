@@ -110,6 +110,31 @@ async def _wakeup_target(repo: GoalRepository, goal: dict[str, Any]) -> str:
     return goal["origin_conversation_id"] or goal["conversation_id"]
 
 
+# Completed-goal error signatures (2026-09-10 incident): a Meshy submit
+# returned HTTP 400 insufficientCredits, the script exited 0 anyway, the
+# goal closed as completed — and the completion wake was narrated as "On
+# it — testing" because the error sat at the bottom of the result. Any of
+# these in a COMPLETED goal's result means the job probably did not
+# succeed; the wake must say so up top.
+_RESULT_ERROR_SIGNATURES = (
+    "insufficientcredits", "insufficient credits",
+    "http 400", "http 401", "http 402", "http 403", "http 404",
+    "http 422", "http 429", "http 5",
+    '"errors": [', '"errors":[',
+    "traceback (most recent call last)",
+    "error: unauthorised", "error: unauthorized",
+)
+
+
+def result_error_signature(result: str) -> str | None:
+    """The first error signature found in a goal result, or None."""
+    low = (result or "").lower()
+    for sig in _RESULT_ERROR_SIGNATURES:
+        if sig in low:
+            return sig
+    return None
+
+
 async def settle_goal(
     ctx: AppContext,
     goal_id: str,
@@ -162,10 +187,19 @@ async def settle_goal(
     if wake_origin and origin and origin != goal["conversation_id"]:
         from server.services.wake_service import wake_conversation
 
+        sig = result_error_signature(result) if status == "completed" else None
+        if sig:
+            logger.warning(
+                "goal %s completed but its result carries error signature "
+                "%r — the wake is flagged so it can't be narrated as success",
+                goal_id, sig)
         content = wake_content or (
-            f"## Goal {status}\n"
-            f"Objective: {goal['objective']}\n\n"
-            f"{result}"
+            (f"## Goal {status} — ⚠ OUTPUT CONTAINS AN ERROR ({sig}): the "
+             f"job likely did NOT succeed. Read the full result below "
+             f"before reporting anything.\n"
+             if sig else f"## Goal {status}\n")
+            + f"Objective: {goal['objective']}\n\n"
+            + f"{result}"
         )
         try:
             await wake_conversation(
@@ -190,8 +224,11 @@ async def _roll_up_to_parent(
 
     stimulus = (
         f"## Child goal {status}\n"
-        f"Objective: {child['objective']}\n\n"
-        f"Result: {result}"
+        + (f"⚠ OUTPUT CONTAINS AN ERROR — the child likely did NOT succeed. "
+           f"Read the result.\n"
+           if status == "completed" and result_error_signature(result) else "")
+        + f"Objective: {child['objective']}\n\n"
+        + f"Result: {result}"
     )
     try:
         await enqueue_revision(
