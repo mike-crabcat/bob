@@ -757,13 +757,15 @@ class OpenAIService(BaseService):
                         iteration,
                         total_total, total_input, total_output, total_cached,
                     )
-                    if fold_dropped or use_view:
+                    view_live = use_view and base_len > (
+                        tl.history_view_keep if tl is not None else 20) + 1
+                    if fold_dropped or view_live:
                         logger.info(
                             "tool-loop folding: dropped %d chars over %d tool "
                             "round(s); history view %s (%d history msgs → keep "
                             "%d) dispatch_id=%s session_key=%s",
                             fold_dropped, fold_count,
-                            "on" if use_view else "off", base_len,
+                            "on" if view_live else "off", base_len,
                             tl.history_view_keep if tl is not None else 20,
                             dispatch_id, session_key)
                     if stream_result is not None:
