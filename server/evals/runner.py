@@ -133,7 +133,8 @@ class EvalRunner:
                 {"kind": r.check.kind, "passed": r.passed, "detail": r.detail}
                 for r in result.structural_results
             ])
-            input_json = json.dumps(result.input_messages) if result.input_messages else None
+            input_json = json.dumps(
+                result.input_messages, default=str) if result.input_messages else None
             await self.ctx.db.execute(
                 """INSERT INTO eval_case_results
                    (id, run_id, case_id, category, passed, llm_response,

@@ -15,6 +15,7 @@ from typing import Any, NoReturn
 
 from server.context import AppContext
 from server.services import model_registry
+from server.services import tool_loop_folding
 from server.services.base import BaseService
 from server.services.tools import ImageInjection, VideoInjection
 
@@ -616,6 +617,20 @@ class OpenAIService(BaseService):
                     if time_limit_seconds is not None else None)
         nudged = False
 
+        # Tool-loop folding (2026-09-10): the caller's history is exactly
+        # messages[:base_len]; everything after is this loop's transcript.
+        # Big loops re-sent that whole prefix on every iteration — fold aged
+        # oversized results in place, and when the history itself is big,
+        # intermediate iterations carry a trimmed wire view of it.
+        tl = getattr(self._get_settings(), "tool_loop", None)
+        base_len = len(messages)
+        use_view = False
+        if tl is not None and tl.folding_enabled:
+            use_view = tool_loop_folding.history_chars(
+                messages, base_len) > tl.history_view_trigger_chars
+        fold_dropped = 0
+        fold_count = 0
+
         total_input = total_output = total_total = 0
         total_cached = 0
 
@@ -645,10 +660,16 @@ class OpenAIService(BaseService):
                     return await self._forced_wrapup(
                         messages, resolved_model, request_kwargs,
                         dispatch_id=dispatch_id, session_key=session_key,
-                        fallback=_LEGACY_TIME_STOP)
+                        fallback=_LEGACY_TIME_STOP,
+                        base_len=base_len if use_view else None,
+                        history_keep=tl.history_view_keep if tl is not None else 20)
 
                 response = await self._client_for(resolved_model).responses.create(
-                    input=messages,
+                    input=tool_loop_folding.iteration_view(
+                        messages, base_len,
+                        history_keep=(tl.history_view_keep
+                                      if tl is not None else 20))
+                    if use_view else messages,
                     **request_kwargs,
                 )
 
@@ -736,6 +757,15 @@ class OpenAIService(BaseService):
                         iteration,
                         total_total, total_input, total_output, total_cached,
                     )
+                    if fold_dropped or use_view:
+                        logger.info(
+                            "tool-loop folding: dropped %d chars over %d tool "
+                            "round(s); history view %s (%d history msgs → keep "
+                            "%d) dispatch_id=%s session_key=%s",
+                            fold_dropped, fold_count,
+                            "on" if use_view else "off", base_len,
+                            tl.history_view_keep if tl is not None else 20,
+                            dispatch_id, session_key)
                     if stream_result is not None:
                         stream_result.prompt_tokens = total_input
                         stream_result.completion_tokens = total_output
@@ -794,6 +824,17 @@ class OpenAIService(BaseService):
                     iteration + 1, len(function_calls),
                 )
 
+                if tl is not None and tl.folding_enabled:
+                    dropped = tool_loop_folding.fold_aged_tool_outputs(
+                        messages,
+                        keep_last=tl.fold_keep_last,
+                        size_threshold=tl.fold_size_threshold,
+                        head_chars=tl.fold_head_chars,
+                        tail_chars=tl.fold_tail_chars)
+                    if dropped:
+                        fold_dropped += dropped
+                        fold_count += 1
+
                 if on_iteration_complete:
                     try:
                         await on_iteration_complete(messages)
@@ -808,7 +849,9 @@ class OpenAIService(BaseService):
             return await self._forced_wrapup(
                 messages, resolved_model, request_kwargs,
                 dispatch_id=dispatch_id, session_key=session_key,
-                fallback=_LEGACY_ITER_STOP)
+                fallback=_LEGACY_ITER_STOP,
+                base_len=base_len if use_view else None,
+                history_keep=tl.history_view_keep if tl is not None else 20)
         finally:
             # Budget nudges are turn-scoped guidance — never persist them
             # into the conversation history the caller keeps.
@@ -818,16 +861,22 @@ class OpenAIService(BaseService):
         self, messages: list[dict[str, Any]], resolved_model: str,
         request_kwargs: dict[str, Any], *, dispatch_id: str | None,
         session_key: str | None, fallback: str,
+        base_len: int | None = None, history_keep: int = 20,
     ) -> str:
         """Exhaustion path: one final LLM round with tools stripped, so the
         model writes its own closing reply instead of hitting a canned stop.
         Falls back to the legacy canned string when the round fails or comes
-        back empty — callers always get a non-empty string."""
+        back empty — callers always get a non-empty string. ``base_len`` set
+        means the loop was using a trimmed history view; the wrap-up round
+        rides the same view."""
         kwargs = {k: v for k, v in request_kwargs.items() if k != "tools"}
         messages.append({"role": "system", "content": _SELF_WRAP_FINAL})
         try:
+            wire = tool_loop_folding.iteration_view(
+                messages, base_len, history_keep=history_keep) \
+                if base_len is not None else messages
             response = await self._client_for(resolved_model).responses.create(
-                input=messages, **kwargs)
+                input=wire, **kwargs)
         except Exception:
             logger.error(
                 "OpenAI forced wrap-up round failed: model=%s dispatch_id=%s "
