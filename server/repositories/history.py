@@ -18,6 +18,14 @@ from typing import Any
 
 _DIALOGUE_ROLES = "('user', 'assistant')"
 
+# Machine-stimulus provenances: not dialogue a human wrote, so they never
+# count as "undigested" for memory extraction (2026-09-11: the Bob Security
+# Guard group burned ~17% of ALL extraction tokens digesting steer streams
+# that concluded "Nothing to record" ~every time). Extraction fires on human
+# exchanges; steer/relay content still RENDERS in extraction context when a
+# run happens — only the trigger and idle measurement change.
+_MACHINE_PROVENANCES = "('steer', 'steer_relay', 'task_relay', 'extraction_marker')"
+
 # Internal bookkeeping rows excluded from replayed context by default.
 # wake_nudge provenance IS replayed — it is the actual conversational
 # stimulus for its turn. Routine REPLIES replay (the group saw them, so
@@ -92,12 +100,14 @@ class HistoryRepository:
             row = await self.db.fetch_one(
                 f"SELECT COUNT(*) AS n FROM messages "
                 f"WHERE conversation_id = ? AND datetime(created_at) > datetime(?) "
-                f"AND role IN {_DIALOGUE_ROLES}",
+                f"AND role IN {_DIALOGUE_ROLES} "
+                f"AND (provenance IS NULL OR provenance NOT IN {_MACHINE_PROVENANCES})",
                 (cid, since_iso))
         else:
             row = await self.db.fetch_one(
                 f"SELECT COUNT(*) AS n FROM messages "
-                f"WHERE conversation_id = ? AND role IN {_DIALOGUE_ROLES}",
+                f"WHERE conversation_id = ? AND role IN {_DIALOGUE_ROLES} "
+                f"AND (provenance IS NULL OR provenance NOT IN {_MACHINE_PROVENANCES})",
                 (cid,))
         return int(row["n"]) if row and row["n"] else 0
 
@@ -387,8 +397,11 @@ class HistoryRepository:
         return [dict(r) for r in rows] if rows else []
 
     async def extraction_candidates(self, *, idle_threshold_minutes: float) -> list[dict]:
-        """Conversations with messages newer than their last silent memory
-        extraction, idle past the threshold (heartbeat idle-summary seam)."""
+        """Conversations with HUMAN dialogue newer than their last silent
+        memory extraction, idle on human messages past the threshold
+        (heartbeat idle-summary seam). Machine stimulus (steers, relays,
+        markers) never flags a session for extraction and never resets its
+        idle clock — see _MACHINE_PROVENANCES."""
         rows = await self.db.fetch_all(
             """
             SELECT
@@ -402,6 +415,9 @@ class HistoryRepository:
                 COUNT(*) AS message_count
             FROM messages sm
             WHERE sm.conversation_id NOT LIKE 'subagent:%'
+              AND (sm.provenance IS NULL
+                   OR sm.provenance NOT IN ('steer', 'steer_relay', 'task_relay',
+                                             'extraction_marker'))
               AND datetime(sm.created_at) > datetime(COALESCE(
                 (SELECT MAX(ran_at) FROM memory_extraction_turns
                  WHERE session_key = sm.conversation_id),
