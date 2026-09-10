@@ -178,7 +178,9 @@ async def test_group_chat_claim_updates_dm_born_goal(ctx, db, mock_wake, llm_cha
 
     log = await db.fetch_one("SELECT * FROM memory_routing_log")
     assert log is not None and log["match_type"] == "ref"
-    assert log["probe_verdict"] == "skipped", "ref matches skip the probe"
+    # 2026-09-10: every tier is probed — blind ref delivery made accreted
+    # goals claim magnets (steak preferences reaching an AFL scoreline goal).
+    assert log["probe_verdict"] == "relevant", "ref matches are probed"
 
 
 async def test_wake_when_next_actions_change(ctx, db, mock_wake, llm_chat):

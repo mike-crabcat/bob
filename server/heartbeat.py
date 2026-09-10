@@ -632,7 +632,12 @@ class GoalReviewTask:
                 "increment `review_streak` by 1 and set wake_needed=true ONLY "
                 "if the new streak equals 2 (first escalation); routine stuck "
                 "confirmations do not re-wake. If the state changed, reset "
-                "`review_streak` to 0 and apply the normal wake rules.")
+                "`review_streak` to 0 and apply the normal wake rules.\n"
+                "If the objective is fully achieved — the event happened, the "
+                "plan is complete, nothing left to chase — do NOT re-validate: "
+                "set wake_needed=true with a wake_summary directing the "
+                "assistant to CLOSE this goal. Achieved goals must not be "
+                "reviewed forever.")
             try:
                 await enqueue_revision(
                     ctx, goal["id"], stimulus,

@@ -274,15 +274,19 @@ silently. Respond with ONLY a JSON object: {"verdict": "RELEVANT"|"IGNORE"}"""
 
 async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
                            facts: str) -> str:
-    """Cheap relevance gate for weak (participant-only) matches. Fails open
-    to 'relevant' on any error (plan §2.3 asymmetry)."""
+    """Cheap relevance gate for claim→goal delivery (all match tiers since
+    2026-09-10). Fails open to 'relevant' on any error (plan §2.3
+    asymmetry)."""
     try:
         from server.services.llm_dispatch import LLMDispatchService
+        from server.services.goal_state_service import parse_strategy, render_strategy
 
+        state_summary = render_strategy(parse_strategy(goal))
         result = await LLMDispatchService(ctx).chat(
             [{"role": "system", "content": _PROBE_SYSTEM},
              {"role": "user", "content":
-              f"# Plan\n{goal['objective']}\n\n# New facts\n{facts}"}],
+              f"# Plan\n{goal['objective']}\n\n# Current state\n"
+              f"{state_summary or '(none)'}\n\n# New facts\n{facts}"}],
             model=ctx.settings.goals.reviser_model
                 or ctx.settings.openai.get_memory_model(),
             temperature=0.0,
@@ -355,18 +359,22 @@ async def _route_batch(
         if goal is None or goal["status"] != "active":
             continue
 
+        # Every match tier is probed (2026-09-10): ref/mention matching was
+        # delivering blind, and a goal whose state has accreted refs becomes
+        # a magnet for unrelated claims (steak preferences reaching an AFL
+        # scoreline goal). The probe is cheap and fails open, so the worst
+        # case is the old behavior.
         probe_verdict = "skipped"
-        if match_type == "participant":
-            verdict = await _probe_relevance(ctx, goal, stimulus)
-            # Fail open: probe errors deliver as if relevant.
-            if verdict == "ignore":
-                await _log_decision(ctx, turn_message_id, cid, goal_id, batch,
-                                    match_type, probe_verdict="ignore",
-                                    revise_outcome="skipped", wake="no_wake",
-                                    detail="probe ignored")
-                skipped += 1
-                continue
-            probe_verdict = verdict
+        verdict = await _probe_relevance(ctx, goal, stimulus)
+        # Fail open: probe errors deliver as if relevant.
+        if verdict == "ignore":
+            await _log_decision(ctx, turn_message_id, cid, goal_id, batch,
+                                match_type, probe_verdict="ignore",
+                                revise_outcome="skipped", wake="no_wake",
+                                detail="probe ignored")
+            skipped += 1
+            continue
+        probe_verdict = verdict
 
         try:
             result = await enqueue_revision(

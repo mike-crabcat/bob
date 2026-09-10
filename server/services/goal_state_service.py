@@ -179,12 +179,30 @@ Rules:
   only a real timestamp triggers follow-through; prose dues never fire. When
   the event instant differs from the goal's deadline, note in `known` that
   the deadline should be the event time (the main model owns setting it).
+- Completion: if the objective is fully achieved (the event happened, the
+  plan is complete, nothing is left to chase), set wake_needed=true with a
+  wake_summary directing the assistant to CLOSE the goal. Achieved goals
+  must not be re-validated forever.
 
-Respond with ONLY a JSON object:
-{"state": {"v": 2, "plan": "...", "known": ["..."], "open_questions": ["..."],
- "next_actions": [{"action": "...", "due": "ISO or empty"}],
- "refs": {"entities": ["..."], "claims": ["..."]}},
- "wake_needed": false, "wake_summary": "one sentence when wake_needed"}"""
+Respond with ONLY a JSON object — a PATCH of operations against the current
+state, never the full state re-emitted:
+{"ops": [
+   {"op": "known.append", "values": ["..."]},
+   {"op": "known.remove", "prefixes": ["..."]},
+   {"op": "known.keep_recent", "n": 20},
+   {"op": "plan.set", "value": "..."},
+   {"op": "open_questions.set", "values": ["..."]},
+   {"op": "next_actions.set", "values": [{"action": "...", "due": "ISO or empty"}]},
+   {"op": "refs.add", "entities": ["..."], "claims": ["..."]}
+ ],
+ "wake_needed": false, "wake_summary": "one sentence when wake_needed"}
+
+- Emit ONLY the operations this stimulus needs — usually one or two. An
+  empty ops list (nothing changed) is a valid answer.
+- `known.append` skips exact duplicates. Use `known.remove` (entry-start
+  prefixes) when a fact is resolved or superseded, and `known.keep_recent`
+  to compact a state that has grown long.
+- Small lists (open_questions, next_actions) are replaced whole via .set."""
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -198,27 +216,111 @@ def _extract_json(text: str) -> dict[str, Any]:
         pass
     start, end = text.find("{"), text.rfind("}")
     if start >= 0 and end > start:
-        parsed = json.loads(text[start:end + 1])
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            raise ValueError("no valid JSON object in reviser response")
         if isinstance(parsed, dict):
             return parsed
+        raise ValueError("no JSON object in reviser response")
     raise ValueError("no JSON object in reviser response")
+
+
+def apply_ops(state: GoalStrategy, ops: list[Any]) -> GoalStrategy:
+    """Apply reviser patch operations to ``state`` (a copy; caller CAS-writes).
+
+    Unknown or malformed ops are skipped with a log, not raised — a reviser
+    response is model output, and one bad op must not discard the good ones.
+    """
+    new = state.model_copy(deep=True)
+    if not isinstance(ops, list):
+        return new
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        kind = op.get("op")
+        try:
+            if kind == "known.append":
+                values = [str(v) for v in op.get("values") or []
+                          if str(v).strip()]
+                for v in values:
+                    if v not in new.known:
+                        new.known.append(v)
+            elif kind == "known.remove":
+                prefixes = [str(p) for p in op.get("prefixes") or [] if str(p)]
+                new.known = [k for k in new.known
+                             if not any(k.startswith(p) for p in prefixes)]
+            elif kind == "known.keep_recent":
+                n = int(op.get("n") or 0)
+                if 0 < n < len(new.known):
+                    new.known = new.known[-n:]
+            elif kind == "plan.set":
+                new.plan = str(op.get("value") or "")
+            elif kind == "open_questions.set":
+                new.open_questions = [str(v) for v in op.get("values") or []]
+            elif kind == "next_actions.set":
+                new.next_actions = [
+                    NextAction.model_validate(v) for v in op.get("values") or []]
+            elif kind == "refs.add":
+                for e in op.get("entities") or []:
+                    if str(e) and str(e) not in new.refs.entities:
+                        new.refs.entities.append(str(e))
+                for c in op.get("claims") or []:
+                    if str(c) and str(c) not in new.refs.claims:
+                        new.refs.claims.append(str(c))
+            else:
+                logger.warning("reviser op skipped (unknown): %r",
+                               str(op)[:120])
+        except (TypeError, ValueError, ValidationError):
+            logger.warning("reviser op skipped (malformed): %r", str(op)[:120])
+    return new
+
+
+# Above this size the prompt carries a compacted view (recent `known` only).
+# Ops apply against the FULL state platform-side, so the view being partial
+# is safe; legacy full-state responses are then refused (they would drop the
+# omitted entries).
+_COMPACT_ABOVE_CHARS = 30_000
+_COMPACT_KEEP_KNOWN = 40
+
+
+def _state_view_for_prompt(state: GoalStrategy) -> tuple[str, bool]:
+    """(state JSON for the prompt, compacted?)"""
+    full = json.dumps(json.loads(strategy_json_for(state)), indent=1)
+    if len(full) <= _COMPACT_ABOVE_CHARS or len(state.known) <= _COMPACT_KEEP_KNOWN:
+        return full, False
+    view = state.model_copy(deep=True)
+    omitted = len(view.known) - _COMPACT_KEEP_KNOWN
+    view.known = view.known[-_COMPACT_KEEP_KNOWN:]
+    text = json.dumps(json.loads(strategy_json_for(view)), indent=1)
+    return (f"(state compacted for this view: {omitted} earlier `known` "
+            f"entries omitted — they remain in the goal and ops apply to the "
+            f"full state; use known.keep_recent to compact if warranted)\n"
+            + text), True
 
 
 async def _call_reviser(
     ctx: AppContext, goal: dict[str, Any], state: GoalStrategy, stimulus: str,
 ) -> tuple[GoalStrategy, bool, str]:
     """One reviser LLM pass with a single validation retry. Raises on hard
-    failure; callers degrade to wake."""
+    failure; callers degrade to wake.
+
+    Ops contract (2026-09-10): the reviser returns a PATCH of operations,
+    not the re-emitted state — output is O(stimulus) instead of O(state), so
+    a grown state can no longer truncate itself against the token cap. A
+    legacy full-state response is still accepted when the input view was the
+    full state. A response that looks cap-truncated (huge + unparseable)
+    fails fast: the temp-0 retry would truncate identically."""
     from server.services.llm_dispatch import LLMDispatchService
 
     model = (ctx.settings.goals.reviser_model
              or ctx.settings.openai.get_memory_model())
-    state_json = json.dumps(json.loads(strategy_json_for(state)), indent=1)
+    state_json, compacted = _state_view_for_prompt(state)
     user = (
         f"# Goal ({goal['kind']})\n{goal['objective']}\n\n"
         f"# Current state\n{state_json}\n\n"
         f"# Stimulus\n{stimulus}\n\n"
-        "Return the updated state JSON object per the contract."
+        "Return the patch operations JSON object per the contract."
     )
     from server.services.prompt_assembler import local_now_prompt_line
 
@@ -229,6 +331,10 @@ async def _call_reviser(
         {"role": "system", "content": _reviser_system_prompt() + "\n\n" + local_now_prompt_line(tools_hint=False)},
         {"role": "user", "content": user},
     ]
+    # Rough chars-per-token for truncation detection (GLM ~3-4); 0.75 of the
+    # cap's char equivalent means the parse failure is almost certainly the
+    # cap, not sloppiness.
+    truncation_chars = int(ctx.settings.goals.reviser_max_tokens * 3 * 0.75)
 
     async with await _semaphore(ctx):
         last_error = ""
@@ -247,19 +353,40 @@ async def _call_reviser(
             )
             try:
                 parsed = _extract_json(result)
-                new_state = GoalStrategy.model_validate(parsed.get("state") or {})
                 wake_needed = bool(parsed.get("wake_needed"))
                 summary = str(parsed.get("wake_summary") or "")[:400]
-                return new_state, wake_needed, summary
+                if isinstance(parsed.get("ops"), list):
+                    new_state = apply_ops(state, parsed["ops"])
+                    return new_state, wake_needed, summary
+                if "state" in parsed and not compacted:
+                    # Legacy full-state response (uncompacted view only).
+                    new_state = GoalStrategy.model_validate(
+                        parsed.get("state") or {})
+                    return new_state, wake_needed, summary
+                raise ValueError(
+                    "response carried neither ops nor a usable state"
+                    + (" (full-state answers are not accepted on a compacted"
+                       " view)" if compacted else ""))
             except (ValueError, json.JSONDecodeError, ValidationError) as exc:
                 last_error = str(exc)[:300]
+                if len(result) >= truncation_chars:
+                    # Cap-truncated: the temp-0 retry would produce the same
+                    # truncation — fail fast, caller degrades to wake.
+                    logger.warning(
+                        "goal %s: reviser output cap-truncated "
+                        "(%d chars ≥ %d) — skipping identical retry",
+                        goal["id"], len(result), truncation_chars)
+                    raise ValueError(
+                        f"reviser output cap-truncated ({len(result)} chars)"
+                    ) from exc
                 logger.warning("goal %s: reviser output invalid (attempt %d): %s",
                                goal["id"], attempt, last_error)
                 messages = messages + [
                     {"role": "assistant", "content": result[:2000]},
                     {"role": "user", "content":
-                     f"Your output was invalid ({last_error}). Respond again with "
-                     "ONLY the JSON object per the contract, corrected."},
+                     f"Your output was invalid ({last_error}). Respond again "
+                     "with ONLY the patch-ops JSON object per the contract, "
+                     "corrected."},
                 ]
     raise ValueError(f"reviser output invalid after retry: {last_error}")
 
