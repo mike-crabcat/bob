@@ -154,6 +154,28 @@ async def test_recurring_wakeup_reschedules(ctx, db, monkeypatch):
     assert len(scheduled) == 1 and scheduled[0]["recurrence"] == "+30m"
 
 
+async def test_bare_date_not_before_does_not_wedge_pump(ctx, db, monkeypatch):
+    """A naive not_before (e.g. goal deadline '2026-09-30' straight from the
+    LLM) must not crash claim_due against the aware pump clock — found live
+    2026-09-11 when one such row killed every pump cycle for ~24h."""
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", AsyncMock())
+    wake_repo = WakeupRepository(db)
+
+    future_bare = "2030-01-01"
+    past_bare = "2020-01-01"
+    await wake_repo.schedule(conversation_id="c", not_before=future_bare)
+    await wake_repo.schedule(conversation_id="c", not_before=past_bare)
+
+    # Stored canonicalised, not verbatim.
+    stored = {w["not_before"] for w in await wake_repo.list_scheduled("c")}
+    assert "2030-01-01T00:00:00+00:00" in stored
+    assert "2020-01-01T00:00:00+00:00" in stored
+
+    # Pump survives; only the past one fires.
+    assert await goal_service.pump_due_wakeups(ctx) == 1
+    assert len(await wake_repo.list_scheduled("c")) == 1
+
+
 async def test_goal_tools_create_and_complete_via_effects(ctx, db, monkeypatch):
     import json as _json
 

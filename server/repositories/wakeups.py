@@ -22,11 +22,15 @@ def _now_iso() -> str:
 
 def _parse_instant(value: str) -> datetime | None:
     """Parse an ISO instant from a not_before/deadline string, tolerating a
-    trailing 'Z'. Returns None when unparseable."""
+    trailing 'Z'. Naive values (e.g. a bare '2026-09-30' goal deadline) are
+    read as UTC so they stay comparable against the aware pump clock (found
+    live 2026-09-11 — one bare deadline wedged the whole pump). Returns None
+    when unparseable."""
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 class WakeupRepository:
@@ -45,6 +49,12 @@ class WakeupRepository:
         kind: str = "wake",
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # Canonicalise at write time: every writer (goal deadlines included)
+        # funnels through here, so nothing naive or Z-suffixed reaches the
+        # pump's instant comparisons.
+        when = _parse_instant(not_before)
+        if when is not None:
+            not_before = when.isoformat()
         wid = str(uuid.uuid4())
         await self.db.execute(
             """INSERT INTO wakeups
