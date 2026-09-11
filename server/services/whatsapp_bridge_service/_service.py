@@ -1018,7 +1018,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # tool then captures replies as the task result instead of delivering.
         backburner_capture: dict[str, Any] = {"enabled": False, "texts": []}
 
-        async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+        async def _send_whatsapp_message(text: str = "", media_path: str = "") -> str:
+            # 2026-09-11: media-only sends used to TypeError on the required
+            # text arg — an empty caption is now valid.
+            if not (text or "").strip() and not media_path:
+                return ("Error: not sent — provide text, media_path, or both.")
             # Leaked-markup guard (2026-09-04 Bob-management leak): models
             # sometimes emit their send call as <tool_call> XML text, and
             # upstream parsing can eat the opening half leaving tag soup.
@@ -1036,7 +1040,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             # Detached turn: capture, don't deliver. The supervisor relays the
             # result to the user via the wake path once the task finishes.
             if backburner_capture["enabled"] and not is_no_reply(text):
-                backburner_capture["texts"].append(text)
+                # Media-only captures keep a placeholder so the relay doesn't
+                # drop the fact a file went out.
+                backburner_capture["texts"].append(
+                    text or f"[Image: {media_path}]")
                 return ("This turn was detached — your reply was captured and will be "
                         "relayed to the user when this background task finishes. Do not "
                         "attempt other send routes.")
@@ -1081,13 +1088,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             description=(
                 "Send a reply to the current WhatsApp conversation. "
                 "You MUST call this tool to deliver your response — your text output will NOT be sent. "
-                "Optionally attach an image or media file by providing media_path."
+                "Optionally attach an image or media file by providing media_path "
+                "(text is then the caption, and may be empty for media-only sends)."
             ),
             parameters={
-                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided)."},
+                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided; optional when sending media only)."},
                 "media_path": {"type": "string", "description": "Optional path to an image or media file, relative to the workspace directory."},
             },
-            required=["text"],
+            required=[],
             handler=_send_whatsapp_message,
         ))
 

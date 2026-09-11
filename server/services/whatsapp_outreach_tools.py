@@ -54,21 +54,47 @@ async def _deliver_group_send(
     idempotency_key: str,
     provenance: dict[str, Any],
     now: float,
+    media_path: str = "",
 ) -> dict[str, Any]:
-    """The single group-send primitive: emit the whatsapp_send effect, consume
-    the per-group rate-limit slot, mirror the message into the group's history
-    (as the bridge does for inbound). Callers own every gate — membership,
-    policy, approval. Extra provenance keys ride in the effect payload for the
-    dashboard timeline and audit."""
+    """The single group-send primitive: emit the whatsapp_send /
+    whatsapp_send_media effect, consume the per-group rate-limit slot, mirror
+    the message into the group's history (as the bridge does for inbound).
+    Callers own every gate — membership, policy, approval. Extra provenance
+    keys ride in the effect payload for the dashboard timeline and audit."""
     from server.services.effects import emit_and_deliver
 
-    result = await emit_and_deliver(
-        ctx, kind="whatsapp_send",
-        idempotency_key=idempotency_key,
-        payload={"chat_id": f"{group_id}@g.us", "text": message,
-                 "origin_session_key": origin_session_key,
-                 **provenance},
-    )
+    prepared_media: str | None = None
+    if media_path:
+        from server.services.whatsapp_bridge_service._media import (
+            _prepare_media, resolve_sendable_media,
+        )
+        resolved = resolve_sendable_media(
+            ctx.settings.harness.workspace_dir, media_path)
+        if isinstance(resolved, str):
+            return {"ok": False, "error": resolved}
+        prepared_media = await _prepare_media(str(resolved))
+        if prepared_media is None:
+            return {"ok": False, "error": "failed to prepare media for sending"}
+
+    if prepared_media is not None:
+        result = await emit_and_deliver(
+            ctx, kind="whatsapp_send_media",
+            idempotency_key=idempotency_key,
+            payload={"chat_id": f"{group_id}@g.us",
+                     "file_path": prepared_media, "caption": message,
+                     "origin_session_key": origin_session_key,
+                     **provenance},
+        )
+        mirror_text = f"[Image: {message}]" if message else "[Image]"
+    else:
+        result = await emit_and_deliver(
+            ctx, kind="whatsapp_send",
+            idempotency_key=idempotency_key,
+            payload={"chat_id": f"{group_id}@g.us", "text": message,
+                     "origin_session_key": origin_session_key,
+                     **provenance},
+        )
+        mirror_text = message
     if not result.get("ok"):
         return result
     _record_group_send(group_key, now)
@@ -78,7 +104,7 @@ async def _deliver_group_send(
     try:
         from server.services.session_service import SessionService
         await SessionService(ctx).add_message(
-            group_key, "assistant", message, channel="whatsapp",
+            group_key, "assistant", mirror_text, channel="whatsapp",
             metadata={"proactive_group_send": True, **provenance},
         )
     except Exception:
@@ -112,14 +138,25 @@ def make_group_send_tools(
         group_id: str,
         message: str,
         goal_id: str = "",
+        media_path: str = "",
     ) -> str:
         """Send a proactive message to a WhatsApp group you are a member of
-        (group_id is the raw group id, no @g.us). For Bob-initiated posts —
-        polls, updates, reminders tied to a plan — and only to groups with
-        outbound sends enabled; pass goal_id when the send serves a goal so
-        it's attributable. User-requested messaging is not this tool: turns
-        a human started carry steer_conversation instead (any conversation
-        they belong to, no policy flag, can carry images)."""
+        (group_id is the raw group id, no @g.us), optionally with an attached
+        image/video (media_path, workspace-relative; message becomes the
+        caption). For Bob-initiated posts — polls, updates, reminders tied
+        to a plan — and only to groups with outbound sends enabled; pass
+        goal_id when the send serves a goal so it's attributable.
+        User-requested messaging is not this tool: turns a human started
+        carry steer_conversation instead (any conversation they belong to,
+        no policy flag, can carry images).
+
+        FAN-OUT RULE (2026-09-11 coffee-gif incident, echoing the 2026-08-30
+        dual-post): when the same exact content goes to several groups,
+        deliver it with THIS tool alone — one turn, one resolved media file,
+        one call per group. NEVER also steer those groups for the same
+        instruction: steers spawn independent turns that re-interpret the
+        request (and each picked a different random gif). Steer = delegate
+        judgment to the target conversation; this tool = deliver a payload."""
         import time
 
         from server.repositories.conversations import ConversationRepository
@@ -150,7 +187,8 @@ def make_group_send_tools(
             ctx, group_key=group_key, group_id=group_id, message=message,
             origin_session_key=current_session_key,
             idempotency_key=f"whatsapp_group_send:{group_key}:{uuid4().hex[:8]}",
-            provenance={"goal_id": goal_id or None}, now=now)
+            provenance={"goal_id": goal_id or None}, now=now,
+            media_path=media_path)
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "delivery failed")})
 

@@ -254,9 +254,13 @@ class GroupEventsMixin:
         sent_texts: list[str] = []
         send_seq = [0]
 
-        async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+        async def _send_whatsapp_message(text: str = "", media_path: str = "") -> str:
             from server.services.effects import emit_and_deliver
 
+            if not (text or "").strip() and not media_path:
+                # 2026-09-11: media-only sends used to TypeError on the
+                # required text arg — an empty caption is now valid.
+                return ("Error: not sent — provide text, media_path, or both.")
             message_was_sent[0] = True
             if is_no_reply(text):
                 return "No reply sent."
@@ -297,13 +301,14 @@ class GroupEventsMixin:
             description=(
                 "Send a reply to the current WhatsApp conversation. "
                 "You MUST call this tool to deliver your response — your text output will NOT be sent. "
-                "Optionally attach an image or media file by providing media_path."
+                "Optionally attach an image or media file by providing media_path "
+                "(text is then the caption, and may be empty for media-only sends)."
             ),
             parameters={
-                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided)."},
+                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided; optional when sending media only)."},
                 "media_path": {"type": "string", "description": "Optional path to an image or media file, relative to the workspace directory."},
             },
-            required=["text"],
+            required=[],
             handler=_send_whatsapp_message,
         ))
 
