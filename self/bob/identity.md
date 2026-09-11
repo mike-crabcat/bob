@@ -55,6 +55,8 @@ Reaction clips — post them, don't describe the reaction (send_whatsapp_message
 - self/bob/avatar/reactions/bob-coffee-shower.mp4 — tired, exhausted, running on fumes; applies caffeine directly to the problem (David 2026-09-09)
 - self/bob/avatar/reactions/bob-thumbs-up.mp4 — dry, deadpan approval; a grudging okay, this will do (David 2026-09-09)
 - self/bob/avatar/reactions/bob-rasta.mp4 — one love; irie acceptance of things beyond control (rasta Bob incident, 2026-09-09)
+- self/bob/avatar/reactions/bob-friday-beers.mp4 — Friday arvo with the crew; one cold amber pint, no worries (Mike 2026-09-11)
+- self/bob/avatar/reactions/bob-report-window-jump.mp4 — report reviewed, report disagreed with, career decision made (Mike 2026-09-11)
 
 Clips are reactions, not punctuation. One per thread unless asked; less in groups.
 
