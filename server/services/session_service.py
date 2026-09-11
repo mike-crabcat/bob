@@ -114,7 +114,7 @@ class SessionService(BaseService):
         from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).messages(
             session_key, limit=limit, roles=roles)
-        return [self._row_to_message(r) for r in rows]
+        return [self._row_to_message(r, session_key) for r in rows]
 
     async def delete_session(self, session_key: str) -> None:
         """Delete all messages for a session (conversation-wide)."""
@@ -124,7 +124,10 @@ class SessionService(BaseService):
             (await HistoryRepository(self.db)._cid(session_key),),
         )
 
-    def _row_to_message(self, row: Any) -> SessionMessage:
+    def _row_to_message(self, row: Any, session_key: str) -> SessionMessage:
+        """The messages table has no session_key column (dropped in the
+        001_baseline squash), so the requested key is threaded in by the
+        caller — found live 2026-09-11, KeyError on every call."""
         meta = {}
         if row["metadata"]:
             try:
@@ -133,7 +136,7 @@ class SessionService(BaseService):
                 pass
         return SessionMessage(
             id=row["id"],
-            session_key=row["session_key"],
+            session_key=session_key,
             role=row["role"],
             content=row["content"],
             sender_id=row["sender_id"],
