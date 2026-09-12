@@ -1,9 +1,10 @@
 # Detach v2 — attributed background turns (replaces capture-and-relay)
 
-**Status:** proposed 2026-09-12 (Mike's design, this session). Supersedes the
+**Status:** IMPLEMENTED + DEPLOYED 2026-09-12 (commit 3b809c64, suite 887
+green; plan written same day from Mike's design). Supersedes the
 capture/relay mechanics of `docs/backburner-plan.md` (mode ladder, probe,
 subagent/goal registration, supervisors all stay; only the delivery contract
-changes). Implementation not started.
+changed). Rollback: `backburner.mode = hold`.
 
 ---
 
