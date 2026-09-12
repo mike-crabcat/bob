@@ -55,6 +55,9 @@ NEW_MARKER = "[NEW — awaiting your reply] "
 SYSTEM_NOTE_MARKER = "[system notification — not from the human] "
 GROUP_EVENT_MARKER = "[Group event] "
 STEER_MARKER = "[system relay — steering request] "
+BG_PLACEHOLDER_MARKER = "[background task at work — not a message to answer, "
+"and not your own voice; do not take over its work] "
+BG_SEND_TAG = "[bg {id8}] "
 
 # Appended after the replay when the turn's claims are nudges only: these
 # turns fold state silently (mirrors _SILENCE_OK_PROVENANCES in
@@ -584,6 +587,20 @@ async def build_chat_messages(
                     meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+            # Detach v2 (docs/detach-v2.md): background-flight rows are
+            # labelled so no later turn mistakes them for its own voice or
+            # a human's. The placeholder announces the flight; bg_send rows
+            # are the flight's direct messages. Applied on every replay
+            # path (dispatch or not) — attribution must never silently
+            # disappear from a prompt.
+            _prov = row.get("provenance") or ""
+            if _prov == "bg_placeholder":
+                content = BG_PLACEHOLDER_MARKER + content
+            elif _prov == "bg_send":
+                _bg = str(meta.get("bg_task") or "")
+                content = BG_SEND_TAG.format(id8=_bg[:8] if _bg else "task") + content
+
             image_path = meta.get("image_path")
             mime_type = meta.get("image_mime_type", "image/jpeg")
             video_path = meta.get("video_path")

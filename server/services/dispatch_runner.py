@@ -103,11 +103,12 @@ class DispatchSpec:
     history_policy: str = "delivered_only"  # delivered_only | merged_always | merged_skip_no_reply
     message_was_sent: list = field(default_factory=lambda: [False])
     sent_texts: list = field(default_factory=list)
-    # Backburner (docs/backburner-plan.md). capture: shared with the send
-    # tool — flip to True at detach and post-detach sends are captured as
-    # the task result instead of delivered. hold_sender: sends the holding
-    # ack through the effects outbox; both are None on non-detachable specs.
-    backburner_capture: dict | None = None
+    # Backburner (docs/detach-v2.md). flight: shared dict with the send
+    # tool — None until detach, then {"subagent_id", "sent"} — a detached
+    # flight speaks DIRECTLY, attributed (v1's capture suppression died with
+    # the relay-lies incidents). hold_sender: sends the holding ack through
+    # the effects outbox; both are None on non-detachable specs.
+    flight: dict | None = None
     hold_sender: Callable[[str], Awaitable[None]] | None = None
     quota_restore: bool = False
     on_quota_exhausted: Callable[[], Awaitable[None]] | None = None

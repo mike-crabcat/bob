@@ -104,6 +104,24 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._register_send_executors()
 
+    async def _record_bg_send(self, session_key: str, subagent_id: str,
+                              content: str) -> None:
+        """Detach v2 (docs/detach-v2.md): history row for a detached
+        flight's direct send — provenance bg_send + task id so later turns
+        render it as [bg <id8>] and never mistake it for the live voice.
+        Best-effort: a history-write failure never fails the send."""
+        try:
+            from server.services.session_service import SessionService
+            await SessionService(self.ctx).add_message(
+                session_key, "assistant", content, channel="whatsapp",
+                provenance="bg_send",
+                metadata={"bg_task": subagent_id}, dispatched=1)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "bg send history write failed for %s", subagent_id[:8],
+                exc_info=True)
+
     def _register_send_executors(self) -> None:
         """Bind this instance as the executor for WhatsApp send effects
         (Bob3 Phase IV outbox). Last-constructed instance wins — there is
@@ -919,6 +937,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         from server.services.context_assembler import ContextAssembler
         from server.services.prompt_assembler import load_workspace_prompt
 
+        # Detach v2 flight holder (docs/detach-v2.md): {} until detach,
+        # then {"subagent_id", "sent", "texts"} — shared with the send
+        # wrapper, the steer/group-send tools, and backburner.detach().
+        # Declared before ANY tool that closes over it.
+        flight: dict[str, Any] = {}
+
         settings = self._get_settings()
         assembler = ContextAssembler(self.ctx)
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
@@ -974,7 +998,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # split is structural now.
         if is_trusted and not human_initiated:
             from server.services.whatsapp_outreach_tools import make_group_send_tools
-            tools.extend(make_group_send_tools(self.ctx, self, session_key))
+            tools.extend(make_group_send_tools(
+                self.ctx, self, session_key, flight=flight))
 
         # Steering (docs/steering-plan.md): any turn a human contact started
         # can request a steer — owner requests fire directly, everyone
@@ -984,7 +1009,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # contact resolution.
         if contact_id and human_initiated:
             from server.services.steering import make_steering_tools
-            tools.extend(make_steering_tools(self.ctx, session_key, contact_id))
+            tools.extend(make_steering_tools(
+                self.ctx, session_key, contact_id, flight=flight))
 
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:
@@ -1013,10 +1039,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         message_was_sent = [False]
         sent_texts: list[str] = []
         send_seq = [0]
-        # Backburner capture mode (docs/backburner-plan.md D2): flipped by the
-        # detach sequence after this turn goes to the background — the send
-        # tool then captures replies as the task result instead of delivering.
-        backburner_capture: dict[str, Any] = {"enabled": False, "texts": []}
+        # (the detach-v2 flight holder is declared at the top of this
+        #  builder — the send wrapper, steer/group-send tools, and the spec
+        #  all close over the SAME dict; backburner.detach() arms it.)
 
         async def _send_whatsapp_message(text: str = "", media_path: str = "") -> str:
             # 2026-09-11: media-only sends used to TypeError on the required
@@ -1037,16 +1062,12 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 return ("Error: not sent — the reply contained only leaked "
                         "tool-call markup. Restate it as a plain message and "
                         "call this tool again with the text.")
-            # Detached turn: capture, don't deliver. The supervisor relays the
-            # result to the user via the wake path once the task finishes.
-            if backburner_capture["enabled"] and not is_no_reply(text):
-                # Media-only captures keep a placeholder so the relay doesn't
-                # drop the fact a file went out.
-                backburner_capture["texts"].append(
-                    text or f"[Image: {media_path}]")
-                return ("This turn was detached — your reply was captured and will be "
-                        "relayed to the user when this background task finishes. Do not "
-                        "attempt other send routes.")
+            # Detach v2 (docs/detach-v2.md): a detached flight delivers
+            # DIRECTLY and ATTRIBUTED — history rows carry provenance
+            # bg_send + the task id so later turns render [bg <id8>]. The
+            # v1 capture branch (and its "nothing was delivered" relay lie)
+            # is gone; the tee stays for the terminal audit trail.
+            bg = (flight or {}).get("subagent_id")
             # Bob3 Phase IV: sends go through the effects outbox — recorded
             # durably, delivered inline, retried by the pump after a crash.
             # History (sent_texts) is written from delivery confirmation.
@@ -1072,7 +1093,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     payload={"chat_id": chat_id, "file_path": prepared, "caption": text})
                 if not result.get("ok"):
                     return f"Error sending media: {result.get('error', 'delivery failed')}"
-                sent_texts.append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
+                delivered = f"[Image: {text}]" if text else f"[Image: {resolved.name}]"
+                sent_texts.append(delivered)
+                if bg:
+                    await self._record_bg_send(session_key, bg, delivered)
+                    flight["texts"] = flight.get("texts", []) + [delivered]
+                    flight["sent"] = True
+                    return (f"Media sent, attributed to background task "
+                            f"{bg[:8]} — you are a detached background task; "
+                            "keep working and finish, don't treat this as "
+                            f"conversation. (request_id={result.get('external_result_id')})")
                 return f"Media sent (request_id={result.get('external_result_id')})"
             result = await emit_and_deliver(
                 self.ctx, kind="whatsapp_send",
@@ -1081,6 +1111,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             if not result.get("ok"):
                 return f"Error sending message: {result.get('error', 'delivery failed')}"
             sent_texts.append(text)
+            if bg:
+                await self._record_bg_send(session_key, bg, text)
+                flight["texts"] = flight.get("texts", []) + [text]
+                flight["sent"] = True
+                return (f"Message sent, attributed to background task "
+                        f"{bg[:8]} — you are a detached background task; "
+                        "keep working and finish, don't treat this as "
+                        f"conversation. (request_id={result.get('external_result_id')})")
             return f"Message sent (request_id={result.get('external_result_id')})"
 
         tools.append(Tool(
@@ -1143,7 +1181,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             history_policy="delivered_only",
             message_was_sent=message_was_sent,
             sent_texts=sent_texts,
-            backburner_capture=backburner_capture,
+            flight=flight,
             hold_sender=_send_holding_ack,
             quota_restore=True,
             on_quota_exhausted=_on_quota_exhausted,

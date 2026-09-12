@@ -279,17 +279,21 @@ class HistoryRepository:
         if not row or not row["content"]:
             return ""
         text = row["content"]
-        # Drop the leading relay header ("[Background task …] FINISHED —
-        # result below. IMPORTANT: nothing in it has been delivered to
-        # anyone. …") — the 2026-09-06 security-group leak mailed this
-        # internal directive to WhatsApp verbatim. The header is one block
-        # ending at the first blank line; the result follows it.
+        # Drop the leading fallback header ("[bg task …] finished without
+        # posting anything. …" — detach v2; the v1 header "[Background
+        # task …] FINISHED — IMPORTANT: nothing in it has been delivered…"
+        # leaked to WhatsApp verbatim on 2026-09-06, hence the strip). The
+        # header is one block ending at the first blank line.
         head, sep, rest = text.partition("\n\n")
-        if sep and head.startswith("[Background task "):
+        if sep and (head.startswith("[bg task ") or
+                    head.startswith("[Background task ")):
             text = rest
-        # Drop the trailing relay instructions — the rescue delivers the
-        # payload, not the meta-directive around it.
-        for tail in ("\n\nThis background task has finished.",
+        # Drop the trailing directives — the rescue delivers the payload,
+        # not the meta-text around it (v2 tails; v1 tails kept for any
+        # historical rows still pending).
+        for tail in ("\n\nTell Mike briefly",
+                     "\n\nIts tool calls before failing",
+                     "\n\nThis background task has finished.",
                      "\n\nThis background task failed."):
             text = text.split(tail, 1)[0]
         text = text.strip()

@@ -92,24 +92,28 @@ def test_hermes_strip_handles_unknown_dialects():
     assert _strip_hermes_tool_calls(text) == "Answer follows."
 
 
-# ------------------------------------------------------------ relay content
+# ------------------------------------------------------------ fallback content
 
-def test_relay_content_states_delivery_truth():
-    content = BackburnerService._relay_content(
-        "abcd1234", "Reply sent to Andrew with the sources.", failed=False)
-    assert "nothing in it has been delivered" in content
-    assert "'sent'" in content, "must defuse the captured-send claim"
-    assert "NO_REPLY" in content, "must name the loss"
-    # The boilerplate tail relay_payload splits on must be present verbatim.
-    assert "\n\nThis background task has finished." in content
-    assert content.index("nothing in it has been delivered") < content.index(
-        "Reply sent to Andrew"), "truth leads, payload follows"
+def test_fallback_content_is_context_not_instruction():
+    """v2 (docs/detach-v2.md): the silent-flight fallback carries the result
+    as CONTEXT and forbids redo — the v1 'nothing was delivered, deliver it'
+    preamble is the documented duplicate-work mechanism (2026-09-10
+    double-sell, 2026-09-11 double-gif) and must never return."""
+    content = BackburnerService._fallback_content(
+        "abcd1234", "Reply sent to Andrew with the sources.")
+    assert "finished without posting" in content
+    assert "do NOT" in content
+    assert "nothing in it has been delivered" not in content
+    # The boilerplate tails relay_payload splits on, verbatim:
+    assert "\n\nTell Mike briefly" in content
+    assert content.index("finished without posting") < content.index(
+        "Reply sent to Andrew"), "context leads, payload follows"
 
 
-def test_relay_content_failed_variant():
-    content = BackburnerService._relay_content("abcd1234", "it broke", failed=True)
-    assert "NO_REPLY" in content
-    assert "\n\nThis background task failed." in content
+def test_failed_content_names_real_effects():
+    content = BackburnerService._failed_content("abcd1234", "it broke")
+    assert "may have had real effects" in content
+    assert "\n\nIts tool calls before failing" in content
 
 
 # ------------------------------------------------------------- dead-man arc
@@ -137,18 +141,18 @@ def stub_history(monkeypatch):
 
 async def test_relay_no_reply_dead_man_delivers_payload(
         ctx, db, stub_llm, stub_history):
-    """The 2026-09-03 incident: the relay turn answers NO_REPLY believing
-    the result already went out. The runner delivers the payload itself."""
+    """The 2026-09-03 incident, v2 shape: the fallback turn answers
+    NO_REPLY anyway. The runner delivers the payload itself."""
     key = "test:relay:deadman"
     svc = SessionService(ctx)
     await svc.add_message(
         key, "user",
-        "[Background task abcd1234] FINISHED — result below. IMPORTANT: "
-        "nothing in it has been delivered to anyone.\n\n"
+        "[bg task abcd1234] finished without posting anything. Everything "
+        "it did via tools already happened for real — do NOT redo it. Its "
+        "result, for context:\n\n"
         "Reply sent to Andrew with the deep-dive sources: METR report et al.\n\n"
-        "This background task has finished. Relay the result to the user now "
-        "with a short summary in your own voice — call your send tool with it; "
-        "replying NO_REPLY here loses the result entirely.",
+        "Tell Mike briefly what came of it if anything here is worth saying; "
+        "silence is fine for routine work.",
         dispatched=0, provenance="task_relay")
     spec, send_tool = _spec(key)
 
@@ -161,15 +165,16 @@ async def test_relay_no_reply_dead_man_delivers_payload(
 
 async def test_relay_delivered_turn_no_dead_man(
         ctx, db, stub_llm, stub_history):
-    """A relay turn that speaks (via the normal rescue) must not ALSO get
+    """A fallback turn that speaks (via the normal rescue) must not ALSO get
     the dead-man payload — one delivery, not two."""
     key = "test:relay:spoken"
     stub_llm["reply"] = "Andrew — here are the sources you wanted."
     svc = SessionService(ctx)
     await svc.add_message(
         key, "user",
-        "[Background task abcd1234] result body\n\n"
-        "This background task has finished. Relay the result to the user.",
+        "[bg task abcd1234] finished without posting anything. Its result, "
+        "for context:\n\nresult body\n\n"
+        "Tell Mike briefly what came of it.",
         dispatched=0, provenance="task_relay")
     spec, send_tool = _spec(key)
 
@@ -182,27 +187,27 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     from server.repositories.history import HistoryRepository
     key = "test:relay:payload"
     svc = SessionService(ctx)
-    # Real relay shape: header paragraph, blank line, result, blank line,
-    # trailing directive. The header must NOT survive into the delivered
-    # payload (2026-09-06: the rescue mailed "IMPORTANT: nothing in it has
-    # been delivered to anyone" to the Bob Security Guard group verbatim).
+    # Real v2 fallback shape: header paragraph, blank line, result, blank
+    # line, trailing directive. The header must NOT survive into the
+    # delivered payload (2026-09-06: the v1 rescue mailed its header to the
+    # Bob Security Guard group verbatim).
     await svc.add_message(
         key, "user",
-        "[Background task abcd1234] FINISHED — result below. IMPORTANT: "
-        "nothing in it has been delivered to anyone. Background runs cannot "
-        "send messages.\n\n"
+        "[bg task abcd1234] finished without posting anything. Everything "
+        "it did via tools already happened for real — do NOT redo it.\n\n"
         "payload text\n\n"
-        "This background task has finished. Relay the result.",
+        "Tell Mike briefly what came of it if anything here is worth saying; "
+        "silence is fine for routine work.",
         dispatched=0, provenance="task_relay")
     ids = await HistoryRepository(db).pending_user_ids(key)
     payload = await HistoryRepository(db).relay_payload(ids)
     assert payload == "payload text"
 
-    # Headerless relays (older/hand-rolled shapes) keep their first line
+    # Headerless rows (older/hand-rolled shapes) keep their first line
     key2 = "test:relay:payload:headerless"
     await svc.add_message(
         key2, "user", "bare result body\n\n"
-        "This background task has finished. Relay the result.",
+        "Tell Mike briefly what came of it.",
         dispatched=0, provenance="task_relay")
     ids = await HistoryRepository(db).pending_user_ids(key2)
     payload = await HistoryRepository(db).relay_payload(ids)

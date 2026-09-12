@@ -95,6 +95,11 @@ async def _deliver_group_send(
                      **provenance},
         )
         mirror_text = message
+    bg_task = provenance.get("bg_task")
+    if bg_task:
+        # Detach v2: the target's transcript shows which background task
+        # spoke (content-level tag — renders everywhere, no renderer needed).
+        mirror_text = f"[bg {str(bg_task)[:8]}] {mirror_text}"
     if not result.get("ok"):
         return result
     _record_group_send(group_key, now)
@@ -118,6 +123,7 @@ def make_group_send_tools(
     ctx: AppContext,
     wa_service: WhatsAppBridgeService,
     current_session_key: str,
+    flight: dict | None = None,
 ) -> list:
     """Proactive group send (Bob Events §1.5).
 
@@ -131,7 +137,11 @@ def make_group_send_tools(
     (services/steering.py) — the old verbatim relay (request_group_message +
     the group_send approval) was retired with it, and human-started turns
     now carry steer_conversation instead of this tool, so the two paths never
-    compete for the same turn."""
+    compete for the same turn.
+
+    ``flight`` (detach v2, docs/detach-v2.md): when the calling turn is a
+    detached background task, sends carry the [bg <id>] tag in the target's
+    history so its transcript shows a background task spoke."""
 
     @tool
     async def send_whatsapp_group_message(
@@ -183,11 +193,13 @@ def make_group_send_tools(
         if not _group_send_allowed(group_key, now):
             return json.dumps({"ok": False, "error": "Group send rate limit reached; retry later"})
 
+        bg = (flight or {}).get("subagent_id")
         result = await _deliver_group_send(
             ctx, group_key=group_key, group_id=group_id, message=message,
             origin_session_key=current_session_key,
             idempotency_key=f"whatsapp_group_send:{group_key}:{uuid4().hex[:8]}",
-            provenance={"goal_id": goal_id or None}, now=now,
+            provenance={"goal_id": goal_id or None,
+                        **({"bg_task": bg} if bg else {})}, now=now,
             media_path=media_path)
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "delivery failed")})

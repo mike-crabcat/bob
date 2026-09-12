@@ -1,22 +1,20 @@
-"""Backburner — detaching slow WHATSAPP_INCOMING turns (docs/backburner-plan.md).
+"""Backburner — detaching slow WHATSAPP_INCOMING turns (docs/detach-v2.md).
 
 Pinned here:
-- gating: DM-only, whatsapp_incoming-only, mode/allowlist honoured
+- gating: whatsapp_incoming-only, mode/allowlist honoured
 - probe: transcript build, JSON parse (incl. fenced), template fallback on
   any probe failure (D7)
-- full detach: turn completes, subagent+goal registered, holding ack sent,
-  capture mode flipped, run() returns early, and the supervisor settles the
-  goal + stores the wake delivery (D1–D4)
-- capture mode: post-detach sends are captured, never delivered
+- full detach (v2): turn completes, subagent+goal registered, holding ack
+  sent, transcript placeholder written, flight dict armed (attribution, no
+  suppression), run() returns early, supervisor settles
+- v2 delivery: post-detach sends DELIVER and are attributed (provenance
+  bg_send + task id); a flight that spoke settles quietly; a silent flight
+  gets the non-imperative fallback wake (task_relay, rescue-covered)
 - kill: live task cancels and settles quietly (no wake); already-finished is
-  an error so the model relays the result instead
+  an error so the model reports the result instead
 - watchdog boundary: a turn that finishes inside the threshold never detaches;
   a turn that speaks or finishes while the detach probe runs never detaches
-  either (the 2026-08-31 AI doom duplicate: reply delivered mid-probe, then
-  relayed back as a speak-expected task_relay)
-- _terminal backstop: a result byte-identical to an already-delivered send
-  settles quietly; a genuinely new result after an intermediate send still
-  wakes as task_relay
+  either (the 2026-08-31 AI doom duplicate)
 - restart recovery: orphaned goals settle + wake, idempotently
 """
 
@@ -58,7 +56,7 @@ def bb(ctx):
     return ctx.settings.backburner
 
 
-def _spec(capture=None, hold=None, send_tool=None, session_key=DM_KEY,
+def _spec(flight=None, hold=None, send_tool=None, session_key=DM_KEY,
           dispatch_id="disp-1") -> DispatchSpec:
     return DispatchSpec(
         session_key=session_key,
@@ -69,7 +67,7 @@ def _spec(capture=None, hold=None, send_tool=None, session_key=DM_KEY,
         dispatch_id=dispatch_id,
         message_was_sent=[False],
         sent_texts=[],
-        backburner_capture=capture if capture is not None else {"enabled": False, "texts": []},
+        flight=flight if flight is not None else {},
         hold_sender=hold,
     )
 
@@ -268,23 +266,29 @@ async def _messages(ctx, key=DM_KEY):
 async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     await _pending_message(ctx)
     acks: list[str] = []
-    capture = {"enabled": False, "texts": []}
+    flight: dict = {}
 
     async def _hold(text: str) -> None:
         acks.append(text)
 
-    spec = _spec(capture=capture, hold=_hold, dispatch_id="disp-detach")
+    spec = _spec(flight=flight, hold=_hold, dispatch_id="disp-detach")
     result = await DispatchRunner(ctx).run(spec)
 
     # run() returned early — the supervisor owns the task now
     assert result == ""
     assert acks == ["still on the hotels, back soon"]
-    assert capture["enabled"] is True
+    assert flight.get("subagent_id"), "flight must be armed at detach"
 
     rows = await _subagent_rows(ctx)
     assert len(rows) == 1
     assert rows[0]["parent_session_key"] == DM_KEY
     assert rows[0]["status"] in ("running", "completed")
+
+    # v2: the transcript placeholder announces the flight
+    msgs = await _messages(ctx)
+    placeholder = [m for m in msgs if m["provenance"] == "bg_placeholder"]
+    assert placeholder and "detached" in placeholder[0]["content"]
+    assert flight["subagent_id"][:8] in placeholder[0]["content"]
 
     # goal held by the parent conversation (goals_block visibility)
     goal = await ctx.db.fetch_one(
@@ -292,7 +296,8 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     assert goal is not None and goal["status"] in ("active", "completed")
     assert "hotel" in goal["objective"]
 
-    # supervisor: task finished (0.3s) -> goal settled, wake message stored
+    # supervisor: task finished (0.3s) -> goal settled. The stub never
+    # calls the send tool (silent flight) -> the v2 fallback wake.
     for _ in range(50):
         if goal is None or goal["status"] == "completed":
             row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
@@ -309,10 +314,10 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     assert "The Grand has rooms" in final["result"]
 
     msgs = await _messages(ctx)
-    wake = [m for m in msgs if "Background task" in m["content"]]
-    assert wake, "settle wake should have stored a relay message"
+    wake = [m for m in msgs if "finished without posting" in m["content"]]
+    assert wake, "silent flight should have stored the fallback wake"
     assert wake[0]["provenance"] == "task_relay", (
-        "relay wakes must be speak-expected so the send-tool rescue covers "
+        "fallback wakes must be speak-expected so the send-tool rescue covers "
         "them (2026-08-30 silent-drop incident)")
 
 
@@ -370,23 +375,23 @@ async def test_turn_that_spokes_during_probe_never_detaches(ctx, bb, stub_histor
 
     await _pending_message(ctx)
     acks: list[str] = []
-    capture = {"enabled": False, "texts": []}
+    flight: dict = {}
 
     async def _hold(text: str) -> None:
         acks.append(text)
 
-    spec = _spec(capture=capture, hold=_hold, dispatch_id="disp-race")
+    spec = _spec(flight=flight, hold=_hold, dispatch_id="disp-race")
     spec.message_was_sent = sent_flag
     spec.sent_texts = sent_texts
     result = await DispatchRunner(ctx).run(spec)
 
     assert result == FINAL, "run() must wait inline, not return early on detach"
     assert acks == []
-    assert capture["enabled"] is False
+    assert "subagent_id" not in flight, "no flight armed — no detach happened"
     assert await _subagent_rows(ctx) == []
     msgs = await _messages(ctx)
-    assert not [m for m in msgs if "Background task" in m["content"]], (
-        "an already-delivered result must not be relayed back")
+    assert not [m for m in msgs if m["provenance"] in ("bg_placeholder", "task_relay")], (
+        "an already-delivered result must not be woken back")
 
 
 async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
@@ -409,9 +414,11 @@ async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
     assert await _subagent_rows(ctx) == []
 
 
-async def test_capture_mode_intercepts_sends(ctx, bb):
-    """The bridge's send tool: once capture mode flips, sends are captured as
-    result and no effect is emitted."""
+async def test_post_detach_send_delivers_attributed(ctx, bb):
+    """v2: a flight's send DELIVERS (real effect emitted) and is attributed —
+    history row with provenance bg_send + the task id, tee kept for the
+    terminal audit, tool response carries the background regime note. The
+    v1 capture branch (suppression + the relay lie) is gone."""
     from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
     svc = WhatsAppBridgeService(ctx)
@@ -427,20 +434,30 @@ async def test_capture_mode_intercepts_sends(ctx, bb):
     send_tool = next(t for t in spec.tools if t.name == "send_whatsapp_message")
     before = await ctx.db.fetch_one("SELECT COUNT(*) AS n FROM effects")
 
-    spec.backburner_capture["enabled"] = True
+    spec.flight["subagent_id"] = "1234567890abcdef"
+    spec.flight["sent"] = False
     out = await send_tool.handler("here is the answer you asked for")
 
-    assert "captured" in out.lower()
-    assert spec.backburner_capture["texts"] == ["here is the answer you asked for"]
+    assert "attributed to background task" in out, out
+    assert "detached background task" in out, "the regime note must ride the response"
     after = await ctx.db.fetch_one("SELECT COUNT(*) AS n FROM effects")
-    assert after["n"] == before["n"], "capture mode must not emit a send effect"
+    assert after["n"] == before["n"] + 1, "the flight's send must actually deliver"
+    assert spec.flight["sent"] is True
+    assert spec.flight["texts"] == ["here is the answer you asked for"]
+    row = await ctx.db.fetch_one(
+        "SELECT provenance, metadata FROM messages "
+        "WHERE conversation_id = ? AND provenance = 'bg_send' "
+        "ORDER BY created_at DESC LIMIT 1", (DM_KEY,))
+    assert row is not None, "attributed history row must be written"
+    assert "12345678" in (row["metadata"] or "")
 
 
-# ------------------------------------------------- _terminal backstop
+# ------------------------------------------------- _terminal (v2)
 
-async def _settled_detached_task(ctx, *, sent_texts: list[str], result_text: str):
+async def _settled_detached_task(ctx, *, flight: dict, result_text: str,
+                                 status: str = "completed"):
     """Register a detached_turn + goal the way detach() does, run _terminal
-    on it, and return (goal_id, subagent_id)."""
+    on it, and return the goal row."""
     from server.repositories.subagents import SubagentRepository
     from server.services.goal_service import create_goal
 
@@ -457,44 +474,61 @@ async def _settled_detached_task(ctx, *, sent_texts: list[str], result_text: str
         origin_conversation_id=DM_KEY, kind="subagent",
         external_ref=subagent_id)
 
-    spec = _spec()
-    spec.sent_texts = list(sent_texts)
+    spec = _spec(flight=flight)
     await BackburnerService(ctx)._terminal(
-        subagent_id, str(goal["id"]), {"enabled": True, "texts": []}, spec,
-        status="completed", result_text=result_text)
+        subagent_id, str(goal["id"]), spec,
+        status=status, result_text=result_text)
     return goal
 
 
-async def test_terminal_settles_quietly_when_result_already_delivered(ctx, bb):
-    """Backstop for the mid-probe race (AI doom group, 2026-08-31): nothing
-    captured post-detach and the result text is byte-identical to the
-    pre-detach send — the group already heard it, so no relay wake."""
+async def test_terminal_flight_that_spoke_settles_quietly(ctx, bb):
+    """v2 core invariant: the flight's attributed messages WERE the output —
+    no wake, no relay turn, nothing to re-deliver (this is the fix for the
+    2026-09-10 double-sell and 2026-09-11 double-gif)."""
     goal = await _settled_detached_task(
         ctx,
-        sent_texts=["Scanned it. The profile's history holds about 21 distinct hosts."],
-        result_text="Scanned it. The profile's history holds about 21 distinct hosts.")
+        flight={"subagent_id": "aaaabbbb", "sent": True,
+                "texts": ["The Grand has rooms"]},
+        result_text="done: checked the hotels")
 
     row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
     assert row["status"] == "completed"
     msgs = await _messages(ctx)
-    assert not [m for m in msgs if "Background task" in m["content"]], (
-        "already-delivered results must not be relayed back as task_relay")
+    assert not [m for m in msgs if m["provenance"] == "task_relay"], (
+        "a flight that spoke must never spawn a delivery turn"
+        " — that instruction was the v1 duplicate mechanism")
 
 
-async def test_terminal_still_relays_new_result_after_intermediate_send(ctx, bb):
-    """The backstop must not over-suppress: an intermediate pre-detach send
-    ("on it") with a genuinely new final result still wakes the conversation
-    as a speak-expected relay — the group hasn't heard the outcome."""
+async def test_terminal_silent_flight_gets_non_imperative_fallback(ctx, bb):
+    """A silent completion with a result still surfaces (the 2026-09-03
+    lost-result shape) — but the wake is context, never an instruction to
+    deliver or redo. Wording pinned by test."""
     goal = await _settled_detached_task(
-        ctx, sent_texts=["on it, still scanning"],
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": []},
         result_text="Scanned it. The profile's history holds about 21 distinct hosts.")
 
     row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
     assert row["status"] == "completed"
     msgs = await _messages(ctx)
-    wake = [m for m in msgs if "Background task" in m["content"]]
-    assert wake, "a new result must still be relayed"
-    assert wake[0]["provenance"] == "task_relay"
+    wake = [m for m in msgs if m["provenance"] == "task_relay"]
+    assert wake, "silent flights with a result must still surface it"
+    content = wake[0]["content"]
+    assert "finished without posting" in content
+    assert "do NOT" in content, "must forbid redoing the flight's real work"
+    # The v1 lie and its imperative are gone for good:
+    assert "nothing in it has been delivered" not in content
+    assert "call your send tool" not in content.lower()
+
+
+async def test_terminal_failed_flight_wakes_honestly(ctx, bb):
+    goal = await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": []},
+        result_text="the upstream API 500'd twice", status="failed")
+
+    msgs = await _messages(ctx)
+    wake = [m for m in msgs if m["provenance"] == "task_relay"]
+    assert wake and "failed" in wake[0]["content"]
+    assert "may have had real effects" in wake[0]["content"]
 
 
 # ------------------------------------------------------------- kill path
@@ -584,30 +618,31 @@ async def test_recovery_settles_orphaned_goals(ctx, bb):
 
 async def test_steer_only_turn_detaches_silently(ctx, bb, stub_llm, stub_history):
     """A slow steer-only turn still detaches (lock frees, work continues in
-    the background) but sends NO holding ack — nobody asked anything. The
-    relay it later produces is labelled steer_relay (silence-ok)."""
+    the background) but sends NO holding ack — nobody asked anything. v2:
+    a silent steer-born flight settles QUIETLY (silence is the designed
+    outcome for stimulus work — no fallback wake, nobody to report to)."""
     from server.services.session_service import SessionService
 
     await SessionService(ctx).add_message(
         DM_KEY, "user", "[Stimulus: frigate activity.person] person at doorbell",
         channel="whatsapp", dispatched=0, provenance="steer")
     acks: list[str] = []
-    capture = {"enabled": False, "texts": []}
+    flight: dict = {}
 
     async def _hold(text: str) -> None:
         acks.append(text)
 
-    spec = _spec(capture=capture, hold=_hold, dispatch_id="disp-steer")
+    spec = _spec(flight=flight, hold=_hold, dispatch_id="disp-steer")
     result = await DispatchRunner(ctx).run(spec)
 
     assert result == ""  # detached — supervisor owns the task
     assert acks == [], "steer-only turn must not send a holding ack"
-    assert capture["enabled"] is True  # the detach itself happened
+    assert flight.get("subagent_id"), "the detach itself happened"
 
     rows = await _subagent_rows(ctx)
     assert len(rows) == 1, "steer turn must still detach (frees the lock)"
 
-    # wait for the supervisor to settle the goal, then check the wake label
+    # wait for the supervisor to settle the goal
     goal = None
     for _ in range(50):
         goal = await ctx.db.fetch_one(
@@ -621,12 +656,9 @@ async def test_steer_only_turn_detaches_silently(ctx, bb, stub_llm, stub_history
     assert goal is not None and goal["status"] == "completed"
 
     msgs = await _messages(ctx)
-    wake = [m for m in msgs if "Background task" in m["content"]]
-    assert wake, "steer relay should still wake the session with the result"
-    assert wake[0]["provenance"] == "steer_relay", (
-        "steer-born relays are silence-ok/rescue-exempt, not speak-expected")
-    assert "needs no reply" in wake[0]["content"], (
-        "steer relay directive must ask for judgement, not force delivery")
+    assert not [m for m in msgs if m["provenance"] in ("task_relay", "steer_relay")], (
+        "a silent steer-born flight reports to nobody — uninvited speech "
+        "was the v1 steer_relay apology shape")
 
 
 async def test_steer_racing_human_message_keeps_the_ack(ctx, bb, stub_llm, stub_history):
@@ -650,12 +682,14 @@ async def test_steer_racing_human_message_keeps_the_ack(ctx, bb, stub_llm, stub_
     assert acks, "human+steer turn keeps the holding ack"
 
 
-def test_relay_content_steer_variant_does_not_force_delivery():
-    plain = BackburnerService._relay_content("abc", "result body", failed=False)
-    steer = BackburnerService._relay_content("abc", "result body", failed=False,
-                                             steer=True)
-    assert "loses the result entirely" in plain
-    assert "loses the result entirely" not in steer
-    assert "needs no reply" in steer
-    # delivery-truth header survives in both (captured sends never reached anyone)
-    assert "nothing in it has been delivered" in steer
+def test_fallback_content_wording_pinned():
+    """v2 (docs/detach-v2.md risk #5): the fallback notice stays
+    non-imperative BY TEST — one wording drift toward 'deliver it' and the
+    v1 duplicate-work mechanism is back through the back door."""
+    content = BackburnerService._fallback_content("abc12345", "result body")
+    assert "finished without posting" in content
+    assert "do NOT" in content
+    # The v1 lie and its imperative are banned:
+    assert "nothing in it has been delivered" not in content
+    assert "call your send tool" not in content.lower()
+    assert "relay the result" not in content.lower()

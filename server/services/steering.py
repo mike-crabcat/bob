@@ -429,11 +429,14 @@ def make_steering_tools(
     ctx: AppContext,
     current_session_key: str,
     requester_contact_id: str | None,
+    flight: dict | None = None,
 ) -> list:
     """steer_conversation — attached on any dispatch a human contact started
     (DM or group, any trust level). Wake-path turns get no steer tool even
     when the route resolves a contact id: the bridge gates on dispatch
-    origin, so no nested steering."""
+    origin, so no nested steering. ``flight`` (detach v2): when this turn
+    detaches mid-work, its steers carry a [bg <id>] tag so the target
+    transcript shows a background task asked, not the live conversation."""
 
     @tool
     async def steer_conversation(target: str, instruction: str) -> str:
@@ -459,6 +462,12 @@ def make_steering_tools(
             ctx, target, requester_contact_id=requester_contact_id)
         if not resolution.get("ok"):
             return json.dumps(resolution)
+
+        bg = (flight or {}).get("subagent_id")
+        if bg:
+            # Detach v2: the target (and the owner's approval render) sees
+            # which background task is asking.
+            instruction = f"[bg {bg[:8]}] {instruction}"
 
         origin_label = await session_label(ctx, current_session_key)
         result = await create_request(
