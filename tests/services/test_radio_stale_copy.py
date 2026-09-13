@@ -125,13 +125,23 @@ def _stamped(domain, made_set):
     return made_set
 
 
+def _iso_in(hours: float) -> str:
+    # Relative timestamps: a hardcoded "future" went stale at midnight and
+    # the test time-bombed (2026-09-14) — schedules must be computed from
+    # the live clock, like the station reads them.
+    from datetime import datetime, timedelta
+
+    return (datetime.now().astimezone()
+            + timedelta(hours=hours)).isoformat()
+
+
 def test_bare_ready_clears_stale_past_schedule(domain, made_set):
     # 2026-09-13 incident: 'feature ready <slug>' (no --at) flipped an
     # aired set back to ready leaving its PAST scheduled_for armed — the
     # station re-aired the set 33 min after it completed (reached via a
     # 'feature ready <slug> --help' that executed instead of helping).
     _stamped(domain, made_set)
-    made_set["scheduled_for"] = "2026-09-13T08:00:00+08:00"
+    made_set["scheduled_for"] = _iso_in(-1)
     domain._feat_save(made_set)
     rc, out = domain.feature_ready("zz-test")
     assert rc == 0
@@ -144,10 +154,11 @@ def test_bare_ready_clears_stale_past_schedule(domain, made_set):
 
 def test_bare_ready_keeps_future_schedule(domain, made_set):
     _stamped(domain, made_set)
-    made_set["scheduled_for"] = "2026-09-13T23:00:00+08:00"
+    future = _iso_in(2)
+    made_set["scheduled_for"] = future
     domain._feat_save(made_set)
     rc, out = domain.feature_ready("zz-test")
     assert rc == 0
     after = json.loads(
         (domain.FEATURES_DIR / "zz-test" / "set.json").read_text())
-    assert after["scheduled_for"] == "2026-09-13T23:00:00+08:00"
+    assert after["scheduled_for"] == future
