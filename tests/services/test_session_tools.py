@@ -120,6 +120,25 @@ async def test_get_session_messages_resolves_sender_names(seeded):
     assert by_content["Lunch Sunday?"]["sender"] is None
 
 
+async def test_get_session_messages_renders_local_offset_timestamps(seeded, ctx):
+    # 2026-09-13: raw UTC created_at values made Bob read his own 07:28
+    # Sunday advert post as "23:28 Saturday night" — 8 h off and across
+    # the date boundary. LLM-facing timestamps must carry the local frame.
+    from datetime import UTC, datetime
+
+    await ctx.db.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, channel, "
+        "created_at) VALUES ('m-tz', ?, 'user', 'tz probe', 'whatsapp', "
+        "'2026-09-12 23:28:51')", (GROUP_KEY,))
+    tools = make_session_tools(
+        ctx, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
+    result = json.loads(await _tool(tools, "get_session_messages").handler())
+    probe = next(m for m in result["messages"] if m["content"] == "tz probe")
+    expected = datetime(2026, 9, 12, 23, 28, 51, tzinfo=UTC).astimezone()
+    assert probe["created_at"] == expected.isoformat(
+        sep=" ", timespec="seconds")
+
+
 async def test_get_session_messages_returns_most_recent_not_oldest(seeded):
     session_svc = SessionService(seeded)
     for i in range(8):

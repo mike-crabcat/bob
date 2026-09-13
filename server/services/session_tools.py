@@ -6,6 +6,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from server.services.base import local_iso
 from server.services.tools import Tool, tool
 
 if TYPE_CHECKING:
@@ -140,7 +141,7 @@ def make_session_tools(
                     "sender": m["sender_name"],
                     "channel": m["channel"],
                     "content": (m["content"] or "")[:_MAX_MESSAGE_CHARS],
-                    "created_at": m["created_at"],
+                    "created_at": local_iso(m["created_at"]),
                 }
                 for m in messages
             ],

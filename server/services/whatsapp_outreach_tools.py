@@ -9,6 +9,7 @@ import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from server.services.base import local_iso
 from server.services.tools import tool
 from server.services.openai_service import strip_citation_markers
 
@@ -434,7 +435,8 @@ def make_whatsapp_outreach_tools(
                     "role": m.role,
                     "content": m.content,
                     "channel": m.channel,
-                    "created_at": m.created_at,
+                    "created_at": (local_iso(m.created_at)
+                                   if m.created_at else None),
                 }
                 for m in messages
             ],
