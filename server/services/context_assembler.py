@@ -120,6 +120,26 @@ class ContextAssembler:
             f"Use `recall('{eid}')` to look up group knowledge."
         )
 
+    async def maybe_memory_roster(self, session_key: str) -> str:
+        """Gated entry point for the conversation memory roster.
+
+        Off unless the conversation opted in via the `memory_roster` policy
+        flag; the BOB_MEMORY_ROSTER=off kill switch force-disables globally.
+        Groups only — DMs already get person_profile. The roster itself is
+        built by memory.build_conversation_roster (SQL ownership: the
+        memory tables belong to services/memory/).
+        """
+        if not self.ctx.settings.memory.roster_enabled:
+            return ""
+        if ":group:" not in session_key:
+            return ""
+        from server.repositories.conversations import ConversationRepository
+        policy = await ConversationRepository(self.db).get_policy(session_key)
+        if not policy.get("memory_roster"):
+            return ""
+        from server.services.memory.service import build_conversation_roster
+        return await build_conversation_roster(self.db, session_key)
+
     async def dream_plans_prompt(self, session_key: str) -> str:
         from server.services.dream.injection import build_session_plans_prompt
         return await build_session_plans_prompt(

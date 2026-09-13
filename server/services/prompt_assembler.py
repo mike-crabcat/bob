@@ -214,10 +214,8 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     if skills_index:
         parts.append("## Available Skills\n\n" + skills_index)
 
-    # Memory tool guidance. The available capture tool depends on the extraction
-    # mode (read from env, the same source make_memory_tools uses). A full memory
-    # index dump used to be appended here but was disabled — Bob discovers
-    # entities on demand via these tools instead.
+    # Memory tool guidance. A full memory index dump used to be appended here
+    # but was disabled — Bob discovers entities on demand via these tools instead.
     if db is not None:
         # Location tool — only when Home Assistant is configured. Mirrors the
         # gating in tool_registry.build_common_tools() so the prompt never

@@ -37,6 +37,8 @@ class SlashCommandsMixin:
             await self._cmd_who(chat_id)
         elif command == "/verbose":
             await self._cmd_verbose(args, session_key, chat_id)
+        elif command == "/roster":
+            await self._cmd_roster(args, session_key, chat_id)
         elif command == "/silentmem":
             await self._cmd_silentmem(session_key, chat_id)
         elif command == "/autoplan":
@@ -47,7 +49,7 @@ class SlashCommandsMixin:
             await self.send_message(
                 chat_id,
                 f"{command} isn't a command — try /model, /patience, /relevance, "
-                f"/verbose, /silentmem, /autoplan, /who")
+                f"/verbose, /roster, /silentmem, /autoplan, /who")
 
     async def _cmd_patience(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle patience for the current session."""
@@ -132,6 +134,41 @@ class SlashCommandsMixin:
         await repo.set_policy(session_key, {"memory_verbose": enabled})
         logger.info("verbose %s for conversation %s", arg, session_key)
         await self.send_message(chat_id, f"verbose {'ON' if enabled else 'OFF'}")
+
+    async def _cmd_roster(self, args: str, session_key: str, chat_id: str) -> None:
+        """Toggle the per-conversation memory roster for this group.
+
+        Usage: /roster on|off|status
+        Injects a compact "## Memory Roster" block (participants' entities +
+        entities this group has touched, fact counts only) into Bob's system
+        prompt here. Off by default; BOB_MEMORY_ROSTER=off overrides to off
+        everywhere.
+        """
+        arg = args.strip().lower()
+        if arg not in ("on", "off", "status", ""):
+            await self.send_message(chat_id, "Usage: /roster on|off|status")
+            return
+
+        from server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        await repo.ensure(session_key)
+        policy = await repo.get_policy(session_key)
+        current = bool(policy.get("memory_roster", False))
+
+        if arg in ("status", ""):
+            state = "ON" if current else "OFF"
+            await self.send_message(chat_id, f"memory roster {state}")
+            return
+
+        enabled = arg == "on"
+        if enabled == current:
+            state = "ON" if current else "OFF"
+            await self.send_message(chat_id, f"memory roster already {state}")
+            return
+
+        await repo.set_policy(session_key, {"memory_roster": enabled})
+        logger.info("memory roster %s for conversation %s", arg, session_key)
+        await self.send_message(chat_id, f"memory roster {'ON' if enabled else 'OFF'}")
 
     async def _cmd_autoplan(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle auto-approval of dream plans FOR THIS CHAT (runtime, no restart).

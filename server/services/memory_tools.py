@@ -26,8 +26,34 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     async def recall(query: str) -> str:
         """Retrieve entity information by ID, name, or natural language query.
         Returns the entity's claims rendered as readable text."""
-        from server.services.memory.tools import recall as _recall
-        return await _recall(ctx.db, query)
+        import time as _time
+        from uuid import uuid4
+
+        from server.services.memory.admin import insert_search_log
+        from server.services.memory.tools import recall_with_meta
+
+        started = _time.perf_counter()
+        text, meta = await recall_with_meta(ctx.db, query)
+        results = []
+        if meta.get("resolved_entity_id"):
+            results.append({
+                "entity_id": meta["resolved_entity_id"],
+                "display_name": meta.get("display_name"),
+            })
+        results.extend({"entity_id": eid} for eid in meta.get("extra_ids", []))
+        try:
+            await insert_search_log(
+                ctx.db,
+                log_id=str(uuid4()),
+                query=query[:500],
+                results_json=json.dumps(results),
+                session_key=session_key,
+                result_count=len(results),
+                latency_seconds=round(_time.perf_counter() - started, 3),
+            )
+        except Exception:
+            logger.warning("recall search-log write failed", exc_info=True)
+        return text
 
     async def _find_handler(
         entity_type: str,

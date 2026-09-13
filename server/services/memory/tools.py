@@ -26,10 +26,27 @@ async def recall(
     Tries exact ID, alias, embedding search (top 3), then FTS.
     For natural language queries, embedding search returns multiple results.
     """
+    text, _meta = await recall_with_meta(db, query, actor)
+    return text
+
+
+async def recall_with_meta(
+    db: Any,
+    query: str,
+    actor: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """recall(), also returning what the query resolved to.
+
+    Meta: {"resolved_entity_id", "display_name", "extra_ids"} — callers use
+    it to log recall outcomes (memory_search_log) without re-querying.
+    """
     # Try direct entity ID lookup
     entity = await _resolve_entity(db, query)
     if not entity:
-        return f"No entity found matching: {query}"
+        return (
+            f"No entity found matching: {query}",
+            {"resolved_entity_id": None, "display_name": None, "extra_ids": []},
+        )
 
     entity_id = entity["entity_id"]
     entity_type = entity["entity_type"]
@@ -95,7 +112,11 @@ async def recall(
             e_rendered = await render_entity(e_row["entity_type"], e_row["display_name"], e_dicts, entity_id=eid, db=db)
             rendered += f"\n\n---\n{e_rendered}"
 
-    return rendered
+    return rendered, {
+        "resolved_entity_id": entity_id,
+        "display_name": display_name,
+        "extra_ids": extra_ids,
+    }
 
 
 async def find(

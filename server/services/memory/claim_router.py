@@ -35,6 +35,7 @@ from typing import Any
 from uuid import uuid4
 
 from server.context import AppContext
+from server.services.llm_json import parse_llm_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -298,10 +299,10 @@ async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
             call_category="claim_router_probe",
             session_key=goal["conversation_id"],
         )
-        parsed = json.loads(result.strip())
-        verdict = str(parsed.get("verdict", "")).upper()
-        return "relevant" if verdict == "RELEVANT" else (
-            "ignore" if verdict == "IGNORE" else "relevant")
+        # GLM intermittently answers with prose or truncated JSON instead of
+        # the requested bare object — rescue-parse before failing open.
+        verdict = parse_llm_verdict(result, {"RELEVANT": "relevant", "IGNORE": "ignore"})
+        return verdict or "relevant"
     except Exception:
         logger.warning("claim router probe failed; failing open to relevant",
                        exc_info=True)

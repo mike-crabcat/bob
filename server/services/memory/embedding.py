@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMS = 1536
 
+# The API rejects inputs over 8192 tokens; rendered entity bodies sometimes
+# run to 40k+ chars (fat entities 400 on every reconciliation pass until the
+# 2026-09-12 fix). Truncate defensively — the leading rendered claims carry
+# the recall signal, and a prefix beats no embedding at all.
+_EMBED_MAX_CHARS = 24_000
+
 
 def _get_api_key() -> str:
     import os
@@ -27,6 +33,8 @@ async def embed_batch(texts: list[str]) -> list[list[float] | None]:
     api_key = _get_api_key()
     if not api_key:
         return [None] * len(texts)
+
+    texts = [t[:_EMBED_MAX_CHARS] for t in texts]
 
     from openai import AsyncOpenAI
     client = AsyncOpenAI(api_key=api_key)

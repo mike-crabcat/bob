@@ -1182,3 +1182,90 @@ async def build_memory_index_text_db(db: Any) -> str:
 
     lines = [f"**{t}**: " + ", ".join(entries) for t, entries in sorted(by_type.items())]
     return "\n".join(lines)
+
+
+async def build_conversation_roster(
+    db: Any, session_key: str, *, max_entities: int = 15
+) -> str:
+    """Scoped memory roster for a group session (2026-09-13 rollout).
+
+    Participants' person entities first (resolved via contact_id claims),
+    then entities this conversation has touched (memory_entity_mentions,
+    most recent first), rendered as entity id + name + active fact count.
+    Presence, not contents — depth-seeking still goes through
+    get_entity/recall, so the roster stays a few hundred bytes while
+    removing the fuzzy-lookup hop (recall sat at 1.7% of group turns,
+    2026-09-12 memory review §4). Returns "" when nothing is known.
+    """
+    from server.repositories.conversations import ConversationRepository
+    from server.repositories.groups import GroupRepository
+
+    convo = ConversationRepository(db)
+    route = await convo.route_for(session_key)
+    if not (route and route["address"]):
+        return ""
+
+    entity_ids: list[str] = []
+
+    # Participants → person entities via their contact_id claim (hex8).
+    contact_ids = await GroupRepository(db).member_contact_ids(route["address"])
+    hexes = [c[:8] for c in contact_ids if c]
+    if hexes:
+        placeholders = ",".join("?" * len(hexes))
+        for row in await db.fetch_all(
+            f"SELECT DISTINCT subject_id FROM memory_claims "
+            f"WHERE claim_type_key = 'contact_id' AND status = 'active' "
+            f"AND value IN ({placeholders})",
+            hexes,
+        ):
+            entity_ids.append(row["subject_id"])
+
+    # Entities this conversation has mentioned, most recent first.
+    seen = set(entity_ids)
+    cid = await convo.resolve_cid(session_key)
+    for row in await db.fetch_all(
+        "SELECT entity_id FROM memory_entity_mentions "
+        "WHERE conversation_id = ? ORDER BY last_at DESC",
+        (cid,),
+    ):
+        eid = row["entity_id"]
+        if eid not in seen:
+            seen.add(eid)
+            entity_ids.append(eid)
+
+    entity_ids = entity_ids[:max_entities]
+    if not entity_ids:
+        return ""
+
+    placeholders = ",".join("?" * len(entity_ids))
+    counts = {
+        r["subject_id"]: r["n"]
+        for r in await db.fetch_all(
+            f"SELECT subject_id, COUNT(*) n FROM memory_claims "
+            f"WHERE status = 'active' AND subject_id IN ({placeholders}) "
+            f"GROUP BY subject_id",
+            entity_ids,
+        )
+    }
+    names = {
+        r["entity_id"]: (r["display_name"] or r["entity_id"])
+        for r in await db.fetch_all(
+            f"SELECT entity_id, display_name FROM memory_entities "
+            f"WHERE status = 'active' AND entity_id IN ({placeholders})",
+            entity_ids,
+        )
+    }
+
+    lines = [
+        "## Memory Roster",
+        "",
+        "Bob's memory already covers these entities from this group's "
+        "conversations (fact counts, not contents). For details use "
+        "get_entity('<entity_id>'), or recall(query) for anything else:",
+    ]
+    for eid in entity_ids:
+        if eid in names:
+            lines.append(f"- {eid} — {names[eid]} ({counts.get(eid, 0)} facts)")
+    if len(lines) <= 3:
+        return ""
+    return "\n".join(lines)

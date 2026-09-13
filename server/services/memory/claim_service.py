@@ -473,5 +473,9 @@ async def update_entity_fts(db: Any, entity_id: str) -> None:
         embedding = await embed_text(rendered)
         if embedding:
             await upsert_embedding(db, entity_id, embedding)
+        else:
+            logger.warning(
+                "Embedding refresh skipped for %s (no vector returned — check "
+                "BOB_OPENAI_API_KEY / provider errors)", entity_id)
     except Exception:
-        pass
+        logger.warning("Embedding refresh failed for %s", entity_id, exc_info=True)

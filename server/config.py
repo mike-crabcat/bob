@@ -399,6 +399,19 @@ class ReconciliationSettings:
 
 
 @dataclass(slots=True)
+class MemorySettings:
+    """Memory-system runtime flags.
+
+    roster_enabled: master switch for the per-conversation memory roster
+    injected into group prompts (2026-09-13). Opt-in per conversation via
+    the `memory_roster` policy flag; this env kill switch (BOB_MEMORY_ROSTER)
+    force-disables everywhere without touching policies.
+    """
+
+    roster_enabled: bool = True
+
+
+@dataclass(slots=True)
 class DreamSettings:
     """Configuration for the dream system (see dream-v2-plan.md).
 
@@ -491,6 +504,7 @@ class Settings:
         default_factory=UtilityConversationSettings)
     tool_loop: ToolLoopSettings = field(default_factory=ToolLoopSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
     heartbeat_interval_seconds: float = 60.0
@@ -760,6 +774,9 @@ class Settings:
             daily_batch_enabled=os.getenv("BOB_RECON_DAILY_BATCH_ENABLED", "1").strip() not in ("0", "false", "no"),
             daily_batch_max_entities=int(os.getenv("BOB_RECON_DAILY_BATCH_MAX_ENTITIES", "50")),
         )
+        memory = MemorySettings(
+            roster_enabled=os.getenv("BOB_MEMORY_ROSTER", "1").strip() not in ("0", "false", "no", "off"),
+        )
 
         dream = DreamSettings(
             enabled=_env_bool("BOB_DREAM_ENABLED"),
@@ -843,6 +860,7 @@ class Settings:
                     os.getenv("BOB_TOOL_LOOP_HISTORY_TRIGGER", "40000")),
             ),
             reconciliation=reconciliation,
+            memory=memory,
             dream=dream,
             goals=GoalsSettings(
                 reviser_model=os.getenv("BOB_GOALS_REVISER_MODEL", ""),

@@ -31,6 +31,7 @@ from server.services.memory.claim_service import (
 from server.services.memory.models import Claim
 from server.services.memory.merge import _execute_merge, _deduplicate_claims
 from server.services.memory.entity_tools import make_list_entities_tool, make_get_entity_tool
+from server.services.llm_json import parse_llm_json
 from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -620,6 +621,8 @@ async def _write_questions(
     ids = []
     now = datetime.now().isoformat()
     for q in questions:
+        if not q.get("question"):
+            continue
         qid = f"question-{uuid.uuid4().hex[:8]}"
         await db.execute(
             "INSERT INTO memory_questions "
@@ -679,6 +682,54 @@ async def deprecate_file_entities_without_path(db: Any) -> list[str]:
     return deprecated
 
 
+# Models behind OpenRouter sometimes rename tool arguments (claim_type,
+# value, winner/loser…). Map known renames so a misnamed argument doesn't
+# kill the whole tool call — pre-fix these surfaced as TypeErrors and the
+# intended repair was silently lost (~7×/week, 2026-09-12 memory review).
+_RECON_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "add_claim": {
+        "claim_type": "claim_type_key", "type": "claim_type_key",
+        "subject": "subject_id", "entity_id": "subject_id",
+    },
+    "retract_claim": {
+        "claim_type": "claim_type_key", "value": "old_value",
+        "subject": "subject_id", "entity_id": "subject_id",
+    },
+    "supersede_claim_tool": {
+        "claim_type": "claim_type_key", "old": "old_value", "value": "old_value",
+        "new": "new_value", "subject": "subject_id", "entity_id": "subject_id",
+    },
+    "create_entity": {"type": "entity_type", "id": "entity_id"},
+    "delete_entity": {"id": "entity_id"},
+    "merge_entities": {
+        "winner": "canonical_id", "canonical": "canonical_id",
+        "into": "canonical_id", "loser": "loser_id",
+    },
+}
+
+
+def _normalise_tool_kwargs(
+    tool_name: str, handler: Any, kwargs: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Rename aliased tool arguments and drop unknown ones.
+
+    Returns (normalised_kwargs, dropped_names) so the caller can log what
+    the model got wrong — the retry-with-feedback loop teaches it within
+    the same reconciliation run.
+    """
+    aliases = _RECON_ARG_ALIASES.get(tool_name, {})
+    renamed = {aliases.get(k, k): v for k, v in kwargs.items()}
+    params = inspect.signature(handler).parameters
+    known = {
+        k for k, p in params.items()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    dropped = sorted(k for k in renamed if k not in known)
+    for k in dropped:
+        del renamed[k]
+    return renamed, dropped
+
+
 async def reconcile_entity(
     db: Any,
     llm: Any,
@@ -732,30 +783,57 @@ async def reconcile_entity(
 
     recon_tools = make_reconciliation_tools(db, on_entity_merged=_on_entity_merged)
 
-    # Track entities touched by tool calls for FTS updates
+    # Track entities touched by tool calls for FTS updates, record the ops
+    # the model actually applied, and survive mis-shaped tool calls
+    # (renamed/missing arguments) instead of raising out of the loop.
     touched_entities: set[str] = {entity_id}
+    ops_applied: list[str] = []
 
-    # Wrap tool handlers to track touched entities
     original_handlers = {t.name: t.handler for t in recon_tools}
 
-    def _track(entity_ids: set[str]):
+    def _track(entity_ids: set[str], tool_name: str, ops: list[str]):
         """Return a decorator that tracks entity IDs touched by tool calls."""
         def _wrap_handler(handler):
             async def _tracked(*args, **kwargs):
-                result = await handler(*args, **kwargs)
-                # Track subject_id if passed
-                sid = kwargs.get("subject_id", "")
-                if sid:
-                    entity_ids.add(sid)
-                eid = kwargs.get("entity_id", "")
-                if eid:
-                    entity_ids.add(eid)
+                kwargs, dropped = _normalise_tool_kwargs(tool_name, handler, kwargs)
+                if dropped:
+                    logger.warning(
+                        "Reconciliation tool %s: dropped unknown argument(s): %s",
+                        tool_name, ", ".join(dropped))
+                if not args:
+                    params = inspect.signature(handler).parameters
+                    missing = [
+                        k for k, p in params.items()
+                        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                      inspect.Parameter.KEYWORD_ONLY)
+                        and p.default is inspect.Parameter.empty
+                        and k not in kwargs
+                    ]
+                    if missing:
+                        return ("Error: missing required argument(s): "
+                                f"{', '.join(missing)}. Call again with all "
+                                "required arguments.")
+                try:
+                    result = await handler(*args, **kwargs)
+                except TypeError as exc:
+                    logger.warning(
+                        "Reconciliation tool %s: bad call shape: %s", tool_name, exc)
+                    return (f"Error: bad arguments ({exc}). Check the tool "
+                            "schema and retry.")
+                for key in ("subject_id", "entity_id", "canonical_id", "loser_id"):
+                    hit = kwargs.get(key, "")
+                    if hit:
+                        entity_ids.add(hit)
+                if (isinstance(result, str)
+                        and not result.startswith(("Error", "No matching"))
+                        and tool_name not in ("list_entities", "get_entity")):
+                    ops.append(f"{tool_name}: {result}"[:200])
                 return result
             return _tracked
         return _wrap_handler
 
     for t in recon_tools:
-        t.handler = _track(touched_entities)(original_handlers[t.name])
+        t.handler = _track(touched_entities, t.name, ops_applied)(original_handlers[t.name])
 
     resolved_model = (
         await resolve_reconciliation_model(db, entity_id, entity_type, settings)
@@ -787,19 +865,50 @@ async def reconcile_entity(
     except Exception:
         logger.warning("Failed to update last_reconciled_at for %s", entity_id, exc_info=True)
 
-    # Parse the final JSON response for issues and questions
+    # Parse the final JSON response for issues and questions. GLM output
+    # is routinely fenced, prose-wrapped, or truncated — parse_llm_json
+    # recovers those; a bare json.loads lost ~75% of finals post model
+    # switch (2026-09-12 memory review). When the model answered in plain
+    # prose (no JSON anywhere), ask once for the JSON summary so issues
+    # and questions are not dropped with it.
     issues: list[dict] = []
     questions: list[dict] = []
-    try:
-        text = response.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        result = json.loads(text)
-        issues = result.get("issues", [])
-        questions = result.get("questions", [])
-    except (json.JSONDecodeError, ValueError):
+    result = parse_llm_json(response)
+    if not isinstance(result, dict) and response and response.strip():
+        try:
+            retry_response = await llm.chat_with_tools(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Review this entity for consistency issues."},
+                    {"role": "assistant", "content": response},
+                    {"role": "user", "content":
+                        "Your previous reply was not valid JSON. Re-emit ONLY the "
+                        "final JSON object {\"issues\": [...], \"questions\": [...]} "
+                        "summarising what you found and fixed. No prose, no fences."},
+                ],
+                tools=recon_tools,
+                call_category="memory_reconciliation",
+                model=resolved_model,
+            )
+            result = parse_llm_json(retry_response)
+        except Exception:
+            logger.warning("Reconciliation JSON retry call failed for %s",
+                           entity_id, exc_info=True)
+    if isinstance(result, dict):
+        raw_issues = result.get("issues", [])
+        raw_questions = result.get("questions", [])
+        if isinstance(raw_issues, list):
+            issues = [i for i in raw_issues if isinstance(i, dict)]
+        if isinstance(raw_questions, list):
+            # q.get("question") — a truthy prompt; repairs can leave a
+            # truncated {"question": None} stub which is not worth storing.
+            questions = [q for q in raw_questions
+                         if isinstance(q, dict) and q.get("question")]
+    else:
         # Tools already applied their effects — just log the parse failure
-        logger.warning("Reconciliation: failed to parse final response for %s", entity_id)
+        logger.warning(
+            "Reconciliation: failed to parse final response for %s (head: %r)",
+            entity_id, (response or "")[:160])
 
     question_ids = await _write_questions(db, entity_id, questions)
 
@@ -819,6 +928,6 @@ async def reconcile_entity(
 
     return {
         "issues": issues,
-        "operations_applied": [],  # Operations were applied via tools, not batched
+        "operations_applied": ops_applied,
         "questions_raised": question_ids,
     }

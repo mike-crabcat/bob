@@ -953,8 +953,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             person_context = await assembler.person_profile(contact_id)
 
         group_memory_hint = ""
+        memory_roster = ""
         if chat_kind == "group":
             group_memory_hint = await assembler.group_memory_hint(session_key)
+            # Scoped memory roster (2026-09-13): opt-in per conversation
+            # (`memory_roster` policy flag, /roster command), master kill
+            # switch BOB_MEMORY_ROSTER=off. Empty string when not enabled.
+            memory_roster = await assembler.maybe_memory_roster(session_key)
 
         # Dream plans — Tier 1 injection for sessions with linked plans
         dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
@@ -967,7 +972,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # fan-out to every channel) — date-relative reasoning ("tomorrow",
         # "this week") and local-vs-UTC arithmetic need a grounded now.
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, dream_plans_prompt, goals_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, dream_plans_prompt, goals_prompt) if p
         )
 
         from server.services.llm_dispatch import LLMDispatchService
