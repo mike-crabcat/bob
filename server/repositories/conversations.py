@@ -112,6 +112,28 @@ class ConversationRepository:
             tuple(conversation_ids))
         return [dict(r) for r in rows]
 
+    async def session_labels_for_cids(
+        self, conversation_ids: list[str],
+    ) -> dict[str, dict[str, str]]:
+        """conversation_id → {"session_key", "title"} for history-search
+        result rendering (session_tools). Missing cids simply absent."""
+        if not conversation_ids:
+            return {}
+        marks = ",".join("?" * len(conversation_ids))
+        rows = await self.db.fetch_all(
+            f"""SELECT b.conversation_id AS cid, b.session_key AS session_key,
+                       COALESCE(c.title, wg.name, '') AS title
+                FROM bindings b
+                LEFT JOIN conversations c ON c.id = b.conversation_id
+                LEFT JOIN whatsappgroups wg ON wg.whatsapp_jid = b.address
+                     AND wg.deleted_at IS NULL
+                WHERE b.conversation_id IN ({marks})""",
+            tuple(conversation_ids))
+        return {
+            r["cid"]: {"session_key": r["session_key"], "title": r["title"]}
+            for r in rows or []
+        }
+
     async def named_sessions(self) -> list[dict[str, Any]]:
         """Active bindings with a human display name: group sessions named by
         the WhatsApp group, DM sessions by the bound contact."""

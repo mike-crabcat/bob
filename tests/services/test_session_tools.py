@@ -49,11 +49,20 @@ async def seeded(ctx):
         "UPDATE bindings SET contact_id = 'c2' WHERE session_key = ?", (DM_KEY,))
 
     session_svc = SessionService(ctx)
-    await session_svc.add_message(GROUP_KEY, "user", "Lunch Sunday?", channel="whatsapp")
-    await session_svc.add_message(
-        GROUP_KEY, "user", "I'm in and I'm bringing my kids",
-        channel="whatsapp", sender_id="c1")
-    await session_svc.add_message(GROUP_KEY, "assistant", "Noted.", channel="whatsapp")
+    # Distinct timestamps: the paging cursor is strictly-before, so messages
+    # sharing one second would be skipped at a page boundary (documented edge).
+    await ctx.db.execute(
+        "INSERT INTO messages (conversation_id, role, content, channel, created_at) "
+        "VALUES (?, 'user', ?, 'whatsapp', '2026-08-17 09:00:01')",
+        (GROUP_KEY, "Lunch Sunday?"))
+    await ctx.db.execute(
+        "INSERT INTO messages (conversation_id, role, content, channel, sender_id, created_at) "
+        "VALUES (?, 'user', ?, 'whatsapp', 'c1', '2026-08-17 09:00:02')",
+        (GROUP_KEY, "I'm in and I'm bringing my kids"))
+    await ctx.db.execute(
+        "INSERT INTO messages (conversation_id, role, content, channel, created_at) "
+        "VALUES (?, 'assistant', ?, 'whatsapp', '2026-08-17 09:00:03')",
+        (GROUP_KEY, "Noted."))
     return ctx
 
 
@@ -172,3 +181,87 @@ async def test_build_common_tools_wires_current_session(seeded):
     read = _tool(tools, "get_session_messages")
     result = json.loads(await read.handler())
     assert result["session_key"] == GROUP_KEY
+
+
+# ---------------------------------------------------------------------------
+# get_session_messages(before=…) — paging back through full history
+# ---------------------------------------------------------------------------
+
+
+async def test_get_session_messages_pages_back_with_before(seeded):
+    # 2026-09-13: the 200-message newest-only window landed ~4 days back in
+    # busy groups — Bob had no way to read older history at all.
+    tools = make_session_tools(seeded, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
+    page1 = json.loads(await _tool(tools, "get_session_messages").handler(limit=2))
+    assert [m["content"] for m in page1["messages"]] == ["I'm in and I'm bringing my kids", "Noted."]
+
+    # Pass back the oldest timestamp exactly as returned (local+offset form)
+    oldest = page1["messages"][0]["created_at"]
+    page2 = json.loads(await _tool(tools, "get_session_messages").handler(limit=2, before=oldest))
+    assert [m["content"] for m in page2["messages"]] == ["Lunch Sunday?"]
+
+    # Exhausted history → empty page, no error
+    oldest2 = page2["messages"][0]["created_at"]
+    page3 = json.loads(await _tool(tools, "get_session_messages").handler(before=oldest2))
+    assert page3["messages"] == []
+
+
+async def test_get_session_messages_before_rejects_garbage(seeded):
+    tools = make_session_tools(seeded, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
+    result = json.loads(
+        await _tool(tools, "get_session_messages").handler(before="not a timestamp"))
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# search_session_messages — content search over history
+# ---------------------------------------------------------------------------
+
+
+async def test_search_finds_matches_with_sender_and_snippet(seeded):
+    tools = make_session_tools(seeded, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
+    result = json.loads(await _tool(tools, "search_session_messages").handler(query="lunch"))
+    assert result["query"] == "lunch"
+    assert len(result["matches"]) == 1
+    m = result["matches"][0]
+    assert m["snippet"] == "Lunch Sunday?"
+    assert m["session_key"] == GROUP_KEY
+    assert m["conversation"] == "Leeming Boys"  # label via whatsappgroups.name
+    assert m["created_at"]
+
+
+async def test_search_all_scans_accessible_sessions(seeded):
+    session_svc = SessionService(seeded)
+    await session_svc.add_message(DM_KEY, "user", "lunch plans for Friday", channel="whatsapp")
+    # Trusted dispatch: session_key="all" spans every conversation
+    tools = make_session_tools(seeded, is_trusted=True, session_key=GROUP_KEY)
+    result = json.loads(
+        await _tool(tools, "search_session_messages").handler(query="lunch", session_key="all"))
+    keys = {m["session_key"] for m in result["matches"]}
+    assert keys == {GROUP_KEY, DM_KEY}
+    # Newest first
+    assert result["matches"][0]["session_key"] == DM_KEY
+
+
+async def test_search_scoped_to_untrusted_accessible_set(seeded):
+    await seeded.db.execute(
+        "INSERT INTO participants (conversation_id, identifier, display_name, contact_id, is_trusted, last_active_at) "
+        "VALUES (?, '+61431939512', 'Trevor', 'c1', 0, ?)", (GROUP_KEY, NOW))
+    session_svc = SessionService(seeded)
+    await session_svc.add_message(DM_KEY, "user", "private lunch talk", channel="whatsapp")
+
+    tools = make_session_tools(seeded, is_trusted=False, contact_id="c1", session_key=GROUP_KEY)
+    # Direct foreign search denied
+    denied = json.loads(await _tool(tools, "search_session_messages").handler(
+        query="lunch", session_key=DM_KEY))
+    assert "error" in denied
+    # "all" clamps to the accessible set: DM content stays invisible
+    result = json.loads(await _tool(tools, "search_session_messages").handler(
+        query="private lunch talk", session_key="all"))
+    assert result["matches"] == []
+
+
+async def test_search_rejects_empty_query(seeded):
+    tools = make_session_tools(seeded, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
+    result = json.loads(await _tool(tools, "search_session_messages").handler(query="  "))
+    assert "error" in result

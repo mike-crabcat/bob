@@ -200,17 +200,53 @@ class HistoryRepository:
             (await self._cid(session_key),))
         return row is not None
 
-    async def recent_with_sender_names(self, session_key: str, *, limit: int) -> list[dict]:
+    async def recent_with_sender_names(
+        self, session_key: str, *, limit: int, before_utc: str | None = None
+    ) -> list[dict]:
         """Newest N joined to contact names, returned oldest-first. rowid
-        breaks created_at ties (second granularity) by insertion order."""
+        breaks created_at ties (second granularity) by insertion order.
+        ``before_utc`` (canonical DB format, exclusive) pages backwards —
+        the LLM history tools reach further back than any single window."""
+        where = "sm.conversation_id = ?"
+        params: list[Any] = [await self._cid(session_key)]
+        if before_utc:
+            where += " AND sm.created_at < ?"
+            params.append(before_utc)
+        params.append(limit)
         rows = await self.db.fetch_all(
-            """SELECT sm.role, sm.content, sm.channel, sm.created_at, c.name AS sender_name
+            f"""SELECT sm.role, sm.content, sm.channel, sm.created_at, c.name AS sender_name
                FROM messages sm
                LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
-               WHERE sm.conversation_id = ?
+               WHERE {where}
                ORDER BY sm.created_at DESC, sm.rowid DESC LIMIT ?""",
-            (await self._cid(session_key), limit))
+            tuple(params))
         return list(reversed(rows or []))
+
+    async def search_messages_with_sender_names(
+        self, query: str, *, session_key: str | None, limit: int
+    ) -> list[dict]:
+        """Case-insensitive substring matches over message content, newest
+        first, joined to contact names. ``session_key=None`` searches every
+        conversation (trusted dispatches only — the tool layer enforces
+        the accessible-set scoping). No FTS index: conversations hold a
+        few thousand rows, a LIKE scan is instant at that scale."""
+        needle = f"%{query.lower()}%"
+        if session_key:
+            where = "sm.conversation_id = ? AND lower(sm.content) LIKE ?"
+            params: list[Any] = [await self._cid(session_key), needle]
+        else:
+            where = "lower(sm.content) LIKE ?"
+            params = [needle]
+        params.append(limit)
+        rows = await self.db.fetch_all(
+            f"""SELECT sm.conversation_id, sm.role, sm.content, sm.channel,
+                       sm.created_at, c.name AS sender_name
+               FROM messages sm
+               LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
+               WHERE {where}
+               ORDER BY sm.created_at DESC, sm.rowid DESC LIMIT ?""",
+            tuple(params))
+        return [dict(r) for r in rows or []]
 
     # ------------------------------------------------- dispatch claim/restore
 

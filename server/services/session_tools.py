@@ -19,6 +19,39 @@ logger = logging.getLogger(__name__)
 _MAX_MESSAGE_CHARS = 2000
 
 
+def _normalise_before(before: str) -> str | None:
+    """Parse a paging cursor into canonical DB UTC ("YYYY-MM-DD HH:MM:SS"),
+    exclusive. Accepts what local_iso returns ("2026-09-13 07:28:51+08:00"),
+    bare ISO, and the raw DB format; returns None when unparseable. Naive
+    strings are treated as UTC (the DB frame)."""
+    s = before.strip()
+    if not s:
+        return ""
+    from datetime import datetime, timezone
+
+    for fmt in (None, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.fromisoformat(s) if fmt is None else datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return None
+
+
+def _snippet(content: str, query: str, *, before: int = 120, after: int = 240) -> str:
+    """Window around the first case-insensitive match, single line."""
+    idx = content.lower().find(query.lower())
+    if idx < 0:
+        return content[:after].replace("\n", " ")
+    start = max(0, idx - before)
+    snippet = content[start:idx + after].replace("\n", " ").strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if idx + after < len(content) else ""
+    return f"{prefix}{snippet}{suffix}"
+
+
 def make_session_tools(
     ctx: AppContext,
     *,
@@ -111,11 +144,19 @@ def make_session_tools(
         return json.dumps({"matches": results})
 
     @tool
-    async def get_session_messages(session_key: str = "", limit: int = 50) -> str:
-        """Read recent messages from a session, oldest first. Defaults to the current session.
+    async def get_session_messages(
+        session_key: str = "", limit: int = 50, before: str = ""
+    ) -> str:
+        """Read messages from a session, oldest first. Defaults to the current session.
         Each message includes role, sender display name (when known), channel, and timestamp.
-        Use this to check what was actually said recently — e.g. whether someone replied,
-        confirmed, or declined — rather than relying on remembered status."""
+        Use this to check what was actually said — e.g. whether someone replied,
+        confirmed, or declined — rather than relying on remembered status.
+        Returns the newest `limit` messages (max 200). To read FURTHER BACK in
+        history, pass `before` = the created_at timestamp of the OLDEST message
+        from your previous read (pass it back exactly as returned) — you get the
+        page preceding it. Repeat to walk back through the full history.
+        (Messages in the same second as the boundary may be skipped — use
+        search_session_messages when precision matters.)"""
         target = session_key.strip() or current_session_key
         if not target:
             return json.dumps({"error": "No session specified"})
@@ -127,11 +168,18 @@ def make_session_tools(
         if not 1 <= limit <= 200:
             limit = 50
 
+        before_utc = _normalise_before(before)
+        if before and before_utc is None:
+            return json.dumps({
+                "error": "Could not parse `before` — pass the exact created_at "
+                          "string from a previous page, e.g. "
+                          "'2026-09-13 07:28:51+08:00'."})
+
         # Newest N, then flip to oldest-first for readability. (SessionService
         # .get_messages applies LIMIT to the oldest end, which is wrong here.)
         from server.repositories.history import HistoryRepository
         messages = await HistoryRepository(db).recent_with_sender_names(
-            target, limit=limit)
+            target, limit=limit, before_utc=before_utc)
 
         return json.dumps({
             "session_key": target,
@@ -147,4 +195,76 @@ def make_session_tools(
             ],
         })
 
-    return [find_session, get_session_messages]
+    @tool
+    async def search_session_messages(
+        query: str, session_key: str = "", limit: int = 20
+    ) -> str:
+        """Search message HISTORY by content (case-insensitive substring), newest
+        first. Each match includes session_key, conversation title, role, sender,
+        timestamp, and a snippet around the match. Defaults to the current
+        session; pass session_key from find_session to search elsewhere, or
+        leave session_key as "all" to search every accessible conversation.
+        Use this for "when did we discuss X" / "what did <person> say about X"
+        over the full history — memory recall only holds what extraction kept,
+        this reads what was actually said. Use get_session_messages(before=...)
+        to read the context around a match."""
+        q = query.strip()
+        if not q:
+            return json.dumps({"error": "Query cannot be empty"})
+        if not 1 <= limit <= 50:
+            limit = 20
+
+        from server.repositories.history import HistoryRepository
+
+        accessible_keys = await _accessible_session_keys()
+        target: str | None
+        if session_key.strip().lower() == "all":
+            if accessible_keys is not None:
+                # Untrusted: search only the accessible sessions, one by one —
+                # the repo's global path has no session filter to clamp.
+                rows: list[dict] = []
+                for key in sorted(accessible_keys):
+                    rows.extend(await HistoryRepository(db).search_messages_with_sender_names(
+                        q, session_key=key, limit=limit))
+                rows.sort(key=lambda m: (m["created_at"] or ""), reverse=True)
+                matches = rows[:limit]
+            else:
+                matches = await HistoryRepository(db).search_messages_with_sender_names(
+                    q, session_key=None, limit=limit)
+        else:
+            target = session_key.strip() or current_session_key
+            if not target:
+                return json.dumps({"error": "No session specified"})
+            if accessible_keys is not None and target not in accessible_keys:
+                return json.dumps({"error": "Session not accessible from this conversation"})
+            matches = await HistoryRepository(db).search_messages_with_sender_names(
+                q, session_key=target, limit=limit)
+
+        # Resolve conversation_id → session_key + title for paging/context.
+        titles, keys = await _conversation_labels({m["conversation_id"] for m in matches})
+
+        return json.dumps({
+            "query": q,
+            "matches": [
+                {
+                    "session_key": keys.get(m["conversation_id"], m["conversation_id"]),
+                    "conversation": titles.get(m["conversation_id"], ""),
+                    "role": m["role"],
+                    "sender": m["sender_name"],
+                    "created_at": local_iso(m["created_at"]),
+                    "snippet": _snippet(m["content"] or "", q),
+                }
+                for m in matches
+            ],
+        })
+
+    async def _conversation_labels(cids: set[str]) -> tuple[dict[str, str], dict[str, str]]:
+        """conversation_id → (title, session_key) via the conversations repo
+        (bindings/conversations SQL stays owned by repositories)."""
+        from server.repositories.conversations import ConversationRepository
+        labels = await ConversationRepository(db).session_labels_for_cids(list(cids))
+        titles = {cid: lab["title"] for cid, lab in labels.items()}
+        keys = {cid: lab["session_key"] for cid, lab in labels.items()}
+        return titles, keys
+
+    return [find_session, get_session_messages, search_session_messages]
