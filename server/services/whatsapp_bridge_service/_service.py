@@ -31,6 +31,18 @@ from server.services.whatsapp_bridge_service._media import (
 
 logger = logging.getLogger(__name__)
 
+
+def is_duplicate_send(text: str, sent_texts: list[str]) -> bool:
+    """True when this exact text was already delivered this turn — the
+    GLM re-emission quirk repeats a send seconds after it succeeded
+    (same dispatch, seq 0 and 1; two such pairs on 2026-09-13 alone,
+    first observed 2026-08-30 with the guard deferred). Plain and
+    captioned-media forms both count; the seq-keyed outbox is per-call
+    by design, so the closure must catch it."""
+    return bool(text) and (text in sent_texts
+                           or f"[Image: {text}]" in sent_texts)
+
+
 # Rate limiting for quota-exhaustion notifications: session_key -> monotonic
 # timestamp of the last notification sent. Resets on process restart, which is
 # fine — if Bob restarts, credit may have been topped up in the meantime.
@@ -1082,6 +1094,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             if is_no_reply(text):
                 return "No reply sent."
             text = strip_citation_markers(text)
+            # duplicate-send guard: an exact re-send of text already
+            # delivered this turn is refused, not repeated (the model
+            # gets the error and finishes instead of double-posting)
+            if is_duplicate_send(text, sent_texts):
+                return ("Error: not sent — duplicate blocked: this exact "
+                        "message was already delivered this turn. Don't "
+                        "resend it; finish your turn.")
             seq = send_seq[0]
             send_seq[0] += 1
             if media_path:
