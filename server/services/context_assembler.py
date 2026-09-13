@@ -117,16 +117,24 @@ class ContextAssembler:
         return f"## Person Profile\n\n{entry}" if entry else ""
 
     async def group_memory_hint(self, session_key: str) -> str:
-        """Recall hint for groups with an accumulated memory entity."""
+        """Recall hint + pushed expectations for groups with an accumulated
+        memory entity. The norms/traditions/open-tasks push (2026-09-13)
+        rides along ungated: recall sat at 1.7% of group turns, so the
+        context a planning kickoff needs is rendered, not pulled."""
         from server.repositories.conversations import ConversationRepository
         eid = await ConversationRepository(self.db).group_memory_entity_id(session_key)
         if not eid:
             return ""
-        return (
-            "## Group Memory\n\n"
+        parts = [
+            "## Group Memory\n",
             f"This is a WhatsApp group with accumulated memory entity `{eid}`.\n"
-            f"Use `recall('{eid}')` to look up group knowledge."
-        )
+            f"Use `recall('{eid}')` to look up group knowledge.",
+        ]
+        from server.services.memory.service import build_group_expectations
+        pushed = await build_group_expectations(self.db, session_key)
+        if pushed:
+            parts.append(pushed)
+        return "\n\n".join(parts)
 
     async def maybe_memory_roster(self, session_key: str) -> str:
         """Gated entry point for the conversation memory roster.

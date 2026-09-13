@@ -33,7 +33,11 @@ async def build_session_plans_prompt(db: Database, session_key: str, *, dream_en
     from server.services.base import json_loads
 
     plans: list[dict] = []
+    seen_ids: set[str] = set()
     for r in rows:
+        if r["item_id"] in seen_ids:
+            continue  # duplicate link rows rendered the plan 3x (2026-09-13)
+        seen_ids.add(r["item_id"])
         row = await db.fetch_one("SELECT * FROM dream_plans WHERE id = ?", (r["item_id"],))
         if row and row["status"] in _SHOW_STATUSES:
             plans.append(dict(row))

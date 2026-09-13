@@ -154,6 +154,16 @@ A genuine `truth` correction reads like: "no, the message to Gareth went by What
 not email", or "actually it's 2 stops in Paris, not 1". If the value does not contradict \
 a previously-recorded claim, it is not a `truth`.
 
+**When a correction is about how Bob should behave IN A GROUP, record it as a `norm` \
+claim on the group entity — not as prose appended to a task, and not as `truth`.** \
+"Fail. AI doom lunch is not a family affair" is a norm: \
+`norm` on the group entity — "AI Doom lunches are adults-only, chat members only". \
+Norms are one fact each, punchy, durable (they outlive any single task or event), and \
+come from corrections or explicit group decisions. A group establishing a recurring \
+practice ("the next lunch", a standing series) is a `tradition` claim on the group \
+entity. A member stating their own weekly work pattern ("I only work from home \
+Thursdays") is a `work_schedule` claim on that person.
+
 **`appearance` is for durable PHYSICAL features of a person ONLY** — build, complexion, \
 hair and facial hair, eyes, habitual accessories (glasses), distinguishing features. Do \
 NOT record as `appearance`:

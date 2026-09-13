@@ -45,6 +45,31 @@ _ENTITY_TYPE_PREFIXES = ENTITY_TYPE_PREFIXES
 _SKIP_EXPAND_PREFIXES = tuple(et.prefix for et in ENTITY_TYPE_REGISTRY.values() if et.skip_expand)
 
 
+def _recon_protection_reason(
+    claim_id: str, claim_type_key: str, *, replacing: bool
+) -> str | None:
+    """Human-evidence protection for sticky claims (2026-09-13 AI doom
+    incident: the members-only lunch norm was captured twice on 2026-08-22
+    and both claims were swept by reconciliation as redundant).
+
+    Protected from reconciliation drift:
+    - `norm` claims — durable group behavioral expectations; changes must
+      come from the owner (memory_correct) or a newer explicit decision.
+    - correction-derived claims (`claim-correct-*` id prefix) — a human
+      already stated this; an LLM consistency pass doesn't outrank that.
+    - `tradition` claims from bare retract (no replacement offered) —
+      deleting the group's record of a series is never a consistency fix;
+      superseding with an updated tradition is fine.
+    """
+    if claim_type_key == "norm":
+        return f"norm claim {claim_id} (group behavioral expectation)"
+    if claim_id.startswith("claim-correct-"):
+        return f"correction-derived claim {claim_id} (human-stated ground truth)"
+    if claim_type_key == "tradition" and not replacing:
+        return f"tradition claim {claim_id} (bare retract would erase the series record)"
+    return None
+
+
 async def resolve_reconciliation_model(
     db: Any,
     entity_id: str,
@@ -180,9 +205,14 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             (subject_id, claim_type_key),
         )
         retracted = 0
+        skipped: list[str] = []
         for row in rows:
             val = row["value"] or row["object_id"] or ""
             if old_value and val != old_value:
+                continue
+            protection = _recon_protection_reason(row["id"], claim_type_key, replacing=False)
+            if protection:
+                skipped.append(protection)
                 continue
             await db.execute(
                 "UPDATE memory_claims SET status = 'superseded', superseded_by = ? WHERE id = ?",
@@ -191,7 +221,11 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             retracted += 1
             if not old_value:
                 break
-        return f"Retracted {retracted} {claim_type_key} claim(s) on {subject_id}"
+        msg = f"Retracted {retracted} {claim_type_key} claim(s) on {subject_id}"
+        if skipped:
+            msg += (f". SKIPPED (human-evidence claims, cannot be retracted by "
+                    f"reconciliation): {'; '.join(skipped)}")
+        return msg
 
     @tool
     async def supersede_claim_tool(
@@ -219,6 +253,14 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             val = row["value"] or row["object_id"] or ""
             if old_value and val != old_value:
                 continue
+            protection = _recon_protection_reason(row["id"], claim_type_key, replacing=True)
+            if protection:
+                return (
+                    f"SKIPPED — {protection}. This claim records a human correction or "
+                    "group norm; reconciliation cannot replace it. If it is genuinely "
+                    "outdated, the change must come from the owner via memory_correct "
+                    "or a newer explicit decision."
+                )
             nv = new_value if new_value else None
             no = new_object_id if new_object_id else None
             if claim_type_key in ENTITY_REF_CLAIM_KEYS and nv and not no:

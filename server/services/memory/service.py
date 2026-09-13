@@ -1220,8 +1220,18 @@ async def build_conversation_roster(
         ):
             entity_ids.append(row["subject_id"])
 
+    # Open tasks related to this group's memory entity, pinned ahead of
+    # the recency tail: a paused task (last mentioned weeks ago) is
+    # exactly what a "next X" question needs, but recency-only ordering
+    # evicts it (2026-09-13 AI doom lunch fail).
+    group_eid = await convo.group_memory_entity_id(session_key)
+    pinned: list[str] = []
+    if group_eid:
+        pinned = await _open_group_task_ids(db, group_eid)
+
     # Entities this conversation has mentioned, most recent first.
-    seen = set(entity_ids)
+    seen = set(entity_ids) | set(pinned)
+    entity_ids.extend(e for e in pinned if e not in entity_ids)
     cid = await convo.resolve_cid(session_key)
     for row in await db.fetch_all(
         "SELECT entity_id FROM memory_entity_mentions "
@@ -1269,3 +1279,101 @@ async def build_conversation_roster(
     if len(lines) <= 3:
         return ""
     return "\n".join(lines)
+
+
+async def _open_group_task_ids(
+    db: Any, group_entity_id: str, *, limit: int = 4
+) -> list[str]:
+    """Open task entities scoped to a group (related_entity → group),
+    newest task_status first. Shared by the roster pin and the group
+    expectations block — recency-only rosters structurally forget
+    anything paused longer than the chatter window (2026-09-13 AI doom
+    lunch: task last mentioned 08-22, evicted by mug/radio noise)."""
+    rows = await db.fetch_all(
+        """SELECT e.entity_id AS entity_id
+           FROM memory_entities e
+           JOIN memory_claims rc
+             ON rc.subject_id = e.entity_id
+            AND rc.claim_type_key = 'related_entity'
+            AND rc.status = 'active' AND rc.object_id = ?
+           JOIN memory_claims tc
+             ON tc.subject_id = e.entity_id
+            AND tc.claim_type_key = 'task_status'
+            AND tc.status = 'active'
+            AND lower(tc.value) LIKE 'open%'
+           WHERE e.status = 'active' AND e.entity_type = 'task'
+           GROUP BY e.entity_id
+           ORDER BY MAX(tc.created_at) DESC
+           LIMIT ?""",
+        (group_entity_id, limit),
+    )
+    return [r["entity_id"] for r in rows or []]
+
+
+async def build_group_expectations(db: Any, session_key: str) -> str:
+    """Push block for a group's learned expectations: active `norm` and
+    `tradition` claims plus open group tasks, rendered into the turn
+    prompt (ContextAssembler.group_memory_hint). The push counterpart to
+    the roster: recall sat at 1.7% of group turns, so the context a
+    "next X" / "ready to plan" kickoff needs must not depend on the
+    model choosing to pull. Stays small by design — punchy claims, top-4
+    tasks; depth still goes through recall/get_entity."""
+    from server.repositories.conversations import ConversationRepository
+
+    eid = await ConversationRepository(db).group_memory_entity_id(session_key)
+    if not eid:
+        return ""
+
+    sections: list[str] = []
+
+    rows = await db.fetch_all(
+        "SELECT claim_type_key, value FROM memory_claims "
+        "WHERE status = 'active' AND subject_id = ? "
+        "AND claim_type_key IN ('norm', 'tradition') "
+        "ORDER BY claim_type_key, created_at",
+        (eid,),
+    )
+    norms = [r["value"] for r in rows or [] if r["claim_type_key"] == "norm"]
+    traditions = [r["value"] for r in rows or [] if r["claim_type_key"] == "tradition"]
+    if norms:
+        lines = ["### How this group expects Bob to behave"]
+        lines += [f"- {v}" for v in norms[:6]]
+        sections.append("\n".join(lines))
+    if traditions:
+        lines = ["### Group traditions"]
+        lines += [f"- {v}" for v in traditions[:3]]
+        sections.append("\n".join(lines))
+
+    task_ids = await _open_group_task_ids(db, eid)
+    if task_ids:
+        placeholders = ",".join("?" * len(task_ids))
+        names = {
+            r["entity_id"]: (r["display_name"] or r["entity_id"])
+            for r in await db.fetch_all(
+                f"SELECT entity_id, display_name FROM memory_entities "
+                f"WHERE entity_id IN ({placeholders})",
+                task_ids,
+            )
+        }
+        statuses: dict[str, str] = {}
+        for r in await db.fetch_all(
+            f"SELECT subject_id, value FROM memory_claims "
+            f"WHERE claim_type_key = 'task_status' AND status = 'active' "
+            f"AND subject_id IN ({placeholders}) "
+            f"ORDER BY created_at",
+            task_ids,
+        ):
+            statuses[r["subject_id"]] = (r["value"] or "").strip()
+        lines = [
+            "### Open tasks for this group",
+            "(get_entity('<entity_id>') for full detail — don't re-ask the "
+            "group for what memory already holds)",
+        ]
+        for tid in task_ids:
+            status = statuses.get(tid, "open")
+            if len(status) > 80:
+                status = status[:77] + "…"
+            lines.append(f"- {tid} — {names.get(tid, tid)} ({status})")
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)

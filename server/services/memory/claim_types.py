@@ -71,10 +71,13 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     ("birthday", ["person"], "Date of birth", 'person-mike-cleaver → "1990-03-15"'),
     ("contact_method", ["person"], "Phone number, email address, or messaging handle only (e.g. '+61 400 123 456', 'email: mike@example.com', '@handle'). Not for conversation summaries, instructions, or actions", 'person-mike-cleaver → "email: mike@example.com"'),
     ("hometown", ["person"], "Where they grew up", 'person-mike-cleaver → "Melbourne"'),
+    ("work_schedule", ["person"], "Usual weekly work pattern — WFH weekdays, office/city days, recurring standing commitments that constrain daytime scheduling (e.g. 'WFH Fridays only', 'recurring Thursday morning meeting'). Only from their own stated answer, never inferred", 'person-mike-cleaver → "WFH Fridays only; in the city Mon–Thu"'),
     ("contact_id", ["person"], "Links to a contacts table row (value = hex8 ID)", "person-mike-cleaver → 7c9f0fd7"),
     # Group
     ("purpose", ["group", "event", "trip", "file", "thing", "task"], "What this entity is for", 'group-bali-gang → "planning the family Bali trip"'),
     ("vibe", ["group"], "How people act in the group", 'group-bali-gang → "casual, lots of banter"'),
+    ("norm", ["group"], "Durable behavioral expectation for Bob in this group, derived from a correction or explicit decision (e.g. 'lunches are members-only', 'Bob proposes, group decides'). Outlives any single task or event; punchy one-fact values. NOT observations of group culture (that's vibe) and NOT one-off arrangements", 'group-ai-doom → "AI Doom lunches are adults-only, chat members only — never apply Mike\'s family context"'),
+    ("tradition", ["group"], "A recurring practice or series the group has established — how it usually runs, cadence, last instance. NOT a single event (use event entities)", 'group-ai-doom → "recurring group lunch series; #1 The Stables 2026-09-01 (Mike, David, Rupert)"'),
     ("member", ["group", "trip"], "Person who belongs to this group or trip", "group-bali-gang → person-mike-cleaver"),
     # Event
     ("name", ["event", "file", "thing", "task"], "Name or title", 'event-dinner-aug5 → "Dinner at Mama San"'),
@@ -232,7 +235,18 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
         keywords=[],
         triggers_types=["group"],
         extraction_rules=[],
-        reconciliation_rules="No specific reconciliation rules.",
+        reconciliation_rules=(
+            "1. `norm` and correction-derived claims are PROTECTED: reconciliation "
+            "cannot retract or replace them (the tools will refuse). They change "
+            "only via the owner's memory_correct or a newer explicit decision.\n"
+            "2. `tradition` claims may be superseded with an updated tradition "
+            "(e.g. a new instance of the series) but never bare-retracted.\n"
+            "3. Group-behavior corrections belong as typed `norm` claims on the "
+            "group entity — do not relocate them into task descriptions or "
+            "`truth` claims.\n"
+            "4. A `vibe` claim records how the group acts; a `norm` records how "
+            "Bob is expected to behave. Don't merge them."
+        ),
         skip_expand=True,
     ),
     "location": EntityType(
@@ -707,6 +721,7 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
         ("assigned_identity", "Group identity"),
         ("communication_style", "Communication"),
         ("preference", "Preferences"),
+        ("work_schedule", "Work schedule"),
         ("contact_id", "Contact ID"),
         ("file_ref", "Files"),
         ("truth", "User truth"),
@@ -714,6 +729,8 @@ _ENTITY_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     "group": [
         ("alias", "Also known as"),
         ("purpose", "Purpose"),
+        ("norm", "Norms"),
+        ("tradition", "Traditions"),
         ("vibe", "Vibe"),
         ("member", "Members"),
         ("file_ref", "Files"),
