@@ -114,3 +114,40 @@ def test_feat_save_derives_setlist_hash(domain, made_set):
     on_disk = json.loads(
         (domain.FEATURES_DIR / "zz-test" / "set.json").read_text())
     assert on_disk["setlist_hash"] == domain._setlist_hash(on_disk)
+
+
+def _stamped(domain, made_set):
+    cur = domain._setlist_hash(made_set)
+    for s in made_set["scripts"].values():
+        s["setlist_hash"] = cur
+    made_set["status"] = "aired"
+    made_set["aired_at"] = 1.0
+    return made_set
+
+
+def test_bare_ready_clears_stale_past_schedule(domain, made_set):
+    # 2026-09-13 incident: 'feature ready <slug>' (no --at) flipped an
+    # aired set back to ready leaving its PAST scheduled_for armed — the
+    # station re-aired the set 33 min after it completed (reached via a
+    # 'feature ready <slug> --help' that executed instead of helping).
+    _stamped(domain, made_set)
+    made_set["scheduled_for"] = "2026-09-13T08:00:00+08:00"
+    domain._feat_save(made_set)
+    rc, out = domain.feature_ready("zz-test")
+    assert rc == 0
+    after = json.loads(
+        (domain.FEATURES_DIR / "zz-test" / "set.json").read_text())
+    assert after["status"] == "ready"
+    assert after.get("scheduled_for") is None
+    assert "CLEARED" in out
+
+
+def test_bare_ready_keeps_future_schedule(domain, made_set):
+    _stamped(domain, made_set)
+    made_set["scheduled_for"] = "2026-09-13T23:00:00+08:00"
+    domain._feat_save(made_set)
+    rc, out = domain.feature_ready("zz-test")
+    assert rc == 0
+    after = json.loads(
+        (domain.FEATURES_DIR / "zz-test" / "set.json").read_text())
+    assert after["scheduled_for"] == "2026-09-13T23:00:00+08:00"
