@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 from server.services.prompt_assembler import (
-    BG_PLACEHOLDER_MARKER, build_chat_messages)
+    BG_PLACEHOLDER_MARKER, PROBE_REACTION_MARKER, build_chat_messages)
 from server.services.session_service import SessionService
 
 DM_KEY = "agent:main:whatsapp:dm:61400000000"
@@ -51,6 +51,31 @@ async def test_bg_placeholder_and_sends_render_labelled(ctx):
         "the flight's sends must carry their [bg id] tag")
     # The live voice's own rows stay untagged
     assert "[bg anything else" not in rendered
+
+
+async def test_probe_reaction_renders_labelled(ctx):
+    # 2026-09-13 AI doom: the attention gate's STAND_DOWN reaction
+    # (bob-celebrate.mp4) replayed as a bare assistant row in Bob's own
+    # slot — with no marker he honestly denied making it ("Not me,
+    # chief"). Probe reactions must announce themselves on every replay
+    # path, exactly like bg rows.
+    svc = SessionService(ctx)
+    await svc.add_message(
+        DM_KEY, "user", "the grep worked!", channel="whatsapp", dispatched=1)
+    await svc.add_message(
+        DM_KEY, "assistant", "[reaction] bob-celebrate.mp4",
+        channel="whatsapp", provenance="probe_reaction", dispatched=1)
+    await svc.add_message(
+        DM_KEY, "assistant", "glad it landed", channel="whatsapp",
+        dispatched=1)
+
+    rendered = await _messages_content(ctx)
+    assert (PROBE_REACTION_MARKER
+            + "[reaction] bob-celebrate.mp4") in rendered, (
+        "probe reactions must carry their auto-reaction marker")
+    assert "probe_reaction" not in rendered  # the DB provenance stays internal
+    # The live voice's own rows stay unmarked
+    assert PROBE_REACTION_MARKER + "glad" not in rendered
 
 
 async def test_bg_rows_render_on_non_dispatch_replays_too(ctx):

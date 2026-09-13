@@ -58,6 +58,8 @@ STEER_MARKER = "[system relay — steering request] "
 BG_PLACEHOLDER_MARKER = "[background task at work — not a message to answer, "
 "and not your own voice; do not take over its work] "
 BG_SEND_TAG = "[bg {id8}] "
+PROBE_REACTION_MARKER = "[auto-reaction from your attention probe — sent " \
+"outside any conversation turn; still you, but not this voice] "
 
 # Appended after the replay when the turn's claims are nudges only: these
 # turns fold state silently (mirrors _SILENCE_OK_PROVENANCES in
@@ -284,6 +286,14 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             "\"I don't know\" or \"I don't have that\" until you have queried "
             "memory. If recall returns nothing relevant, try find() with the "
             "relevant entity type and date/topic filters.\n"
+            "\n"
+            "**Before proposing any plan, booking, or arrangement** (dates, "
+            "venues, headcount, scheduling, \"the next X\") — recall the related "
+            "task/event/group entities first and ground the proposal in what "
+            "memory holds: past venues and what worked, members' work schedules, "
+            "group norms. Never propose venues, dates, headcounts, or dietary/"
+            "family framing from assumption — if memory has nothing, say so and "
+            "ask, rather than filling the gap with a plausible invention.\n"
         )
         parts.append(memory_section)
         if location_section:
@@ -624,6 +634,14 @@ async def build_chat_messages(
             elif _prov == "bg_send":
                 _bg = str(meta.get("bg_task") or "")
                 content = BG_SEND_TAG.format(id8=_bg[:8] if _bg else "task") + content
+            elif _prov == "probe_reaction":
+                # Attention-gate STAND_DOWN reactions post out-of-band
+                # (coordinator._send_probe_reaction); replayed bare they
+                # read as a mystery message in Bob's own slot and he
+                # denies making them (2026-09-13 AI doom: "Not me, chief"
+                # about his own bob-celebrate.mp4). Attribution must never
+                # silently disappear from a prompt.
+                content = PROBE_REACTION_MARKER + content
 
             image_path = meta.get("image_path")
             mime_type = meta.get("image_mime_type", "image/jpeg")
