@@ -97,6 +97,14 @@ class ContextAssembler:
             "body (e.g. \"Sean: look at this\") is the author calling out to "
             "that person, NOT that person speaking."
         )
+        # Quote-replies: the [reply to …] marker is WhatsApp quote context —
+        # what the sender is replying to, not something they said.
+        lines.append(
+            "A `[reply to Name: \"…\"]` marker quotes the earlier message the "
+            "sender is replying to — treat that snippet as context, not as "
+            "part of their new message. `Bob (you)` means one of your own "
+            "earlier messages."
+        )
         return "\n".join(lines)
 
     async def person_profile(self, contact_id: str | None) -> str:

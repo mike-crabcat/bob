@@ -64,6 +64,8 @@ type IncomingMessagePayload struct {
 	SenderName        string          `json:"sender_name,omitempty"`
 	Text              string          `json:"text,omitempty"`
 	QuotedMessageID   string          `json:"quoted_message_id,omitempty"`
+	QuotedSenderJID   string          `json:"quoted_sender_jid,omitempty"`
+	QuotedText        string          `json:"quoted_text,omitempty"`
 	MentionedJIDs     []string        `json:"mentioned_jids,omitempty"`
 	Media             *MediaInfo      `json:"media,omitempty"`
 	Contacts          []SharedContact `json:"contacts,omitempty"`

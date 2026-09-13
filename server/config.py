@@ -298,6 +298,9 @@ class WhatsAppBridgeSettings:
     typing_indicator_enabled: bool = True
     typing_keepalive_seconds: float = 5.0
     typing_max_seconds: float = 600.0
+    # This instance's own WhatsApp number (E.164, optional). Lets inbound
+    # quote-replies to Bob's own messages render "[reply to Bob (you): …]".
+    own_phone: str = ""
 
 
 @dataclass(slots=True)
@@ -755,6 +758,7 @@ class Settings:
             typing_indicator_enabled=_env_bool("BOB_WHATSAPP_BRIDGE_TYPING_INDICATOR", True),
             typing_keepalive_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_TYPING_KEEPALIVE_SECONDS", "5")),
             typing_max_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_TYPING_MAX_SECONDS", "600")),
+            own_phone=os.getenv("BOB_WHATSAPP_BRIDGE_OWN_PHONE", ""),
         )
 
         patience = PatienceSettings(

@@ -543,6 +543,38 @@ async def build_chat_messages(
             if is_group and mention_names:
                 content = _resolve_mentions(content, mention_names)
 
+            # Row metadata, parsed before the dispatch markers below: the
+            # quote prefix must be inside the markers (composition
+            # "[NEW] [reply to …] text") and flow into the lifted trailer
+            # lines, both of which read `content` from here on.
+            meta: dict[str, Any] = {}
+            raw_meta = row.get("metadata")
+            if raw_meta:
+                try:
+                    meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Quote-reply context (whatsapp ContextInfo captured by the
+            # bridge): prefix user rows that quote an earlier message so a
+            # bare "yes that works" carries its referent inline.
+            quote = meta.get("quote") if row["role"] == "user" else None
+            if isinstance(quote, dict):
+                q_name = quote.get("sender_name")
+                if not q_name:
+                    q_jid = str(quote.get("sender_jid") or "")
+                    if q_jid:
+                        digits = q_jid.split("@")[0].split(":")[0]
+                        q_name = f"+{digits}" if digits.isdigit() else q_jid
+                snippet = str(quote.get("text") or "")
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "…"
+                label = q_name or "an earlier message"
+                if snippet:
+                    content = f'[reply to {label}: "{snippet}"] ' + content
+                else:
+                    content = f"[reply to {label}] " + content
+
             # Dispatch-state markers, dispatch turns only (claimed_ids set —
             # non-dispatch callers keep the byte-for-byte old replay shape).
             # Claimed non-nudge rows are this turn's stimulus; system-generated
@@ -578,13 +610,7 @@ async def build_chat_messages(
                     lifted.append(f"{sender_prefix}{content}")
 
             # Check for image metadata and reconstruct multimodal content
-            meta: dict[str, Any] = {}
-            raw_meta = row.get("metadata")
-            if raw_meta:
-                try:
-                    meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            # (row metadata was parsed above, before the dispatch markers)
 
             # Detach v2 (docs/detach-v2.md): background-flight rows are
             # labelled so no later turn mistakes them for its own voice or

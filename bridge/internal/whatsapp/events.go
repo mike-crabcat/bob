@@ -37,6 +37,8 @@ type IncomingMessageEvent struct {
 	SenderName        string
 	Text              string
 	QuotedMessageID   string
+	QuotedSenderJID   string
+	QuotedText        string
 	MentionedJIDs     []string
 	Contacts          []SharedContact
 	Media             *MediaInfo

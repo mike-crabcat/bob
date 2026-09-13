@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -119,7 +120,7 @@ func (c *Client) SendMessage(jid types.JID, text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(resp.ServerID), nil
+	return resp.ID, nil
 }
 
 func (c *Client) SendImage(jid types.JID, imageData []byte, mimeType, caption string) (string, error) {
@@ -147,7 +148,7 @@ func (c *Client) SendImage(jid types.JID, imageData []byte, mimeType, caption st
 	if err != nil {
 		return "", err
 	}
-	return string(resp.ServerID), nil
+	return resp.ID, nil
 }
 
 func (c *Client) SendDocument(jid types.JID, data []byte, mimeType, fileName, caption string) (string, error) {
@@ -176,7 +177,7 @@ func (c *Client) SendDocument(jid types.JID, data []byte, mimeType, fileName, ca
 	if err != nil {
 		return "", err
 	}
-	return string(resp.ServerID), nil
+	return resp.ID, nil
 }
 
 // SendGIF converts GIF data to a silent MP4 via ffmpeg, then uploads and sends
@@ -221,7 +222,7 @@ func (c *Client) SendVideoAsGif(jid types.JID, mp4Data []byte, caption string) (
 	if err != nil {
 		return "", err
 	}
-	return string(resp.ServerID), nil
+	return resp.ID, nil
 }
 
 func (c *Client) ParseJID(s string) (types.JID, bool) {
@@ -476,9 +477,21 @@ func (c *Client) handleMessage(evt *events.Message) {
 		}
 	}
 
-	if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
-		msgEvt.QuotedMessageID = ext.GetContextInfo().GetStanzaID()
-		for _, raw := range ext.GetContextInfo().GetMentionedJID() {
+	// Quote-reply metadata and @mentions both live on the message's
+	// ContextInfo, whichever body type carries it — a reply sent with an
+	// image or video holds its ContextInfo on the media message itself,
+	// not on an ExtendedTextMessage.
+	if ci := contextInfoOf(evt.Message); ci != nil {
+		msgEvt.QuotedMessageID = ci.GetStanzaID()
+		if p := ci.GetParticipant(); p != "" {
+			if parsed, err := types.ParseJID(p); err == nil {
+				msgEvt.QuotedSenderJID = c.ResolveLID(parsed).String()
+			} else {
+				msgEvt.QuotedSenderJID = p
+			}
+		}
+		msgEvt.QuotedText = quotedPreview(ci.GetQuotedMessage())
+		for _, raw := range ci.GetMentionedJID() {
 			parsed, err := types.ParseJID(raw)
 			if err != nil {
 				msgEvt.MentionedJIDs = append(msgEvt.MentionedJIDs, raw)
@@ -535,6 +548,83 @@ func extractTextAndContacts(msg *waE2E.Message) (string, []SharedContact) {
 		return header + "\n" + strings.Join(parts, "\n"), parsed
 	}
 	return "", nil
+}
+
+// contextInfoOf returns the ContextInfo carried by any supported message
+// type. Quote-reply metadata lives there (StanzaID = quoted message ID,
+// Participant = quoted sender, QuotedMessage = content snapshot), but each
+// body type carries its own copy — a reply sent with an image holds it on
+// the ImageMessage, not on an ExtendedTextMessage.
+func contextInfoOf(msg *waE2E.Message) *waE2E.ContextInfo {
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		return ext.GetContextInfo()
+	}
+	if img := msg.GetImageMessage(); img != nil {
+		return img.GetContextInfo()
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		return vid.GetContextInfo()
+	}
+	if ptv := msg.GetPtvMessage(); ptv != nil {
+		return ptv.GetContextInfo()
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		return doc.GetContextInfo()
+	}
+	if aud := msg.GetAudioMessage(); aud != nil {
+		return aud.GetContextInfo()
+	}
+	if st := msg.GetStickerMessage(); st != nil {
+		return st.GetContextInfo()
+	}
+	if contact := msg.GetContactMessage(); contact != nil {
+		return contact.GetContextInfo()
+	}
+	return nil
+}
+
+const quotedPreviewMax = 200
+
+// quotedPreview renders a short human-readable summary of a quoted-message
+// snapshot for the LLM: the quoted text when there is one, otherwise a media
+// descriptor.
+func quotedPreview(qm *waE2E.Message) string {
+	if qm == nil {
+		return ""
+	}
+	if text, _ := extractTextAndContacts(qm); text != "" {
+		return truncateRunes(text, quotedPreviewMax)
+	}
+	if qm.GetImageMessage() != nil {
+		return "an image"
+	}
+	if vid := qm.GetVideoMessage(); vid != nil {
+		if vid.GetGifPlayback() {
+			return "a GIF"
+		}
+		return "a video"
+	}
+	if qm.GetPtvMessage() != nil || qm.GetAudioMessage() != nil {
+		return "an audio message"
+	}
+	if doc := qm.GetDocumentMessage(); doc != nil {
+		if name := doc.GetFileName(); name != "" {
+			return "a document: " + truncateRunes(name, 80)
+		}
+		return "a document"
+	}
+	if qm.GetStickerMessage() != nil {
+		return "a sticker"
+	}
+	return ""
+}
+
+// truncateRunes clips s to at most max runes, appending an ellipsis when cut.
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max]) + "…"
 }
 
 func parseContact(displayName, vcard string) SharedContact {

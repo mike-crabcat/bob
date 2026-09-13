@@ -600,6 +600,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         wa_message_id = payload.get("whatsapp_message_id", "")
         mentioned_jids = payload.get("mentioned_jids", [])
         media = payload.get("media")
+        # Quote-reply context (bridge extracts it from WhatsApp ContextInfo)
+        quoted_message_id = payload.get("quoted_message_id", "")
+        quoted_sender_jid = payload.get("quoted_sender_jid", "")
+        quoted_text = payload.get("quoted_text", "")
 
         # Resolve media path from media metadata. Image, video, GIF, and
         # documents all land in the same bridge media dir.
@@ -811,6 +815,39 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
         from server.services.session_service import SessionService
+
+        # Quote-reply context: resolve the quoted sender to a display name
+        # (same participant→contact ladder as @mentions) so the prompt can
+        # render "[reply to Name: ...]" instead of a bare JID.
+        quote_meta: dict[str, Any] | None = None
+        if quoted_message_id:
+            quoted_name: str | None = None
+            quoted_phone = _jid_to_phone(quoted_sender_jid) if quoted_sender_jid else None
+            if quoted_phone:
+                if settings.whatsapp_bridge.own_phone:
+                    from server.services.phone_utils import normalize_phone
+                    own = normalize_phone(settings.whatsapp_bridge.own_phone)
+                    if own and quoted_phone == own:
+                        quoted_name = "Bob (you)"
+                if quoted_name is None:
+                    from server.repositories.participants import ParticipantRepository
+                    participant = await ParticipantRepository(self.db).get(session_key, quoted_phone)
+                    if participant and participant["display_name"]:
+                        quoted_name = participant["display_name"]
+                    else:
+                        from server.repositories.contacts import ContactRepository
+                        contact_match = await ContactRepository(self.db).get_by_phone(quoted_phone)
+                        if contact_match and contact_match["name"]:
+                            quoted_name = contact_match["name"]
+            if len(quoted_text) > 200:
+                quoted_text = quoted_text[:200] + "…"
+            quote_meta = {
+                "wa_message_id": quoted_message_id,
+                "sender_jid": quoted_sender_jid or None,
+                "sender_name": quoted_name,
+                "text": quoted_text or None,
+            }
+
         message_metadata: dict[str, Any] | None = None
         if image_path:
             message_metadata = {
@@ -829,6 +866,13 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 "document_workspace_path": document_workspace_path,
                 "document_filename": document_filename,
             }
+        # Own WhatsApp id on every stored row (quote-target resolution /
+        # debugging); quote block rides alongside media metadata when a
+        # reply is sent with an image or video.
+        if quote_meta or wa_message_id:
+            message_metadata = {**(message_metadata or {}), "wa_message_id": wa_message_id or None}
+            if quote_meta:
+                message_metadata["quote"] = quote_meta
         if image_path:
             fallback_text = "[Image]"
         elif video_path:
@@ -863,7 +907,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     "chat_kind": chat_kind,
                     "sender_name": sender_name,
                     "contact_id": contact_id,
-                    "has_media": bool(message_metadata),
+                    "has_media": bool(image_path or video_path or document_path),
+                    "has_quote": bool(quote_meta),
                 },
             ), txn=txn)
 

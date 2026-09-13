@@ -216,6 +216,8 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			SenderName:        evt.SenderName,
 			Text:              evt.Text,
 			QuotedMessageID:   evt.QuotedMessageID,
+			QuotedSenderJID:   evt.QuotedSenderJID,
+			QuotedText:        evt.QuotedText,
 			MentionedJIDs:     evt.MentionedJIDs,
 			Timestamp:         evt.Timestamp,
 		}
