@@ -7,7 +7,7 @@ import asyncio
 import logging
 import sqlite3
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -50,6 +50,41 @@ from server.services.event_bus import EventBus
 from server.structured_logging import configure_logging, CorrelationIdMiddleware
 
 logger = logging.getLogger(__name__)
+
+
+async def recover_zombie_turns(database: Any) -> None:
+    """Boot sweep: turns still pending/running died with the process.
+
+    Default: restore the claimed messages for re-dispatch (2026-08-30 Dylan
+    incident — a restart mid-LLM silently ate an in-flight question), then
+    fail the turn so a fresh claim works. Suppression: when the dying turn
+    ALREADY delivered a WhatsApp send (durable proof in the effects outbox),
+    the claims stay consumed — re-dispatching a live question that was
+    already answered double-replies the chat (2026-09-14: a deploy restart
+    7s after a delivered send; Mike got two different answers to one
+    question). Extracted from lifespan for testability.
+    """
+    from server.repositories.history import HistoryRepository
+    from server.repositories.turns import TurnRepository
+
+    turn_repo = TurnRepository(database)
+    zombie_ids = await turn_repo.nonterminal_ids()
+    restored = suppressed = 0
+    for tid in zombie_ids:
+        if await turn_repo.already_delivered(tid):
+            await turn_repo.fail(tid, "process restart (reply already delivered)")
+            suppressed += 1
+            logger.info(
+                "Boot sweep: zombie turn %s already delivered its reply — "
+                "claims left consumed, no re-dispatch", tid[:16])
+            continue
+        restored += await HistoryRepository(database).restore_messages_for_turn(tid)
+        await turn_repo.fail(tid, "process restart")
+    if zombie_ids:
+        logger.info("Boot sweep recovered %d zombie turn(s), restored "
+                    "%d claimed message(s) for re-dispatch, %d suppressed "
+                    "(already delivered)", len(zombie_ids), restored, suppressed)
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -99,19 +134,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # them (2026-08-30: a restart ate an in-flight Dylan question; it
         # sat unanswered until an unrelated nudge 10 minutes later). Restore
         # the claims, then fail the turn; the WhatsApp +10s sweep re-arms.
+        # EXCEPT when the dying turn already delivered its reply (effects
+        # outbox proof): restoring then re-dispatches a live question that
+        # was already answered — Mike got a double reply from a deploy
+        # restart that landed 7s after a send (2026-09-14).
         try:
-            from server.repositories.history import HistoryRepository
-            from server.repositories.turns import TurnRepository
-            turn_repo = TurnRepository(database)
-            zombie_ids = await turn_repo.nonterminal_ids()
-            restored = 0
-            for tid in zombie_ids:
-                restored += await HistoryRepository(database).restore_messages_for_turn(tid)
-                await turn_repo.fail(tid, "process restart")
-            if zombie_ids:
-                logger.info("Boot sweep recovered %d zombie turn(s), restored "
-                            "%d claimed message(s) for re-dispatch",
-                            len(zombie_ids), restored)
+            await recover_zombie_turns(database)
         except Exception:
             logger.warning("zombie-turn boot sweep failed", exc_info=True)
 

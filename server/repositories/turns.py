@@ -136,6 +136,37 @@ class TurnRepository:
             "SELECT id FROM turns WHERE status IN ('pending', 'running')")
         return [r["id"] for r in rows] if rows else []
 
+    async def already_delivered(self, turn_id: str) -> bool:
+        """True when the zombie turn's dispatch already delivered a WhatsApp
+        send. The effects outbox is durable across the process death (unlike
+        in-memory turn state), and its idempotency key embeds the dispatch id
+        (`whatsapp_send:<dispatch_id>:<seq>`) that llm_call_log rows for this
+        turn's conversation carry.
+
+        2026-09-14 incident: a deploy restart landed 7s after a turn
+        delivered its reply; the boot sweep restored the claimed message,
+        the re-dispatch answered the same question again — a double reply.
+        Reading llm_call_log + effects here is cross-domain but read-only
+        (sanctioned cursor-table pattern, cf. history.py)."""
+        turn = await self.db.fetch_one(
+            "SELECT conversation_id, started_at FROM turns WHERE id = ?",
+            (turn_id,))
+        if not turn:
+            return False
+        dispatches = await self.db.fetch_all(
+            "SELECT DISTINCT dispatch_id FROM llm_call_log "
+            "WHERE session_key = ? AND dispatch_id IS NOT NULL AND dispatch_id != '' "
+            "AND datetime(created_at) >= datetime(COALESCE(?, '1970-01-01'))",
+            (turn["conversation_id"], turn["started_at"]))
+        for row in dispatches:
+            eff = await self.db.fetch_one(
+                "SELECT 1 FROM effects "
+                "WHERE idempotency_key LIKE ? AND status = 'delivered' LIMIT 1",
+                (f"whatsapp_send:{row['dispatch_id']}:%",))
+            if eff is not None:
+                return True
+        return False
+
     async def stuck(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Turns still 'running' with an expired lease — a crash or hang."""
         rows = await self.db.fetch_all(

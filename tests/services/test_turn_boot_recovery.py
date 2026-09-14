@@ -65,3 +65,86 @@ async def test_no_zombies_is_a_noop(ctx, db):
     repo = TurnRepository(db)
     assert await repo.nonterminal_ids() == []
     assert await HistoryRepository(db).undispatched_conversations(channel="whatsapp") == []
+
+
+# ---------------------------------------------------------------------------
+# Already-delivered suppression (2026-09-14 double-reply incident)
+# ---------------------------------------------------------------------------
+
+async def _seed_delivered_effect(db, dispatch_id: str) -> None:
+    """A delivered whatsapp_send effect whose idempotency key embeds the
+    dispatch id — the durable record that survives the process death."""
+    await db.execute(
+        "INSERT INTO effects (id, kind, idempotency_key, payload_json, status, "
+        "attempt, available_at, delivered_at, created_at) "
+        "VALUES (?, 'whatsapp_send', ?, '{}', 'delivered', 1, datetime('now'), "
+        "datetime('now'), datetime('now'))",
+        (f"eff-{dispatch_id[:8]}", f"whatsapp_send:{dispatch_id}:0"))
+
+
+async def _seed_llm_call(db, dispatch_id: str, session_key: str) -> None:
+    await db.execute(
+        "INSERT INTO llm_call_log (id, provider, model, call_category, session_key, "
+        "dispatch_id, status, created_at) "
+        "VALUES (?, 'openrouter', 'z-ai/glm-5.3-flash', 'whatsapp_incoming', ?, ?, "
+        "'running', datetime('now'))",
+        (f"llm-{dispatch_id[:8]}", session_key, dispatch_id))
+
+
+async def test_zombie_that_delivered_is_not_restored(ctx, db):
+    """The dying turn already sent its reply (effects proof): restoring the
+    claim would re-dispatch a live, answered question — the 2026-09-14
+    double reply. Claims stay consumed; the turn still fails."""
+    from server.main import recover_zombie_turns
+    turn_id = await _zombie_turn(ctx, db)
+    await _seed_llm_call(db, "070e8d85-54a2-4eef-af1d-8af72c607205", KEY)
+    await _seed_delivered_effect(db, "070e8d85-54a2-4eef-af1d-8af72c607205")
+
+    await recover_zombie_turns(db)
+
+    # claim NOT restored — nothing to re-dispatch
+    assert await HistoryRepository(db).undispatched_conversations(channel="whatsapp") == []
+    row = await db.fetch_one(
+        "SELECT dispatched FROM messages WHERE conversation_id = ? "
+        "AND role = 'user' ORDER BY id DESC", (KEY,))
+    assert row["dispatched"] == 1
+    # turn is terminal either way
+    assert await TurnRepository(db).nonterminal_ids() == []
+    err = await db.fetch_one("SELECT error FROM turns WHERE id = ?", (turn_id,))
+    assert "already delivered" in err["error"]
+
+
+async def test_zombie_without_delivery_still_restores(ctx, db):
+    """No delivered effect (the normal Dylan case): restore + fail as before."""
+    from server.main import recover_zombie_turns
+    turn_id = await _zombie_turn(ctx, db)
+    # LLM call exists but nothing was delivered through the outbox.
+    await _seed_llm_call(db, "8867d20c-4556-4a29-a433-b63dd447526e", KEY)
+
+    await recover_zombie_turns(db)
+
+    assert await HistoryRepository(db).undispatched_conversations(channel="whatsapp") == [KEY]
+    assert await TurnRepository(db).nonterminal_ids() == []
+    del turn_id
+
+
+async def test_delivered_effect_for_other_dispatch_does_not_suppress(ctx, db):
+    """Only sends from the zombie turn's own dispatch window count — a
+    delivered effect belonging to a different/older dispatch must not
+    suppress restoration of an unanswered question."""
+    from server.main import recover_zombie_turns
+    await _zombie_turn(ctx, db)
+    # An unrelated dispatch delivered earlier — llm_call_log predates nothing
+    # here, so give it a created_at older than the turn by using a different
+    # session entirely (no llm_call_log row for KEY at all).
+    await db.execute(
+        "INSERT INTO llm_call_log (id, provider, model, call_category, session_key, "
+        "dispatch_id, status, created_at) "
+        "VALUES ('llm-other', 'openrouter', 'm', 'whatsapp_incoming', "
+        "'agent:main:whatsapp:group:elsewhere', 'aaaa-bbbb-cccc', 'completed', "
+        "datetime('now'))")
+    await _seed_delivered_effect(db, "aaaa-bbbb-cccc")
+
+    await recover_zombie_turns(db)
+
+    assert await HistoryRepository(db).undispatched_conversations(channel="whatsapp") == [KEY]
