@@ -153,6 +153,20 @@ def model_serving_prompt_line(model: str, *, override: bool = False) -> str:
     return f"Model serving this turn: {model} ({src})."
 
 
+async def _self_brief_suffix(db: Any) -> str:
+    """The self-bob memory brief as a prompt suffix ('' when unavailable).
+    Never raises — a memory hiccup must not take the prompt down."""
+    if db is None:
+        return ""
+    try:
+        from server.services.memory.self_brief import self_brief_block
+        brief = await self_brief_block(db)
+        return f"\n\n{brief}" if brief else ""
+    except Exception:
+        logger.warning("self-brief suffix failed", exc_info=True)
+        return ""
+
+
 async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     """Load and concatenate workspace files. Cached until any file changes."""
     global _cached_prompt, _cached_mtime
@@ -184,7 +198,7 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
 
     mtime_hash = tuple(mtimes.items())
     if _cached_prompt is not None and _cached_prompt[0] == mtime_hash:
-        return _cached_prompt[1]
+        return _cached_prompt[1] + await _self_brief_suffix(db)
 
     parts: list[str] = []
 
@@ -326,6 +340,11 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         "- If you are unsure whether a file counts as code, propose first.\n"
     )
 
+    # Self-brief: the cached base prompt above stays byte-stable (mtime-keyed,
+    # provider-cacheable); Bob's live self-model from memory rides as a tail
+    # block, re-rendered only when self-bob's active claims change. Kill
+    # switch: BOB_SELF_BRIEF=off. Placed last deliberately — the stable prefix
+    # keeps its prompt-cache discount when the tail moves.
     workspace_resolved = workspace_dir.expanduser().resolve()
     parts.append(
         "## Workspace\n"
@@ -386,7 +405,7 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             [n for n in _WORKSPACE_FILES if mtimes.get(n)],
         )
         _cached_mtime.update(mtimes)
-    return combined
+    return combined + await _self_brief_suffix(db)
 
 
 def _resolve_mentions(text: str, mention_names: dict[str, str]) -> str:

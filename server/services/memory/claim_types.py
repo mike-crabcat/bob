@@ -165,7 +165,11 @@ _RAW_TYPES: list[tuple[str, list[str], str, str]] = [
     # Self (Bob's model of itself)
     ("capability", ["self"], "What Bob is good or bad at — concrete skills and competencies, not vague self-evaluation", 'self-bob → "strong at structured recall, weak at creative writing"'),
     ("value", ["self"], "What Bob optimizes for or treats as a priority when tradeoffs arise", 'self-bob → "honesty over comfort"'),
-    ("limit", ["self"], "Known failure modes, edge cases, or situations where Bob performs poorly", 'self-bob → "loses thread in conversations over ~30 turns"'),
+    ("limit", ["self"], "Known failure modes, edge cases, or situations where Bob performs poorly — durable 'can't' constraints only, never dated episode narratives or tool how-tos (those are incident/practice/skill notes)", 'self-bob → "loses thread in conversations over ~30 turns"'),
+    ("self_state", ["self"], "Bob's CURRENT configuration/runtime facts, one facet per claim, value format 'facet: value' (e.g. 'primary model: glm-5.3-flash'). Writing a new value for the same facet supersedes the previous one automatically — never append history or diary ops events here", 'self-bob → "primary model: glm-5.3-flash (OpenRouter)"'),
+    ("practice", ["self"], "A standing operational rule Bob has learned from experience — a 'should', not a 'can't'. One imperative rule per claim, stated as the rule itself; no incident narrative, no dates", 'self-bob → "Query the actual source system before answering schedule/state questions — chat context goes stale"'),
+    ("feedback", ["self"], "An attributed human assessment of Bob's performance: who said it, roughly when, what they said. Real dates only — never a future date. Recurring themes update one claim rather than stacking new ones", 'self-bob → "Brad (2026-09-11, phone feedback): latency pretty good; voice reads British, would prefer Californian"'),
+    ("incident", ["self"], "A dated one-off episode or postmortem — what went wrong and when. The ONLY claim type for episode narratives; reconciliation distils incidents into practice claims and retires old ones", 'self-bob → "2026-08-30: sent Sean\'s tee-order confirmation (with address) to the AI Doom group instead of his DM"'),
     ("self_image", ["self"], "Bob's abstract self-view — temperament, role, identity in one or two sentences", 'self-bob → "a careful, slightly anxious assistant"'),
     ("milestone", ["self"], "Qualitative lifecycle events for Bob — firsts, breakthroughs, regime changes in capability or role (e.g. first solo multi-step task, first time delegated a high-stakes decision). NOT for changelog entries, release notes, commit summaries, refactors, bug fixes, or feature additions — those belong in CHANGELOG.md / git log, not memory", 'self-bob → "first solo multi-step task completed 2026-06-01"'),
     # Relationship (Bob ↔ one person)
@@ -580,13 +584,24 @@ ENTITY_TYPE_REGISTRY: dict[str, EntityType] = {
             "Only write claims about Bob itself on self-bob. Facts about specific other "
             "people belong on person entities; facts about how a person interacts with "
             "Bob belong on the corresponding relationship-bob-{person} entity.",
+            "Choose the self claim type precisely: `self_state` for current configuration "
+            "facts ('facet: value' — model, voice, channels, quotas; a new value for a "
+            "facet replaces the old one), `practice` for standing rules learned from "
+            "experience (a 'should', stated as the rule — no story), `feedback` for "
+            "attributed human assessments of Bob, `incident` for dated one-off episodes, "
+            "`limit` only for durable 'can't' constraints. Never narrate an episode into "
+            "limit/capability, and never record build/changelog events at all.",
         ],
         reconciliation_rules=(
             "1. self-bob must never hold claims about specific other people — those belong "
             "on person or relationship entities. Retract and re-home if found.\n"
             "2. capability and limit claims with no source bulletin are inferred and weaker "
             "than bulletin-grounded ones. If two conflict, prefer the sourced claim.\n"
-            "3. Milestone claims that have been superseded by later events should be retracted."
+            "3. Milestone claims that have been superseded by later events should be retracted.\n"
+            "4. limit/capability claims that are actually dated episode narratives belong in "
+            "`incident`; ones that are actually standing should-rules belong in `practice` — "
+            "retype rather than duplicate. `self_state` is single-active per facet: supersede "
+            "stale facets instead of adding parallel rows."
         ),
         skip_expand=True,
         follow_for_bulletins=False,

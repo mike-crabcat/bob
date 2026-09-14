@@ -142,6 +142,29 @@ async def write_claim(db: Any, claim: Claim) -> str:
                                          claim.source_messages)
             return existing_id
 
+    # self_state is single-active per facet (2026-09-14 self-memory review):
+    # values are "facet: current value" (e.g. "primary model: glm-5.3-flash"),
+    # so a new value for the same facet supersedes the previous row instead
+    # of appending history. Without this, state facts accumulate the same
+    # staleness that buried limit/capability.
+    if claim.status == "active" and claim.claim_type_key == "self_state":
+        facet = (claim.value or claim.object_id or "").split(":", 1)[0].strip().lower()
+        if facet:
+            stale = await db.fetch_all(
+                "SELECT id, value FROM memory_claims "
+                "WHERE status = 'active' AND subject_id = ? "
+                "AND claim_type_key = 'self_state'",
+                (claim.subject_id,),
+            )
+            for row in stale:
+                old_facet = (row["value"] or "").split(":", 1)[0].strip().lower()
+                if old_facet == facet and row["id"] != claim.id:
+                    await db.execute(
+                        "UPDATE memory_claims SET status = 'superseded', superseded_by = ? "
+                        "WHERE id = ?",
+                        (json.dumps([claim.id]), row["id"]),
+                    )
+
     await db.execute(
         "INSERT OR REPLACE INTO memory_claims "
         "(id, claim_type_key, subject_id, object_id, value, status, "
