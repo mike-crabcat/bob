@@ -146,3 +146,55 @@ async def test_task_relay_only_turn_unsent_text_is_rescued(
     await DispatchRunner(ctx).run(_spec(key, send_tool))
 
     assert send_tool.delivered == [stub_llm["reply"]]
+
+
+# ---------------------------------------------------------------------------
+# Echo guard (2026-09-14 Mike-DM incident)
+# ---------------------------------------------------------------------------
+
+async def test_marker_parrot_not_rescued(ctx, db, stub_llm, stub_history):
+    """GLM returned the marked user line verbatim as final text with no send
+    call; the rescue mailed Mike his own question back. A reply carrying the
+    new-message marker — or exactly echoing the stimulus — is never
+    delivered."""
+    key = "test:rescue:echo-marker"
+    svc = SessionService(ctx)
+    await svc.add_message(
+        key, "user",
+        "Tell me a little more about yourself. What motivates you? What is your life goal?",
+        dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = ("[NEW — awaiting your reply] Tell me a little more about "
+                         "yourself. What motivates you? What is your life goal?")
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == [], "marker parrot must not be delivered"
+
+
+async def test_verbatim_echo_without_marker_not_rescued(
+        ctx, db, stub_llm, stub_history):
+    key = "test:rescue:echo-bare"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "what time is it", dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "What time is it"  # case/whitespace-insensitive match
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == [], "verbatim echo must not be delivered"
+
+
+async def test_normal_reply_still_rescued_alongside_guard(
+        ctx, db, stub_llm, stub_history):
+    """The guard is exact-match only — a real answer (even quoting a word of
+    the question) still gets rescued."""
+    key = "test:rescue:echo-false-positive"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "what time is it", dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "It's 3pm WST — I checked the clock, not the vibes."
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == [stub_llm["reply"]]

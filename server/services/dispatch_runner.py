@@ -53,6 +53,39 @@ def is_no_reply(text: str | None) -> bool:
 # rescue must not mail out.
 _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 
+
+def _echo_norm(text: str) -> str:
+    """Normalise for the stimulus-echo test: collapse whitespace, casefold,
+    and strip the prompt's new-message marker — an echo of a marked history
+    line reproduces the marker verbatim (Mike-DM parrot, 2026-09-14)."""
+    from server.services.prompt_assembler import NEW_MARKER
+    return " ".join(text.replace(NEW_MARKER, "").split()).casefold()
+
+
+async def _is_stimulus_echo(
+    result: str, claimed_ids: list[str], history_repo: Any,
+) -> bool:
+    """True when the un-sent final text is a parrot of this turn's inbound
+    stimulus (verbatim, with or without the new-message marker) or leaks the
+    marker at all — the marker is an internal prompt artifact and can never
+    be legitimate outbound text. The 2026-09-14 incident: GLM-5.3-flash
+    answered 'tell me about yourself' by returning the marked user line
+    verbatim, and the send-tool rescue delivered Mike his own question."""
+    from server.services.prompt_assembler import NEW_MARKER
+    stripped = result.strip()
+    if not stripped:
+        return False
+    if NEW_MARKER.strip() in stripped:
+        return True
+    resp = _echo_norm(stripped)
+    if not resp:
+        return False
+    for mid in claimed_ids:
+        content = await history_repo.content_by_id(mid)
+        if content and content.strip() and _echo_norm(content) == resp:
+            return True
+    return False
+
 # Provenances that mark a pending message as a system nudge rather than
 # inbound a human wrote. A turn claimed by ONLY these isn't expected to
 # speak — its un-sent final text is internal bookkeeping (e.g. a goal-state
@@ -65,7 +98,7 @@ _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 # rescue was mailing Bob's "nothing to report" conclusions to the security
 # group six times a morning (2026-09-07). The send tool call itself remains
 # the intent signal: a steer turn that wants to report calls it explicitly.
-_SILENCE_OK_PROVENANCES = {"wake_nudge", "steer", "steer_relay"}
+_SILENCE_OK_PROVENANCES = {"wake_nudge", "steer", "steer_relay", "wa_reaction"}
 
 # Backburner (docs/backburner-plan.md): only turns with a HUMAN stimulus
 # detach. Turns claimed solely by system nudges (goal folds, background-task
@@ -103,6 +136,13 @@ class DispatchSpec:
     history_policy: str = "delivered_only"  # delivered_only | merged_always | merged_skip_no_reply
     message_was_sent: list = field(default_factory=lambda: [False])
     sent_texts: list = field(default_factory=list)
+    # WhatsApp send tracking (reactions): entries appended by the send tool
+    # after each delivered effect — {request_id, text, wa_message_id?,
+    # message_id?}. _record_history stamps the assistant row id onto them so
+    # late send_message_result frames can back-fill the WhatsApp message id
+    # (WhatsAppBridgeService._record_send_wa_id); the recorded metadata.sends
+    # list is what makes Bob's own messages reaction-targetable.
+    send_records: list = field(default_factory=list)
     # Backburner (docs/detach-v2.md). flight: shared dict with the send
     # tool — None until detach, then {"subagent_id", "sent"} — a detached
     # flight speaks DIRECTLY, attributed (v1's capture suppression died with
@@ -372,12 +412,18 @@ class DispatchRunner:
             # Deliver through the send tool itself, reusing its NO_REPLY
             # semantics, citation stripping, and effects-outbox idempotency.
             # (The old tap — a reminder retry — managed 0/20 and was removed.)
+            # Echo guard (2026-09-14): never rescue a parrot of the inbound
+            # stimulus or anything carrying the new-message marker — the
+            # deferred guard from the 2026-08-30 duplicate-reply work; silence
+            # beats mailing Mike his own question back.
+            is_echo = await _is_stimulus_echo(result, claimed_ids, history_repo)
             if (not spec.message_was_sent[0]
                     and spec.send_tool_name
                     and spec.call_category in _SEND_RESCUE_CATEGORIES
                     and expect_send
                     and result.strip()
-                    and not is_no_reply(result)):
+                    and not is_no_reply(result)
+                    and not is_echo):
                 send_tool = next(
                     (t for t in spec.tools if t.name == spec.send_tool_name), None)
                 if send_tool is not None:
@@ -393,6 +439,15 @@ class DispatchRunner:
                         logger.exception(
                             "send-tool rescue failed (session=%s, dispatch=%s)",
                             session_key, spec.dispatch_id)
+            elif (is_echo
+                    and not spec.message_was_sent[0]
+                    and spec.call_category in _SEND_RESCUE_CATEGORIES
+                    and result.strip()
+                    and not is_no_reply(result)):
+                logger.warning(
+                    "send-tool rescue suppressed echo/marker-leak reply "
+                    "(session=%s, dispatch=%s, head=%r)",
+                    session_key, spec.dispatch_id, result.strip()[:120])
             elif (spec.call_category in _SEND_RESCUE_CATEGORIES
                     and not spec.message_was_sent[0] and result.strip()
                     and not is_no_reply(result) and not expect_send):
@@ -465,14 +520,29 @@ class DispatchRunner:
         return await resolve_session_model(self.db, self.ctx.settings, session_key)
 
     async def _record_history(self, spec: DispatchSpec, session_svc: Any, result: str) -> None:
+        def _send_metadata() -> dict | None:
+            if not spec.send_records:
+                return None
+            return {"sends": [
+                {"request_id": r.get("request_id"),
+                 "wa_message_id": r.get("wa_message_id")}
+                for r in spec.send_records if r.get("request_id")]}
+
+        def _stamp_row_ids(row_id: str | None) -> None:
+            if row_id:
+                for r in spec.send_records:
+                    r["message_id"] = row_id
+
         if spec.history_policy == "delivered_only":
             # Only delivered replies belong in replayed history; raw output
             # can leak <tool_call> XML. Nothing sent → nothing recorded.
             if spec.message_was_sent[0] and spec.sent_texts:
                 assistant_text = "\n\n".join(p for p in spec.sent_texts if p.strip())
-                await session_svc.add_message(
+                row_id = await session_svc.add_message(
                     spec.session_key, "assistant", assistant_text,
-                    channel=spec.channel, dispatch_id=spec.dispatch_id)
+                    channel=spec.channel, dispatch_id=spec.dispatch_id,
+                    metadata=_send_metadata())
+                _stamp_row_ids(row_id)
             return
 
         # Merged policies: LLM text output + actually-sent bodies.
@@ -484,9 +554,11 @@ class DispatchRunner:
             if not spec.message_was_sent[0] and is_no_reply(assistant_text):
                 return
 
-        await session_svc.add_message(
+        row_id = await session_svc.add_message(
             spec.session_key, "assistant", assistant_text,
-            channel=spec.channel, dispatch_id=spec.dispatch_id)
+            channel=spec.channel, dispatch_id=spec.dispatch_id,
+            metadata=_send_metadata())
+        _stamp_row_ids(row_id)
 
 
 def _is_quota_error(exc: Exception) -> bool:
