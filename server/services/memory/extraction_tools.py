@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -28,6 +29,31 @@ from server.services.memory.models import Claim
 from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
+
+
+def _name_tokens(name: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", (name or "").lower()))
+
+
+def _fuzzy_name_match(new_name: str, existing_name: str) -> bool:
+    """Token-overlap sameness test for write-time soft resolution.
+
+    The same real-world thing named with drift ("Nuffy Talkback Segment" vs
+    "Nuffy Talkback AFL") shares its meaningful tokens; two dated entities
+    ("… Cartoons 2026 09 12" vs "… 2026 09 13") differ exactly in their date
+    tokens and must stay separate.
+    """
+    a, b = _name_tokens(new_name), _name_tokens(existing_name)
+    digits_a = {t for t in a if t.isdigit()}
+    digits_b = {t for t in b if t.isdigit()}
+    if digits_a and digits_b and digits_a != digits_b:
+        return False  # both dated, different dates → different things
+    wa = {t for t in a if len(t) >= 3}
+    wb = {t for t in b if len(t) >= 3}
+    if not wa or not wb:
+        return False
+    inter = wa & wb
+    return len(inter) >= 2 and len(inter) / min(len(wa), len(wb)) >= 0.6
 
 
 def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
@@ -116,24 +142,36 @@ def make_extraction_tools(db: Any, turn_message_id: str) -> list[Tool]:
         if existing:
             return f"Entity {entity_id} already exists — use add_claim on it instead."
         display_name = entity_id.split("-", 1)[-1].replace("-", " ").title() if "-" in entity_id else entity_id
-        # Bob Events §2.0 layer 2 — write-time soft resolution: an exact
-        # display-name match on the same entity type is almost certainly the
-        # same real-world thing mentioned in another conversation. Steer the
-        # extractor to reuse the existing id rather than minting a
+        # Bob Events §2.0 layer 2 — write-time soft resolution: an exact or
+        # fuzzy display-name match on the same entity type is almost certainly
+        # the same real-world thing mentioned in another conversation. Steer
+        # the extractor to reuse the existing id rather than minting a
         # near-duplicate that fragments routing (reconciliation merges what
-        # still slips past). A genuinely different thing deserves a more
-        # specific slug — which then won't display-name-match.
-        near = await db.fetch_one(
-            "SELECT entity_id FROM memory_entities "
-            "WHERE status = 'active' AND entity_type = ? AND entity_id != ? "
-            "AND LOWER(display_name) = LOWER(?)",
-            (entity_type, entity_id, display_name),
+        # still slips past). Exact match first; then token-overlap, which
+        # catches naming drift ("Nuffy Talkback Segment" vs "Nuffy Talkback
+        # AFL") while keeping differently-dated entities apart. A genuinely
+        # different thing deserves a more specific slug — which then won't
+        # display-name-match.
+        rows = await db.fetch_all(
+            "SELECT entity_id, display_name FROM memory_entities "
+            "WHERE status = 'active' AND entity_type = ? AND entity_id != ?",
+            (entity_type, entity_id),
         )
+        near = None
+        for row in rows:
+            if (row["display_name"] or "").lower() == display_name.lower():
+                near = row["entity_id"]
+                break
+        if near is None:
+            for row in rows:
+                if _fuzzy_name_match(display_name, row["display_name"] or ""):
+                    near = row["entity_id"]
+                    break
         if near:
             return (
-                f"An existing {entity_type} entity '{near['entity_id']}' has the same "
-                f"display name as {entity_id!r}. If the conversation refers to the same "
-                f"real-world thing, reuse it — call add_claim on {near['entity_id']} "
+                f"An existing {entity_type} entity '{near}' has the same or a very "
+                f"similar display name to {entity_id!r}. If the conversation refers to "
+                f"the same real-world thing, reuse it — call add_claim on {near} "
                 "instead of creating a near-duplicate. Only create a new entity if it "
                 "is genuinely a different thing (then pick a more distinguishing id)."
             )

@@ -70,6 +70,38 @@ def _recon_protection_reason(
     return None
 
 
+def _norm_text(s: str | None) -> str:
+    return " ".join((s or "").lower().split())
+
+
+async def _recon_noop_reason(
+    db: Any, subject_id: str, claim_type_key: str, value: str | None, object_id: str | None
+) -> str | None:
+    """Deterministic no-op guards for reconciliation writes (2026-09-14
+    diagnosis: recon repeatedly wrote alias/name claims that just restated
+    the entity's display name, then later passes retracted them — pure churn).
+
+    Guards:
+    - `alias`/`name` claims whose value equals the subject's display_name
+      (case/whitespace-insensitive) — restating the display name adds nothing.
+    """
+    if claim_type_key in ("alias", "name"):
+        v = _norm_text(value or object_id)
+        if not v:
+            return None
+        row = await db.fetch_one(
+            "SELECT display_name FROM memory_entities WHERE entity_id = ?",
+            (subject_id,),
+        )
+        display = _norm_text(row["display_name"]) if row and row["display_name"] else ""
+        if display and v == display:
+            return (
+                f"'{claim_type_key}' = {v!r} already matches the entity's display "
+                f"name — recording it is a no-op"
+            )
+    return None
+
+
 async def resolve_reconciliation_model(
     db: Any,
     entity_id: str,
@@ -183,6 +215,9 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
         err = validate_claim_for_write(claim)
         if err:
             return f"Error: {err}"
+        noop = await _recon_noop_reason(db, subject_id, claim_type_key, val, obj)
+        if noop:
+            return f"Skipped no-op: {noop}."
         await write_claim(db, claim)
         return f"Added {claim_type_key} claim on {subject_id}" + (f" → {obj}" if obj else f" = {val}")
 
@@ -265,6 +300,17 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             no = new_object_id if new_object_id else None
             if claim_type_key in ENTITY_REF_CLAIM_KEYS and nv and not no:
                 no, nv = nv, None
+            # Rewriting a claim to the same value it already holds is churn:
+            # it mints a fresh row, re-enrols the entity for another recon
+            # sweep, and shows up on the dashboard as memory being re-created.
+            if _norm_text(nv or no) == _norm_text(old_value):
+                return (
+                    f"Skipped: new value for {claim_type_key} on {subject_id} is identical "
+                    f"to the current value — superseding would be a no-op rewrite."
+                )
+            noop = await _recon_noop_reason(db, subject_id, claim_type_key, nv, no)
+            if noop:
+                return f"Skipped no-op: {noop}."
             new_claim = Claim(
                 id=f"claim-recon-{uuid.uuid4().hex[:8]}",
                 claim_type_key=claim_type_key,
@@ -324,6 +370,11 @@ def make_reconciliation_tools(db: Any, *, on_entity_merged: Any = None) -> list[
             err = validate_claim_for_write(claim)
             if err:
                 logger.warning("Skipped invalid claim on %s: %s", entity_id, err)
+                continue
+            noop = await _recon_noop_reason(
+                db, entity_id, claim.claim_type_key, claim.value, claim.object_id)
+            if noop:
+                logger.info("Skipped no-op claim on %s: %s", entity_id, noop)
                 continue
             await write_claim(db, claim)
             written += 1

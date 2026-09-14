@@ -102,7 +102,13 @@ async def list_entities(db: Any, *, entity_type: str = "") -> list[dict[str, Any
 
 async def recently_touched_entity_ids(db: Any, *, limit: int) -> list[str]:
     """Entities with claim or entity rows created in the last 24h, most
-    recently touched first — daily reconciliation candidates."""
+    recently touched first — daily reconciliation candidates.
+
+    Reconciliation's own writes (claim-recon-*) are excluded: counting them
+    let each recon pass re-enrol its subjects for another 24h, so the sweep
+    fed itself (2026-09-14: months-old entities perpetually re-reconciled,
+    ~47% of new claims were recon re-assertions). Claims from extraction,
+    question answers, corrections and seeds still count."""
     rows = await db.fetch_all(
         """
         SELECT entity_id, MAX(touched_at) AS last_touched FROM (
@@ -110,6 +116,7 @@ async def recently_touched_entity_ids(db: Any, *, limit: int) -> list[str]:
             FROM memory_claims
             WHERE status = 'active'
               AND datetime(created_at) > datetime('now', '-24 hours')
+              AND id NOT LIKE 'claim-recon-%'
             UNION ALL
             SELECT entity_id, created_at AS touched_at
             FROM memory_entities

@@ -91,6 +91,18 @@ tastes they actually hold (e.g. "I'm vegetarian", "I drive a Prado", "I follow t
   actually stated it or clearly owns it. Never transfer one person's possession, trait, \
   or taste onto another participant.
 - Multiple claims about the same topic for the same person — consolidate into one claim.
+- Dated event-log entries on hub entities. A claim whose value is essentially "on \
+<date>, X happened" (a trading-day recap, an ops fix, a segment run, an incident \
+report) is a journal entry about that incident, not a durable trait. Record it on \
+an entity keyed to the incident itself (event-…-2026-09-12, task-…, or the \
+relevant file/thing) — or skip it entirely if it is transient ops noise. NEVER \
+append it as another `limit` / `shared_context` / `typical_request` / \
+`memorable_interaction` / `purpose` row on self-bob, relationship-*, or group-* \
+entities: hub entities hold a small set of stable, current truths, and one row \
+per day buries them (self-bob had accrued 70 active `limit` claims before this \
+rule existed). When a hub-entity claim is genuinely superseded by newer \
+information, the new extraction should say so in the value ("as of Sep 2026, …") \
+rather than stacking a parallel row.
 - Greetings, acknowledgements, emoji reactions, scheduling chatter, or who-said-what logs.
 
 **Attribution rule (read carefully):** when a group discusses an object or topic — a car, \

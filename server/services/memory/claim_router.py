@@ -354,10 +354,26 @@ async def _route_batch(
     goals = await _candidate_goals(ctx.db, cid, batch["entity_ids"])
     repo = GoalRepository(ctx.db)
 
-    delivered = skipped = 0
+    delivered = skipped = already_routed = 0
     for goal_id, match_type in goals:
         goal = await repo.get(goal_id)
         if goal is None or goal["status"] != "active":
+            continue
+
+        # Inline delivery + watermark replay race (2026-09-14): the inline
+        # path after an extraction turn doesn't advance the watermark, so the
+        # heartbeat sweep re-routes the same batch — a duplicate probe LLM
+        # call and a duplicate routing-log row per goal. The revise effect
+        # key already dedupes the wake itself; skip the rerun instead. Rows
+        # that ended in an enqueue error stay retryable.
+        seen = await ctx.db.fetch_one(
+            "SELECT 1 FROM memory_routing_log "
+            "WHERE stimulus_id = ? AND goal_id = ? AND revise_outcome != 'error' "
+            "LIMIT 1",
+            (turn_message_id, goal_id),
+        )
+        if seen:
+            already_routed += 1
             continue
 
         # Every match tier is probed (2026-09-10): ref/mention matching was
@@ -393,10 +409,11 @@ async def _route_batch(
 
     if goals:
         logger.info("claim router: %d claim(s) from %s → %d goal(s) "
-                    "(%d probe-ignored)",
-                    len(batch["claim_ids"]), session_key, delivered, skipped)
+                    "(%d probe-ignored, %d already routed)",
+                    len(batch["claim_ids"]), session_key, delivered, skipped,
+                    already_routed)
     return {"candidates": len(goals), "delivered": delivered,
-            "probe_ignored": skipped}
+            "probe_ignored": skipped, "already_routed": already_routed}
 
 
 async def _log_decision(

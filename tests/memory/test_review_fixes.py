@@ -226,18 +226,20 @@ async def test_reconcile_records_real_ops(recon_db):
     eid = await _seed_person(recon_db)
 
     async def apply_fix(tools):
+        # Value deliberately != the seeded display name: since the 2026-09-14
+        # no-op guards, alias/name claims restating display_name are skipped.
         await _call_tool(tools, "add_claim",
-                         {"subject_id": eid, "claim_type_key": "name",
-                          "value": "Review Test"})
+                         {"subject_id": eid, "claim_type_key": "interest",
+                          "value": "rock climbing"})
 
-    llm = _ScriptedLLM('{"issues": [{"summary": "added name"}], "questions": []}',
+    llm = _ScriptedLLM('{"issues": [{"summary": "added interest"}], "questions": []}',
                        script=[apply_fix])
     result = await reconcile_entity(recon_db, llm, eid)
 
     assert len(result["operations_applied"]) == 1
     assert "add_claim" in result["operations_applied"][0]
     row = await recon_db.fetch_one(
-        "SELECT COUNT(*) n FROM memory_claims WHERE subject_id = ? AND claim_type_key = 'name'",
+        "SELECT COUNT(*) n FROM memory_claims WHERE subject_id = ? AND claim_type_key = 'interest'",
         (eid,))
     assert row["n"] == 1
 
