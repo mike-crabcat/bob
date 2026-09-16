@@ -647,6 +647,49 @@ Skill *definitions* live on disk under `~/workspace/skills/<name>/` (`skill.md` 
 
 ---
 
+## MCP servers
+
+External tool servers (Model Context Protocol) exposed to the LLM as native tools namespaced `mcp_<server>_<tool>` (migration `007`, 2026-09-14). `services/mcp_service.py` owns connections (connection-per-call under a timeout), a TTL-refreshed tool-definition cache, and the per-turn factory `make_mcp_tools()` that resolves global + attached servers beside `build_common_tools()` at the four channel dispatch sites.
+
+```mermaid
+erDiagram
+    mcp_servers ||--o{ conversation_mcp_attachments : "attached to"
+    conversations ||--o{ conversation_mcp_attachments : "has"
+
+    mcp_servers {
+        TEXT id PK
+        TEXT name UK "slug; namespacing key"
+        TEXT transport "stdio|http"
+        TEXT command "stdio: absolute path"
+        TEXT args_json
+        TEXT env_json "child env; allowlist + these only"
+        TEXT url "http transport"
+        TEXT headers_json
+        INTEGER enabled "per-row kill switch"
+        INTEGER is_global "every conversation vs attached-only"
+        INTEGER trusted_only "hidden from untrusted sessions"
+        TEXT tool_filter_json "allow/deny lists"
+        INTEGER timeout_seconds "NULL = settings default"
+    }
+    conversation_mcp_attachments {
+        TEXT conversation_id PK
+        TEXT mcp_server_id PK
+        TEXT attached_by
+    }
+```
+
+**`mcp_servers`** — Registered MCP tool servers, with `created_by` auditing who requested each one (migration `008`). Two registration paths, same validation (`mcp_service.validate_mcp_server_fields`) and the same `max_servers` cap:
+- **Operator path** — token-gated dashboard API (`routers/dashboard_api/mcp.py`, `cli/mcp_cmds.py`): writes need the API token, GETs redact `env_json`/`headers_json` values as `"***"` (keys preserved), and a `"***"` value on PUT keeps the stored secret.
+- **Agent path** (`services/mcp_admin_tools.py`, 2026-09-14) — Bob can register at a **trusted contact's request**: the tools (`register_mcp_server`, `attach_mcp_server`, `detach_mcp_servers`, `list_mcp_servers`, `test_mcp_server`) attach only in human-initiated turns from a trusted contact. The owner (`contacts.is_default`) registers directly; any other trusted contact's request parks an `mcp_server` approval in the owner's DM (the approvals machinery — migration `008` extended the type allowlist via the standard rebuild) and approving executes the registration from the stored proposal, attaches it to the requesting conversation, and wakes that conversation with the result. Agent-registered servers are conversation-scoped; `is_global` stays an operator decision.
+
+stdio children run as the service user, outside the workspace sandbox, and never inherit the service environment — only `McpSettings.env_allowlist` vars plus the row's `env_json` (the service env holds LLM keys).
+
+**`conversation_mcp_attachments`** — Which servers a specific conversation additionally sees (`is_global` servers need no row). Replace-semantics writes via `set_attachments`; deleting a server removes its attachments in the same transaction.
+
+Kill switches, widest first: per-row `enabled=0` → detach the conversation → `BOB_MCP_ENABLED=off` + restart → remove the `mcp` package (the manager degrades to logged errors; the app is unaffected).
+
+---
+
 ## Audit and utility
 
 Tables that exist for operational visibility or configuration rather than feature state:

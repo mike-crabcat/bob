@@ -184,6 +184,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app_ctx.event_bus = event_bus
         app.state.event_bus = event_bus
 
+        # MCP client manager — inert with no servers registered;
+        # BOB_MCP_ENABLED=off kills it entirely
+        mcp_manager = None
+        if resolved_settings.mcp.enabled:
+            try:
+                from server.services.mcp_service import McpManager
+                mcp_manager = McpManager(app_ctx)
+                await mcp_manager.start()
+                app.state.mcp_manager = mcp_manager
+                app_ctx.mcp = mcp_manager
+            except Exception:
+                logger.exception("MCP manager failed to start")
+
         # Conditional WhatsApp bridge service
         wa_bridge_service = None
         if resolved_settings.whatsapp_bridge.enabled:
@@ -253,6 +266,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             if wa_bridge_service is not None:
                 await wa_bridge_service.stop()
+
+            if mcp_manager is not None:
+                await mcp_manager.stop()
 
             await database.close()
 

@@ -387,6 +387,29 @@ class ToolLoopSettings:
 
 
 @dataclass(slots=True)
+class McpSettings:
+    """MCP client subsystem: external tool servers (stdio subprocess or
+    streamable HTTP) exposed to the LLM as native tools namespaced
+    mcp_<server>_<tool>, globally or attached per conversation. Servers are
+    registered ONLY through the token-gated dashboard API (Mike's decision,
+    2026-09-14) — the agent gets tools, never registration powers. An empty
+    mcp_servers table is a total no-op, so this defaults to enabled; per-row
+    `enabled` is the real gate. BOB_MCP_ENABLED=off is the master kill
+    switch. stdio children never inherit the service environment (it holds
+    LLM keys) — only the env_allowlist vars plus the per-server env_json."""
+
+    enabled: bool = True
+    refresh_interval_seconds: float = 900.0  # tool-def cache TTL per server
+    default_timeout_seconds: float = 60.0    # per call_tool; row overrides
+    connect_timeout_seconds: float = 20.0    # initialize/list_tools budget
+    max_tools_per_server: int = 80
+    max_schema_chars_per_server: int = 24000  # combined tool JSON; over → 0 tools
+    max_output_chars: int = 24000             # flattened call result cap
+    max_servers: int = 12                     # blast-radius cap on registrations
+    env_allowlist: str = "HOME,PATH,LANG,TZ,SSL_CERT_FILE"
+
+
+@dataclass(slots=True)
 class ReconciliationSettings:
     """Configuration for memory reconciliation model selection.
 
@@ -506,6 +529,7 @@ class Settings:
     utility_conversations: UtilityConversationSettings = field(
         default_factory=UtilityConversationSettings)
     tool_loop: ToolLoopSettings = field(default_factory=ToolLoopSettings)
+    mcp: McpSettings = field(default_factory=McpSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
@@ -862,6 +886,19 @@ class Settings:
                 history_view_keep=int(os.getenv("BOB_TOOL_LOOP_HISTORY_KEEP", "20")),
                 history_view_trigger_chars=int(
                     os.getenv("BOB_TOOL_LOOP_HISTORY_TRIGGER", "40000")),
+            ),
+            mcp=McpSettings(
+                enabled=_env_bool("BOB_MCP_ENABLED", True),
+                refresh_interval_seconds=float(os.getenv("BOB_MCP_REFRESH_INTERVAL_SECONDS", "900")),
+                default_timeout_seconds=float(os.getenv("BOB_MCP_DEFAULT_TIMEOUT_SECONDS", "60")),
+                connect_timeout_seconds=float(os.getenv("BOB_MCP_CONNECT_TIMEOUT_SECONDS", "20")),
+                max_tools_per_server=int(os.getenv("BOB_MCP_MAX_TOOLS_PER_SERVER", "80")),
+                max_schema_chars_per_server=int(
+                    os.getenv("BOB_MCP_MAX_SCHEMA_CHARS_PER_SERVER", "24000")),
+                max_output_chars=int(os.getenv("BOB_MCP_MAX_OUTPUT_CHARS", "24000")),
+                max_servers=int(os.getenv("BOB_MCP_MAX_SERVERS", "12")),
+                env_allowlist=os.getenv(
+                    "BOB_MCP_ENV_ALLOWLIST", "HOME,PATH,LANG,TZ,SSL_CERT_FILE"),
             ),
             reconciliation=reconciliation,
             memory=memory,

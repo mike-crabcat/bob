@@ -350,7 +350,15 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
                 handler=_send_whatsapp_message,
             ))
 
+        # MCP tools last: global + this conversation's attached servers,
+        # namespaced mcp_<server>_<tool> (services/mcp_service.py).
+        from server.services.mcp_service import make_mcp_tools
+        tools.extend(await make_mcp_tools(
+            ctx, session_key=session_key, is_trusted=is_trusted,
+            reserved={t.name for t in tools}))
+
         dispatch_id = str(uuid4())
+        budget: dict[str, bool] = {}
         response = await LLMDispatchService(ctx).chat_with_tools(
             messages, tools,
             model=model_arg,

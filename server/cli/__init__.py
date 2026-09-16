@@ -42,6 +42,7 @@ from server.cli.eval_cmds import app as eval_app  # noqa: E402
 from server.cli.replay_cmds import app as replay_app  # noqa: E402
 from server.cli.whatsapp_cmds import app as whatsapp_app  # noqa: E402
 from server.cli.dream_cmds import app as dream_app  # noqa: E402
+from server.cli.mcp_cmds import app as mcp_app  # noqa: E402
 
 app.add_typer(contact_app, name="contact")
 app.add_typer(memory_app, name="memory")
@@ -56,6 +57,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(replay_app, name="replay")
 app.add_typer(whatsapp_app, name="whatsapp")
 app.add_typer(dream_app, name="dream")
+app.add_typer(mcp_app, name="mcp")
 
 
 def main() -> int:

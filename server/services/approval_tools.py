@@ -165,6 +165,8 @@ def _register_approval_executors() -> None:
     _steering.register()
     from server.services import utility_conversations as _utility
     _utility.register()
+    from server.services import mcp_admin_tools as _mcp_admin
+    _mcp_admin.register()
 
 
 _register_approval_executors()

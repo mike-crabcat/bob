@@ -72,6 +72,8 @@ OWNERS: dict[str, list[str]] = {
     "skill_delegations": ["services/skill_developer_service.py"],
     "location_history": ["heartbeat.py", "services/location_tools.py"],
     "recon_model_overrides": ["services/memory/", "cli/memory_cmds.py"],
+    "mcp_servers": ["repositories/mcp.py"],
+    "conversation_mcp_attachments": ["repositories/mcp.py"],
 }
 
 # Table-name-prefix families owned by whole packages.

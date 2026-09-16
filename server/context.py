@@ -17,3 +17,4 @@ class AppContext:
     settings: Settings
     event_bus: Any | None = None
     whatsapp_bridge: Any | None = None
+    mcp: Any | None = None

@@ -711,6 +711,12 @@ class EmailPollingService(BaseService):
             tools.extend(make_goal_tools(self.ctx, session_key))
             from server.services.approval_tools import make_approval_tools
             tools.extend(make_approval_tools(self.ctx, session_key))
+            # MCP administration: email threads are human-initiated by
+            # nature, so trusted threads get the register/attach tools.
+            from server.services.mcp_admin_tools import make_mcp_admin_tools
+            tools.extend(await make_mcp_admin_tools(
+                self.ctx, session_key=session_key, is_trusted=is_trusted,
+                contact_id=contact_id, human_initiated=True))
 
         # If this thread was initiated from another session, inject the finish_email_thread tool
         if origin_session_key:
@@ -723,6 +729,13 @@ class EmailPollingService(BaseService):
                 agenda=thread.get("agenda") or "",
                 wa_service=wa_service,
             ))
+
+        # MCP tools last: global + this conversation's attached servers,
+        # namespaced mcp_<server>_<tool> (services/mcp_service.py).
+        from server.services.mcp_service import make_mcp_tools
+        tools.extend(await make_mcp_tools(
+            self.ctx, session_key=session_key, is_trusted=is_trusted,
+            reserved={t.name for t in tools}))
 
         dispatch_id = str(uuid4())
 

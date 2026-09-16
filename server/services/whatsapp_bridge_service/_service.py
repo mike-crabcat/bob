@@ -1074,6 +1074,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             tools.extend(make_steering_tools(
                 self.ctx, session_key, contact_id, flight=flight))
 
+        # MCP administration (2026-09-14): register/attach MCP servers at a
+        # trusted contact's request — owner direct, other trusted contacts
+        # via owner approval (services/mcp_admin_tools.py). Untrusted or
+        # non-human turns never see these tools.
+        if is_trusted and contact_id and human_initiated:
+            from server.services.mcp_admin_tools import make_mcp_admin_tools
+            tools.extend(await make_mcp_admin_tools(
+                self.ctx, session_key=session_key, is_trusted=is_trusted,
+                contact_id=contact_id, human_initiated=human_initiated))
+
         # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
         if is_trusted:
             from server.services.goal_tools import make_goal_tools
@@ -1205,6 +1215,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             required=[],
             handler=_send_whatsapp_message,
         ))
+
+        # MCP tools last: global + this conversation's attached servers,
+        # namespaced mcp_<server>_<tool> (services/mcp_service.py). No-op
+        # unless Mike has registered servers.
+        from server.services.mcp_service import make_mcp_tools
+        tools.extend(await make_mcp_tools(
+            self.ctx, session_key=session_key, is_trusted=is_trusted,
+            reserved={t.name for t in tools}))
 
         dispatch_id = str(uuid4())
 

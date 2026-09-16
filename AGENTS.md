@@ -48,6 +48,10 @@ All realtime voice (Twilio phone calls and browser voice-link sessions) runs the
 - Dispatch entry point for the LLM: `create_subagent(agent_type="openai_voice", modality="phone"|"voice_link")`.
 - Schema and data flow: see `docs/datamodel.md` → Phone Calls & Voice Sessions. Note `services/voice_service.py` + `/voice/ws` are the LEGACY local STT→TTS pipeline (language-practice frontend only) — do not build on them.
 
+## MCP servers
+
+External MCP tool servers surface as native LLM tools namespaced `mcp_<server>_<tool>` — global or attached per conversation (`services/mcp_service.py`, `repositories/mcp.py`, migrations `007`/`008`). Registration: Mike via the token-gated dashboard API (`/dashboard/api/mcp/servers`) or `bob mcp` CLI; Bob can also register at a **trusted contact's request** (`services/mcp_admin_tools.py`) — owner requests take effect directly, other trusted contacts' requests park an approval in Mike's DM. Agent-registered servers attach to the requesting conversation only; `is_global` stays an operator decision. stdio server commands run as the service user outside the workspace sandbox with an allowlist-only child env. Kill switches: per-row `enabled` → `BOB_MCP_ENABLED=off`. See `docs/datamodel.md` → MCP servers.
+
 ## Runtime paths
 
 The database is at `/home/bob/data/bob.db`
