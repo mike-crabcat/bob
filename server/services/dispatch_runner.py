@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -62,6 +63,9 @@ def _echo_norm(text: str) -> str:
     return " ".join(text.replace(NEW_MARKER, "").split()).casefold()
 
 
+_LEADING_TAG_RE = re.compile(r"^(\s*\[[^\]\n]*\])+\s*")
+
+
 async def _is_stimulus_echo(
     result: str, claimed_ids: list[str], history_repo: Any,
 ) -> bool:
@@ -70,7 +74,11 @@ async def _is_stimulus_echo(
     marker at all — the marker is an internal prompt artifact and can never
     be legitimate outbound text. The 2026-09-14 incident: GLM-5.3-flash
     answered 'tell me about yourself' by returning the marked user line
-    verbatim, and the send-tool rescue delivered Mike his own question."""
+    verbatim, and the send-tool rescue delivered Mike his own question.
+    The 2026-09-16 variant: the model SWAPPED the marker for its own
+    bracketed tag ('[Proposing, as my bit…] …') and echoed the line
+    otherwise verbatim — so leading bracketed segments are stripped before
+    the exact comparison too."""
     from server.services.prompt_assembler import NEW_MARKER
     stripped = result.strip()
     if not stripped:
@@ -78,11 +86,15 @@ async def _is_stimulus_echo(
     if NEW_MARKER.strip() in stripped:
         return True
     resp = _echo_norm(stripped)
+    destagged = _echo_norm(_LEADING_TAG_RE.sub("", stripped))
     if not resp:
         return False
     for mid in claimed_ids:
         content = await history_repo.content_by_id(mid)
-        if content and content.strip() and _echo_norm(content) == resp:
+        if not (content and content.strip()):
+            continue
+        content_norm = _echo_norm(content)
+        if content_norm == resp or (destagged and content_norm == destagged):
             return True
     return False
 

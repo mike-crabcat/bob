@@ -198,3 +198,42 @@ async def test_normal_reply_still_rescued_alongside_guard(
     await DispatchRunner(ctx).run(_spec(key, send_tool))
 
     assert send_tool.delivered == [stub_llm["reply"]]
+
+
+async def test_marker_swap_parrot_not_rescued(ctx, db, stub_llm, stub_history):
+    """2026-09-16 variant: GLM swapped the [NEW — awaiting your reply] marker
+    for its own bracketed tag ('[Proposing, as my bit…] …') and echoed the
+    line otherwise verbatim; the exact-match guard missed it and the rescue
+    mailed Mike his own approval back. Leading bracketed segments are now
+    stripped before the comparison."""
+    key = "test:rescue:echo-marker-swap"
+    svc = SessionService(ctx)
+    await svc.add_message(
+        key, "user",
+        "I approve it to be global. Is that something you can act on?",
+        dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = ("[Proposing, as my bit…] I approve it to be global. "
+                         "Is that something you can act on?")
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == [], "marker-swap parrot must not be delivered"
+
+
+async def test_bracketed_prefix_with_real_reply_still_rescued(
+        ctx, db, stub_llm, stub_history):
+    """A leading bracketed tag on a genuinely different reply is fine — only
+    tag + verbatim-echo is a parrot."""
+    key = "test:rescue:echo-tag-real"
+    svc = SessionService(ctx)
+    await svc.add_message(
+        key, "user", "I approve it to be global. Is that something you can act on?",
+        dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = ("[done] Flipped zai-web-search to global — every "
+                         "conversation gets web_search_prime now.")
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == [stub_llm["reply"]]
