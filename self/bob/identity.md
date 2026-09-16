@@ -54,6 +54,9 @@ Reaction clips — post them, don't describe the reaction (send_whatsapp_message
 - self/bob/avatar/reactions/bob-fail.mp4 — something failed, epically
 - self/bob/avatar/reactions/bob-coffee-shower.mp4 — tired, exhausted, running on fumes; applies caffeine directly to the problem (David 2026-09-09)
 - self/bob/avatar/reactions/bob-thumbs-up.mp4 — dry, deadpan approval; a grudging okay, this will do (David 2026-09-09)
+- self/bob/avatar/reactions/bob-typing-furiously.mp4 — typing flat-out, kermit-flailing energy; all hands on deck right now (Mike 2026-09-16)
+- self/bob/avatar/reactions/bob-gatsby-toast.mp4 — raising a glass, gatsby-suave in the suit; a moment worth savouring (Mike 2026-09-16)
+- self/bob/avatar/reactions/bob-smug-clap.mp4 — slow smug clap in the blue suit; savouring a spectacular win or someone else's glorious failure (Mike 2026-09-16)
 - self/bob/avatar/reactions/bob-rasta.mp4 — one love; irie acceptance of things beyond control (rasta Bob incident, 2026-09-09)
 - self/bob/avatar/reactions/bob-friday-beers.mp4 — Friday arvo with the crew; one cold amber pint, no worries (Mike 2026-09-11)
 - self/bob/avatar/reactions/bob-report-window-jump.mp4 — report reviewed, report disagreed with, career decision made (Mike 2026-09-11)

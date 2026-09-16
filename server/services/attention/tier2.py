@@ -57,6 +57,12 @@ REACTION_CLIPS: dict[str, str] = {
     "bob-coffee-shower": "tired, exhausted, running on fumes — applies "
                          "caffeine directly to the problem",
     "bob-thumbs-up": "dry, deadpan approval — a grudging okay, this will do",
+    "bob-typing-furiously": "typing flat-out, kermit-flailing energy — all "
+                            "hands on deck right now",
+    "bob-gatsby-toast": "raising a glass, gatsby-suave in the suit — a "
+                        "moment worth savouring",
+    "bob-smug-clap": "slow smug clap in the blue suit — savouring a "
+                     "spectacular win or someone else's glorious failure",
 }
 
 
