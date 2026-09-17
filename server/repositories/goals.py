@@ -156,6 +156,22 @@ class GoalRepository:
     async def get(self, goal_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one("SELECT * FROM goals WHERE id = ?", (goal_id,))
 
+    async def set_conversation(self, goal_id: str, conversation_id: str) -> None:
+        """Retarget the working conversation (goal-room adoption: the room
+        becomes the worker; the old conversation keeps its holder rows)."""
+        await self.db.execute(
+            "UPDATE goals SET conversation_id = ?, updated_at = ? WHERE id = ?",
+            (conversation_id, _now_iso(), goal_id))
+
+    async def active_goal_in_conversation(
+        self, conversation_id: str,
+    ) -> dict[str, Any] | None:
+        """The active goal working in this conversation (goal rooms: the
+        session IS the room, so this is 1:1)."""
+        return await self.db.fetch_one(
+            "SELECT * FROM goals WHERE conversation_id = ? AND status = 'active' "
+            "ORDER BY updated_at DESC LIMIT 1", (conversation_id,))
+
     async def get_by_external_ref(self, external_ref: str) -> dict[str, Any] | None:
         return await self.db.fetch_one(
             "SELECT * FROM goals WHERE external_ref = ? ORDER BY created_at DESC LIMIT 1",
@@ -301,6 +317,42 @@ class GoalRepository:
                  if (r["updated_at"] or "")[:19] < cutoff]
         stale.sort(key=lambda r: r["updated_at"] or "")
         return stale[:limit]
+
+    async def review_candidates(
+        self, *, stale_before: str,
+        deadline_from: datetime, deadline_to: datetime, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Goals the review loop should look at (2026-09-16): quiet too
+        long (``updated_at`` before ``stale_before``) OR carrying a
+        deadline inside [``deadline_from``, ``deadline_to``] regardless of
+        recent activity — a fresh 24h-deadline goal never goes stale before
+        its own deadline, so the WFH-roster goals sailed past unreviewed.
+        Deadline-bearing first (most urgent), compared in Python because
+        deadline writers emit offset ISO."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM goals WHERE status = 'active'")
+        cutoff = stale_before[:19]
+        picked: list[dict[str, Any]] = []
+        for r in rows or []:
+            g = dict(r)
+            if (g.get("updated_at") or "")[:19] < cutoff:
+                picked.append(g)
+                continue
+            raw_dl = g.get("deadline")
+            if not raw_dl:
+                continue
+            try:
+                dl = datetime.fromisoformat(str(raw_dl).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if dl.tzinfo is None:
+                dl = dl.replace(tzinfo=timezone.utc)
+            if deadline_from <= dl <= deadline_to:
+                picked.append(g)
+        picked.sort(key=lambda g: (g.get("deadline") is None,
+                                   g.get("deadline") or "",
+                                   g.get("updated_at") or ""))
+        return picked[:limit]
 
     async def children_map(self, goal_ids: list[str]) -> dict[str, list[str]]:
         """parent_goal_id → [child ids], for the goal-tree dashboard view."""

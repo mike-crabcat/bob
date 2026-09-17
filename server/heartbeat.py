@@ -590,13 +590,17 @@ class GoalReviewTask:
 
     An OWN heartbeat task — deliberately not dream scheduling, which is
     gated on ``dream.enabled`` (default false) and would silently never run.
-    Scans active goals untouched for longer than the threshold and runs the
-    reviser with a coherence-check stimulus. The reviser maintains a
+    Scans active goals untouched for longer than the threshold — or, since
+    2026-09-16, carrying a deadline inside (now−back, now+fwd] regardless
+    of recent activity — and runs the reviser with a coherence-check
+    stimulus (the deadline variant says so and flags PASSED deadlines).
+    The reviser maintains a
     ``review_streak`` in the goal's state (reset when something changed,
     incremented when the review found nothing new) and wakes the working
     conversation on the streak-2 escalation. This task adds the origin
     escalation at streak 4 (one wake, not per-cycle). Kill switch:
-    ``BOB_GOAL_REVIEW_DISABLED=1``."""
+    ``BOB_GOAL_REVIEW_DISABLED=1``; window knobs
+    ``BOB_GOAL_REVIEW_DEADLINE_BACK_HOURS`` / ``_FWD_HOURS``."""
 
     name = "goal_review"
     _THROTTLE = timedelta(hours=1)
@@ -620,13 +624,44 @@ class GoalReviewTask:
         cutoff = (now - timedelta(
             hours=ctx.settings.goals.review_threshold_hours)).isoformat()
         repo = GoalRepository(ctx.db)
-        stale = await repo.stale_active(older_than=cutoff, limit=10)
+        # Selection (2026-09-16): stale-by-age OR deadline inside the
+        # window — fresh short-deadline goals were invisible to the
+        # age-only scan (the WFH-roster sail-past: created with a 24h
+        # deadline, the 24h staleness threshold only matured as the
+        # deadline fired).
+        stale = await repo.review_candidates(
+            stale_before=cutoff,
+            deadline_from=now - timedelta(
+                hours=ctx.settings.goals.review_deadline_back_hours),
+            deadline_to=now + timedelta(
+                hours=ctx.settings.goals.review_deadline_fwd_hours),
+            limit=10)
         reviewed = escalated = 0
         for goal in stale:
+            # Goal rooms (docs/goal-rooms-plan.md) run their own check-in
+            # series with in-context state — the reviser-based review loop
+            # serves legacy goals only.
+            from server.services.goal_rooms import is_room_session
+            if is_room_session(goal.get("conversation_id") or ""):
+                continue
             date = now.strftime("%Y-%m-%d")
+            deadline_note = ""
+            raw_dl = goal.get("deadline")
+            if raw_dl:
+                try:
+                    dl_dt = datetime.fromisoformat(
+                        str(raw_dl).replace("Z", "+00:00"))
+                    if dl_dt.tzinfo is None:
+                        dl_dt = dl_dt.replace(tzinfo=timezone.utc)
+                    passed = " — PASSED, act on it now" if dl_dt <= now else ""
+                    deadline_note = (f"\nThe goal's deadline is "
+                                     f"{str(raw_dl)[:19]} UTC{passed}.")
+                except ValueError:
+                    deadline_note = f"\nThe goal's deadline is {raw_dl}."
             stimulus = (
                 "## Coherence review\n"
-                "This goal has been quiet. Validate: are open_questions still "
+                "This goal has been quiet." + deadline_note +
+                " Validate: are open_questions still "
                 "actionable? are next_actions overdue (and worth chasing)? is "
                 "`known` still true? If NOTHING changed since the last review, "
                 "increment `review_streak` by 1 and set wake_needed=true ONLY "
@@ -674,6 +709,32 @@ class GoalReviewTask:
 
 
 _last_due_sweep: datetime | None = None
+
+
+class GoalRoomHygieneTask:
+    """Goal-rooms route hygiene (docs/goal-rooms-plan.md D11 backstop):
+    delete enabled routes targeting a room whose goal is no longer active.
+    Direct settles prune inline; this catches rows that slipped past
+    (crashed settles, manual SQL). Hourly, cheap, never raises."""
+
+    name = "goal_room_hygiene"
+    _THROTTLE = timedelta(hours=1)
+    _last: datetime | None = None
+
+    async def run(self, ctx: AppContext) -> None:
+        now = datetime.now(timezone.utc)
+        if GoalRoomHygieneTask._last and \
+                (now - GoalRoomHygieneTask._last) < self._THROTTLE:
+            return
+        GoalRoomHygieneTask._last = now
+        from server.services.goal_rooms import prune_orphan_routes
+        try:
+            pruned = await prune_orphan_routes(ctx)
+        except Exception:
+            logger.exception("goal room hygiene sweep failed")
+            return
+        if pruned:
+            logger.info("goal room hygiene: pruned %d orphan route(s)", pruned)
 
 
 class GoalDueTask:

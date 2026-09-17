@@ -71,6 +71,25 @@ def _goal(objective="test goal") -> dict:
 
 # ─── op application ───────────────────────────────────────────────────
 
+def test_apply_ops_normalises_dict_form():
+    """2026-09-14 live drift: GLM emitted {"known.append": [...]} — op name
+    as key — and the whole op was dropped as "unknown" (a WFH-roster fact
+    vanished). The dict form now normalises to the canonical shape; names
+    outside the contract still skip."""
+    state = GoalStrategy()
+    out = apply_ops(state, [
+        {"known.append": ["roster: office-default"]},
+        {"next_actions.set": [{"action": "escalate via email",
+                               "due": "2026-09-18T09:00:00+08:00"}]},
+        {"plan.set": "chase the rosters"},
+        {"totally.made.up": ["nope"]},
+    ])
+    assert out.known == ["roster: office-default"]
+    assert out.plan == "chase the rosters"
+    assert [na.action for na in out.next_actions] == ["escalate via email"]
+    assert [na.due for na in out.next_actions] == ["2026-09-18T09:00:00+08:00"]
+
+
 def test_apply_ops_full_vocabulary():
     s = GoalStrategy(plan="old", known=["k1", "k2", "k3"],
                      open_questions=["q1"],

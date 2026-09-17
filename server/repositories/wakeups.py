@@ -173,3 +173,18 @@ class WakeupRepository:
             "ORDER BY not_before",
             (conversation_id,),
         )
+
+    async def last_fired_of_kind(self, goal_id: str, kind: str) -> str | None:
+        """MAX(not_before) over fired wakeups of a kind for a goal — the goal
+        rooms check-in digest boundary ('claims since the last check-in')."""
+        row = await self.db.fetch_one(
+            "SELECT MAX(not_before) AS t FROM wakeups "
+            "WHERE goal_id = ? AND kind = ? AND status = 'fired'",
+            (goal_id, kind))
+        return row["t"] if row and row["t"] else None
+
+    async def has_scheduled_of_kind(self, goal_id: str, kind: str) -> bool:
+        row = await self.db.fetch_one(
+            "SELECT 1 FROM wakeups WHERE goal_id = ? AND kind = ? "
+            "AND status = 'scheduled' LIMIT 1", (goal_id, kind))
+        return row is not None

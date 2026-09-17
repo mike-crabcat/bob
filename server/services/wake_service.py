@@ -161,6 +161,14 @@ async def _generic_wake_dispatch(
         charter_block, utility_model, report_to = spec
         if report_to:
             utility_tools = make_report_to_tool(ctx, session_key, report_to)
+        # Goal rooms (docs/goal-rooms-plan.md): the room-scoped tool surface —
+        # state block writes, evidenced close, child spawning, subscription
+        # self-management, plus gated DM outreach when the bridge is up.
+        # No goal_id juggling: the session IS the room.
+        if session_key.startswith("agent:goal-"):
+            from server.services.goal_rooms import room_turn_tools
+            utility_tools = list(utility_tools) + room_turn_tools(
+                ctx, session_key)
 
     tools = make_workspace_tools(ctx, session_key=session_key)
     # Bob Events §1.5: goal tools on the generic wake path — a goal_deadline

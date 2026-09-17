@@ -17,6 +17,15 @@ from server.repositories.wakeups import WakeupRepository
 from server.services import goal_service
 
 
+@pytest.fixture(autouse=True)
+def _legacy_goal_path(ctx):
+    """These tests pin the LEGACY goal machinery (reviser, wake matrix,
+    claim-router delivery) — the fallback path under goal rooms. Rooms have
+    their own suite: tests/services/test_goal_rooms.py."""
+    ctx.settings.goal_rooms.enabled = False
+    yield
+
+
 def _past() -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
 
@@ -104,11 +113,14 @@ async def test_deadline_schedules_wakeup_and_settle_cancels_it(ctx, db, monkeypa
         ctx, conversation_id="c", objective="obj",
         origin_conversation_id="o", deadline=_future())
 
-    wakeups = await WakeupRepository(db).list_scheduled("o")
+    # 2026-09-16 wake-matrix change: deadline wakeups land in the WORKING
+    # conversation (the follow-up ladder and send tools live there), not
+    # the origin — the origin is woken on completion.
+    wakeups = await WakeupRepository(db).list_scheduled("c")
     assert len(wakeups) == 1 and wakeups[0]["goal_id"] == goal["id"]
 
     await goal_service.complete_goal(ctx, goal["id"], result="done")
-    assert await WakeupRepository(db).list_scheduled("o") == []
+    assert await WakeupRepository(db).list_scheduled("c") == []
 
 
 async def test_due_wakeup_fires_with_goal_context(ctx, db, monkeypatch):
@@ -121,14 +133,71 @@ async def test_due_wakeup_fires_with_goal_context(ctx, db, monkeypatch):
     fired = await goal_service.pump_due_wakeups(ctx)
     assert fired == 1
     args = wake.await_args
-    assert args.args[1] == "o"
+    assert args.args[1] == "c"   # working conversation (wake matrix 2026-09-16)
     assert "chase the invoice" in args.args[2]
+
+    # 2026-09-16: the deadline also enqueues a reviser stimulus (durable,
+    # idempotent per goal+deadline-day) so state folds — close-if-achieved
+    # or materialise the escalation ladder — alongside the wake.
+    assert await db.fetch_one(
+        "SELECT 1 FROM effects WHERE kind = 'goal_revise_state' "
+        "AND idempotency_key LIKE 'goal_revise:%:deadline:%'") is not None
 
     # Claimed exactly once: a second pump finds nothing.
     assert await goal_service.pump_due_wakeups(ctx) == 0
     assert goal["id"]  # goal untouched by deadline fire
     row = await GoalRepository(db).get(goal["id"])
     assert row["status"] == "active"
+
+
+async def test_deadline_fire_skips_reviser_for_tool_booked_wakeups(ctx, db, monkeypatch):
+    """Reminder wakeups booked via schedule_goal_wakeup carry
+    scheduled_by=tool — they are reminders, not the deadline, and must not
+    trigger the deadline reviser stimulus (2026-09-16)."""
+    wake = AsyncMock()
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    goal = await GoalRepository(db).create(
+        conversation_id="c", objective="remind me")
+    await WakeupRepository(db).schedule(
+        conversation_id="c", not_before=_past(), goal_id=goal["id"],
+        payload={"note": "call mum", "scheduled_by": "tool"})
+
+    assert await goal_service.pump_due_wakeups(ctx) == 1
+    wake.assert_awaited_once()
+    assert await db.fetch_one(
+        "SELECT 1 FROM effects WHERE kind = 'goal_revise_state'") is None
+
+
+async def test_create_goal_seeds_fallback_action_for_deadline(ctx, db):
+    """2026-09-16: a deadlined goal created with no dated next_action gets
+    a seeded re-drive due at deadline−4h, so the due-action sweep produces
+    a working-conversation wake even if the reviser never runs — the
+    WFH-roster stall shape (asks sent, next_actions stayed empty, only the
+    deadline wake fired)."""
+    from server.services.goal_service import extract_due_instant
+    from server.services.goal_state_service import parse_strategy
+
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="c", objective="collect rosters",
+        deadline=deadline)
+    state = parse_strategy(goal)
+    assert len(state.next_actions) == 1
+    assert state.next_actions[0].action.startswith("(seeded)")
+    expected = extract_due_instant(deadline) - timedelta(hours=4)
+    assert extract_due_instant(state.next_actions[0].due) == expected
+
+    # Explicit next_actions are left alone, and no deadline means no seed.
+    goal2 = await goal_service.create_goal(
+        ctx, conversation_id="c", objective="with actions",
+        deadline=_future(),
+        strategy={"v": 2, "next_actions": [{"action": "already planned",
+                                            "due": ""}]})
+    assert [na.action for na in parse_strategy(goal2).next_actions] == [
+        "already planned"]
+    goal3 = await goal_service.create_goal(
+        ctx, conversation_id="c", objective="no deadline")
+    assert parse_strategy(goal3).next_actions == []
 
 
 async def test_wakeup_for_settled_goal_is_moot(ctx, db, monkeypatch):

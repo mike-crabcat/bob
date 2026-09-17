@@ -21,6 +21,15 @@ from server.repositories.wakeups import WakeupRepository
 from server.services import goal_service
 
 
+@pytest.fixture(autouse=True)
+def _legacy_goal_path(ctx):
+    """These tests pin the LEGACY goal machinery (reviser, wake matrix,
+    claim-router delivery) — the fallback path under goal rooms. Rooms have
+    their own suite: tests/services/test_goal_rooms.py."""
+    ctx.settings.goal_rooms.enabled = False
+    yield
+
+
 def _past() -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
 
@@ -492,6 +501,29 @@ async def test_goal_review_skips_fresh_goals(ctx, db, mock_wake, reviser,
     assert await db.fetch_one(
         "SELECT 1 FROM effects WHERE kind = 'goal_revise_state' "
         "AND payload_json LIKE '%review:%'") is None
+
+
+async def test_goal_review_picks_deadline_window_goals(ctx, db, mock_wake,
+                                                       reviser, review_task):
+    """2026-09-16: a freshly-touched goal with a deadline inside the window
+    enters the review loop — age-only selection let short-deadline goals
+    sail past unreviewed (the WFH-roster incident: 24h-deadline goals only
+    went 'stale' as the deadline fired)."""
+    deadline = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+    await goal_service.create_goal(
+        ctx, conversation_id="work", objective="collect WFH rosters",
+        origin_conversation_id="asker", deadline=deadline)
+
+    await review_task.run(ctx)
+
+    # Selected via the deadline window (not age) → reviser ran inline with
+    # the deadline flagged; default mock response has no streak → no wake.
+    assert len(reviser.calls) == 1
+    row = await db.fetch_one(
+        "SELECT payload_json FROM effects WHERE kind = 'goal_revise_state' "
+        "AND idempotency_key LIKE 'goal_revise:%:review:%'")
+    assert row is not None and "PASSED" in row["payload_json"]
+    mock_wake.assert_not_awaited()
 
 
 async def test_goal_review_kill_switch(ctx, db, mock_wake, reviser,

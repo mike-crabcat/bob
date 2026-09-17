@@ -62,6 +62,49 @@ class StimulusRepository:
         sql += " ORDER BY priority, id"
         return await self.db.fetch_all(sql)
 
+    async def routes_for_target(
+        self, target_session: str, *, enabled_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM stimulus_routes WHERE target_session = ?"
+        if enabled_only:
+            sql += " AND enabled = 1"
+        sql += " ORDER BY id"
+        return await self.db.fetch_all(sql, (target_session,))
+
+    async def delete_routes_for_target(self, target_session: str) -> int:
+        """Drop every route (and its fire state) targeting a session — the
+        goal-room settle prune: the room's routes die with its goal."""
+        n = 0
+        for r in await self.routes_for_target(target_session):
+            await self.delete_route(int(r["id"]))
+            n += 1
+        return n
+
+    async def enabled_goal_room_routes(self) -> list[dict[str, Any]]:
+        """Enabled routes targeting any goal room — the hygiene sweep's scan
+        set (settle prunes inline; the sweep then checks goal liveness via
+        the goals repository and deletes the strays)."""
+        return await self.db.fetch_all(
+            "SELECT id, target_session FROM stimulus_routes "
+            "WHERE enabled = 1 AND target_session LIKE 'agent:goal-%:utility'")
+
+    async def recent_events(
+        self, *, source: str, since_iso: str, limit: int = 100,
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Processed events since a cutoff — the goal-room check-in's claim
+        activity view reads here (both tiers: info rides the check-in,
+        action already steered; the room sees the whole window either way)."""
+        sql = ("SELECT id, type, summary, ts FROM stimulus_events "
+               "WHERE source = ? AND processed_at IS NOT NULL AND ts > ?")
+        params: list[Any] = [source, since_iso]
+        if level is not None:
+            sql += " AND level = ?"
+            params.append(level)
+        sql += " ORDER BY ts LIMIT ?"
+        params.append(limit)
+        return await self.db.fetch_all(sql, tuple(params))
+
     async def get_route(self, route_id: int) -> dict[str, Any] | None:
         return await self.db.fetch_one(
             "SELECT * FROM stimulus_routes WHERE id = ?", (route_id,))
@@ -70,17 +113,23 @@ class StimulusRepository:
         self, *, source: str, type_pattern: str, level: str,
         target_session: str, hours: str | None = None,
         cooldown_s: int | None = None, budget_per_hour: int | None = None,
-        note: str = "", created_by: str = "",
+        note: str = "", created_by: str = "", enabled: bool = False,
     ) -> int:
-        """Insert a route, disabled (utility-conversations plan Part 3: the
-        request tool writes inert; approval flips it live)."""
+        """Insert a route, disabled by default (utility-conversations plan
+        Part 3: the request tool writes inert; approval flips it live).
+        Platform-created routes (goal-room seeds/subscriptions) pass
+        ``enabled=True`` so the flag lands in the INSERT — a follow-up
+        enable keyed on last_insert_rowid races across pooled connections
+        (found live 2026-09-16: one seed route stranded disabled, one
+        duplicated, when the read-back hit a different pool member)."""
         now = utcnow_iso()
         await self.db.execute(
             "INSERT INTO stimulus_routes "
             "(source, type_pattern, level, target_session, enabled, priority, "
             " note, created_at, created_by, hours, cooldown_s, budget_per_hour) "
-            "VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)",
-            (source, type_pattern, level, target_session, note, now, created_by,
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+            (source, type_pattern, level, target_session,
+             1 if enabled else 0, note, now, created_by,
              hours, cooldown_s, budget_per_hour))
         row = await self.db.fetch_one("SELECT last_insert_rowid() AS id")
         return int(row["id"]) if row else 0

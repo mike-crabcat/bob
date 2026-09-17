@@ -32,8 +32,12 @@ def _iso(dt: datetime) -> str:
 
 
 async def _goal_with_due(ctx, due: str, *, objective: str = "organise the coffee") -> str:
+    # outreach stays on the legacy path (goal rooms: deliberative kinds get
+    # rooms; wrappers don't) — these tests pin the sweep mechanics and the
+    # legacy working-conversation target. Room targeting has its own case in
+    # tests/services/test_goal_rooms.py.
     goal = await goal_service.create_goal(
-        ctx, conversation_id=WORK_KEY, objective=objective, kind="coordination",
+        ctx, conversation_id=WORK_KEY, objective=objective, kind="outreach",
         strategy={"v": 2, "plan": "hold the coffee",
                   "known": [], "open_questions": [],
                   "next_actions": [{"action": "send the final reminder",

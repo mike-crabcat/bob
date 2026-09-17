@@ -174,23 +174,47 @@ async def test_drain_null_valves_unchanged_and_stamps_route_id(db, ctx, fake_wak
     assert row["route_id"] == frigate_route["id"]
 
 
-async def test_drain_cooldown_throttles_second_fire(db, ctx, fake_wake):
+async def test_drain_cooldown_defers_then_coalesces(db, ctx, fake_wake):
+    """The dropped-leave-clip lesson (2026-09-14): rate-valve-blocked events
+    DEFER (stay pending) instead of dying, so the enter-garden and
+    leave-garden clips land in ONE watch turn once the cooldown opens."""
     await _make_utility(db, valves=False)
     await StimulusRepository(db).db.execute(  # clear valve-less → set cooldown
         "UPDATE stimulus_routes SET cooldown_s = 1800 "
         "WHERE target_session = 'agent:arrival-herald:utility'")
-    await _seed_event(db, dedup_key="c1")
+    await _seed_event(db, dedup_key="c1", summary="person enters garden")
     assert (await drain(ctx))["steered"] == 1
-    await _seed_event(db, dedup_key="c2")
+    await _seed_event(db, dedup_key="c2", summary="person leaves garden")
     counts = await drain(ctx)
-    assert counts["throttled"] == 1 and counts["steered"] == 0
-    assert len(fake_wake) == 1  # throttled never retries
+    assert counts["deferred"] == 1 and counts["steered"] == 0
+    assert len(fake_wake) == 1  # no immediate second fire
     row = await db.fetch_one("SELECT delivered_steer FROM stimulus_events "
                              "WHERE dedup_key = 'c2'")
-    assert row["delivered_steer"] == "throttled"
+    assert row["delivered_steer"] is None  # still pending — deferred, not dead
+    # Re-drain while still inside the cooldown: deferred again, no wake.
+    assert (await drain(ctx))["deferred"] == 1 and len(fake_wake) == 1
+
+    # Cooldown opens (backdate the fire): everything deferred since (c2)
+    # plus the new event rides ONE wake — c1 already fired in turn one.
+    from server.services.stimulus_router import _parse_ts
+    past = (_parse_ts(datetime.now(timezone.utc).isoformat())
+            - timedelta(seconds=1800)).isoformat()
+    await db.execute("UPDATE stimulus_route_fires SET ts = ?",
+                     (past,))
+    await _seed_event(db, dedup_key="c3", summary="later event")
+    counts = await drain(ctx)
+    assert counts["steered"] == 2 and counts["deferred"] == 0
+    assert len(fake_wake) == 2
+    content = fake_wake[-1][1]
+    assert "person leaves garden" in content
+    assert "later event" in content
+    for key in ("c2", "c3"):
+        row = await db.fetch_one("SELECT delivered_steer FROM stimulus_events "
+                                 "WHERE dedup_key = ?", (key,))
+        assert row["delivered_steer"] == "steer:ok"
 
 
-async def test_drain_budget_exhaustion(db, ctx, fake_wake):
+async def test_drain_budget_exhaustion_defers(db, ctx, fake_wake):
     await _make_utility(db, valves=False)
     await StimulusRepository(db).db.execute(
         "UPDATE stimulus_routes SET budget_per_hour = 1 "
@@ -198,7 +222,31 @@ async def test_drain_budget_exhaustion(db, ctx, fake_wake):
     await _seed_event(db, dedup_key="b1")
     assert (await drain(ctx))["steered"] == 1
     await _seed_event(db, dedup_key="b2")
-    assert (await drain(ctx))["throttled"] == 1
+    counts = await drain(ctx)
+    assert counts["deferred"] == 1 and len(fake_wake) == 1
+    row = await db.fetch_one("SELECT delivered_steer FROM stimulus_events "
+                             "WHERE dedup_key = 'b2'")
+    assert row["delivered_steer"] is None  # pending — waits for budget window
+
+
+async def test_drain_backlog_cap_drops_overflow_with_note(db, ctx, fake_wake):
+    """A deferred pile rides one wake capped at MAX_EVENTS_PER_STEER,
+    oldest-first; the excess is dropped and the steer says so."""
+    from server.services.stimulus_router import MAX_EVENTS_PER_STEER
+    await _guard_route(db)  # valve-less target
+    for i in range(MAX_EVENTS_PER_STEER + 2):
+        await _seed_event(db, dedup_key=f"o{i}", summary=f"clip {i}")
+    counts = await drain(ctx)
+    assert counts["steered"] == MAX_EVENTS_PER_STEER
+    assert len(fake_wake) == 1
+    target, content = fake_wake[0]
+    for i in range(MAX_EVENTS_PER_STEER):  # oldest kept
+        assert f"clip {i}" in content
+    assert "2 further event(s) held back" in content
+    outcomes = await db.fetch_all(
+        "SELECT delivered_steer FROM stimulus_events "
+        "WHERE delivered_steer = 'steer:overflow'")
+    assert len(outcomes) == 2
 
 
 async def test_drain_hours_valve(db, ctx, fake_wake):

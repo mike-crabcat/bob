@@ -293,10 +293,43 @@ _SELF_WRAP_FINAL = (
     "This turn's budget is exhausted. Do not call any more tools. Reply to "
     "the user right now with a short summary of what you found or did, and "
     "say plainly what is left undone.")
+# Send-tool variants (2026-09-14 crypto-report incident): on channels where
+# delivery is a tool call, "reply to the user" in plain text delivers
+# nothing — the nudge must say DELIVER VIA THE SEND TOOL while tools are
+# still available, and the tools-stripped final round must write the
+# message the runner/rescue will deliver on the model's behalf.
+_SELF_WRAP_NUDGE_SEND = (
+    "You are close to this turn's budget (time or tool calls). Stop starting "
+    "new work and DELIVER NOW by calling your send tool with what you have — "
+    "plain text output is NOT delivered to the user. Note anything left "
+    "unfinished inside the sent message. If silence is correct, send "
+    "NO_REPLY instead.")
+_SELF_WRAP_FINAL_SEND = (
+    "This turn's budget is exhausted and tools are now disabled. Write the "
+    "final message for the user as your reply — it will be delivered for "
+    "you. Keep it short: what you found or did, and what is left undone.")
 _LEGACY_TIME_STOP = (
     "Stopped at the turn's wall-clock budget — work done so far is complete, "
     "remaining steps were skipped.")
 _LEGACY_ITER_STOP = "Max tool call iterations reached."
+
+_WRAP_TEXTS: tuple[str, ...] = (
+    _SELF_WRAP_NUDGE, _SELF_WRAP_FINAL,
+    _SELF_WRAP_NUDGE_SEND, _SELF_WRAP_FINAL_SEND,
+)
+
+
+def _has_send_tool(tools: list[Any]) -> bool:
+    """True when the turn's tool set contains a delivery tool — the wrap
+    texts must then talk in terms of calling it, not 'replying' in text.
+    Handles both Tool objects and openai-format dicts."""
+    for t in tools or []:
+        name = getattr(t, "name", None)
+        if name is None and isinstance(t, dict):
+            name = (t.get("function") or {}).get("name") or t.get("name")
+        if name and (str(name).startswith("send_") or name == "email_reply"):
+            return True
+    return False
 
 
 def _strip_wrap_nudges(messages: list[dict[str, Any]]) -> None:
@@ -304,7 +337,7 @@ def _strip_wrap_nudges(messages: list[dict[str, Any]]) -> None:
     messages[:] = [
         m for m in messages
         if not (isinstance(m, dict)
-                and m.get("content") in (_SELF_WRAP_NUDGE, _SELF_WRAP_FINAL))
+                and m.get("content") in _WRAP_TEXTS)
     ]
 
 
@@ -584,6 +617,7 @@ class OpenAIService(BaseService):
         dispatch_id: str | None = None,
         session_key: str | None = None,
         log_id: str | None = None,
+        budget_stats: dict[str, bool] | None = None,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -598,6 +632,14 @@ class OpenAIService(BaseService):
         iteration margin) asking the model to wrap up in its own words, then
         a forced final round with tools stripped at the deadline/iteration
         cap. With self_wrap disabled the legacy canned-string stop applies.
+        Wrap texts are send-tool aware: when the tool set contains a delivery
+        tool, the nudge says to DELIVER via it (text output alone reaches
+        nobody) and the final round writes text the caller is expected to
+        deliver on the model's behalf.
+
+        ``budget_stats`` (optional out-param) gets ``hit_wall_clock`` /
+        ``hit_iteration_cap`` set when the respective budget ended the loop —
+        callers use it to decide cutoff rescues.
         """
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools, model=resolved_model)
@@ -616,6 +658,7 @@ class OpenAIService(BaseService):
         nudge_at = (t0 + time_limit_seconds * wrap.duration_fraction
                     if time_limit_seconds is not None else None)
         nudged = False
+        send_tool_turn = _has_send_tool(tools)
 
         # Tool-loop folding (2026-09-10): the caller's history is exactly
         # messages[:base_len]; everything after is this loop's transcript.
@@ -640,7 +683,9 @@ class OpenAIService(BaseService):
                 if (wrap.enabled and not nudged
                         and ((nudge_at is not None and now >= nudge_at)
                              or iteration >= max_iterations - wrap.iteration_margin)):
-                    messages.append({"role": "system", "content": _SELF_WRAP_NUDGE})
+                    messages.append({"role": "system", "content": (
+                        _SELF_WRAP_NUDGE_SEND if send_tool_turn
+                        else _SELF_WRAP_NUDGE)})
                     nudged = True
                     logger.info(
                         "OpenAI self-wrap nudge: model=%s iteration=%d "
@@ -655,6 +700,8 @@ class OpenAIService(BaseService):
                         "iterations=%d elapsed=%.1fs dispatch_id=%s session_key=%s",
                         resolved_model, time_limit_seconds, iteration,
                         now - t0, dispatch_id, session_key)
+                    if budget_stats is not None:
+                        budget_stats["hit_wall_clock"] = True
                     if not wrap.enabled:
                         return _LEGACY_TIME_STOP
                     return await self._forced_wrapup(
@@ -662,7 +709,8 @@ class OpenAIService(BaseService):
                         dispatch_id=dispatch_id, session_key=session_key,
                         fallback=_LEGACY_TIME_STOP,
                         base_len=base_len if use_view else None,
-                        history_keep=tl.history_view_keep if tl is not None else 20)
+                        history_keep=tl.history_view_keep if tl is not None else 20,
+                        send_tool_turn=send_tool_turn)
 
                 response = await self._client_for(resolved_model).responses.create(
                     input=tool_loop_folding.iteration_view(
@@ -846,6 +894,8 @@ class OpenAIService(BaseService):
             logger.warning(
                 "OpenAI tool call hit max iterations: model=%s max=%d",
                 resolved_model, max_iterations)
+            if budget_stats is not None:
+                budget_stats["hit_iteration_cap"] = True
             if not wrap.enabled:
                 return _LEGACY_ITER_STOP
             return await self._forced_wrapup(
@@ -853,7 +903,8 @@ class OpenAIService(BaseService):
                 dispatch_id=dispatch_id, session_key=session_key,
                 fallback=_LEGACY_ITER_STOP,
                 base_len=base_len if use_view else None,
-                history_keep=tl.history_view_keep if tl is not None else 20)
+                history_keep=tl.history_view_keep if tl is not None else 20,
+                send_tool_turn=send_tool_turn)
         finally:
             # Budget nudges are turn-scoped guidance — never persist them
             # into the conversation history the caller keeps.
@@ -864,15 +915,18 @@ class OpenAIService(BaseService):
         request_kwargs: dict[str, Any], *, dispatch_id: str | None,
         session_key: str | None, fallback: str,
         base_len: int | None = None, history_keep: int = 20,
+        send_tool_turn: bool = False,
     ) -> str:
         """Exhaustion path: one final LLM round with tools stripped, so the
         model writes its own closing reply instead of hitting a canned stop.
         Falls back to the legacy canned string when the round fails or comes
         back empty — callers always get a non-empty string. ``base_len`` set
         means the loop was using a trimmed history view; the wrap-up round
-        rides the same view."""
+        rides the same view. ``send_tool_turn`` selects the delivery-framed
+        wrap text (the caller delivers the final text on the model's behalf)."""
         kwargs = {k: v for k, v in request_kwargs.items() if k != "tools"}
-        messages.append({"role": "system", "content": _SELF_WRAP_FINAL})
+        messages.append({"role": "system", "content": (
+            _SELF_WRAP_FINAL_SEND if send_tool_turn else _SELF_WRAP_FINAL)})
         try:
             wire = tool_loop_folding.iteration_view(
                 messages, base_len, history_keep=history_keep) \

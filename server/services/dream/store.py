@@ -294,6 +294,25 @@ class DreamStore(BaseService):
             (json_dumps(existing) or "[]", iso_utc(), item_id),
         )
 
+    async def set_plan_task_id(self, plan_id: str, task_id: str) -> None:
+        """D15: the goal room working an approved plan (the reserved column's
+        first writer). No clobbering: only sets when currently empty."""
+        await self.db.execute(
+            "UPDATE dream_plans SET task_id = ?, updated_at = ? "
+            "WHERE id = ? AND task_id IS NULL",
+            (task_id, iso_utc(), plan_id))
+
+    async def link_session_for_item(
+        self, item_type: str, item_id: str,
+    ) -> str | None:
+        """The evidence session a dream item is linked to (the goal-room
+        seeding origin — reports go where the commitment was detected)."""
+        row = await self.db.fetch_one(
+            "SELECT session_key FROM dream_item_links "
+            "WHERE item_type = ? AND item_id = ? AND session_key != '' LIMIT 1",
+            (item_type, item_id))
+        return row["session_key"] if row else None
+
     async def get_plan(self, plan_id: str) -> dict | None:
         return await self.db.fetch_one("SELECT * FROM dream_plans WHERE id = ?", (plan_id,))
 
@@ -340,6 +359,22 @@ class DreamStore(BaseService):
                 "UPDATE dream_plans SET status = ?, updated_at = ? WHERE id = ?",
                 (status, iso_utc(), plan_id),
             )
+        # Goal-rooms seeding (goal-rooms-plan.md D15): an approved plan is a
+        # ready-made charter — the room works it, dream_plans.task_id finally
+        # gets its writer. Every approval path funnels through here. Never
+        # raises into the caller; no task_id clobbering on re-approval.
+        if status == "approved":
+            try:
+                existing = await self.db.fetch_one(
+                    "SELECT task_id FROM dream_plans WHERE id = ?", (plan_id,))
+                if existing is not None and not existing.get("task_id"):
+                    from server.services import goal_rooms
+                    plan = await self.get_plan(plan_id)
+                    if plan is not None:
+                        await goal_rooms.seed_room_for_plan(ctx=self.ctx, plan=plan)
+            except Exception:
+                logger.exception(
+                    "dream plan %s: goal-room seeding failed at approval", plan_id)
 
     async def list_plans(self, statuses: list[str] | None = None, limit: int = 200) -> list[dict]:
         if statuses:

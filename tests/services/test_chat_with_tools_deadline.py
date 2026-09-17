@@ -91,3 +91,63 @@ async def test_no_budget_keeps_existing_contract(monkeypatch, tmp_path):
     )
     assert len(calls) == 1
     assert "tools" in calls[0]
+
+
+def _send_tool_dict(name: str = "send_whatsapp_message") -> dict:
+    return {"type": "function", "function": {
+        "name": name, "description": "send", "parameters": {}}}
+
+
+def _system_contents(call: dict) -> str:
+    return "\n".join(
+        m.get("content", "") for m in call["input"]
+        if m.get("role") == "system")
+
+
+@pytest.mark.asyncio
+async def test_send_tool_turn_gets_delivery_wrap_text(monkeypatch, tmp_path):
+    """2026-09-14 crypto-report incident: on send-tool channels 'reply to
+    the user' delivers nothing — the tools-stripped wrap-up round must use
+    the delivery-framed text, and budget_stats must flag the cutoff."""
+    from server.services.openai_service import _SELF_WRAP_FINAL_SEND
+    svc, calls = _service(monkeypatch, tmp_path)
+    budget: dict[str, bool] = {}
+    result = await svc.chat_with_tools(
+        [{"role": "user", "content": "report"}],
+        tools=[_send_tool_dict()], tool_handlers={},
+        time_limit_seconds=0.0, budget_stats=budget,
+    )
+    assert result == "wrapped up"
+    assert _SELF_WRAP_FINAL_SEND in _system_contents(calls[0])
+    assert budget.get("hit_wall_clock") is True
+
+
+@pytest.mark.asyncio
+async def test_plain_turn_keeps_original_wrap_text(monkeypatch, tmp_path):
+    from server.services.openai_service import _SELF_WRAP_FINAL
+    svc, calls = _service(monkeypatch, tmp_path)
+    budget: dict[str, bool] = {}
+    await svc.chat_with_tools(
+        [{"role": "user", "content": "hi"}],
+        tools=[_send_tool_dict("bash")], tool_handlers={},
+        time_limit_seconds=0.0, budget_stats=budget,
+    )
+    assert _SELF_WRAP_FINAL in _system_contents(calls[0])
+    assert budget.get("hit_wall_clock") is True
+
+
+def test_strip_wrap_nudges_covers_send_variants():
+    from server.services.openai_service import (
+        _SELF_WRAP_NUDGE, _SELF_WRAP_FINAL,
+        _SELF_WRAP_NUDGE_SEND, _SELF_WRAP_FINAL_SEND,
+        _strip_wrap_nudges,
+    )
+    messages = [
+        {"role": "system", "content": _SELF_WRAP_NUDGE},
+        {"role": "user", "content": "keep me"},
+        {"role": "system", "content": _SELF_WRAP_FINAL},
+        {"role": "system", "content": _SELF_WRAP_NUDGE_SEND},
+        {"role": "system", "content": _SELF_WRAP_FINAL_SEND},
+    ]
+    _strip_wrap_nudges(messages)
+    assert messages == [{"role": "user", "content": "keep me"}]

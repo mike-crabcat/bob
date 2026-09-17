@@ -32,6 +32,7 @@ from server.heartbeat import (
     ClaimRouterSweepTask,
     OutreachDetectorSweepTask,
     GoalReviewTask,
+    GoalRoomHygieneTask,
     StimulusRouterTask,
     GoalDueTask,
     WakeupPumpTask,
@@ -222,6 +223,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(ClaimRouterSweepTask())
         runner.register(OutreachDetectorSweepTask())
         runner.register(GoalReviewTask())
+        runner.register(GoalRoomHygieneTask())
         runner.register(StimulusRouterTask())
         runner.register(GoalDueTask())
         runner.register(DeletionPropagationTask())

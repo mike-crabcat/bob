@@ -19,6 +19,15 @@ GROUP_KEY = "agent:main:whatsapp:group:doom"
 DM_KEY = "agent:main:whatsapp:dm:61400000001"
 
 
+@pytest.fixture(autouse=True)
+def _legacy_goal_path(ctx):
+    """These tests pin the LEGACY goal machinery (reviser, wake matrix,
+    claim-router delivery) — the fallback path under goal rooms. Rooms have
+    their own suite: tests/services/test_goal_rooms.py."""
+    ctx.settings.goal_rooms.enabled = False
+    yield
+
+
 def _reviser_json(state: dict, *, wake_needed: bool = False,
                   summary: str = "") -> str:
     return json.dumps({"state": {"v": 2, **state}, "wake_needed": wake_needed,

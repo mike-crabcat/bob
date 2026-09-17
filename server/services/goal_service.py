@@ -12,6 +12,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 from server.context import AppContext
 from server.repositories.event_log import Event, EventLogRepository
@@ -73,6 +74,41 @@ async def create_goal(
     origin_cid = (await conv_repo.resolve_cid(origin_conversation_id)
                   if origin_conversation_id else None)
 
+    # Goal rooms (docs/goal-rooms-plan.md): qualifying kinds get their own
+    # utility conversation as the working surface — the charter carries the
+    # objective + standing rules, subscriptions seed from refs/mentions, and
+    # a check-in wakeup series is created with the room (D13: no room
+    # without a next check-in). The asking conversation becomes the origin.
+    from server.services import goal_rooms
+    use_room = goal_rooms.kind_gets_room(ctx, kind)
+    gid = goal_id or str(uuid4())
+    if use_room:
+        await goal_rooms.ensure_room(
+            ctx, goal_id=gid, objective=objective, kind=kind,
+            deadline=deadline, origin_session=cid)
+        cid = goal_rooms.room_session_key(gid)
+        if origin_cid is None:
+            origin_cid = await conv_repo.resolve_cid(conversation_id)
+
+    # Follow-through seed (2026-09-16): a deadlined goal created with no
+    # dated next_action gets one due at deadline−4h, so the due-action
+    # sweep produces a working-conversation re-drive even if the reviser
+    # never runs — the 2026-09-14 WFH-roster stall shape (asks sent,
+    # next_actions stayed empty, only the deadline wake fired, into the
+    # origin group).
+    if deadline and not (strategy or {}).get("next_actions"):
+        seed_due = extract_due_instant(deadline)
+        if seed_due is not None:
+            strategy = {
+                **(strategy or {}), "v": 2,
+                "next_actions": [{
+                    "action": "(seeded) Re-drive this goal at the deadline: "
+                              "act, escalate per any authorised ladder, or "
+                              "close if already met",
+                    "due": (seed_due - timedelta(hours=4)).isoformat(),
+                }],
+            }
+
     goal = await repo.create(
         conversation_id=cid,
         objective=objective,
@@ -82,11 +118,24 @@ async def create_goal(
         deadline=deadline,
         external_ref=external_ref,
         parent_goal_id=parent_goal_id,
-        goal_id=goal_id,
+        goal_id=gid,
     )
     await repo.add_holder(goal["id"], cid, role="worker")
     if origin_cid and origin_cid != cid:
         await repo.add_holder(goal["id"], origin_cid, role="origin")
+
+    if use_room:
+        # Seed the attention set (D8) and the check-in series (D13). The
+        # deadline wakeup below still lands via _wakeup_target — for a room
+        # goal that IS the room (deadlines follow brains, plan D10).
+        await goal_rooms.seed_subscriptions(
+            ctx, room_key=cid, origin_session=origin_cid or "",
+            strategy=strategy)
+        await goal_rooms.schedule_checkin(ctx, goal)
+        # An operator-directed scan cadence rides the strategy's ``scan``
+        # block (rooms own it via room_state once live).
+        if (strategy or {}).get("scan"):
+            await goal_rooms.schedule_scan(ctx, goal)
 
     if deadline:
         await WakeupRepository(ctx.db).schedule(
@@ -99,15 +148,19 @@ async def create_goal(
 
 
 async def _wakeup_target(repo: GoalRepository, goal: dict[str, Any]) -> str:
-    """Where this goal's deadline wakeups land (plan §1.2 wake matrix): a
-    child's deadline wakes the ROOT's working conversation (never an outreach
-    child's target DM); a root goal keeps today's behaviour — the origin
-    (asker) if set, else its own working conversation."""
+    """Where this goal's deadline/reminder wakeups land (wake matrix,
+    revised 2026-09-16): always the conversation WORKING the goal — a
+    child resolves to its root's working conversation — because the
+    follow-up ladder and send tools live there. The origin (asker) is
+    woken on completion instead (settle_goal owns that). The 2026-09-14
+    WFH-roster incident: five root-goal deadline wakes landed in the
+    origin group, producing one public status check instead of the
+    authorised per-contact DM escalation."""
     if goal.get("parent_goal_id"):
         root = await repo.root_of(goal["id"])
         if root is not None:
             return root["conversation_id"]
-    return goal["origin_conversation_id"] or goal["conversation_id"]
+    return goal["conversation_id"]
 
 
 # Completed-goal error signatures (2026-09-10 incident): a Meshy submit
@@ -178,6 +231,24 @@ async def settle_goal(
         return True
     await _append_goal_event(ctx, goal, f"goal.{status}")
 
+    # Goal rooms: the room's routes die with the goal (plan D11 — orphan
+    # routes waking a dead room are the "3 dead routines" lesson again), and
+    # a cancelled room-goal parent cascades to its children with the reason
+    # recorded (completion requires children settled first — enforced at the
+    # room_close door and here for operator/dashboard settles).
+    from server.services import goal_rooms
+    if goal_rooms.is_room_session(goal["conversation_id"]):
+        try:
+            await goal_rooms.prune_room_routes(ctx, goal_id)
+        except Exception:
+            logger.exception("goal %s: room route prune failed", goal_id)
+        if status == "cancelled":
+            for child in await repo.children_of(goal_id, status="active"):
+                await settle_goal(
+                    ctx, child["id"], status="cancelled",
+                    result=f"parent goal cancelled: {objective_of(goal)}",
+                    note=f"cascade from parent {goal_id}")
+
     parent_id = goal.get("parent_goal_id")
     if parent_id:
         await _roll_up_to_parent(ctx, goal, status, result)
@@ -213,15 +284,21 @@ async def settle_goal(
     return True
 
 
+def objective_of(goal: dict[str, Any]) -> str:
+    return (goal.get("objective") or "")[:200]
+
+
 async def _roll_up_to_parent(
     ctx: AppContext, child: dict[str, Any], status: str, result: str,
 ) -> None:
     """Child-settle roll-up (plan §1.2): enqueue a durable reviser run on the
     parent with the child's outcome as the stimulus. If effect enqueueing
     itself fails, degrade to a direct wake of the parent's working
-    conversation — information must not be lost to infrastructure."""
-    from server.services.goal_state_service import enqueue_revision
+    conversation — information must not be lost to infrastructure.
 
+    Goal rooms (docs/goal-rooms-plan.md D10): a parent with a room has a
+    thinker — the roll-up is a direct wake of the parent room (the child's
+    report lands in its history, in context), no reviser, no patch."""
     stimulus = (
         f"## Child goal {status}\n"
         + (f"⚠ OUTPUT CONTAINS AN ERROR — the child likely did NOT succeed. "
@@ -230,6 +307,22 @@ async def _roll_up_to_parent(
         + f"Objective: {child['objective']}\n\n"
         + f"Result: {result}"
     )
+    from server.services import goal_rooms
+    parent = await GoalRepository(ctx.db).get(child["parent_goal_id"])
+    if parent is not None and goal_rooms.is_room_session(parent["conversation_id"]):
+        from server.services.wake_service import wake_conversation
+        try:
+            await wake_conversation(
+                ctx, parent["conversation_id"], stimulus,
+                call_category="goal_progress",
+                metadata={"goal_id": parent["id"],
+                          "rolled_up_from": child["id"]},
+            )
+        except Exception:
+            logger.exception("goal %s: room roll-up wake failed", child["id"])
+        return
+
+    from server.services.goal_state_service import enqueue_revision
     try:
         await enqueue_revision(
             ctx, child["parent_goal_id"], stimulus,
@@ -243,7 +336,6 @@ async def _roll_up_to_parent(
                          child["id"])
         from server.services.wake_service import wake_conversation
 
-        parent = await GoalRepository(ctx.db).get(child["parent_goal_id"])
         if parent is None:
             return
         try:
@@ -302,6 +394,9 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
                     the run but keeps the series alive.
       action_due  — a goal next_action entering its due window (scheduled by
                     schedule_due_action_wakes; payload carries the action).
+      goal_checkin — a goal room's check-in (goal-rooms plan D13): wakes the
+                    ROOM with the state block, the claims digest since the
+                    last check-in, and the pick-up-the-thread brief.
       wake        — goal-deadline or plain scheduled wake for a conversation.
     """
     from server.services.wake_service import wake_conversation
@@ -330,6 +425,35 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
         if goal and goal["status"] != "active":
             return True  # goal already settled; wakeup is moot
 
+    if wakeup.get("kind") == "goal_checkin":
+        # Room check-in: the room renders its own brief (state + digest +
+        # standing decisions). Series rolls via the wakeup recurrence.
+        from server.services import goal_rooms
+        if goal is None:
+            return True  # room's goal gone; series moot
+        content = await goal_rooms.render_checkin(ctx, goal)
+        await wake_conversation(
+            ctx, goal["conversation_id"], content,
+            call_category="goal_checkin",
+            metadata={"wakeup_id": wakeup["id"], "goal_id": goal["id"]},
+        )
+        return True
+
+    if wakeup.get("kind") == "goal_scan":
+        # Room scheduled scan (operator-directed cadence, e.g. the merch
+        # morning scan): the brief comes from the goal's own scan block —
+        # groups to read, what to look for, where pitches go.
+        from server.services import goal_rooms
+        if goal is None:
+            return True
+        await wake_conversation(
+            ctx, goal["conversation_id"],
+            await goal_rooms.render_scan(ctx, goal),
+            call_category="goal_scan",
+            metadata={"wakeup_id": wakeup["id"], "goal_id": goal["id"]},
+        )
+        return True
+
     if wakeup.get("kind") == "action_due":
         payload = json.loads(wakeup.get("payload_json") or "{}")
         content = (
@@ -343,21 +467,69 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
             "goal state so the action is not chased again."
         )
         category = "goal_action_due"
+        # action_due wakeups are scheduled against the working
+        # conversation already (schedule_due_action_wakes).
+        target = wakeup["conversation_id"]
     elif goal:
         content = (
             f"## Goal deadline reached\n"
             f"Objective: {goal['objective']}\n"
             f"Status: still active (no result yet)\n"
             f"Progress: {goal['progress'] or 'none recorded'}\n\n"
-            f"Decide how to proceed: follow up, revise the goal, or report back."
+            "Decide how to proceed: act on the goal state's next_actions and "
+            "any authorised follow-up ladder (e.g. re-DM, then email, then "
+            "call), revise the goal, or — if the objective is already met by "
+            "answers that arrived on any channel — close it with a result. "
+            "Follow up with individuals directly; do not post status checks "
+            "to groups."
         )
         category = "goal_deadline"
+        # Route the deadline through the reviser too (2026-09-16): it folds
+        # the deadline into state — closing achieved goals or materialising
+        # the escalation ladder as dated next_actions — before/in parallel
+        # with the woken turn. Durable + idempotent per (goal, deadline day)
+        # so a crash between enqueue and wake re-delivers safely. Tool-
+        # booked reminder wakeups (payload scheduled_by=tool) are excluded:
+        # they're reminders, not the deadline. ROOM goals skip the reviser
+        # entirely (goal-rooms plan): the deadline wake IS the room's turn,
+        # and the room maintains its own state in-context.
+        from server.services import goal_rooms as _gr
+        wpayload = json.loads(wakeup.get("payload_json") or "{}")
+        if not wpayload.get("scheduled_by") and \
+                not _gr.is_room_session(goal["conversation_id"]):
+            try:
+                from server.services.goal_state_service import enqueue_revision
+                await enqueue_revision(
+                    ctx, goal["id"],
+                    "## Deadline reached\n"
+                    "This goal hit its deadline still active. Fold this "
+                    "stimulus: if the objective is met by facts already in "
+                    "`known` (answers may have arrived on any channel — DM, "
+                    "group, or a memory claim about the person), set "
+                    "next_actions to settling and wake_needed=true so the "
+                    "assistant closes it with a per-source result. Otherwise "
+                    "materialise the next follow-up rung (any authorised "
+                    "escalation ladder in `known`) as dated next_actions and "
+                    "apply the normal wake rules.",
+                    stimulus_id=(
+                        f"deadline:{goal['id']}:"
+                        f"{str(goal.get('deadline') or '')[:10]}"),
+                    inline=False,
+                )
+            except Exception:
+                logger.exception("deadline reviser stimulus failed for %s",
+                                 goal["id"])
+        # Deadline wakes land in the WORKING conversation (wake matrix
+        # 2026-09-16) — re-resolved at fire time so rows scheduled under
+        # the old origin-targeting rule also deliver to the worker.
+        target = await _wakeup_target(GoalRepository(ctx.db), goal)
     else:
         content = "## Scheduled wakeup\nA scheduled wakeup for this conversation fired."
         category = "wakeup"
+        target = wakeup["conversation_id"]
 
     await wake_conversation(
-        ctx, wakeup["conversation_id"], content,
+        ctx, target, content,
         call_category=category,
         metadata={"wakeup_id": wakeup["id"], "goal_id": wakeup["goal_id"]},
     )

@@ -175,14 +175,22 @@ Rules:
   call), encode follow-through as next_actions with explicit ISO `due`
   timestamps INCLUDING their UTC offset (e.g. the reminder due the evening
   before, recording the outcome due just after) — not prose like "before the
-  meetup". A scheduler wakes the assistant when a due enters its window, so
+  meetup"). A scheduler wakes the assistant when a due enters its window, so
   only a real timestamp triggers follow-through; prose dues never fire. When
   the event instant differs from the goal's deadline, note in `known` that
   the deadline should be the event time (the main model owns setting it).
+- An active goal with empty `next_actions` is a gap — close it when you see
+  it: if `known` carries a follow-up path or standing authorisation (an
+  escalation ladder, a reminder permission), materialise the next concrete
+  rung as a next_action with an ISO `due`. Keep at most 3 next_actions;
+  replace stale ones rather than accumulating.
 - Completion: if the objective is fully achieved (the event happened, the
   plan is complete, nothing is left to chase), set wake_needed=true with a
   wake_summary directing the assistant to CLOSE the goal. Achieved goals
-  must not be re-validated forever.
+  must not be re-validated forever. For collect-from-several-sources
+  objectives, an answer that arrived on ANY channel (DM, group, or a memory
+  claim about the person) counts — when every source has answered, propose
+  closing with a per-source result summary.
 
 Respond with ONLY a JSON object — a PATCH of operations against the current
 state, never the full state re-emitted:
@@ -226,18 +234,56 @@ def _extract_json(text: str) -> dict[str, Any]:
     raise ValueError("no JSON object in reviser response")
 
 
+# Ops the patch contract accepts. GLM periodically emits the dict form
+# {"known.append": [...]} instead of {"op": "known.append", "values": [...]}
+# (observed live 2026-09-14: a whole known.append dropped as "unknown") —
+# normalise defensively, same stance as the agent_type/modality alias
+# tables and the Hermes tool-call XML recovery.
+_KNOWN_OPS = frozenset({
+    "known.append", "known.remove", "known.keep_recent", "plan.set",
+    "open_questions.set", "next_actions.set", "refs.add",
+})
+
+
+def _normalize_op(op: Any) -> Any:
+    """Rewrite a single-key ``{op_name: payload}`` dict into the canonical
+    ``{"op": ..., <payload keys>}`` shape. Everything else passes through
+    untouched (unknown names still hit the skip-with-warning path)."""
+    if not isinstance(op, dict) or "op" in op:
+        return op
+    keys = [k for k in op.keys() if isinstance(k, str)]
+    if len(keys) != 1 or keys[0] not in _KNOWN_OPS:
+        return op
+    name, payload = keys[0], op[keys[0]]
+    if name == "plan.set":
+        return {"op": name, "value": payload}
+    if name == "known.keep_recent":
+        return {"op": name, "n": payload}
+    if name == "refs.add":
+        if isinstance(payload, dict):
+            return {"op": name, **payload}
+        return {"op": name, "entities": payload if isinstance(payload, list) else []}
+    return {"op": name, "values": payload}
+
+
 def apply_ops(state: GoalStrategy, ops: list[Any]) -> GoalStrategy:
     """Apply reviser patch operations to ``state`` (a copy; caller CAS-writes).
 
     Unknown or malformed ops are skipped with a log, not raised — a reviser
     response is model output, and one bad op must not discard the good ones.
+    Dict-shaped ops (``{op_name: payload}``) are normalised first.
     """
     new = state.model_copy(deep=True)
     if not isinstance(ops, list):
         return new
+    normalised = 0
     for op in ops:
         if not isinstance(op, dict):
             continue
+        fixed = _normalize_op(op)
+        if fixed is not op:
+            normalised += 1
+            op = fixed
         kind = op.get("op")
         try:
             if kind == "known.append":
@@ -273,6 +319,8 @@ def apply_ops(state: GoalStrategy, ops: list[Any]) -> GoalStrategy:
                                str(op)[:120])
         except (TypeError, ValueError, ValidationError):
             logger.warning("reviser op skipped (malformed): %r", str(op)[:120])
+    if normalised:
+        logger.info("reviser op normalised (dict form): %d op(s)", normalised)
     return new
 
 

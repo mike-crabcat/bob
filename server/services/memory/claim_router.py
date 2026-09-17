@@ -203,6 +203,20 @@ async def handle_extraction_batch(
     if router_disabled():
         return {"status": "disabled", "event_id": event_id}
 
+    # Goal rooms (docs/goal-rooms-plan.md D3–D6): broadcast the batch as
+    # per-entity sensations BEFORE legacy routing — corrections (action)
+    # wake subscribed rooms through the stimulus spine, adds (info) ride
+    # their check-in digest. Room-origin batches are skipped whole (D6).
+    # Independent kill switch: rooms off → no emission, legacy path unchanged.
+    try:
+        from server.services import goal_rooms
+        await goal_rooms.emit_claim_sensations(
+            ctx, session_key=session_key, turn_message_id=turn_message_id,
+            batch=batch)
+    except Exception:
+        logger.exception("goal-rooms claim sensation emission failed for %s",
+                         session_key)
+
     routed = await _route_batch(ctx, session_key=session_key, cid=cid,
                                 turn_message_id=turn_message_id, batch=batch)
     return {"status": "routed", "event_id": event_id, **routed}
@@ -222,6 +236,46 @@ async def _batch_for_turn(db: Any, turn_message_id: str) -> dict[str, Any]:
                 entity_ids.append(eid)
     return {"claims": claims, "claim_ids": [c["id"] for c in claims],
             "entity_ids": entity_ids}
+
+
+async def superseded_subjects(db: Any, claim_ids: list[str]) -> set[str]:
+    """Subjects of claims superseded by any of ``claim_ids`` (memory-owned
+    read for the goal-rooms emitter: a supersession makes the entity's
+    sensation action-level — corrections wake, adds digest)."""
+    subjects: set[str] = set()
+    for cid in claim_ids:
+        row = await db.fetch_one(
+            "SELECT subject_id FROM memory_claims "
+            "WHERE status = 'superseded' AND superseded_by LIKE ? LIMIT 1",
+            (f'%"{cid}"%',))
+        if row and row["subject_id"]:
+            subjects.add(row["subject_id"])
+    return subjects
+
+
+async def mentioned_entities_for_conversation(
+    db: Any, conversation_id: str, limit: int = 12,
+) -> list[str]:
+    """Entities a conversation has discussed (the entity-mention index) —
+    the goal-room seed set's generous half (goal-rooms plan D8)."""
+    rows = await db.fetch_all(
+        "SELECT DISTINCT entity_id FROM memory_entity_mentions "
+        "WHERE conversation_id = ? ORDER BY entity_id LIMIT ?",
+        (conversation_id, limit))
+    return [r["entity_id"] for r in rows or []]
+
+
+async def person_entity_for_name(db: Any, display_name: str) -> str | None:
+    """The active person entity for a contact's display name (memory-owned
+    read; the outreach auto-subscribe seam resolves contact → entity)."""
+    if not display_name:
+        return None
+    row = await db.fetch_one(
+        "SELECT entity_id FROM memory_entities "
+        "WHERE entity_type = 'person' AND display_name = ? "
+        "AND status = 'active' LIMIT 1",
+        (display_name,))
+    return row["entity_id"] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +412,12 @@ async def _route_batch(
     for goal_id, match_type in goals:
         goal = await repo.get(goal_id)
         if goal is None or goal["status"] != "active":
+            continue
+        # Goal rooms receive claims via their sensation subscriptions, not
+        # candidate matching + probe — structural matching over-delivers to
+        # a room that already has an explicit attention set.
+        from server.services.goal_rooms import is_room_session
+        if is_room_session(goal["conversation_id"]):
             continue
 
         # Inline delivery + watermark replay race (2026-09-14): the inline

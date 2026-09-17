@@ -322,12 +322,19 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
     async def list_goals() -> str:
         """List this conversation's active goals: id, objective, kind,
         progress, version, deadline, parent/children, and the state summary
-        (plan, known, open questions, next actions, entity refs)."""
+        (plan, known, open questions, next actions, entity refs). Includes
+        goals this conversation holds (e.g. goals whose ROOM is working them
+        — the origin still sees and closes them from here)."""
         from server.repositories.goals import GoalRepository
         from server.services.goal_state_service import parse_strategy
 
         repo = GoalRepository(ctx.db)
         rows = await repo.list_active(conversation_id=session_key)
+        # Goal rooms move the working conversation to the room; holders
+        # (origin, parent room) still list and act on the goal from here.
+        held = await repo.goals_held_by(session_key, limit=20)
+        seen = {r["id"] for r in rows}
+        rows = list(rows) + [h for h in held if h["id"] not in seen]
         goals = []
         for r in rows:
             state = parse_strategy(r)

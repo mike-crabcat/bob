@@ -29,6 +29,15 @@ from tests.rehearsal.scenario import RehearsalScenario
 pytestmark = pytest.mark.timeout(120)
 
 
+@pytest.fixture(autouse=True)
+def _legacy_goal_path(ctx):
+    """These tests pin the LEGACY goal machinery (reviser, wake matrix,
+    claim-router delivery) — the fallback path under goal rooms. Rooms have
+    their own suite: tests/services/test_goal_rooms.py."""
+    ctx.settings.goal_rooms.enabled = False
+    yield
+
+
 async def test_benchmark_end_to_end_all_group_zero_information_loss(
         ctx, db, monkeypatch, tmp_path):
     """The deterministic gate: everyone replies in the group chat (the

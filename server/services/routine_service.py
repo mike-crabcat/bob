@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,6 +25,27 @@ logger = logging.getLogger(__name__)
 # do its job in two minutes, the fix is a better-scoped routine prompt (or a
 # background task it polls next run), not a longer turn.
 ROUTINE_WALL_CLOCK_SECONDS = 120.0
+
+# A routine whose prompt asks for delivery to its channel ("send the charts
+# to this channel", "publish the brief to the group"). Gates the report-first
+# prompt suffix and the cutoff rescue — session-only routines ("log X, don't
+# post") keep their silent-by-design outcome.
+_ROUTINE_DELIVERY_INTENT_RE = re.compile(
+    r"\b(send|post|share|deliver|publish|notify|message|report)\b"
+    r"[^.]{0,100}\b(channel|chat|group|whatsapp)\b"
+    r"|\b(channel|chat|group|whatsapp)\b"
+    r"[^.]{0,100}\b(send|post|share|deliver|publish|notify|message)\b",
+    re.IGNORECASE)
+
+# Report-first contract appended to delivery-intent routine prompts
+# (2026-09-14 crypto-report incident: the turn burned its whole budget
+# diagnosing a broken chart CLI and the report never went out).
+_ROUTINE_DELIVERY_SUFFIX = (
+    "\n\nDelivery contract: the report goes out before the diagnosis. If a "
+    "step fails or runs slow, send the report with whatever you have and "
+    "note the failure inside the sent message — investigate only if budget "
+    "clearly remains. An undelivered report is a failed run; a partial "
+    "delivered report is not.")
 
 _ROUTINE_COLUMNS = (
     "id, session_key, name, schedule, prompt, enabled, next_run_at, last_run_at, "
@@ -269,6 +291,9 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
 
     try:
         prompt = f"{_format_routine_now(routine)}\n\n{prompt}"
+        delivery_intent = bool(_ROUTINE_DELIVERY_INTENT_RE.search(routine["prompt"]))
+        if delivery_intent:
+            prompt += _ROUTINE_DELIVERY_SUFFIX
 
         session_svc = SessionService(ctx)
         await session_svc.add_message(session_key, "user", prompt, channel="routine", provenance="routine")
@@ -309,10 +334,12 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         # Add channel-specific delivery tools
         wa_bridge = ctx.whatsapp_bridge
         chat_id = session_key_to_chat_id(session_key)
+        sent: dict[str, bool] = {"ok": False}
         if chat_id and wa_bridge and wa_bridge.connected:
             async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
                 if is_no_reply(text):
                     return "No reply sent."
+                sent["ok"] = True
                 if media_path:
                     from server.services.whatsapp_bridge_service._media import (
                         _prepare_media,
@@ -366,7 +393,35 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
             call_category="routine",
             session_key=session_key,
             dispatch_id=dispatch_id,
+            budget_stats=budget,
         )
+
+        # Cutoff rescue (2026-09-14 crypto-report incident): the turn hit
+        # its wall-clock budget mid-loop, wrote its wrap-up as text, and
+        # never called the send tool — the report was archived silently
+        # (dispatched=1 in the DB, nothing in WhatsApp). A delivery-intent
+        # routine that gets cut with un-sent, non-NO_REPLY text gets that
+        # text delivered by us; session-only routines keep their
+        # silent-by-design outcome.
+        if ((budget.get("hit_wall_clock") or budget.get("hit_iteration_cap"))
+                and not sent.get("ok")
+                and chat_id and wa_bridge and wa_bridge.connected
+                and delivery_intent
+                and response.strip() and not is_no_reply(response)):
+            try:
+                await wa_bridge.send_message(
+                    chat_id,
+                    "(auto-delivered — routine hit its time budget mid-turn)\n"
+                    + response)
+                logger.warning(
+                    "routine cutoff rescue: delivered un-sent routine output "
+                    "after budget cutoff (routine=%s, session=%s, "
+                    "dispatch=%s, chars=%d)",
+                    name, session_key, dispatch_id, len(response))
+            except Exception:
+                logger.exception(
+                    "routine cutoff rescue failed (routine=%s, session=%s)",
+                    name, session_key)
 
         await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id, provenance="routine")
 
