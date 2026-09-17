@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"go.mau.fi/whatsmeow/types"
 	"io"
 	"log/slog"
 	"net/http"
@@ -266,6 +267,40 @@ func (b *Bridge) handleWhatsAppEvent(event any) {
 			b.log.Info("client not connected, incoming message queued", "msg_id", evt.WhatsAppMessageID)
 		}
 
+	case whatsapp.IncomingReactionEvent:
+		payload := wsproto.IncomingReactionPayload{
+			WhatsAppMessageID: evt.WhatsAppMessageID,
+			ChatID:            evt.ChatID,
+			ChatKind:          evt.ChatKind,
+			SenderJID:         evt.SenderJID,
+			SenderName:        evt.SenderName,
+			TargetMessageID:   evt.TargetMessageID,
+			TargetSenderJID:   evt.TargetSenderJID,
+			Emoji:             evt.Emoji,
+			Timestamp:         evt.Timestamp,
+		}
+		env := wsproto.NewEnvelope(wsproto.TypeIncomingReaction, payload)
+
+		b.log.Info("incoming reaction",
+			"msg_id", evt.WhatsAppMessageID,
+			"chat", evt.ChatID,
+			"kind", evt.ChatKind,
+			"sender", evt.SenderName,
+			"sender_jid", evt.SenderJID,
+			"emoji", evt.Emoji,
+			"target", evt.TargetMessageID,
+		)
+
+		// Durable like messages: dedup keyed by the reaction's own WA id,
+		// replayed by drainIncoming until Python acks.
+		if err := b.inQ.Enqueue(queue.Incoming, evt.WhatsAppMessageID, wsproto.TypeIncomingReaction, payload); err != nil {
+			b.log.Warn("failed to enqueue incoming reaction", "error", err, "msg_id", evt.WhatsAppMessageID)
+		}
+
+		if !b.sendToClient(env) {
+			b.log.Info("client not connected, incoming reaction queued", "msg_id", evt.WhatsAppMessageID)
+		}
+
 	case whatsapp.MessageAckedEvent:
 		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeMessageAcked, wsproto.MessageAckedPayload{
 			WhatsAppMessageID: evt.WhatsAppMessageID,
@@ -341,6 +376,14 @@ func (b *Bridge) handleClientMessage(env wsproto.Envelope) {
 			return
 		}
 		b.handleSendMedia(payload)
+
+	case wsproto.TypeSendReaction:
+		var payload wsproto.SendReactionPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			b.log.Warn("invalid send_reaction payload", "error", err)
+			return
+		}
+		b.handleSendReaction(payload)
 
 	case wsproto.TypeAck:
 		var payload wsproto.AckPayload
@@ -435,6 +478,80 @@ func (b *Bridge) handleSend(payload wsproto.SendMessagePayload) {
 	}
 
 	b.log.Info("message sent", "request_id", payload.RequestID, "msg_id", msgID, "chat_id", payload.ChatID)
+	b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+		RequestID:         payload.RequestID,
+		Success:           true,
+		WhatsAppMessageID: msgID,
+	})
+}
+
+// handleSendReaction mirrors handleSend: durable outQ enqueue keyed by
+// request_id, then the immediate send when connected. Empty emoji (a
+// removal) is rejected in v1.
+func (b *Bridge) handleSendReaction(payload wsproto.SendReactionPayload) {
+	if err := b.outQ.Enqueue(queue.Outgoing, payload.RequestID, wsproto.TypeSendReaction, payload); err != nil {
+		b.log.Warn("failed to enqueue outgoing reaction", "error", err, "request_id", payload.RequestID)
+	}
+
+	if !b.wa.IsConnected() {
+		b.log.Info("whatsapp not connected, outgoing reaction queued", "request_id", payload.RequestID)
+		return
+	}
+
+	if payload.Emoji == "" {
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     "empty reaction (removal not supported)",
+		})
+		return
+	}
+
+	b.log.Info("outgoing reaction",
+		"request_id", payload.RequestID,
+		"chat_id", payload.ChatID,
+		"emoji", payload.Emoji,
+		"target", payload.TargetMessageID,
+	)
+
+	chat, ok := b.wa.ParseJID(payload.ChatID)
+	if !ok {
+		b.log.Warn("invalid jid for reaction", "chat_id", payload.ChatID)
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     "invalid jid",
+		})
+		return
+	}
+
+	targetSender := types.EmptyJID
+	if payload.TargetSenderJID != "" {
+		parsed, ok := b.wa.ParseJID(payload.TargetSenderJID)
+		if !ok {
+			b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+				RequestID: payload.RequestID,
+				Success:   false,
+				Error:     "invalid target sender jid",
+			})
+			return
+		}
+		targetSender = parsed
+	}
+
+	msgID, err := b.wa.SendReaction(chat, targetSender, payload.TargetMessageID, payload.Emoji)
+	if err != nil {
+		b.log.Warn("reaction send failed", "error", err, "chat_id", payload.ChatID)
+		b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     err.Error(),
+		})
+		return
+	}
+
+	b.log.Info("reaction sent", "request_id", payload.RequestID, "msg_id", msgID,
+		"chat_id", payload.ChatID, "emoji", payload.Emoji)
 	b.handleWhatsAppEvent(whatsapp.SendMessageResultEvent{
 		RequestID:         payload.RequestID,
 		Success:           true,
@@ -585,43 +702,123 @@ func (b *Bridge) drainOutgoing() {
 		b.log.Info("draining outgoing queue", "count", len(msgs))
 	}
 	for _, m := range msgs {
-		var payload wsproto.SendMessagePayload
-		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err != nil {
-			b.log.Warn("failed to parse queued outgoing message", "error", err)
-			b.outQ.MarkFailed(m.MessageID)
-			continue
-		}
-
-		jid, ok := b.wa.ParseJID(payload.ChatID)
-		if !ok {
-			b.outQ.MarkFailed(m.MessageID)
-			continue
-		}
-
-		msgID, err := b.wa.SendMessage(jid, payload.Text)
-		if err != nil {
-			b.log.Warn("failed to send queued message", "error", err, "request_id", payload.RequestID)
-			if m.Attempts >= b.cfg.OutgoingMaxRetries {
-				b.outQ.MarkFailed(m.MessageID)
-				b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
-					RequestID: payload.RequestID,
-					Success:   false,
-					Error:     "max retries exceeded",
-				}))
-			} else {
-				b.outQ.MarkPending(m.MessageID)
+		// Branch on message type: every queued outgoing row used to be
+		// re-sent as TEXT (a queued reaction would have gone out as an
+		// empty message after a WhatsApp reconnect).
+		switch m.MessageType {
+		case wsproto.TypeSendReaction:
+			if !b.drainQueuedReaction(m) {
+				continue
 			}
-			continue
+		case wsproto.TypeSendMessage:
+			if !b.drainQueuedMessage(m) {
+				continue
+			}
+		default:
+			b.log.Warn("unknown queued outgoing message type",
+				"type", m.MessageType, "message_id", m.MessageID)
+			b.outQ.MarkFailed(m.MessageID)
 		}
-
-		b.outQ.MarkDelivered(m.MessageID)
-		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
-			RequestID:         payload.RequestID,
-			Success:           true,
-			WhatsAppMessageID: msgID,
-		}))
-		b.log.Info("drained queued outgoing message", "msg_id", msgID)
 	}
+}
+
+// drainQueuedMessage re-sends a queued text send. Returns false when the
+// row was terminal (failed) and the drain loop should move on.
+func (b *Bridge) drainQueuedMessage(m queue.QueuedMessage) bool {
+	var payload wsproto.SendMessagePayload
+	if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err != nil {
+		b.log.Warn("failed to parse queued outgoing message", "error", err)
+		b.outQ.MarkFailed(m.MessageID)
+		return false
+	}
+
+	jid, ok := b.wa.ParseJID(payload.ChatID)
+	if !ok {
+		b.outQ.MarkFailed(m.MessageID)
+		return false
+	}
+
+	msgID, err := b.wa.SendMessage(jid, payload.Text)
+	if err != nil {
+		b.log.Warn("failed to send queued message", "error", err, "request_id", payload.RequestID)
+		if m.Attempts >= b.cfg.OutgoingMaxRetries {
+			b.outQ.MarkFailed(m.MessageID)
+			b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
+				RequestID: payload.RequestID,
+				Success:   false,
+				Error:     "max retries exceeded",
+			}))
+		} else {
+			b.outQ.MarkPending(m.MessageID)
+		}
+		return false
+	}
+
+	b.outQ.MarkDelivered(m.MessageID)
+	b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
+		RequestID:         payload.RequestID,
+		Success:           true,
+		WhatsAppMessageID: msgID,
+	}))
+	b.log.Info("drained queued outgoing message", "msg_id", msgID)
+	return true
+}
+
+// drainQueuedReaction re-sends a queued reaction (same retry semantics as
+// drainQueuedMessage).
+func (b *Bridge) drainQueuedReaction(m queue.QueuedMessage) bool {
+	var payload wsproto.SendReactionPayload
+	if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err != nil {
+		b.log.Warn("failed to parse queued outgoing reaction", "error", err)
+		b.outQ.MarkFailed(m.MessageID)
+		return false
+	}
+
+	chat, ok := b.wa.ParseJID(payload.ChatID)
+	if !ok || payload.Emoji == "" {
+		b.outQ.MarkFailed(m.MessageID)
+		b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
+			RequestID: payload.RequestID,
+			Success:   false,
+			Error:     "invalid reaction payload",
+		}))
+		return false
+	}
+
+	targetSender := types.EmptyJID
+	if payload.TargetSenderJID != "" {
+		parsed, parsedOK := b.wa.ParseJID(payload.TargetSenderJID)
+		if !parsedOK {
+			b.outQ.MarkFailed(m.MessageID)
+			return false
+		}
+		targetSender = parsed
+	}
+
+	msgID, err := b.wa.SendReaction(chat, targetSender, payload.TargetMessageID, payload.Emoji)
+	if err != nil {
+		b.log.Warn("failed to send queued reaction", "error", err, "request_id", payload.RequestID)
+		if m.Attempts >= b.cfg.OutgoingMaxRetries {
+			b.outQ.MarkFailed(m.MessageID)
+			b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
+				RequestID: payload.RequestID,
+				Success:   false,
+				Error:     "max retries exceeded",
+			}))
+		} else {
+			b.outQ.MarkPending(m.MessageID)
+		}
+		return false
+	}
+
+	b.outQ.MarkDelivered(m.MessageID)
+	b.sendToClient(wsproto.NewEnvelope(wsproto.TypeSendMessageResult, wsproto.SendMessageResultPayload{
+		RequestID:         payload.RequestID,
+		Success:           true,
+		WhatsAppMessageID: msgID,
+	}))
+	b.log.Info("drained queued outgoing reaction", "msg_id", msgID)
+	return true
 }
 
 func (b *Bridge) sendToClient(env wsproto.Envelope) bool {

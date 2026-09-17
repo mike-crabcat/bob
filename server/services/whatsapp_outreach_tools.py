@@ -194,7 +194,8 @@ def make_group_send_tools(
         if not _group_send_allowed(group_key, now):
             return json.dumps({"ok": False, "error": "Group send rate limit reached; retry later"})
 
-        bg = (flight or {}).get("subagent_id")
+        from server.services.backburner import active_bg_id
+        bg = active_bg_id(flight)
         result = await _deliver_group_send(
             ctx, group_key=group_key, group_id=group_id, message=message,
             origin_session_key=current_session_key,
@@ -241,9 +242,15 @@ def make_whatsapp_outreach_tools(
 
         db = ctx.db
 
-        # Look up contact
+        # Look up contact — by id first, then by name (goal rooms and other
+        # headless turns hold no contact-id roster; a name like "Rupert
+        # Quekett" must resolve or the room is stuck refusing to guess ids.
+        # Mirrors get_contact_session_messages' resolution.)
         from server.repositories.contacts import ContactRepository
-        contact = await ContactRepository(db).get(contact_id)
+        c_repo = ContactRepository(db)
+        contact = await c_repo.get(contact_id)
+        if contact is None:
+            contact = await c_repo.search_by_name(f"%{contact_id}%")
         if contact is None:
             return json.dumps({"ok": False, "error": "Contact not found"})
 
@@ -336,6 +343,26 @@ def make_whatsapp_outreach_tools(
             goal_id = goal["id"]
         except Exception:
             logger.warning("failed to create outreach goal", exc_info=True)
+
+        # Goal rooms: engagement must flow back (goal-rooms plan D8/D10).
+        # The settle rollup only fires when the outreach goal CLOSES — a
+        # mid-conversation "maybe next week" would stay in the DM. So the
+        # room auto-subscribes to the contact's person entity: their replies
+        # extract as claims, claims fire sensations at the room.
+        from server.services.goal_rooms import is_room_session
+        if is_room_session(current_session_key):
+            try:
+                from server.services.goal_rooms import subscribe_room_to_entity
+                from server.services.memory.claim_router import (
+                    person_entity_for_name,
+                )
+                entity = await person_entity_for_name(ctx.db, contact["name"])
+                if entity:
+                    await subscribe_room_to_entity(
+                        ctx, current_session_key, entity)
+            except Exception:
+                logger.warning("room outreach auto-subscribe failed",
+                               exc_info=True)
 
         # Ensure the target DM binding exists (no outreach state on it).
         from server.repositories.conversations import ConversationRepository

@@ -112,6 +112,19 @@ func (c *Client) RequestPairingCode(phone string) (string, error) {
 	return code, nil
 }
 
+// SendReaction posts an emoji reaction on a target message. targetSender
+// is the author of the TARGET message (whatsmeow BuildMessageKey
+// semantics): an empty JID reacts to one of Bob's own messages (FromMe),
+// a peer/member JID to theirs — required in groups.
+func (c *Client) SendReaction(chat, targetSender types.JID, targetID string, emoji string) (string, error) {
+	msg := c.client.BuildReaction(chat, targetSender, targetID, emoji)
+	resp, err := c.client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
 func (c *Client) SendMessage(jid types.JID, text string) (string, error) {
 	msg := &waE2E.Message{
 		Conversation: &text,
@@ -357,6 +370,14 @@ func (c *Client) handleEvent(raw any) {
 
 func (c *Client) handleMessage(evt *events.Message) {
 	info := evt.Info
+
+	// Reactions carry no text/media and would be dropped by the guard
+	// below — they only make sense as their own event.
+	if rx := evt.Message.GetReactionMessage(); rx != nil {
+		c.handleReaction(evt, rx)
+		return
+	}
+
 	text, contacts := extractTextAndContacts(evt.Message)
 
 	img := evt.Message.GetImageMessage()
@@ -508,6 +529,62 @@ func (c *Client) handleMessage(evt *events.Message) {
 
 	if c.onEvent != nil {
 		c.onEvent(msgEvt)
+	}
+}
+
+// handleReaction turns a ReactionMessage body into an IncomingReactionEvent.
+// Reactions Bob adds from his own phone arrive here too (FromMe) and are
+// dropped — feeding them back would self-loop Bob's own actions.
+func (c *Client) handleReaction(evt *events.Message, rx *waE2E.ReactionMessage) {
+	if evt.Info.IsFromMe {
+		return
+	}
+	if rx.GetKey() == nil || rx.GetKey().GetID() == "" {
+		return
+	}
+
+	msgEvt := buildIncomingReactionEvent(evt.Info, rx)
+
+	// Resolve LIDs to phone number JIDs (same ladder as handleMessage).
+	msgEvt.ChatID = c.ResolveLID(evt.Info.Chat).String()
+	msgEvt.SenderJID = c.ResolveLID(evt.Info.Sender).String()
+	if raw := rx.GetKey().GetParticipant(); raw != "" {
+		if parsed, err := types.ParseJID(raw); err == nil {
+			msgEvt.TargetSenderJID = c.ResolveLID(parsed).String()
+		} else {
+			msgEvt.TargetSenderJID = raw
+		}
+	} else if raw := rx.GetKey().GetRemoteJID(); raw != "" {
+		if parsed, err := types.ParseJID(raw); err == nil {
+			msgEvt.TargetSenderJID = c.ResolveLID(parsed).String()
+		} else {
+			msgEvt.TargetSenderJID = raw
+		}
+	}
+
+	if c.onEvent != nil {
+		c.onEvent(msgEvt)
+	}
+}
+
+// buildIncomingReactionEvent is the pure, table-testable half of
+// handleReaction: raw JIDs, no client state.
+func buildIncomingReactionEvent(info types.MessageInfo, rx *waE2E.ReactionMessage) IncomingReactionEvent {
+	chatKind := "dm"
+	if info.IsGroup {
+		chatKind = "group"
+	}
+	senderName := ""
+	if info.PushName != "" {
+		senderName = info.PushName
+	}
+	return IncomingReactionEvent{
+		WhatsAppMessageID: info.ID,
+		ChatKind:          chatKind,
+		SenderName:        senderName,
+		TargetMessageID:   rx.GetKey().GetID(),
+		Emoji:             rx.GetText(),
+		Timestamp:         info.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 }
 

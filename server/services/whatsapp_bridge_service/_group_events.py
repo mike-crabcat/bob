@@ -252,6 +252,7 @@ class GroupEventsMixin:
         chat_id = group_jid
         message_was_sent = [False]
         sent_texts: list[str] = []
+        send_records: list[dict] = []
         send_seq = [0]
 
         async def _send_whatsapp_message(text: str = "", media_path: str = "") -> str:
@@ -285,6 +286,7 @@ class GroupEventsMixin:
                     payload={"chat_id": chat_id, "file_path": prepared, "caption": text})
                 if not result.get("ok"):
                     return f"Error sending media: {result.get('error', 'delivery failed')}"
+                self._track_send(send_records, str(result.get("external_result_id")), f"[media] {text}")
                 sent_texts.append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
                 return f"Media sent (request_id={result.get('external_result_id')})"
             result = await emit_and_deliver(
@@ -293,6 +295,7 @@ class GroupEventsMixin:
                 payload={"chat_id": chat_id, "text": text})
             if not result.get("ok"):
                 return f"Error sending message: {result.get('error', 'delivery failed')}"
+            self._track_send(send_records, str(result.get("external_result_id")), text)
             sent_texts.append(text)
             return f"Message sent (request_id={result.get('external_result_id')})"
 
@@ -336,6 +339,7 @@ class GroupEventsMixin:
             history_policy="merged_skip_no_reply",
             message_was_sent=message_was_sent,
             sent_texts=sent_texts,
+            send_records=send_records,
         )
 
         asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))

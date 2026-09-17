@@ -86,6 +86,20 @@ type SharedContact struct {
 	Phone       string `json:"phone,omitempty"` // first TEL from vcard, normalized
 }
 
+type IncomingReactionPayload struct {
+	WhatsAppMessageID string `json:"whatsapp_message_id"` // the reaction's own WA id (queue/dedupe key)
+	ChatID            string `json:"chat_id"`
+	ChatKind          string `json:"chat_kind"` // "dm" or "group"
+	SenderJID         string `json:"sender_jid"`
+	SenderName        string `json:"sender_name,omitempty"`
+	TargetMessageID   string `json:"target_message_id"`
+	TargetSenderJID   string `json:"target_sender_jid,omitempty"` // author of the reacted-to message
+	// Emoji has no omitempty: an empty emoji is a removal and must
+	// round-trip as "" rather than being dropped from the payload.
+	Emoji    string `json:"emoji"`
+	Timestamp string `json:"timestamp"`
+}
+
 type MessageAckedPayload struct {
 	WhatsAppMessageID string `json:"whatsapp_message_id"`
 	ChatID            string `json:"chat_id"`
@@ -149,6 +163,17 @@ type SendMediaPayload struct {
 	RequestID string `json:"request_id"`
 }
 
+type SendReactionPayload struct {
+	ChatID          string `json:"chat_id"`
+	TargetMessageID string `json:"target_message_id"`
+	// TargetSenderJID is the author of the reacted-to message: empty (or
+	// Bob's own JID) → reacting to one of Bob's messages; a peer/member
+	// JID → theirs. Groups require it to disambiguate the target.
+	TargetSenderJID string `json:"target_sender_jid,omitempty"`
+	Emoji           string `json:"emoji"`
+	RequestID       string `json:"request_id"`
+}
+
 type AckPayload struct {
 	MessageID string `json:"message_id"`
 }
@@ -186,10 +211,12 @@ const (
 	TypeQRCode            = "whatsapp.qr_code"
 	TypePairingCode       = "whatsapp.pairing_code"
 	TypeIncomingMessage   = "whatsapp.incoming_message"
+	TypeIncomingReaction  = "whatsapp.incoming_reaction"
 	TypeMessageAcked      = "whatsapp.message_acked"
 	TypeBridgeStatus      = "bridge.status"
 	TypeSendMessage       = "send_message"
 	TypeSendMedia         = "send_media"
+	TypeSendReaction      = "send_reaction"
 	TypeAck               = "ack"
 	TypeRequestPairing    = "request_pairing"
 	TypeSendMessageResult = "send_message_result"

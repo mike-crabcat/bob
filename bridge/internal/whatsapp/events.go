@@ -45,6 +45,22 @@ type IncomingMessageEvent struct {
 	Timestamp         string
 }
 
+// IncomingReactionEvent is an emoji reaction on an existing message.
+// Emoji == "" means the sender removed their reaction. TargetMessageID /
+// TargetSenderJID identify the reacted-to message (its author's JID, which
+// groups need to disambiguate the target).
+type IncomingReactionEvent struct {
+	WhatsAppMessageID string
+	ChatID            string
+	ChatKind          string
+	SenderJID         string
+	SenderName        string
+	TargetMessageID   string
+	TargetSenderJID   string
+	Emoji             string
+	Timestamp         string
+}
+
 type MessageAckedEvent struct {
 	WhatsAppMessageID string
 	ChatID            string
