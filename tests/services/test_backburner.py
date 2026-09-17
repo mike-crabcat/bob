@@ -436,6 +436,9 @@ async def test_post_detach_send_delivers_attributed(ctx, bb):
 
     spec.flight["subagent_id"] = "1234567890abcdef"
     spec.flight["sent"] = False
+    # 2026-09-17 token: this test runs in the LLM task's place — arm the
+    # flight the way detach() does, with the running task as the token.
+    spec.flight["detach_task"] = asyncio.current_task()
     out = await send_tool.handler("here is the answer you asked for")
 
     assert "attributed to background task" in out, out
@@ -450,6 +453,77 @@ async def test_post_detach_send_delivers_attributed(ctx, bb):
         "ORDER BY created_at DESC LIMIT 1", (DM_KEY,))
     assert row is not None, "attributed history row must be written"
     assert "12345678" in (row["metadata"] or "")
+
+
+async def test_reflown_spec_keeps_the_live_voice(ctx, bb):
+    """2026-09-16 AI doom incident: the attention coordinator's leftover
+    sweep re-armed the FLOWN spec for messages that arrived mid-turn — after
+    that flight detached, the re-run's sends were stamped bg_send under the
+    old task id. The token check must return the live voice: same flight
+    dict, different running task."""
+    from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
+
+    svc = WhatsAppBridgeService(ctx)
+    try:
+        spec = await svc._build_inbound_dispatch_spec(
+            session_key=DM_KEY, chat_id="61400000000@s.whatsapp.net",
+            chat_kind="dm", contact_id=None, is_trusted=False,
+            human_initiated=False)
+    except Exception:
+        pytest.skip("builder needs a fuller environment")
+
+    send_tool = next(t for t in spec.tools if t.name == "send_whatsapp_message")
+    other_task = asyncio.ensure_future(asyncio.sleep(0))
+    try:
+        spec.flight["subagent_id"] = "1234567890abcdef"
+        spec.flight["sent"] = False
+        spec.flight["detach_task"] = other_task  # the detached task, not us
+
+        out = await send_tool.handler("live voice reply")
+
+        assert "attributed to background task" not in out, out
+        assert spec.flight["sent"] is False, "must not mark the flight as spoken"
+        row = await ctx.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM messages "
+            "WHERE conversation_id = ? AND provenance = 'bg_send'", (DM_KEY,))
+        assert row["n"] == 0, "re-flown turn's sends must not be bg-attributed"
+    finally:
+        await other_task
+
+
+def test_active_bg_id_token_rules():
+    """active_bg_id: no flight / no id → None; token match → id; token
+    mismatch → None; missing token (pre-deploy flight) → old behaviour."""
+    import asyncio
+    from server.services.backburner import active_bg_id
+
+    assert active_bg_id(None) is None
+    assert active_bg_id({}) is None
+    assert active_bg_id({"sent": False}) is None
+
+    async def _case():
+        me = asyncio.current_task()
+        assert active_bg_id({"subagent_id": "abc"}) == "abc", (
+            "pre-deploy flights without a token keep the old behaviour")
+        assert active_bg_id({"subagent_id": "abc", "detach_task": me}) == "abc"
+        other = asyncio.ensure_future(asyncio.sleep(0))
+        try:
+            assert active_bg_id(
+                {"subagent_id": "abc", "detach_task": other}) is None
+        finally:
+            await other
+
+    asyncio.run(_case())
+
+
+def test_spec_detached_predicate():
+    from server.services.backburner import spec_detached
+
+    assert spec_detached(None) is False
+    assert spec_detached(type("S", (), {"flight": {}})()) is False
+    assert spec_detached(type("S", (), {"flight": None})()) is False
+    assert spec_detached(
+        type("S", (), {"flight": {"subagent_id": "x"}})()) is True
 
 
 # ------------------------------------------------- _terminal (v2)
@@ -502,9 +576,11 @@ async def test_terminal_flight_that_spoke_settles_quietly(ctx, bb):
 async def test_terminal_silent_flight_gets_non_imperative_fallback(ctx, bb):
     """A silent completion with a result still surfaces (the 2026-09-03
     lost-result shape) — but the wake is context, never an instruction to
-    deliver or redo. Wording pinned by test."""
+    deliver or redo. Wording pinned by test. Flight ran tools (the scan it
+    narrates really happened), so the vouch is earned."""
     goal = await _settled_detached_task(
-        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": []},
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
+                     "tool_calls": 3},
         result_text="Scanned it. The profile's history holds about 21 distinct hosts.")
 
     row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
@@ -518,6 +594,44 @@ async def test_terminal_silent_flight_gets_non_imperative_fallback(ctx, bb):
     # The v1 lie and its imperative are gone for good:
     assert "nothing in it has been delivered" not in content
     assert "call your send tool" not in content.lower()
+
+
+async def test_terminal_zero_tool_flight_flagged_as_narration(ctx, bb):
+    """The 2026-09-17 phantom build: a silent flight that made ZERO tool
+    calls returned 'Build is running — I'll post the file when it's done'.
+    The relay must withdraw the vouch (no 'already happened for real / do
+    NOT redo') and say the work still needs doing."""
+    goal = await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
+                     "tool_calls": 0},
+        result_text="Build is running — mixed when it lands. "
+                    "I'll post the file when it's done.")
+
+    msgs = await _messages(ctx)
+    wake = [m for m in msgs if m["provenance"] == "task_relay"]
+    assert wake, "zero-call flights must still surface — loudly, not silently"
+    content = wake[0]["content"]
+    assert "made no tool calls" in content
+    assert "needs doing for real" in content
+    assert "unfounded" in content
+    assert "already happened for real" not in content
+    assert "do NOT" not in content, (
+        "the anti-redo vouch is for flights that ran tools; "
+        "narration-only flights have nothing to protect")
+
+
+def test_note_tool_call_counts_only_armed_flights():
+    from server.services import backburner as bb
+
+    bb.reset_for_tests()
+    flight: dict = {"tool_calls": 0}
+    bb._flight_by_dispatch["d-1"] = flight
+    bb.note_tool_call("d-1")
+    bb.note_tool_call("d-1")
+    bb.note_tool_call("d-unarmed")     # no registration — no-op
+    bb.note_tool_call(None)
+    assert flight["tool_calls"] == 2
+    bb.reset_for_tests()
 
 
 async def test_terminal_failed_flight_wakes_honestly(ctx, bb):

@@ -11,7 +11,8 @@ Two gates:
 - **Membership** falls out of resolution: targets resolve only against the
   requester's own conversations (their DM, or a group they currently belong
   to via ``groups_for_contact``). A group the requester isn't in simply
-  doesn't resolve.
+  doesn't resolve — one relaxation: the owner's reach is Bob's reach
+  (any group with an active group binding; plan §5, relaxed 2026-09-17).
 - **Approval**: the owner (``contacts.is_default``) steers directly;
   everyone else's request routes to the owner's DM as a ``conversation_steer``
   approval whose proposal stores the rendered wake verbatim — approving
@@ -42,6 +43,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 APPROVAL_TYPE = "conversation_steer"
+
+# Result payloads (2026-09-17 Everton-song incident): a pending steer twice
+# got reported to the requester as "posted" — models read {"ok": true} as
+# delivered no matter what rode beside it. The message text is the
+# load-bearing field now; keep it self-instructing and unambiguous.
+_PENDING_MESSAGE = (
+    "NOT SENT — the request is parked in the owner's DM awaiting Mike's "
+    "approval. Tell the requester it needs Mike's OK before anything posts. "
+    "Do NOT report it as sent, posted, or on its way.")
+_FIRED_MESSAGE = (
+    "Steer delivered — the target conversation wakes now and composes its "
+    "own message in its own voice. It may still decline to act: verify in "
+    "the target transcript before reporting success.")
 
 # Phrases (casefolded) that mean "the user's own DM with Bob".
 _OWN_DM_PHRASES = {
@@ -107,6 +121,39 @@ async def _group_result(
             "target_label": group["name"], "target_kind": "group"}
 
 
+def _match_group(
+    groups: list[dict[str, Any]], raw: str,
+) -> dict[str, Any] | None:
+    """The id/name match ladder over a candidate pool: the matched group, an
+    error dict (ambiguity — callers surface it verbatim rather than widen
+    the pool), or None for no match. Callers own the no-match error because
+    the pool may widen (operator steering) before giving up."""
+    # Raw group id first — never fuzzy-match what is already exact.
+    jid_digits = _digits(raw)
+    if jid_digits:
+        for g in groups:
+            if _digits(g["whatsapp_jid"]) == jid_digits:
+                return g
+
+    low = raw.casefold()
+    by_name = {g["name"].casefold(): g for g in groups}
+    exact = by_name.get(low)
+    if exact:
+        return exact
+
+    substring = [g for g in groups if low in g["name"].casefold()]
+    if len(substring) == 1:
+        return substring[0]
+    if len(substring) > 1:
+        return {"error": f"Multiple groups match '{raw}' — ask which one",
+                "candidates": _candidates(substring)}
+
+    close = get_close_matches(low, list(by_name), n=1, cutoff=0.6)
+    if close:
+        return by_name[close[0]]
+    return None
+
+
 async def resolve_target(
     ctx: AppContext, target: str, *, requester_contact_id: str | None,
 ) -> dict[str, Any]:
@@ -117,6 +164,11 @@ async def resolve_target(
     ``{"ok": False, "error", "candidates"?}`` otherwise — candidates (member
     groups) ride both the ambiguous and the no-match errors so the
     requesting turn can ask or self-correct instead of guessing.
+
+    One relaxation: when the requester is the owner, a group that didn't
+    match their own membership resolves against every group Bob holds an
+    active binding for (2026-09-17 — the operator asked from their DM for a
+    group they aren't in, and the plan §5 note anticipated exactly this).
     """
     from server.repositories.contacts import ContactRepository
     from server.repositories.conversations import ConversationRepository
@@ -149,37 +201,39 @@ async def resolve_target(
         return {"ok": True, "target_key": dm_key,
                 "target_label": contact["name"], "target_kind": "dm"}
 
-    groups = await GroupRepository(ctx.db).groups_for_contact(str(contact["id"]))
+    group_repo = GroupRepository(ctx.db)
+    groups = await group_repo.groups_for_contact(str(contact["id"]))
+    if groups:
+        match = _match_group(groups, raw)
+        if isinstance(match, dict) and "error" in match:
+            return {"ok": False, **match}
+        if match is not None:
+            return await _group_result(conv_repo, match)
+
+    # Operator-wide steering: the owner's reach is Bob's reach. Membership
+    # still binds everyone else; the owner resolves the leftover against any
+    # group with an active binding, so "post in that group" from the owner's
+    # DM always has a path.
+    owner = await owner_contact(ctx)
+    if owner and requester_contact_id == str(owner["id"]):
+        bound = await group_repo.actively_bound_groups()
+        if bound:
+            match = _match_group(bound, raw)
+            if isinstance(match, dict) and "error" in match:
+                return {"ok": False, **match}
+            if match is not None:
+                return await _group_result(conv_repo, match)
+        return {"ok": False,
+                "error": f"No group matching '{raw}' that {contact['name']} "
+                         f"or Bob belongs to",
+                "candidates": _candidates(bound or groups)}
+
     if not groups:
         return {"ok": False, "error": (
-            "This user belongs to no groups; only their own DM can be steered")}
-
-    # Raw group id first — never fuzzy-match what is already exact.
-    jid_digits = _digits(raw)
-    if jid_digits:
-        for g in groups:
-            if _digits(g["whatsapp_jid"]) == jid_digits:
-                return await _group_result(conv_repo, g)
-
-    by_name = {g["name"].casefold(): g for g in groups}
-    exact = by_name.get(low)
-    if exact:
-        return await _group_result(conv_repo, exact)
-
-    substring = [g for g in groups if low in g["name"].casefold()]
-    if len(substring) == 1:
-        return await _group_result(conv_repo, substring[0])
-    if len(substring) > 1:
-        return {"ok": False,
-                "error": f"Multiple groups match '{raw}' — ask which one",
-                "candidates": _candidates(substring)}
-
-    close = get_close_matches(low, list(by_name), n=1, cutoff=0.6)
-    if close:
-        return await _group_result(conv_repo, by_name[close[0]])
-
+            f"{contact['name']} belongs to no groups; only their own DM "
+            "can be steered")}
     return {"ok": False,
-            "error": f"No group matching '{raw}' that this user belongs to",
+            "error": f"No group matching '{raw}' that {contact['name']} belongs to",
             "candidates": _candidates(groups)}
 
 
@@ -291,7 +345,8 @@ async def create_request(
                      "metadata": {**metadata, "owner_direct": True}})
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error", "steer failed")}
-        return {"ok": True, "steered": True, "target": target_label}
+        return {"ok": True, "steered": True, "status": "steer_delivered",
+                "target": target_label, "message": _FIRED_MESSAGE}
 
     # Dedupe: the approval_request effect key is a fresh uuid per call, so a
     # repeated LLM attempt would otherwise mint a second pending approval
@@ -306,7 +361,9 @@ async def create_request(
             continue
         if proposal.get("instruction") == instruction:
             return {"ok": True, "steered": False,
-                    "approval_id": row["id"], "duplicate": True}
+                    "status": "pending_owner_approval",
+                    "approval_id": row["id"], "duplicate": True,
+                    "message": _PENDING_MESSAGE}
 
     # The summary is what _summarize_proposal renders into the owner's wake,
     # so it must carry the target and the exact instruction being approved.
@@ -343,7 +400,10 @@ async def create_request(
         })
     if not result.get("ok"):
         return {"ok": False, "error": result.get("error", "approval request failed")}
-    return {"ok": True, "steered": False, "approval_id": result.get("external_result_id")}
+    return {"ok": True, "steered": False,
+            "status": "pending_owner_approval",
+            "approval_id": result.get("external_result_id"),
+            "message": _PENDING_MESSAGE}
 
 
 async def on_approved(ctx: AppContext, row: dict[str, Any]) -> None:
@@ -455,15 +515,29 @@ def make_steering_tools(
         candidate groups, so call the tool and read the result rather than
         researching destinations. instruction: self-contained — spell out
         anything the target can't see (what "this verdict" was, which file
-        to pull), because the target receives only this text. Owner requests
-        steer immediately; anyone else's goes to the owner for approval —
-        tell the user which."""
+        to pull), because the target receives only this text — and FACTUAL
+        about provenance: never assert that Mike (the owner) authorized,
+        commissioned, or requested something unless he said so in this
+        conversation; invented authority gets refused by the target
+        (2026-09-17 Everton-song incident). Read the result carefully:
+        ok:true with status "pending_owner_approval" means NOTHING was sent
+        yet — tell the user their request is waiting on Mike, never that it
+        posted. Owner requests steer immediately; anyone else's goes to the
+        owner for approval — tell the user which. If the user is the owner
+        (Mike), the target may be ANY group Bob is active in, not just one
+        the user belongs to — membership only binds everyone else's
+        targets.
+        This tool DELEGATES: the target composes its own message. When the
+        exact content already exists (text or a file to drop in) use
+        share_to_group instead — and NEVER both for the same content:
+        relay OR steer, never both (double-post)."""
         resolution = await resolve_target(
             ctx, target, requester_contact_id=requester_contact_id)
         if not resolution.get("ok"):
             return json.dumps(resolution)
 
-        bg = (flight or {}).get("subagent_id")
+        from server.services.backburner import active_bg_id
+        bg = active_bg_id(flight)
         if bg:
             # Detach v2: the target (and the owner's approval render) sees
             # which background task is asking.

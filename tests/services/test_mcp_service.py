@@ -94,7 +94,7 @@ async def test_tools_for_skips_empty_serves_stale_on_error():
 
 # ── caps and filters ─────────────────────────────────────────────────
 
-async def test_enforce_caps_tools_truncated_schema_budget_zero():
+async def test_enforce_caps_tools_truncated_schema_budget_degrades():
     settings = Settings.from_env()
     settings.mcp.max_tools_per_server = 2
     settings.mcp.max_schema_chars_per_server = 10_000
@@ -105,12 +105,44 @@ async def test_enforce_caps_tools_truncated_schema_budget_zero():
     manager._enforce_caps(cache, tools)
     assert len(cache.tools) == 2
 
-    # schema over budget → zero tools + reason
+    # schema over budget and trimming can't save it → keep the prefix that
+    # fits, never zero (the 2026-09-17 elevenlabs "0 tools" bug). Each tool
+    # json.dumps to ~123 chars: 150 fits one, not two.
     settings.mcp.max_tools_per_server = 80
-    settings.mcp.max_schema_chars_per_server = 100
+    settings.mcp.max_schema_chars_per_server = 150
     manager._enforce_caps(cache, tools)
+    assert len(cache.tools) == 1
+    assert cache.tools[0]["name"] == "t0"
+    assert "exposing 1 of 5" in cache.error
+
+
+async def test_enforce_caps_budget_trims_descriptions_first():
+    """Descriptions dominate schema bulk — an over-budget server whose
+    bloat is prose keeps every tool with descriptions cut."""
+    settings = Settings.from_env()
+    settings.mcp.max_schema_chars_per_server = 1_000
+    settings.mcp.max_tool_description_chars = 100
+    manager = _manager(settings)
+    cache = _cache("s1", "elevenlabs", [])
+    tools = [{"name": f"tool_{i}", "description": "x" * 400,
+              "input_schema": {"properties": {"a": {"type": "string"}}}}
+             for i in range(4)]           # ~450 chars each raw ≈ 1800 total
+    manager._enforce_caps(cache, tools)
+    assert len(cache.tools) == 4           # all kept, none dropped
+    assert all(len(t["description"]) <= 100 for t in cache.tools)
+    assert "descriptions trimmed" in cache.error
+
+
+async def test_enforce_caps_no_tool_fits_still_explains():
+    settings = Settings.from_env()
+    settings.mcp.max_schema_chars_per_server = 20
+    manager = _manager(settings)
+    cache = _cache("s1", "monolith", [])
+    manager._enforce_caps(
+        cache, [{"name": "huge", "description": "x",
+                 "input_schema": {"properties": {"a": {"type": "string"}}}}])
     assert cache.tools == []
-    assert "schema budget exceeded" in cache.error
+    assert "no single tool fits" in cache.error
 
 
 async def test_apply_filters_allow_deny():

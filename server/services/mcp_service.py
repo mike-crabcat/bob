@@ -342,9 +342,13 @@ class McpManager:
                     async with self._open_session(row) as session:
                         result = await session.list_tools()
                 tools = self._apply_filters(row, result.tools)
+                # Clear before caps: _enforce_caps raises its own degradation
+                # notes, and clearing after would wipe them (the 2026-09-17
+                # elevenlabs bug — a budget-failed server rendered as a bare
+                # "0 tools" with no reason).
+                cache.error = ""
                 self._enforce_caps(cache, tools)
                 cache.fetched_at = time.monotonic()
-                cache.error = ""
             except Exception as exc:
                 # Keep serving stale tools (if any) — better than yanking a
                 # working server's tools over a transient connect failure.
@@ -378,22 +382,54 @@ class McpManager:
 
     def _enforce_caps(self, cache: ServerToolCache,
                       tools: list[dict[str, Any]]) -> None:
+        """Degrade, don't vanish. A server over the schema budget loses
+        verbose descriptions first (they dominate the bulk, and the wire
+        caps them anyway), then its tail tools — never the whole suite,
+        which is how the elevenlabs server sat at "0 tools" 2026-09-17 and
+        pushed Bob into a doomed script fallback."""
         s = self._settings()
         if len(tools) > s.max_tools_per_server:
             logger.warning("mcp %s: %d tools over cap %d — truncating",
                            cache.name, len(tools), s.max_tools_per_server)
             tools = tools[:s.max_tools_per_server]
-        schema_chars = sum(len(json.dumps(t)) for t in tools)
-        if schema_chars > s.max_schema_chars_per_server:
-            logger.warning(
-                "mcp %s: tool schemas %d chars over budget %d — exposing none",
-                cache.name, schema_chars, s.max_schema_chars_per_server)
+        budget = s.max_schema_chars_per_server
+        total = sum(len(json.dumps(t)) for t in tools)
+        if total <= budget:
+            cache.tools = tools
+            return
+        cut = s.max_tool_description_chars
+        slimmed = [dict(t, description=t.get("description", "")[:cut])
+                   for t in tools]
+        if sum(len(json.dumps(t)) for t in slimmed) <= budget:
+            logger.warning("mcp %s: %d chars over budget %d — descriptions "
+                           "trimmed to %d chars, all %d tools kept",
+                           cache.name, total, budget, cut, len(tools))
+            cache.tools = slimmed
+            cache.error = (f"schema budget tight — descriptions trimmed to "
+                           f"{cut} chars")
+            return
+        kept: list[dict[str, Any]] = []
+        used = 0
+        for t in slimmed:
+            size = len(json.dumps(t))
+            if used + size > budget:
+                break
+            kept.append(t)
+            used += size
+        if not kept:
+            logger.warning("mcp %s: %d chars over budget %d — no tool fits",
+                           cache.name, total, budget)
             cache.tools = []
-            cache.error = (f"schema budget exceeded ({schema_chars} chars > "
-                           f"{s.max_schema_chars_per_server}); tighten "
+            cache.error = (f"schema budget exceeded ({total} chars > "
+                           f"{budget}) and no single tool fits — tighten "
                            f"tool_filter_json")
             return
-        cache.tools = tools
+        logger.warning("mcp %s: %d chars over budget %d even trimmed — "
+                       "kept %d of %d tools",
+                       cache.name, total, budget, len(kept), len(tools))
+        cache.tools = kept
+        cache.error = (f"schema budget — exposing {len(kept)} of {len(tools)} "
+                       f"tools; tighten tool_filter_json to choose which")
 
     async def refresh_due(self) -> None:
         ttl = self._settings().refresh_interval_seconds

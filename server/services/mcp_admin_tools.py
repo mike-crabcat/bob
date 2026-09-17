@@ -60,8 +60,11 @@ async def make_mcp_admin_tools(
         lines = []
         for r in rows:
             s = status.get(r["id"], {})
-            state = (f"{s.get('tool_count', 0)} tools"
-                     if not s.get("error") else f"error: {s['error']}")
+            # Count AND note — never either/or: "0 tools" with the reason
+            # hidden is how the elevenlabs budget bug went unnoticed.
+            state = f"{s.get('tool_count', 0)} tools"
+            if s.get("error"):
+                state += f" — {s['error']}"
             env_keys = ",".join(json.loads(r["env_json"] or "{}"))
             lines.append(
                 f"- {r['name']} [{r['transport']}] {state}"

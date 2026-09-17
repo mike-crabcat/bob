@@ -169,3 +169,17 @@ class GroupRepository:
                ORDER BY g.name""",
             (contact_id,))
         return [dict(r) for r in rows] if rows else []
+
+    async def actively_bound_groups(self) -> list[dict[str, Any]]:
+        """Groups Bob currently holds an active group binding for — the
+        operator steering pool. The binding is the membership ground truth
+        (member rows can outlive Bob leaving), so this joins on bindings
+        rather than membership."""
+        rows = await self.db.fetch_all(
+            """SELECT g.name, g.whatsapp_jid
+               FROM whatsappgroups g
+               JOIN bindings b ON b.address = g.whatsapp_jid
+               WHERE b.endpoint_kind = 'group' AND b.is_active = 1
+                 AND g.deleted_at IS NULL
+               ORDER BY g.name COLLATE NOCASE""")
+        return [dict(r) for r in rows] if rows else []

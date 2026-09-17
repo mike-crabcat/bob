@@ -370,3 +370,79 @@ async def post_conversation_reflect(request: Request, session_key: str) -> dict[
     except Exception as exc:
         logger.error("Reflection failed for session=%s: %s", session_key, exc)
         return {"error": "reflection failed", "detail": str(exc)}
+
+
+@router.post("/api/conversations/wake")
+async def post_conversation_wake(request: Request) -> dict[str, Any]:
+    """Operator steer: wake one of Bob's conversations at the owner's
+    request — the target turn composes and sends its own message from the
+    instruction. Same wake shape as steering's owner-direct path (provenance
+    ``steer``, requester attribution, own voice); ``bob steer`` is the CLI
+    front. Target resolution: raw session key, phone number (digits → DM,
+    120363… → group), or a group name via the owner-wide steering pool."""
+    if not _check_auth(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    instruction = (body.get("instruction") or "").strip()
+    if not instruction:
+        return {"error": "instruction required"}
+
+    import re
+
+    from server.context import AppContext
+    from server.repositories.contacts import ContactRepository
+    from server.services.steering import (
+        build_wake_content, resolve_target, steer_metadata)
+    from server.services.wake_service import wake_conversation
+
+    ctx = AppContext(db=_db(request), settings=request.app.state.settings)
+    ctx.whatsapp_bridge = getattr(
+        request.app.state, "whatsapp_bridge_service", None)
+    conv_repo = ConversationRepository(ctx.db)
+
+    owner = await ContactRepository(ctx.db).get_default()
+    if owner is None:
+        return {"error": "no default contact (owner) configured"}
+
+    raw = (body.get("target") or "").strip()
+    if not raw:
+        return {"error": "target required"}
+
+    session_key = raw if raw.startswith("agent:") else ""
+    if not session_key and re.fullmatch(r"\+?\d{7,20}", raw):
+        digits = re.sub(r"\D", "", raw)
+        kinds = ("group", "dm") if digits.startswith("120363") else ("dm", "group")
+        for kind in kinds:
+            candidate = f"agent:main:whatsapp:{kind}:{digits}"
+            if await conv_repo.active_binding(candidate):
+                session_key = candidate
+                break
+        if not session_key:
+            return {"error": f"no active conversation for {raw!r}"}
+    if not session_key:
+        # Group names ride the owner-wide steering pool (any group Bob is
+        # active in — the 2026-09-17 relaxation), with candidates on miss.
+        resolution = await resolve_target(
+            ctx, raw, requester_contact_id=str(owner["id"]))
+        if not resolution.get("ok"):
+            return {"error": resolution.get("error", "target unresolvable"),
+                    "candidates": resolution.get("candidates", [])}
+        session_key = resolution["target_key"]
+
+    binding = await conv_repo.active_binding(session_key)
+    if not binding or binding.get("endpoint_kind") not in ("dm", "group"):
+        return {"error": f"no active dm/group binding for {session_key}"}
+
+    content = build_wake_content(
+        requester_name=owner["name"],
+        origin_label="the operator console (bob steer)",
+        instruction=instruction)
+    metadata = steer_metadata(
+        requester_contact_id=str(owner["id"]), requester_name=owner["name"],
+        origin_session_key="cli:bob-steer")
+    metadata["owner_direct"] = True
+
+    dispatched = await wake_conversation(
+        ctx, session_key, content, call_category="steer",
+        metadata=metadata, provenance="steer")
+    return {"ok": True, "session_key": session_key, "dispatched": dispatched}

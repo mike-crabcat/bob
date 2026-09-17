@@ -104,8 +104,11 @@ def test_fallback_content_is_context_not_instruction():
     assert "finished without posting" in content
     assert "do NOT" in content
     assert "nothing in it has been delivered" not in content
-    # The boilerplate tails relay_payload splits on, verbatim:
-    assert "\n\nTell Mike briefly" in content
+    # The boilerplate tails relay_payload splits on, verbatim
+    # (2026-09-18: audience-relative — "Tell Mike" echoed into the wrong
+    # chat once, and it aimed untrusted chats at the owner):
+    assert "\n\nReport here briefly" in content
+    assert "Tell Mike" not in content
     assert content.index("finished without posting") < content.index(
         "Reply sent to Andrew"), "context leads, payload follows"
 
@@ -212,6 +215,21 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     ids = await HistoryRepository(db).pending_user_ids(key2)
     payload = await HistoryRepository(db).relay_payload(ids)
     assert payload == "bare result body"
+
+    # 2026-09-18 audience-relative tails strip the same way (the "Tell
+    # Mike" wording echoed a report into the wrong chat once)
+    key3 = "test:relay:payload:new-tails"
+    await svc.add_message(
+        key3, "user",
+        "[bg task abcd1234] finished without posting anything AND made no "
+        "tool calls — no tool ran.\n\n"
+        "payload text\n\n"
+        "Tell the person in THIS chat plainly what came of it — never "
+        "carry reports to Mike or anyone else from here.",
+        dispatched=0, provenance="task_relay")
+    ids = await HistoryRepository(db).pending_user_ids(key3)
+    payload = await HistoryRepository(db).relay_payload(ids)
+    assert payload == "payload text"
 
 
 async def test_steer_relay_silence_is_not_rescued(ctx, db, stub_llm, stub_history):

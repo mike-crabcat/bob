@@ -51,6 +51,10 @@ coordinator, turn claims, effects-backed sends).
    still binds the *target*: a user may steer only their own DM or a group
    they participate in — this applies to the owner too; relaxing it later is
    a one-line change if operator-wide steering is ever wanted.
+   *(Relaxed 2026-09-17: when the requester is the owner, a target that
+   didn't match their own membership resolves against every group Bob holds
+   an active group binding for — the operator asked from their DM to post in
+   a group they aren't in, and nothing else on a human turn could reach it.)*
 
 ## Non-goals
 

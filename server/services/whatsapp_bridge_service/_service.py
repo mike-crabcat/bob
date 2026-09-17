@@ -28,6 +28,7 @@ from server.services.whatsapp_bridge_service._media import (
     _prepare_media,
     resolve_sendable_media,
 )
+from server.services.whatsapp_bridge_service._reactions import ReactionsMixin
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ from server.services.whatsapp_bridge_service._group_events import GroupEventsMix
 from server.services.whatsapp_bridge_service._slash_commands import SlashCommandsMixin
 
 
-class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
+class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, ReactionsMixin):
     """WebSocket client connecting to the whatsappbridge Go companion service."""
 
     def __init__(self, ctx: AppContext) -> None:
@@ -114,6 +115,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # what keeps an in-flight keepalive alive (same lesson as backburner's
         # _supervisors). Empty = no chat shows Bob typing.
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        # WhatsApp send-id tracking (reactions): request_id → the send tool's
+        # send_records entry, plus early results that arrived before the entry
+        # existed. Lets send_message_result frames back-fill the WhatsApp
+        # message id onto the assistant history row — in place when the result
+        # beats _record_history, by row-PK UPDATE when it doesn't. Bounded:
+        # _track_send/_record_send_wa_id trim past _SEND_REG_MAX.
+        self._send_reg: dict[str, dict[str, Any]] = {}
+        self._wa_results: dict[str, str] = {}
         self._register_send_executors()
 
     async def _record_bg_send(self, session_key: str, subagent_id: str,
@@ -150,8 +159,70 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 payload["chat_id"], payload["file_path"],
                 caption=payload.get("caption", ""))
 
+        async def _exec_react(ctx: Any, payload: dict[str, Any]) -> str:
+            return await self.send_reaction(
+                payload["chat_id"], payload["target_message_id"],
+                payload.get("target_sender_jid", ""), payload["emoji"])
+
         effects_svc.register_executor("whatsapp_send", _exec_send)
         effects_svc.register_executor("whatsapp_send_media", _exec_media)
+        effects_svc.register_executor("whatsapp_react", _exec_react)
+
+    # In-flight sends are bounded by turn volume; past this the oldest
+    # entries are dropped (their rows just stay unstamped — the reaction
+    # wake rule degrades to passive, it never false-fires).
+    _SEND_REG_MAX = 512
+
+    def _send_tracking(self) -> tuple[dict, dict]:
+        """(_send_reg, _wa_results), lazily — tests construct this service
+        via object.__new__ and init only what they touch (the stop() typing
+        reap does the same)."""
+        reg = self.__dict__.setdefault("_send_reg", {})
+        results = self.__dict__.setdefault("_wa_results", {})
+        return reg, results
+
+    def _track_send(self, send_records: list, request_id: str, text: str) -> None:
+        """Register a delivered send on the spec's send_records list so
+        _record_history can stamp ids onto the assistant row, and so a late
+        send_message_result frame can find the row again."""
+        reg, results = self._send_tracking()
+        entry = {
+            "request_id": request_id,
+            "text": text,
+            "wa_message_id": results.pop(request_id, None),
+            "message_id": None,
+        }
+        send_records.append(entry)
+        reg[request_id] = entry
+        while len(reg) > self._SEND_REG_MAX:
+            reg.pop(next(iter(reg)))
+
+    async def _record_send_wa_id(self, request_id: str, wa_message_id: str) -> None:
+        """Back-fill the WhatsApp message id for a send when its result frame
+        arrives. Never raises into the WS reader loop."""
+        try:
+            reg, results = self._send_tracking()
+            entry = reg.get(request_id)
+            if entry is None:
+                # Result beat the tool handler's _track_send (or an
+                # untracked send path): stash for the record-time pickup.
+                results[request_id] = wa_message_id
+                while len(results) > self._SEND_REG_MAX:
+                    results.pop(next(iter(results)))
+                return
+            if entry.get("message_id"):
+                # Row already recorded — stamp it in place by row PK.
+                from server.repositories.history import HistoryRepository
+                await HistoryRepository(self.db).stamp_send_wa_id(
+                    entry["message_id"], request_id, wa_message_id)
+                reg.pop(request_id, None)
+            else:
+                # Result beat _record_history: mutate the entry and the
+                # metadata write picks it up moments later.
+                entry["wa_message_id"] = wa_message_id
+        except Exception:
+            logger.warning("send wa-id record failed for %s", request_id,
+                           exc_info=True)
 
     @property
     def connected(self) -> bool:
@@ -245,6 +316,30 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             await self._ws.send(json.dumps(payload))
         else:
             logger.warning("cannot send message, not connected to bridge")
+        return request_id
+
+    async def send_reaction(self, chat_id: str, target_message_id: str,
+                            target_sender_jid: str, emoji: str) -> str:
+        """Post an emoji reaction on a message. target_sender_jid is the
+        author of the TARGET message — empty means one of Bob's own
+        (whatsmeow BuildMessageKey semantics; groups need the real author)."""
+        request_id = str(uuid4())
+        payload = {
+            "type": "send_reaction",
+            "id": request_id,
+            "timestamp": utcnow().isoformat(),
+            "payload": {
+                "chat_id": chat_id,
+                "target_message_id": target_message_id,
+                "target_sender_jid": target_sender_jid,
+                "emoji": emoji,
+                "request_id": request_id,
+            },
+        }
+        if self._ws is not None:
+            await self._ws.send(json.dumps(payload))
+        else:
+            logger.warning("cannot send reaction, not connected to bridge")
         return request_id
 
     async def send_media(self, chat_id: str, file_path: str, *, caption: str = "") -> str:
@@ -570,11 +665,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             logger.info("whatsapp pairing code: %s", payload.get("code", ""))
         elif msg_type == "whatsapp.incoming_message":
             await self._handle_incoming_message(payload)
+        elif msg_type == "whatsapp.incoming_reaction":
+            await self._handle_incoming_reaction(payload)
         elif msg_type == "whatsapp.message_acked":
             pass
         elif msg_type == "send_message_result":
             if not payload.get("success"):
                 logger.warning("send message failed: %s (request %s)", payload.get("error"), payload.get("request_id"))
+            elif payload.get("whatsapp_message_id") and payload.get("request_id"):
+                await self._record_send_wa_id(
+                    payload["request_id"], payload["whatsapp_message_id"])
         elif msg_type == "bridge.status":
             self._last_bridge_status = payload
         elif msg_type == "whatsapp.group_member_change":
@@ -585,6 +685,99 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             await self._handle_chat_presence(payload)
         else:
             logger.debug("unknown bridge message type: %s", msg_type)
+
+    async def _resolve_whatsapp_sender(
+        self, chat_id: str, chat_kind: str, sender_jid: str, sender_name: str,
+        *, preview: str = "",
+    ) -> tuple[str, str | None, bool] | None:
+        """Policy gate + contact resolution shared by inbound messages and
+        reactions. Returns (phone_number, contact_id, is_trusted) or None
+        when the sender is dropped (unknown number / inbound disabled)."""
+        phone_jid = chat_id if chat_kind == "dm" else sender_jid
+        phone_number = _jid_to_phone(phone_jid)
+        if not phone_number:
+            logger.warning(
+                "unparseable phone from jid, dropping: chat_id=%s sender_jid=%s",
+                chat_id, sender_jid,
+            )
+            return None
+        from server.services.channel_policies import WhatsAppInboundPolicy
+        resolution = await WhatsAppInboundPolicy(self.ctx).resolve_sender(
+            chat_kind=chat_kind, phone_number=phone_number, sender_name=sender_name)
+        if not resolution.accepted:
+            if resolution.drop_reason == "inbound_disabled":
+                # Distinct log line so "why can't X reach me" is answerable
+                # from journalctl.
+                logger.warning(
+                    "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
+                    phone_number, resolution.contact_id, sender_name, preview[:80],
+                )
+            else:
+                logger.warning(
+                    "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
+                    phone_number, sender_jid, sender_name, preview[:80],
+                )
+            return None
+        return phone_number, resolution.contact_id, resolution.is_trusted
+
+    async def _derive_whatsapp_session(
+        self, chat_id: str, chat_kind: str, sender_jid: str, phone_number: str,
+    ) -> tuple[str, str]:
+        """Session-key derivation + conversation canonicalization shared by
+        inbound messages and reactions. Returns (binding_key, session_key):
+        the channel-derived key is the binding (preserved as the event log's
+        binding_key), the canonical conversation id is what everything
+        downstream keys under."""
+        # DM keys strip the WhatsApp linked-device suffix
+        # (<phone>:<device>@s.whatsapp.net → <phone>): messages from a
+        # companion device are the same human and must land in the same
+        # conversation as the primary phone, not fork a :<device> variant.
+        agent_id = "main"
+        if chat_kind == "group":
+            key_part = chat_id.split("@")[0] if "@" in chat_id else chat_id
+        else:
+            key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
+            key_part = key_part.split(":")[0]
+        session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
+
+        # Canonicalize onto the conversation id: the channel-derived key is
+        # the binding; everything downstream keys under the conversation,
+        # so a merged binding lands in its survivor conversation with no
+        # per-call-site changes. 1:1 today — diverges only on merge.
+        try:
+            from server.repositories.conversations import ConversationRepository
+            conversation = await ConversationRepository(self.db).ensure(
+                session_key,
+                address=chat_id if chat_kind == "group" else phone_number,
+                endpoint_kind=chat_kind)
+            return session_key, conversation["id"]
+        except Exception:
+            logger.warning("conversation resolve failed for %s", session_key, exc_info=True)
+            return session_key, session_key
+
+    async def _register_whatsapp_participant(
+        self, session_key: str, chat_id: str, chat_kind: str,
+        phone_number: str, sender_name: str,
+        contact_id: str | None, is_trusted: bool,
+    ) -> None:
+        """Sender participant upsert + endpoint binding shared by inbound
+        messages and reactions."""
+        now_iso = utcnow().isoformat()
+        from server.repositories.participants import ParticipantRepository
+        await ParticipantRepository(self.db).upsert(
+            session_key, phone_number,
+            display_name=sender_name or phone_number,
+            contact_id=contact_id, is_trusted=bool(is_trusted), now_iso=now_iso)
+        # Register the endpoint binding — DM carries contact_id, group the JID
+        from server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(self.db)
+        if chat_kind == "group":
+            await repo.register_endpoint(
+                session_key, endpoint_kind="group", address=chat_id)
+        else:
+            await repo.register_endpoint(
+                session_key, endpoint_kind="dm", address=chat_id,
+                contact_id=str(contact_id) if contact_id else None)
 
     async def _handle_incoming_message(self, payload: dict[str, Any]) -> None:
         settings = self._get_settings()
@@ -648,64 +841,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         )
 
         # Resolve contact — use chat_id for DMs (sender_jid may be device JID for own messages)
-        phone_jid = chat_id if chat_kind == "dm" else sender_jid
-        phone_number = _jid_to_phone(phone_jid)
-        if not phone_number:
-            logger.warning(
-                "unparseable phone from jid, dropping message: chat_id=%s sender_jid=%s",
-                chat_id, sender_jid,
-            )
+        resolved = await self._resolve_whatsapp_sender(
+            chat_id, chat_kind, sender_jid, sender_name, preview=text[:80])
+        if resolved is None:
             return
-        contact_id = None
-        is_trusted = False
-        from server.services.channel_policies import WhatsAppInboundPolicy
-        resolution = await WhatsAppInboundPolicy(self.ctx).resolve_sender(
-            chat_kind=chat_kind, phone_number=phone_number, sender_name=sender_name)
-        if not resolution.accepted:
-            if resolution.drop_reason == "inbound_disabled":
-                # Distinct log line so "why can't X reach me" is answerable
-                # from journalctl.
-                logger.warning(
-                    "dropped DM: contact exists but inbound disabled: phone=%s contact=%s sender_name=%s preview=%r",
-                    phone_number, resolution.contact_id, sender_name, text[:80],
-                )
-            else:
-                logger.warning(
-                    "dropped unknown whatsapp DM: phone=%s sender_jid=%s sender_name=%s preview=%r",
-                    phone_number, sender_jid, sender_name, text[:80],
-                )
-            return
-        contact_id = resolution.contact_id
-        is_trusted = resolution.is_trusted
+        phone_number, contact_id, is_trusted = resolved
 
-        # Derive session key. DM keys strip the WhatsApp linked-device
-        # suffix (<phone>:<device>@s.whatsapp.net → <phone>): messages from
-        # a companion device are the same human and must land in the same
-        # conversation as the primary phone, not fork a :<device> variant.
-        agent_id = "main"
-        if chat_kind == "group":
-            key_part = chat_id.split("@")[0] if "@" in chat_id else chat_id
-        else:
-            key_part = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
-            key_part = key_part.split(":")[0]
-        session_key = f"agent:{agent_id}:whatsapp:{chat_kind}:{key_part}"
-
-        # Bob3 Phase VI item 3: canonicalize onto the conversation id. The
-        # channel-derived key above is the binding; everything downstream
-        # (participants, routes, messages, events, dispatch) keys under the
-        # conversation, so a merged binding lands in its survivor
-        # conversation with no per-call-site changes. 1:1 today (ensure()
-        # backfills conversation.id = session_key) — diverges only on merge.
-        binding_key = session_key
-        try:
-            from server.repositories.conversations import ConversationRepository
-            conversation = await ConversationRepository(self.db).ensure(
-                session_key,
-                address=chat_id if chat_kind == "group" else phone_number,
-                endpoint_kind=chat_kind)
-            session_key = conversation["id"]
-        except Exception:
-            logger.warning("conversation resolve failed for %s", session_key, exc_info=True)
+        binding_key, session_key = await self._derive_whatsapp_session(
+            chat_id, chat_kind, sender_jid, phone_number)
 
         # Slash command interception — trusted contacts only, never stored or dispatched
         if text.startswith("/"):
@@ -742,75 +885,30 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 bare = phone.lstrip("+")
                 text = re.sub(rf"@{re.escape(bare)}\b", f"@{name}", text)
 
-        # Upsert sender as session participant
-        from server.repositories.participants import ParticipantRepository
-        await ParticipantRepository(self.db).upsert(
-            session_key, phone_number,
-            display_name=sender_name or phone_number,
-            contact_id=contact_id, is_trusted=bool(is_trusted), now_iso=now_iso)
-
-        # Register the endpoint binding — DM carries contact_id, group the JID
-        from server.repositories.conversations import ConversationRepository
-        repo = ConversationRepository(self.db)
-        if chat_kind == "group":
-            await repo.register_endpoint(
-                session_key, endpoint_kind="group", address=chat_id)
-        else:
-            await repo.register_endpoint(
-                session_key, endpoint_kind="dm", address=chat_id,
-                contact_id=str(contact_id) if contact_id else None)
-
-        # Resolve agenda
-        from server.services.session_agenda_service import SessionAgendaService
-        agenda_svc = SessionAgendaService(self.ctx)
-        agenda = await agenda_svc.get_effective_agenda(
-            session_key, "whatsapp",
-            contact_id=contact_id, is_trusted=is_trusted,
-        )
+        # Upsert sender as session participant + register endpoint binding
+        await self._register_whatsapp_participant(
+            session_key, chat_id, chat_kind, phone_number, sender_name,
+            contact_id, is_trusted)
 
         # Handle shared contacts — auto-seed into contacts table
         shared_contacts = payload.get("contacts", [])
-        contacts_block = ""
-        if shared_contacts:
-            contacts_lines = ["## Shared Contacts"]
-            for sc in shared_contacts:
-                name = sc.get("display_name", "Unknown")
-                phone = sc.get("phone", "")
-                vcard = sc.get("vcard", "")
-                # Auto-seed contact from shared vCard
-                if phone:
-                    normalized_phone = _jid_to_phone(phone)
-                    from server.repositories.contacts import ContactRepository
-                    repo = ContactRepository(self.db)
-                    existing = await repo.get_by_phone(normalized_phone)
-                    if not existing:
-                        await repo.create(name=name, phone_number=normalized_phone)
-                        logger.info("auto-seeded shared contact %s (%s)", name, normalized_phone)
-                    contacts_lines.append(f"- **{name}** — {normalized_phone}")
-                else:
-                    contacts_lines.append(f"- **{name}** (no phone)")
-            contacts_block = "\n".join(contacts_lines)
+        for sc in shared_contacts:
+            name = sc.get("display_name", "Unknown")
+            phone = sc.get("phone", "")
+            # Auto-seed contact from shared vCard
+            if phone:
+                normalized_phone = _jid_to_phone(phone)
+                from server.repositories.contacts import ContactRepository
+                repo = ContactRepository(self.db)
+                existing = await repo.get_by_phone(normalized_phone)
+                if not existing:
+                    await repo.create(name=name, phone_number=normalized_phone)
+                    logger.info("auto-seeded shared contact %s (%s)", name, normalized_phone)
 
-        user_content = "\n".join([
-            "## Incoming WhatsApp Message",
-            f"From: {sender_name} ({sender_jid})" if sender_name else f"From: {sender_jid}",
-            f"Chat: {chat_id} ({chat_kind})",
-            f"Message ID: {wa_message_id}",
-            "",
-            text,
-        ])
-        if agenda:
-            user_content = agenda + "\n\n" + user_content
-        if contacts_block:
-            user_content += "\n\n" + contacts_block
-        if document_workspace_path:
-            user_content += (
-                "\n\n## Document attached"
-                f"\n- Filename: {document_filename}"
-                f"\n- Saved at: `{document_workspace_path}` (relative to workspace)"
-                f"\nUse `bash` to inspect it (e.g. `pdftotext {document_workspace_path} -`)."
-            )
-        user_content += "\n\nRespond to this message by calling send_whatsapp_message with your reply."
+        # (The old `user_content` block — "## Incoming WhatsApp Message" +
+        # Message ID header — was never stored or dispatched; the stored
+        # row is plain `text` and prompt_assembler renders rows from the
+        # DB. Removed 2026-09-14 during the reactions work.)
 
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
@@ -927,7 +1025,29 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         async def _run_dispatch() -> str:
             from server.services.dispatch_runner import DispatchRunner
-            return await DispatchRunner(self.ctx).run(dispatch_spec)
+            from server.services.backburner import spec_detached
+            spec_to_run = dispatch_spec
+            if spec_detached(dispatch_spec):
+                # 2026-09-17 reflight guard (AI doom incident 2026-09-16):
+                # this closure is the attention coordinator's stored "flown
+                # spec"; its leftover sweep re-arms it for messages that
+                # arrived mid-turn. If that flight DETACHED, re-flying the
+                # same spec would stamp this live turn's sends as the old
+                # bg task (and share its send-seq). Build a fresh spec;
+                # inherit sent_texts so the duplicate-send guard still
+                # spans both runs — it is what blocked the re-sent
+                # duplicates live.
+                spec_to_run = await self._build_inbound_dispatch_spec(
+                    session_key=session_key, chat_id=chat_id,
+                    chat_kind=chat_kind, contact_id=contact_id,
+                    is_trusted=is_trusted, human_initiated=True,
+                    sender_name=sender_name, text_preview=text[:100])
+                spec_to_run.sent_texts.extend(dispatch_spec.sent_texts)
+                logger.info(
+                    "dispatch: re-flying detached spec for %s — fresh spec "
+                    "built, %d prior send(s) inherited for the duplicate "
+                    "guard", session_key, len(dispatch_spec.sent_texts))
+            return await DispatchRunner(self.ctx).run(spec_to_run)
 
         # Attention coordinator (Bob3 Phase III cutover): Tier 0 addressed
         # detection + Tier 1 windows decide WHEN this dispatch runs; Tier 2
@@ -982,6 +1102,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         human_initiated: bool,
         sender_name: str = "",
         text_preview: str = "",
+        extra_system_note: str = "",
     ) -> "DispatchSpec":
         """Assemble the full inbound-WhatsApp DispatchSpec (system prompt,
         tools, send tool, quota handling). Shared by the live inbound path
@@ -1031,6 +1152,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         system_content = "\n\n".join(
             p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, dream_plans_prompt, goals_prompt) if p
         )
+        # Channel note appended for special wake shapes (reactions): rides
+        # after the context blocks so it reads as current-turn guidance.
+        if extra_system_note:
+            system_content = f"{system_content}\n\n{extra_system_note}"
 
         from server.services.llm_dispatch import LLMDispatchService
         from server.services.tools import Tool
@@ -1069,10 +1194,29 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         # (no nested steering): they may carry the route's contact id, but
         # no human dispatched them, so the gate is the dispatch origin, not
         # contact resolution.
+        #
+        # Member relay (2026-09-17), when enabled: non-owners get
+        # share_to_group INSTEAD of steer — they share exact content into
+        # groups they're in, attributed, but can't make Bob act. The owner
+        # keeps steer and gets the relay tool alongside (exact-content
+        # delivery beats a steer when the words already exist).
         if contact_id and human_initiated:
-            from server.services.steering import make_steering_tools
-            tools.extend(make_steering_tools(
-                self.ctx, session_key, contact_id, flight=flight))
+            relay_on = bool(getattr(
+                self.ctx.settings.whatsapp_bridge, "member_relay_enabled",
+                False))
+            is_owner = False
+            if relay_on:
+                from server.services.steering import owner_contact
+                owner = await owner_contact(self.ctx)
+                is_owner = bool(owner and str(contact_id) == str(owner["id"]))
+            if relay_on:
+                from server.services.member_relay import make_relay_tools
+                tools.extend(make_relay_tools(
+                    self.ctx, session_key, contact_id, flight=flight))
+            if (not relay_on) or is_owner:
+                from server.services.steering import make_steering_tools
+                tools.extend(make_steering_tools(
+                    self.ctx, session_key, contact_id, flight=flight))
 
         # MCP administration (2026-09-14): register/attach MCP servers at a
         # trusted contact's request — owner direct, other trusted contacts
@@ -1110,6 +1254,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
 
         message_was_sent = [False]
         sent_texts: list[str] = []
+        send_records: list[dict[str, Any]] = []
         send_seq = [0]
         # (the detach-v2 flight holder is declared at the top of this
         #  builder — the send wrapper, steer/group-send tools, and the spec
@@ -1139,7 +1284,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             # bg_send + the task id so later turns render [bg <id8>]. The
             # v1 capture branch (and its "nothing was delivered" relay lie)
             # is gone; the tee stays for the terminal audit trail.
-            bg = (flight or {}).get("subagent_id")
+            # active_bg_id (2026-09-17): attribution only when THIS asyncio
+            # task is the detached flight — a re-flown spec must keep the
+            # live voice.
+            from server.services.backburner import active_bg_id
+            bg = active_bg_id(flight)
             # Bob3 Phase IV: sends go through the effects outbox — recorded
             # durably, delivered inline, retried by the pump after a crash.
             # History (sent_texts) is written from delivery confirmation.
@@ -1172,6 +1321,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                     payload={"chat_id": chat_id, "file_path": prepared, "caption": text})
                 if not result.get("ok"):
                     return f"Error sending media: {result.get('error', 'delivery failed')}"
+                self._track_send(send_records, str(result.get("external_result_id")), f"[media] {text}")
                 delivered = f"[Image: {text}]" if text else f"[Image: {resolved.name}]"
                 sent_texts.append(delivered)
                 if bg:
@@ -1189,6 +1339,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
                 payload={"chat_id": chat_id, "text": text})
             if not result.get("ok"):
                 return f"Error sending message: {result.get('error', 'delivery failed')}"
+            self._track_send(send_records, str(result.get("external_result_id")), text)
             sent_texts.append(text)
             if bg:
                 await self._record_bg_send(session_key, bg, text)
@@ -1216,6 +1367,17 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             handler=_send_whatsapp_message,
         ))
 
+        dispatch_id = str(uuid4())
+
+        # Emoji reactions (2026-09-14): in-conversation reply tool, same
+        # risk class as the send tool above (it can only touch messages
+        # already in this conversation's history) — flag-gated only.
+        if settings.whatsapp_bridge.outbound_reactions_enabled:
+            from server.services.whatsapp_bridge_service._reactions import make_react_tool
+            tools.append(make_react_tool(
+                self.ctx, self, session_key, chat_id, chat_kind,
+                dispatch_id, send_seq))
+
         # MCP tools last: global + this conversation's attached servers,
         # namespaced mcp_<server>_<tool> (services/mcp_service.py). No-op
         # unless Mike has registered servers.
@@ -1223,8 +1385,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
         tools.extend(await make_mcp_tools(
             self.ctx, session_key=session_key, is_trusted=is_trusted,
             reserved={t.name for t in tools}))
-
-        dispatch_id = str(uuid4())
 
         async def _send_holding_ack(text: str) -> None:
             """Backburner holding ack — sent by the detach sequence while the
@@ -1268,6 +1428,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin):
             history_policy="delivered_only",
             message_was_sent=message_was_sent,
             sent_texts=sent_texts,
+            send_records=send_records,
             flight=flight,
             hold_sender=_send_holding_ack,
             quota_restore=True,

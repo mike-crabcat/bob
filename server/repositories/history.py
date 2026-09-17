@@ -14,6 +14,7 @@ modify cycle over the same rows.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 _DIALOGUE_ROLES = "('user', 'assistant')"
@@ -42,6 +43,28 @@ _INTERNAL_FILTER = (
     # to NULL for them and silently drop them from replay.
     " AND (provenance IS NOT 'routine' OR role IS NOT 'user') "
 )
+
+
+def _row_owns_wa_id(metadata_raw: Any, wa_message_id: str) -> bool:
+    """True when the row's own metadata claims the id: top-level wa_message_id
+    (inbound rows) or one of sends[].wa_message_id (Bob's sends). Reference
+    fields (quote.wa_message_id, reaction.target_wa_message_id) don't count."""
+    if not metadata_raw:
+        return False
+    if isinstance(metadata_raw, str):
+        try:
+            metadata_raw = json.loads(metadata_raw)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(metadata_raw, dict):
+        return False
+    if metadata_raw.get("wa_message_id") == wa_message_id:
+        return True
+    sends = metadata_raw.get("sends")
+    if isinstance(sends, list):
+        return any(isinstance(s, dict) and s.get("wa_message_id") == wa_message_id
+                   for s in sends)
+    return False
 
 
 class HistoryRepository:
@@ -124,6 +147,54 @@ class HistoryRepository:
             "AND datetime(created_at) > datetime('now', ?)",
             (cid, f"-{minutes} minutes"))
         return bool(row and row["n"])
+
+    async def message_by_wa_id(self, session_key: str, wa_message_id: str) -> dict | None:
+        """Newest row in this conversation that OWNS the given WhatsApp
+        message id — a stored inbound row (metadata.wa_message_id) or one of
+        Bob's own sends (metadata.sends[].wa_message_id). The metadata-LIKE
+        is only a prefilter: rows that merely REFERENCE the id
+        (reaction.target_wa_message_id, quote.wa_message_id) also match the
+        scan — a removal arriving after its add-on resolved to the reaction
+        row itself in prod (2026-09-14) — so candidates are structurally
+        matched before winning."""
+        cid = await self._cid(session_key)
+        candidates = await self.db.fetch_all(
+            "SELECT * FROM messages "
+            "WHERE conversation_id = ? AND metadata LIKE ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 8",
+            (cid, f'%"{wa_message_id}"%'))
+        for row in candidates:
+            if _row_owns_wa_id(row.get("metadata"), wa_message_id):
+                return row
+        return None
+
+    async def stamp_send_wa_id(self, message_id: str, request_id: str,
+                               wa_message_id: str) -> None:
+        """Back-fill metadata.sends[].wa_message_id on a recorded assistant
+        row when its send_message_result frame arrives after the row was
+        written. Idempotent: an already-stamped send is left alone."""
+        row = await self.db.fetch_one(
+            "SELECT metadata FROM messages WHERE id = ?", (message_id,))
+        if not row or not row["metadata"]:
+            return
+        try:
+            meta = json.loads(row["metadata"])
+        except (TypeError, ValueError):
+            return
+        sends = meta.get("sends") if isinstance(meta, dict) else None
+        if not isinstance(sends, list):
+            return
+        changed = False
+        for send in sends:
+            if (isinstance(send, dict)
+                    and send.get("request_id") == request_id
+                    and not send.get("wa_message_id")):
+                send["wa_message_id"] = wa_message_id
+                changed = True
+        if changed:
+            await self.db.execute(
+                "UPDATE messages SET metadata = ? WHERE id = ?",
+                (json.dumps(meta), message_id))
 
     async def messages(
         self, session_key: str, *, limit: int = 50, roles: list[str] | None = None,
@@ -326,8 +397,14 @@ class HistoryRepository:
             text = rest
         # Drop the trailing directives — the rescue delivers the payload,
         # not the meta-text around it (v2 tails; v1 tails kept for any
-        # historical rows still pending).
-        for tail in ("\n\nTell Mike briefly",
+        # historical rows still pending). The 2026-09-18 audience-relative
+        # rewording ("Report here…"/"Tell the person in THIS chat…") came
+        # after a relay in a NON-owner DM said "Tell Mike plainly" and the
+        # woken turn, unsure whose chat it was in, echoed the report into
+        # the source conversation instead.
+        for tail in ("\n\nReport here briefly",
+                     "\n\nTell the person in THIS chat",
+                     "\n\nTell Mike briefly",
                      "\n\nIts tool calls before failing",
                      "\n\nThis background task has finished.",
                      "\n\nThis background task failed."):
@@ -441,7 +518,10 @@ class HistoryRepository:
         memory extraction, idle on human messages past the threshold
         (heartbeat idle-summary seam). Machine stimulus (steers, relays,
         markers) never flags a session for extraction and never resets its
-        idle clock — see _MACHINE_PROVENANCES."""
+        idle clock — see _MACHINE_PROVENANCES. Goal rooms are exempt whole
+        (goal-rooms plan D6): a room's own narration re-extracted as claims
+        is the self-echo churn (2026-09-16: David's WFH schedule claim-written
+        4× in 4.5h from Bob's own roster text)."""
         rows = await self.db.fetch_all(
             """
             SELECT
@@ -455,6 +535,7 @@ class HistoryRepository:
                 COUNT(*) AS message_count
             FROM messages sm
             WHERE sm.conversation_id NOT LIKE 'subagent:%'
+              AND sm.conversation_id NOT LIKE 'agent:goal-%:utility'
               AND (sm.provenance IS NULL
                    OR sm.provenance NOT IN ('steer', 'steer_relay', 'task_relay',
                                              'extraction_marker'))

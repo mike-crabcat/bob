@@ -301,6 +301,15 @@ class WhatsAppBridgeSettings:
     # This instance's own WhatsApp number (E.164, optional). Lets inbound
     # quote-replies to Bob's own messages render "[reply to Bob (you): …]".
     own_phone: str = ""
+    # Emoji reactions (2026-09-14): inbound = store + render reactions on
+    # messages (a DM reaction to one of Bob's own messages wakes a turn);
+    # outbound = the react_whatsapp_message reply tool. Both kill-switchable.
+    inbound_reactions_enabled: bool = True
+    outbound_reactions_enabled: bool = True
+    # Member relay (2026-09-17): share_to_group on human turns — non-owners
+    # get it INSTEAD of steer (they share, they can't make Bob act), the
+    # owner gets both. Off = pre-relay behaviour (everyone steers).
+    member_relay_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -403,7 +412,8 @@ class McpSettings:
     default_timeout_seconds: float = 60.0    # per call_tool; row overrides
     connect_timeout_seconds: float = 20.0    # initialize/list_tools budget
     max_tools_per_server: int = 80
-    max_schema_chars_per_server: int = 24000  # combined tool JSON; over → 0 tools
+    max_schema_chars_per_server: int = 24000  # combined tool JSON; over → trim
+    max_tool_description_chars: int = 400     # trim stage before budget drops tools
     max_output_chars: int = 24000             # flattened call result cap
     max_servers: int = 12                     # blast-radius cap on registrations
     env_allowlist: str = "HOME,PATH,LANG,TZ,SSL_CERT_FILE"
@@ -495,6 +505,40 @@ class GoalsSettings:
     # Progress-review loop (§4.1); BOB_GOAL_REVIEW_DISABLED is the runtime
     # kill switch, read at call time.
     review_threshold_hours: float = 24.0
+    # Deadline-window review selection (2026-09-16): goals with a deadline
+    # inside (now − back, now + fwd] enter the review loop regardless of
+    # how recently they were touched — a fresh 24h-deadline goal is never
+    # 24h-stale before its own deadline (the WFH-roster sail-past).
+    review_deadline_back_hours: float = 72.0
+    review_deadline_fwd_hours: float = 48.0
+
+
+@dataclass(slots=True)
+class GoalRoomsSettings:
+    """Configuration for goal rooms (docs/goal-rooms-plan.md).
+
+    A goal room is the utility conversation that works ONE goal: charter as
+    behaviour spec, its own history as working memory, sensation routes as
+    its attention. Enabled by default — the reviser path remains as the
+    fallback and serves wrapper-kind/legacy goals; BOB_GOAL_ROOMS=off is
+    the kill switch (new goals take the legacy path, rooms go inert).
+
+    room_kinds: goal kinds that get rooms. Wrapper kinds (subagent, call,
+    email_thread, outreach) stay legacy — they are bookkeeping around an
+    external process or ride a target DM's routing, not deliberation.
+    """
+
+    enabled: bool = True
+    room_kinds: str = "task,event_plan,negotiate,coordination,commerce,sales_target,merch_order"
+    checkin_minutes_deadline: int = 1440     # daily while a deadline is set
+    checkin_minutes_plain: int = 10080       # weekly otherwise
+    max_routes_per_room: int = 20
+    max_children_per_parent: int = 8
+    max_goal_depth: int = 3
+    subscribe_sources: str = "memory"        # room self-serve source allowlist
+
+    def kind_gets_room(self, kind: str) -> bool:
+        return kind in {k.strip() for k in self.room_kinds.split(",") if k.strip()}
 
 
 @dataclass(slots=True)
@@ -534,6 +578,7 @@ class Settings:
     memory: MemorySettings = field(default_factory=MemorySettings)
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
+    goal_rooms: GoalRoomsSettings = field(default_factory=GoalRoomsSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     # Dedicated token for POST /api/v1/stimulus/events (external feeds).
@@ -783,6 +828,9 @@ class Settings:
             typing_keepalive_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_TYPING_KEEPALIVE_SECONDS", "5")),
             typing_max_seconds=float(os.getenv("BOB_WHATSAPP_BRIDGE_TYPING_MAX_SECONDS", "600")),
             own_phone=os.getenv("BOB_WHATSAPP_BRIDGE_OWN_PHONE", ""),
+            inbound_reactions_enabled=_env_bool("BOB_WHATSAPP_BRIDGE_INBOUND_REACTIONS", True),
+            outbound_reactions_enabled=_env_bool("BOB_WHATSAPP_BRIDGE_OUTBOUND_REACTIONS", True),
+            member_relay_enabled=_env_bool("BOB_STEER_MEMBER_RELAY", False),
         )
 
         patience = PatienceSettings(
@@ -895,6 +943,8 @@ class Settings:
                 max_tools_per_server=int(os.getenv("BOB_MCP_MAX_TOOLS_PER_SERVER", "80")),
                 max_schema_chars_per_server=int(
                     os.getenv("BOB_MCP_MAX_SCHEMA_CHARS_PER_SERVER", "24000")),
+                max_tool_description_chars=int(
+                    os.getenv("BOB_MCP_MAX_TOOL_DESCRIPTION_CHARS", "400")),
                 max_output_chars=int(os.getenv("BOB_MCP_MAX_OUTPUT_CHARS", "24000")),
                 max_servers=int(os.getenv("BOB_MCP_MAX_SERVERS", "12")),
                 env_allowlist=os.getenv(
@@ -909,6 +959,25 @@ class Settings:
                 max_concurrent_revisions=int(os.getenv("BOB_GOALS_MAX_CONCURRENT_REVISIONS", "3")),
                 max_cas_retries=int(os.getenv("BOB_GOALS_MAX_CAS_RETRIES", "3")),
                 review_threshold_hours=float(os.getenv("BOB_GOAL_REVIEW_THRESHOLD_HOURS", "24")),
+                review_deadline_back_hours=float(os.getenv("BOB_GOAL_REVIEW_DEADLINE_BACK_HOURS", "72")),
+                review_deadline_fwd_hours=float(os.getenv("BOB_GOAL_REVIEW_DEADLINE_FWD_HOURS", "48")),
+            ),
+            goal_rooms=GoalRoomsSettings(
+                # Plan kill switch is the literal BOB_GOAL_ROOMS=off form.
+                enabled=os.getenv("BOB_GOAL_ROOMS", "on").strip().lower()
+                not in ("off", "0", "false", "no"),
+                room_kinds=os.getenv(
+                    "BOB_GOAL_ROOM_KINDS",
+                    "task,event_plan,negotiate,coordination,commerce,"
+                    "sales_target,merch_order"),
+                checkin_minutes_deadline=int(os.getenv(
+                    "BOB_GOAL_ROOM_CHECKIN_DEADLINE_MIN", "1440")),
+                checkin_minutes_plain=int(os.getenv(
+                    "BOB_GOAL_ROOM_CHECKIN_PLAIN_MIN", "10080")),
+                max_routes_per_room=int(os.getenv("BOB_GOAL_ROOM_MAX_ROUTES", "20")),
+                max_children_per_parent=int(os.getenv(
+                    "BOB_GOAL_ROOM_MAX_CHILDREN", "8")),
+                max_goal_depth=int(os.getenv("BOB_GOAL_ROOM_MAX_DEPTH", "3")),
             ),
         )
 

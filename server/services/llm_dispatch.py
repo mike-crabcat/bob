@@ -273,8 +273,17 @@ class LLMDispatchService(BaseService):
         dispatch_id: str | None = None,
     ) -> Any:
         async def _on_tool_call(name: str, args: dict, result_summary: str) -> None:
-            if dispatch_id and name in _MEMORY_TOOL_NAMES:
-                _memory_tool_used[dispatch_id] = True
+            if dispatch_id:
+                if name in _MEMORY_TOOL_NAMES:
+                    _memory_tool_used[dispatch_id] = True
+                # Detached-flight honesty ledger (backburner, 2026-09-17):
+                # zero-call silent flights narrate work that never happened;
+                # count every executed call so the relay can tell.
+                try:
+                    from server.services import backburner as _bb
+                    _bb.note_tool_call(dispatch_id)
+                except Exception:
+                    pass
             if self.ctx.event_bus is None:
                 return
             payload: dict[str, Any] = {
@@ -559,6 +568,7 @@ class LLMDispatchService(BaseService):
         task_id: str | None = None,
         dispatch_id: str | None = None,
         contact_id: str | None = None,
+        budget_stats: dict[str, bool] | None = None,
     ) -> str:
         """Chat with tool calling. Loops until LLM finishes or max iterations.
 
@@ -617,6 +627,7 @@ class LLMDispatchService(BaseService):
                 dispatch_id=dispatch_id,
                 session_key=session_key,
                 log_id=log_id,
+                budget_stats=budget_stats,
             )
             elapsed = time.monotonic() - t0
 

@@ -147,6 +147,9 @@ async def test_resolves_group_by_name_id_and_own_dm(ctx, db, mock_wake):
 
     out = await _steer(ctx)
     assert out["ok"] and out["steered"] is False, out  # non-owner → approval
+    # Pending is unmissable (2026-09-17: pending steers were reported as sent)
+    assert out["status"] == "pending_owner_approval"
+    assert "NOT SENT" in out["message"]
     assert (await ApprovalRepository(db).pending())[0]["entity_id"] == GROUP_KEY
 
     out = await _steer(ctx, target=GID)  # raw id, never fuzzy-matched
@@ -208,6 +211,9 @@ async def test_owner_steers_directly(ctx, db, mock_wake):
 
     out = await _steer(ctx, requester_contact_id="c-mike")
     assert out["ok"] and out["steered"] is True and out["target"] == GROUP_NAME
+    # Fired is honest too: delivered ≠ the target agreed to act
+    assert out["status"] == "steer_delivered"
+    assert "may still decline" in out["message"]
     assert await ApprovalRepository(db).pending() == []
 
     wakes = _wakes_to(mock_wake, GROUP_KEY)
@@ -329,6 +335,9 @@ async def test_duplicate_pending_request_returns_existing(ctx, db, mock_wake):
     second = await _steer(ctx)
     assert second["ok"] and second["duplicate"] is True
     assert second["approval_id"] == first["approval_id"]
+    # A duplicate is still PENDING — the wording must not soften that
+    assert second["status"] == "pending_owner_approval"
+    assert "NOT SENT" in second["message"]
     assert len(await ApprovalRepository(db).pending()) == 1
     mock_wake.assert_awaited_once()  # one approval wake, not two
 

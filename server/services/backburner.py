@@ -60,6 +60,22 @@ _cancel_reasons: dict[str, str] = {}
 # without a schema change; the supervisor pops both on termination.
 _dispatch_ids: dict[str, str] = {}
 
+# dispatch_id -> armed flight dict, so note_tool_call (fed by the dispatch
+# layer's per-call callback) can count executed tool calls against the
+# detached run. A flight that finishes silent AND zero-call narrated work
+# that never happened (2026-09-17 phantom sweeper build) — the relay must
+# not vouch for it. Armed at detach, dropped in the supervisor's finally.
+_flight_by_dispatch: dict[str, dict] = {}
+
+
+def note_tool_call(dispatch_id: str | None) -> None:
+    """Count one executed tool call against a detached flight, if armed.
+    Cheap dict lookup; never raises; no-op for live (undetached) turns."""
+    if dispatch_id:
+        flight = _flight_by_dispatch.get(dispatch_id)
+        if flight is not None:
+            flight["tool_calls"] = int(flight.get("tool_calls") or 0) + 1
+
 TEMPLATE_SUMMARY = "working on the sender's last request"
 TEMPLATE_HOLDING = "still working on that — I'll get back to you soon"
 
@@ -74,6 +90,7 @@ def reset_for_tests() -> None:
     _supervisors.clear()
     _cancel_reasons.clear()
     _dispatch_ids.clear()
+    _flight_by_dispatch.clear()
 
 
 # ------------------------------------------------------------------ gating
@@ -107,6 +124,42 @@ def probe_model(settings: Any) -> str:
     return (settings.backburner.probe_model
             or settings.patience.model
             or settings.openai.get_memory_model())
+
+
+# -------------------------------------------------- attribution (detach v2)
+
+def active_bg_id(flight: dict | None) -> str | None:
+    """The bg task id THIS run's sends/steers belong to, or None.
+
+    Detach v2 arms the shared flight dict with subagent_id; the send
+    wrapper, steer, and group-send tools consult it to attribute output to
+    the task. But the dict outlives the detached run: the attention
+    coordinator's leftover sweep re-arms the flown spec's closure for
+    messages that arrived mid-turn, and that re-run shares the dict — so
+    the 2026-09-16 AI doom incident saw a live group turn's reply stamped
+    as task 9e69b321. The fix: detach also records the llm_task
+    (detach_task), and attribution applies only when the CURRENT asyncio
+    task is that task (tool handlers are awaited inline by chat_with_tools,
+    so a flight's sends run inside its own task). Flights without a token
+    (in-flight rows from before the deploy) keep the old behaviour."""
+    if not flight:
+        return None
+    bg = flight.get("subagent_id")
+    if not bg:
+        return None
+    import asyncio
+    token = flight.get("detach_task")
+    if token is not None and token is not asyncio.current_task():
+        return None
+    return bg
+
+
+def spec_detached(spec: Any) -> bool:
+    """True when this spec's flight was armed by a detach — a re-fly (the
+    coordinator's leftover sweep) must build a fresh spec instead of
+    reusing it, or the new turn inherits the bg attribution and the shared
+    send-seq/sent_texts state."""
+    return bool((getattr(spec, "flight", None) or {}).get("subagent_id"))
 
 
 # ------------------------------------------------------- cancel plumbing
@@ -389,6 +442,19 @@ class BackburnerService(BaseService):
         #    is no capture: what is sent was sent.
         spec.flight["subagent_id"] = subagent_id
         spec.flight["sent"] = False
+        # Honesty ledger (2026-09-17): count executed tool calls so _terminal
+        # can tell a silent-but-real flight from pure narration. Registered
+        # here, fed by note_tool_call from the dispatch layer's per-call
+        # callback, dropped in the supervisor's finally.
+        spec.flight["tool_calls"] = 0
+        _flight_by_dispatch[spec.dispatch_id] = spec.flight
+        # Attribution token (2026-09-17): only THIS llm_task's sends belong
+        # to the task. The attention coordinator's leftover sweep can re-fly
+        # the same spec for mid-turn arrivals, and that re-run shares the
+        # dict — active_bg_id() compares the token against the running
+        # asyncio task so the later turn keeps the live voice (AI doom
+        # 2026-09-16: the "Mike — flag" reply went out as task 9e69b321).
+        spec.flight["detach_task"] = llm_task
 
         # e2. The transcript placeholder: later turns in this conversation
         #     see the flight exists and neither wait for it nor redo it.
@@ -486,21 +552,42 @@ class BackburnerService(BaseService):
         flight's tool calls all executed for real, so nothing here may
         suggest delivering or redoing work — that instruction was the v1
         relay bug (2026-09-10 double-sell, 2026-09-11 double-gif). Wording
-        is pinned by test."""
+        is pinned by test. Only for flights that made at least one tool
+        call — a zero-call flight gets _narration_only_content instead."""
         return (
             f"[bg task {short}] finished without posting anything. "
             "Everything it did via tools already happened for real — do NOT "
             f"redo it. Its result, for context:\n\n{combined}\n\n"
-            "Tell Mike briefly what came of it if anything here is worth "
+            "Report here briefly what came of it if anything is worth "
             "saying; silence is fine for routine work.")
+
+    @staticmethod
+    def _narration_only_content(short: str, combined: str) -> str:
+        """Zero-tool-call silent completion: no tool executed, nothing was
+        sent. The 2026-09-17 phantom build: a bg task returned 'Build is
+        running — I'll post the file when it's done' having called no tools,
+        the fallback vouched for it ('already happened for real — do NOT
+        redo'), and the group waited on work that never existed. The relay
+        must withdraw the vouch: claims of running/done work are unfounded,
+        conclusions are unverified, and the work is still to do."""
+        return (
+            f"[bg task {short}] finished without posting anything AND made "
+            "no tool calls — no tool ran, so treat any claim below that "
+            "work is running, queued, or already done as unfounded, and its "
+            "conclusions as unverified. If the work matters, it still needs "
+            f"doing for real.\n\n{combined}\n\n"
+            "Tell the person in THIS chat plainly what came of it — never "
+            "carry reports to Mike or anyone else from here; a message "
+            "reaches only this conversation.")
 
     @staticmethod
     def _failed_content(short: str, combined: str) -> str:
         return (
             f"[bg task {short}] failed. {combined}\n\n"
             "Its tool calls before failing may have had real effects — "
-            "check the current state before retrying anything. Tell Mike "
-            "plainly what happened.")
+            "check the current state before retrying anything. Tell the "
+            "person in THIS chat plainly what happened — never carry "
+            "reports to Mike or anyone else from here.")
 
     # ---------------------------------------------------------- supervisor
 
@@ -554,6 +641,7 @@ class BackburnerService(BaseService):
         finally:
             _tasks.pop(subagent_id, None)
             _dispatch_ids.pop(subagent_id, None)
+            _flight_by_dispatch.pop(spec.dispatch_id, None)
 
     async def _terminal(self, subagent_id: str, goal_id: str,
                         spec: Any, *, status: str,
@@ -574,6 +662,7 @@ class BackburnerService(BaseService):
         flight = spec.flight or {}
         teed = [t for t in (flight.get("texts") or []) if t.strip()]
         spoke = bool(flight.get("sent"))
+        made_tool_calls = bool(flight.get("tool_calls"))
         combined = (result_text or "").strip()
         if teed:
             combined = (combined + "\n\n(posted directly: "
@@ -598,7 +687,14 @@ class BackburnerService(BaseService):
                                       wake_origin=False)
                 else:
                     # Silent completion with a result: the one v2 fallback.
-                    content = self._fallback_content(short, combined)
+                    # Vouched only when the flight ran tools — a zero-call
+                    # flight narrated, it didn't work (2026-09-17 phantom
+                    # build), and its relay must withdraw the do-not-redo
+                    # vouch instead of repeating it.
+                    content = (
+                        self._fallback_content(short, combined)
+                        if made_tool_calls
+                        else self._narration_only_content(short, combined))
                     await settle_goal(self.ctx, goal_id, status="completed",
                                       result=content, wake_content=content,
                                       wake_provenance="task_relay")
