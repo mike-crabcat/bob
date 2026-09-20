@@ -33,6 +33,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -537,6 +538,25 @@ async def subscribe_room_to_entity(
         created_by="goal_rooms", enabled=True)
 
 
+async def _resolve_group_key(ctx: AppContext, name: str) -> str | None:
+    """Resolve a shorthand group name to its full session key via the
+    WhatsApp group roster (title substring, case-insensitive). None when
+    no unique match — the caller reports the format error."""
+    if not name or len(name) < 3:
+        return None
+    from server.repositories.groups import GroupRepository
+    g_repo = GroupRepository(ctx.db)
+    rows = await g_repo.search_by_name(f"%{name}%")
+    if not rows:
+        slug = re.sub(r"[-_]+", "%", name.strip())
+        rows = await g_repo.search_by_name(f"%{slug}%")
+    if len(rows or []) == 1:
+        jid = rows[0]["whatsapp_jid"]
+        gid = jid.split("@")[0]
+        return f"agent:main:whatsapp:group:{gid}"
+    return None
+
+
 def make_goal_room_tools(ctx: AppContext, session_key: str) -> list:
     """Room-scoped tools: no goal_id juggling — the session IS the room.
     Available only inside goal-room turns (wake_service gates injection)."""
@@ -732,15 +752,23 @@ def make_goal_room_tools(ctx: AppContext, session_key: str) -> list:
     async def read_group_history(session_key: str, limit: int = 40) -> str:
         """Read recent messages from a WhatsApp GROUP this platform is a
         member of (read-only — the morning-scan eyes). Pass the full group
-        session key, e.g. agent:main:whatsapp:group:12036.... Raises nothing;
-        wrong shapes return ok=false with the reason."""
+        session key, e.g. agent:main:whatsapp:group:12036.... A short name
+        ("ai-doom", "Weeming") also resolves via the group roster — the
+        model passes shorthand even when the brief carries full keys
+        (2026-09-19: a morning scan died on "ai-doom" and fell back to
+        search). Raises nothing; wrong shapes return ok=false with the reason."""
         key = (session_key or "").strip()
         if not (key.startswith("agent:main:whatsapp:group:") and
                 key.count(":") >= 5):
-            return json.dumps({"ok": False,
-                               "error": "session_key must be a WhatsApp "
-                                        "group session key "
-                                        "(agent:main:whatsapp:group:<id>)"})
+            resolved = await _resolve_group_key(ctx, key)
+            if resolved is None:
+                return json.dumps({"ok": False,
+                                   "error": "session_key must be a WhatsApp "
+                                            "group session key "
+                                            "(agent:main:whatsapp:group:<id>) "
+                                            "or a group name this platform "
+                                            "knows (e.g. 'ai-doom')"})
+            key = resolved
         from server.services.session_service import SessionService
         messages = await SessionService(ctx).get_messages(key, limit=min(max(limit, 1), 80))
         from server.services.base import local_iso

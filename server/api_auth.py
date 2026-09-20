@@ -28,6 +28,11 @@ PUBLIC_UNAUTHENTICATED: dict[str, frozenset[str]] = {
     "POST": frozenset({"/phone/twiml", "/phone/status", "/voice/log",
                        "/api/v1/stimulus/events"}),
 }
+# Task settle carries its own dedicated bearer (BOB_TASK_TOKEN) checked
+# inside the handler — same limited-blast-radius pattern as stimulus
+# ingest. The path embeds a task id, so it matches by prefix+suffix.
+_TASK_SETTLE_PREFIX = "/api/v1/tasks/"
+_TASK_SETTLE_SUFFIX = "/settle"
 
 
 def extract_api_token(request: Request) -> str:
@@ -63,7 +68,12 @@ class ApiAuthMiddleware:
             await self.app(scope, receive, send)
             return
         method = scope["method"].upper()
-        if method in SAFE_METHODS or scope["path"] in PUBLIC_UNAUTHENTICATED.get(method, frozenset()):
+        path = scope["path"]
+        if method in SAFE_METHODS or path in PUBLIC_UNAUTHENTICATED.get(method, frozenset()):
+            await self.app(scope, receive, send)
+            return
+        if (method == "POST" and path.startswith(_TASK_SETTLE_PREFIX)
+                and path.endswith(_TASK_SETTLE_SUFFIX)):
             await self.app(scope, receive, send)
             return
         if api_token_valid(self.settings, Request(scope, receive)):

@@ -33,7 +33,7 @@ async def test_bg_placeholder_and_sends_render_labelled(ctx):
         channel="whatsapp", dispatched=1)
     await svc.add_message(
         DM_KEY, "user",
-        "[bg task 4545bcaa detached: sharing a coffee gif. Its messages "
+        "[bg turn 4545bcaa detached: sharing a coffee gif. Its messages "
         "will appear under that id until it finishes.]",
         channel="whatsapp", provenance="bg_placeholder", dispatched=1)
     await svc.add_message(
@@ -122,4 +122,4 @@ async def test_group_send_from_flight_tags_target_history(ctx, tmp_path,
     msgs = await SessionService(ctx).get_messages(GROUP_KEY, limit=5)
     assert any(m.content.startswith("[bg 99887766] morning update")
                for m in msgs), (
-        "the target transcript must show which background task spoke")
+        "the target transcript must show which background turn spoke")

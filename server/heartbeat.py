@@ -543,172 +543,32 @@ class WakeupPumpTask:
             logger.info("wakeup pump fired %d wakeup(s)", fired)
 
 
-class ClaimRouterSweepTask:
-    """Replay un-routed memory.claims_created events (Bob Events §2.2).
-
-    The inline path delivers at extraction time; this sweep exists for crash
-    leftovers and for replaying the gap when BOB_CLAIM_ROUTER_DISABLED is
-    lifted (the watermark holds while disabled). Routing effects are
-    idempotent per (goal, stimulus), so replay after inline delivery is
-    harmless."""
-
-    name = "claim_router_sweep"
-
-    async def run(self, ctx: AppContext) -> None:
-        from server.services.memory.claim_router import replay_pending
-
-        replayed = await replay_pending(ctx)
-        if replayed:
-            logger.info("claim router sweep replayed %d event(s)", replayed)
 
 
-class OutreachDetectorSweepTask:
-    """Out-of-channel answer detection for outreach goals (2026-08-26 review).
 
-    Replays message.received events past the detector watermark: when the
-    sender has an active outreach goal working a different conversation, a
-    cheap probe asks whether the message satisfies the objective; a
-    satisfied verdict completes the goal through the normal settle chokepoint.
-    Kill switch: ``BOB_OUTREACH_DETECTOR_DISABLED=1`` (watermark frozen, so
-    lifting it replays the gap)."""
+class TaskReconcileTask:
+    """Task-registry reconciliation (docs/task-registry-plan.md): fail
+    pending tasks whose completer is dead (failed subagent, dead bg unit,
+    script past grace) so waiters hear 'completer died' instead of stalling
+    to the due backstop. The 2026-09-19 OOM-orphaned-Meshy class. Hourly."""
 
-    name = "outreach_detector_sweep"
-
-    async def run(self, ctx: AppContext) -> None:
-        from server.services.outreach_detector import sweep
-
-        processed = await sweep(ctx)
-        if processed:
-            logger.info("outreach detector processed %d inbound message(s)", processed)
-
-
-_last_goal_review: datetime | None = None
-
-
-class GoalReviewTask:
-    """Progress-review loop (bob-events-plan.md §4.1, gap G6).
-
-    An OWN heartbeat task — deliberately not dream scheduling, which is
-    gated on ``dream.enabled`` (default false) and would silently never run.
-    Scans active goals untouched for longer than the threshold — or, since
-    2026-09-16, carrying a deadline inside (now−back, now+fwd] regardless
-    of recent activity — and runs the reviser with a coherence-check
-    stimulus (the deadline variant says so and flags PASSED deadlines).
-    The reviser maintains a
-    ``review_streak`` in the goal's state (reset when something changed,
-    incremented when the review found nothing new) and wakes the working
-    conversation on the streak-2 escalation. This task adds the origin
-    escalation at streak 4 (one wake, not per-cycle). Kill switch:
-    ``BOB_GOAL_REVIEW_DISABLED=1``; window knobs
-    ``BOB_GOAL_REVIEW_DEADLINE_BACK_HOURS`` / ``_FWD_HOURS``."""
-
-    name = "goal_review"
+    name = "task_reconcile"
     _THROTTLE = timedelta(hours=1)
+    _last: datetime | None = None
 
     async def run(self, ctx: AppContext) -> None:
-        global _last_goal_review
-        import os as _os
-        if _os.getenv("BOB_GOAL_REVIEW_DISABLED", "").strip().lower() in (
-                "1", "true", "yes", "on"):
-            return
         now = datetime.now(timezone.utc)
-        if _last_goal_review and (now - _last_goal_review) < self._THROTTLE:
+        if TaskReconcileTask._last and \
+                (now - TaskReconcileTask._last) < self._THROTTLE:
             return
-        _last_goal_review = now
-
-        from server.repositories.goals import GoalRepository
-        from server.services.goal_state_service import (
-            enqueue_revision, parse_strategy,
-        )
-
-        cutoff = (now - timedelta(
-            hours=ctx.settings.goals.review_threshold_hours)).isoformat()
-        repo = GoalRepository(ctx.db)
-        # Selection (2026-09-16): stale-by-age OR deadline inside the
-        # window — fresh short-deadline goals were invisible to the
-        # age-only scan (the WFH-roster sail-past: created with a 24h
-        # deadline, the 24h staleness threshold only matured as the
-        # deadline fired).
-        stale = await repo.review_candidates(
-            stale_before=cutoff,
-            deadline_from=now - timedelta(
-                hours=ctx.settings.goals.review_deadline_back_hours),
-            deadline_to=now + timedelta(
-                hours=ctx.settings.goals.review_deadline_fwd_hours),
-            limit=10)
-        reviewed = escalated = 0
-        for goal in stale:
-            # Goal rooms (docs/goal-rooms-plan.md) run their own check-in
-            # series with in-context state — the reviser-based review loop
-            # serves legacy goals only.
-            from server.services.goal_rooms import is_room_session
-            if is_room_session(goal.get("conversation_id") or ""):
-                continue
-            date = now.strftime("%Y-%m-%d")
-            deadline_note = ""
-            raw_dl = goal.get("deadline")
-            if raw_dl:
-                try:
-                    dl_dt = datetime.fromisoformat(
-                        str(raw_dl).replace("Z", "+00:00"))
-                    if dl_dt.tzinfo is None:
-                        dl_dt = dl_dt.replace(tzinfo=timezone.utc)
-                    passed = " — PASSED, act on it now" if dl_dt <= now else ""
-                    deadline_note = (f"\nThe goal's deadline is "
-                                     f"{str(raw_dl)[:19]} UTC{passed}.")
-                except ValueError:
-                    deadline_note = f"\nThe goal's deadline is {raw_dl}."
-            stimulus = (
-                "## Coherence review\n"
-                "This goal has been quiet." + deadline_note +
-                " Validate: are open_questions still "
-                "actionable? are next_actions overdue (and worth chasing)? is "
-                "`known` still true? If NOTHING changed since the last review, "
-                "increment `review_streak` by 1 and set wake_needed=true ONLY "
-                "if the new streak equals 2 (first escalation); routine stuck "
-                "confirmations do not re-wake. If the state changed, reset "
-                "`review_streak` to 0 and apply the normal wake rules.\n"
-                "If the objective is fully achieved — the event happened, the "
-                "plan is complete, nothing left to chase — do NOT re-validate: "
-                "set wake_needed=true with a wake_summary directing the "
-                "assistant to CLOSE this goal. Achieved goals must not be "
-                "reviewed forever.")
-            try:
-                await enqueue_revision(
-                    ctx, goal["id"], stimulus,
-                    stimulus_id=f"review:{goal['id']}:{date}")
-            except Exception:
-                logger.exception("goal review failed for %s", goal["id"])
-                continue
-            reviewed += 1
-
-            row = await repo.get(goal["id"])
-            streak = (parse_strategy(row).model_extra or {}).get(
-                "review_streak", 0) if row else 0
-            if isinstance(streak, (int, float)) and streak >= 4:
-                # The reviser's wake covers the working conversation at
-                # streak 2; this is the origin escalation (plan §1.2 wake
-                # matrix) — one wake at the streak-4 threshold, not per cycle.
-                target = goal["origin_conversation_id"] or goal["conversation_id"]
-                from server.services.wake_service import wake_conversation
-                try:
-                    await wake_conversation(
-                        ctx, target,
-                        f"## Goal stuck\nObjective: {goal['objective']}\n\n"
-                        "This goal has been stalled across multiple reviews. "
-                        "Decide: revive it, narrow it, or cancel it.",
-                        call_category="goal_escalation",
-                        metadata={"goal_id": goal["id"], "review_streak": streak})
-                    escalated += 1
-                except Exception:
-                    logger.exception("origin escalation wake failed for %s",
-                                     goal["id"])
-        if reviewed:
-            logger.info("goal review: %d stale goal(s) reviewed, %d escalated",
-                        reviewed, escalated)
-
-
-_last_due_sweep: datetime | None = None
+        TaskReconcileTask._last = now
+        from server.services.tasks import reconcile_orphans, tasks_enabled
+        if not tasks_enabled():
+            return
+        try:
+            await reconcile_orphans(ctx)
+        except Exception:
+            logger.exception("task reconcile sweep failed")
 
 
 class GoalRoomHygieneTask:
@@ -735,6 +595,9 @@ class GoalRoomHygieneTask:
             return
         if pruned:
             logger.info("goal room hygiene: pruned %d orphan route(s)", pruned)
+
+
+_last_due_sweep: datetime | None = None
 
 
 class GoalDueTask:

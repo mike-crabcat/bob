@@ -486,6 +486,5 @@ class RehearsalScenario:
         # or later tests in the same process inherit stale loop-bound state.
         from server.services import wake_service as ws
         ws._pending_dispatches.clear()
-        from server.services import goal_state_service as gss
-        gss._GOAL_LOCKS.clear()
-        gss._REVISER_SEMAPHORES.clear()
+        # (goal_state_service module state retired with the reviser —
+        # Phase 4, task registry.)

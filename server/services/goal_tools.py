@@ -320,11 +320,15 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
 
     @tool
     async def list_goals() -> str:
-        """List this conversation's active goals: id, objective, kind,
-        progress, version, deadline, parent/children, and the state summary
-        (plan, known, open questions, next actions, entity refs). Includes
-        goals this conversation holds (e.g. goals whose ROOM is working them
-        — the origin still sees and closes them from here)."""
+        """List active goals relevant to this conversation: id, objective,
+        kind, progress, version, deadline, parent/children, and the state
+        summary. Two sources: goals this conversation holds or works
+        (relation=held — e.g. a goal whose ROOM is working it), and goals
+        ORIGINATED in other conversations sharing a human participant with
+        this one (relation=origin-shared — so the operator can ask about and
+        steer goals from their DM even though the DM holds nothing). For
+        origin-shared goals, report on them and steer their room; the goal's
+        working state lives in its room conversation."""
         from server.repositories.goals import GoalRepository
         from server.services.goal_state_service import parse_strategy
 
@@ -334,12 +338,33 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         # (origin, parent room) still list and act on the goal from here.
         held = await repo.goals_held_by(session_key, limit=20)
         seen = {r["id"] for r in rows}
-        rows = list(rows) + [h for h in held if h["id"] not in seen]
+        rows = [(r, "held") for r in rows]
+        rows += [(h, "held") for h in held if h["id"] not in seen]
+        seen = {g[0]["id"] for g in rows}
+        # Widened (2026-09-19): also surface active goals whose ORIGIN is a
+        # conversation sharing a human participant with this one. The evening
+        # incident: Mike ruled on the merch goal in his DM and the turn
+        # answered "no parent goal to inform" — holder-scoped visibility made
+        # the goal invisible exactly where the operator was talking about it.
+        # Participant overlap (not raw contact id) keeps it relationship-
+        # scoped; rooms and subagent sessions have no human overlap, so the
+        # widening is a no-op there.
+        try:
+            from server.repositories.participants import ParticipantRepository
+            related = await ParticipantRepository(
+                ctx.db).conversations_sharing_contacts(session_key)
+            if related:
+                for g in await repo.goals_connected_to(related, limit=10):
+                    if g["id"] not in seen:
+                        rows.append((g, "origin-shared"))
+        except Exception:
+            logger.warning("list_goals participant widening failed", exc_info=True)
         goals = []
-        for r in rows:
+        for r, relation in rows:
             state = parse_strategy(r)
             goals.append({
                 "goal_id": r["id"], "objective": r["objective"],
+                "relation": relation,
                 "kind": r["kind"], "progress": r["progress"],
                 "version": r["version"], "deadline": r["deadline"],
                 "parent_goal_id": r.get("parent_goal_id"),

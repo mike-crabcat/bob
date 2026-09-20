@@ -129,7 +129,7 @@ def probe_model(settings: Any) -> str:
 # -------------------------------------------------- attribution (detach v2)
 
 def active_bg_id(flight: dict | None) -> str | None:
-    """The bg task id THIS run's sends/steers belong to, or None.
+    """The bg turn id THIS run's sends/steers belong to, or None.
 
     Detach v2 arms the shared flight dict with subagent_id; the send
     wrapper, steer, and group-send tools consult it to attribute output to
@@ -462,7 +462,7 @@ class BackburnerService(BaseService):
             from server.services.session_service import SessionService
             await SessionService(self.ctx).add_message(
                 spec.session_key, "user",
-                f"[bg task {subagent_id[:8]} detached: {info['summary']} "
+                f"[bg turn {subagent_id[:8]} detached: {info['summary']} "
                 "Its messages will appear under that id until it finishes. "
                 "Do not take over its work — it speaks for itself.]",
                 channel=spec.channel, provenance="bg_placeholder",
@@ -555,7 +555,7 @@ class BackburnerService(BaseService):
         is pinned by test. Only for flights that made at least one tool
         call — a zero-call flight gets _narration_only_content instead."""
         return (
-            f"[bg task {short}] finished without posting anything. "
+            f"[bg turn {short}] finished without posting anything. "
             "Everything it did via tools already happened for real — do NOT "
             f"redo it. Its result, for context:\n\n{combined}\n\n"
             "Report here briefly what came of it if anything is worth "
@@ -571,7 +571,7 @@ class BackburnerService(BaseService):
         must withdraw the vouch: claims of running/done work are unfounded,
         conclusions are unverified, and the work is still to do."""
         return (
-            f"[bg task {short}] finished without posting anything AND made "
+            f"[bg turn {short}] finished without posting anything AND made "
             "no tool calls — no tool ran, so treat any claim below that "
             "work is running, queued, or already done as unfounded, and its "
             "conclusions as unverified. If the work matters, it still needs "
@@ -583,7 +583,7 @@ class BackburnerService(BaseService):
     @staticmethod
     def _failed_content(short: str, combined: str) -> str:
         return (
-            f"[bg task {short}] failed. {combined}\n\n"
+            f"[bg turn {short}] failed. {combined}\n\n"
             "Its tool calls before failing may have had real effects — "
             "check the current state before retrying anything. Tell the "
             "person in THIS chat plainly what happened — never carry "
@@ -703,7 +703,7 @@ class BackburnerService(BaseService):
                     subagent_id, status="killed",
                     result=combined or "(killed before finishing)", now_iso=now)
                 await settle_goal(self.ctx, goal_id, status="cancelled",
-                                  result="background task killed by the user",
+                                  result="background turn killed by the user",
                                   wake_origin=False)
             else:  # failed
                 await SubagentRepository(self.db).store_terminal(
@@ -712,7 +712,7 @@ class BackburnerService(BaseService):
                     error=combined[:500])
                 if steer_origin:
                     await settle_goal(self.ctx, goal_id, status="failed",
-                                      result="steer-born background task failed",
+                                      result="steer-born background turn failed",
                                       wake_origin=False)
                 else:
                     content = self._failed_content(short, combined)
@@ -773,12 +773,12 @@ class BackburnerService(BaseService):
                 # A steer-born orphan waking the session to apologise is
                 # uninvited speech — nobody asked for the work. Settle quietly.
                 if await settle_goal(self.ctx, goal["id"], status="failed",
-                                     result="steer-born background task lost on restart",
+                                     result="steer-born background turn lost on restart",
                                      wake_origin=False):
                     moved += 1
                 continue
             content = (
-                f"[bg task {subagent_id[:8]}] I lost this background task "
+                f"[bg turn {subagent_id[:8]}] I lost this background turn "
                 f"when I restarted — it was: {goal['objective']}. "
                 "Tell the user it was interrupted and ask whether to redo it.")
             try:

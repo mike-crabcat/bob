@@ -322,31 +322,20 @@ async def _roll_up_to_parent(
             logger.exception("goal %s: room roll-up wake failed", child["id"])
         return
 
-    from server.services.goal_state_service import enqueue_revision
+    # Legacy child settle (non-room parent): the reviser fold is retired
+    # (task-registry Phase 4) — the parent gets the stimulus directly.
+    from server.services.wake_service import wake_conversation
+    if parent is None:
+        return
     try:
-        await enqueue_revision(
-            ctx, child["parent_goal_id"], stimulus,
-            stimulus_id=f"settle:{child['id']}:{status}",
-            inline=False,  # delivered by the pump: settling usually already
-                           # runs inside an effect executor — don't nest a
-                           # reviser LLM call + wake dispatch inside it.
+        await wake_conversation(
+            ctx, parent["conversation_id"], stimulus,
+            call_category="goal_progress",
+            metadata={"goal_id": parent["id"],
+                      "rolled_up_from": child["id"]},
         )
     except Exception:
-        logger.exception("goal %s: roll-up enqueue failed; degrading to direct wake",
-                         child["id"])
-        from server.services.wake_service import wake_conversation
-
-        if parent is None:
-            return
-        try:
-            await wake_conversation(
-                ctx, parent["conversation_id"], stimulus,
-                call_category="goal_progress",
-                metadata={"goal_id": parent["id"],
-                          "rolled_up_from": child["id"]},
-            )
-        except Exception:
-            logger.exception("goal %s: roll-up degrade wake failed", child["id"])
+        logger.exception("goal %s: roll-up wake failed", child["id"])
 
 
 async def complete_goal(ctx: AppContext, goal_id: str, *, result: str,
@@ -425,6 +414,32 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
         if goal and goal["status"] != "active":
             return True  # goal already settled; wakeup is moot
 
+    if wakeup.get("kind") == "task_due":
+        # Task-registry backstop (docs/task-registry-plan.md): completion
+        # didn't arrive by the due time — wake the WAITER so it decides
+        # (chase, re-register, or cancel). The settle effect cancels this
+        # series' future when the task resolves.
+        from server.services import tasks as task_svc
+        payload = json.loads(wakeup.get("payload_json") or "{}")
+        task = None
+        if payload.get("task_id"):
+            from server.repositories.tasks import TaskRepository
+            task = await TaskRepository(ctx.db).get(payload["task_id"])
+        if task is not None and task["status"] != "pending":
+            return False  # settled between arm and fire; series ends
+        label = (f" ({task['title']})" if task else "")
+        await wake_conversation(
+            ctx, wakeup["conversation_id"],
+            f"## Task overdue{label}\n"
+            f"A task you were waiting on passed its due time without "
+            f"settling. list_tasks to see it; chase the completer, "
+            f"re-register, or task_cancel it.",
+            call_category="task_due",
+            metadata={"wakeup_id": wakeup["id"],
+                      "task_id": payload.get("task_id")},
+        )
+        return False  # one-shot backstop per registration
+
     if wakeup.get("kind") == "goal_checkin":
         # Room check-in: the room renders its own brief (state + digest +
         # standing decisions). Series rolls via the wakeup recurrence.
@@ -484,41 +499,6 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
             "to groups."
         )
         category = "goal_deadline"
-        # Route the deadline through the reviser too (2026-09-16): it folds
-        # the deadline into state — closing achieved goals or materialising
-        # the escalation ladder as dated next_actions — before/in parallel
-        # with the woken turn. Durable + idempotent per (goal, deadline day)
-        # so a crash between enqueue and wake re-delivers safely. Tool-
-        # booked reminder wakeups (payload scheduled_by=tool) are excluded:
-        # they're reminders, not the deadline. ROOM goals skip the reviser
-        # entirely (goal-rooms plan): the deadline wake IS the room's turn,
-        # and the room maintains its own state in-context.
-        from server.services import goal_rooms as _gr
-        wpayload = json.loads(wakeup.get("payload_json") or "{}")
-        if not wpayload.get("scheduled_by") and \
-                not _gr.is_room_session(goal["conversation_id"]):
-            try:
-                from server.services.goal_state_service import enqueue_revision
-                await enqueue_revision(
-                    ctx, goal["id"],
-                    "## Deadline reached\n"
-                    "This goal hit its deadline still active. Fold this "
-                    "stimulus: if the objective is met by facts already in "
-                    "`known` (answers may have arrived on any channel — DM, "
-                    "group, or a memory claim about the person), set "
-                    "next_actions to settling and wake_needed=true so the "
-                    "assistant closes it with a per-source result. Otherwise "
-                    "materialise the next follow-up rung (any authorised "
-                    "escalation ladder in `known`) as dated next_actions and "
-                    "apply the normal wake rules.",
-                    stimulus_id=(
-                        f"deadline:{goal['id']}:"
-                        f"{str(goal.get('deadline') or '')[:10]}"),
-                    inline=False,
-                )
-            except Exception:
-                logger.exception("deadline reviser stimulus failed for %s",
-                                 goal["id"])
         # Deadline wakes land in the WORKING conversation (wake matrix
         # 2026-09-16) — re-resolved at fire time so rows scheduled under
         # the old origin-targeting rule also deliver to the worker.

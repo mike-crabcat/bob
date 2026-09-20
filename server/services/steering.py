@@ -496,7 +496,7 @@ def make_steering_tools(
     when the route resolves a contact id: the bridge gates on dispatch
     origin, so no nested steering. ``flight`` (detach v2): when this turn
     detaches mid-work, its steers carry a [bg <id>] tag so the target
-    transcript shows a background task asked, not the live conversation."""
+    transcript shows a background turn asked, not the live conversation."""
 
     @tool
     async def steer_conversation(target: str, instruction: str) -> str:
@@ -505,7 +505,16 @@ def make_steering_tools(
         THE tool whenever the user asks to tell / inform / update / share /
         send something to another chat or group ("tell the Leeming Boys chat
         about this verdict", "let the AI Doom group know the radio feature
-        set is on") or to nudge their own chat ("my chat"). Images and files
+        set is on") or to nudge their own chat ("my chat") — AND whenever
+        the request is framed as the TARGET'S action, not just a delivery:
+        "steer the Leeming group to review X and apologise", "get the group
+        to decide", "ask them to check". Delegation is the point: do NOT do
+        the target's work yourself and hand the result back to the user —
+        the apology, decision, or message belongs in the target
+        conversation, in its voice. If you need facts first (e.g. a history
+        check), gather them, then steer with the findings embedded in the
+        instruction; never skip the steer because you finished the work.
+        Images and files
         are fine — name a workspace media_path in the instruction and the
         target conversation attaches it with its own send tool. (Bob-initiated
         posts are send_whatsapp_group_message; user-requested messages go

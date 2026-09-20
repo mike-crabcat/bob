@@ -97,6 +97,29 @@ class GoalRepository:
             (goal_id,))
         return [dict(r) for r in rows] if rows else []
 
+    async def goals_connected_to(
+        self, conversation_ids: list[str], *, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Active goals HELD by or ORIGINATED in any of these conversations —
+        the widened list_goals source (2026-09-19): the operator answering a
+        goal question in their DM sees goals from conversations they belong
+        to, even though the DM itself holds nothing. Holder-based (any role:
+        the origin group, the pre-adoption working conversation) because
+        adopted goals can carry an empty origin_conversation_id — holders are
+        the durable link."""
+        if not conversation_ids:
+            return []
+        marks = ",".join("?" for _ in conversation_ids)
+        rows = await self.db.fetch_all(
+            f"""SELECT DISTINCT g.* FROM goals g
+                LEFT JOIN goal_conversations gc ON gc.goal_id = g.id
+                WHERE g.status = 'active'
+                  AND (g.origin_conversation_id IN ({marks})
+                       OR gc.conversation_id IN ({marks}))
+                ORDER BY g.updated_at DESC LIMIT ?""",
+            (*conversation_ids, *conversation_ids, limit))
+        return [dict(r) for r in rows or []]
+
     async def goals_held_by(
         self, conversation_id: str, *, active_only: bool = True, limit: int = 5,
     ) -> list[dict[str, Any]]:

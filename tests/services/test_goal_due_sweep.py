@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock
 from server.repositories.wakeups import WakeupRepository
 from server.services import goal_service
 from server.services.goal_service import extract_due_instant
-from server.services.goal_state_service import _reviser_system_prompt
 
 WORK_KEY = "agent:main:whatsapp:group:120363422982048691"
 
@@ -166,8 +165,3 @@ async def test_claim_due_compares_instants_not_strings(db):
 
 
 # ------------------------------------------------- reviser contract
-
-def test_reviser_prompt_demands_iso_dues():
-    prompt = _reviser_system_prompt()
-    assert "ISO `due`" in prompt
-    assert "prose dues never fire" in prompt

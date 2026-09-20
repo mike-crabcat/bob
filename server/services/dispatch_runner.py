@@ -54,6 +54,31 @@ def is_no_reply(text: str | None) -> bool:
 # rescue must not mail out.
 _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
 
+# Tool-narration signatures (2026-09-19 gnome-repair incident): the model
+# wrote "[tools used: send_whatsapp_message(...) → Message sent
+# (request_id=…); create_subagent(…) → {"ok": true, "subagent_id": …}]"
+# as PLAIN TEXT — zero real tool calls — and the send rescue delivered the
+# hallucination verbatim, fabricated id and all, while the promised repair
+# never ran. The rescue must never launder narrated tool calls into the
+# chat.
+_TOOL_NARRATION_RE = re.compile(
+    r"\[\s*tools used[^\]]*\]|\(request_id=[0-9a-f-]{8,}\)"
+    r"|→\s*\{\s*\"ok\"\s*:\s*true[^\n]{0,120}\}", re.IGNORECASE)
+
+
+def _narrated_tool_calls(text: str) -> bool:
+    """True when the reply text CLAIMS tool calls — the platform renders
+    real ones in tool blocks, never in the reply, so any match here is a
+    fabrication by construction."""
+    return bool(_TOOL_NARRATION_RE.search(text or ""))
+
+
+def _strip_narration(text: str) -> str:
+    """Remove fabricated tool-call narration blocks; keep the model's actual
+    prose (which usually follows the hallucinated prefix)."""
+    cleaned = _TOOL_NARRATION_RE.sub("", text or "")
+    return cleaned.strip() if cleaned.strip() else text
+
 
 def _echo_norm(text: str) -> str:
     """Normalise for the stimulus-echo test: collapse whitespace, casefold,
@@ -429,6 +454,43 @@ class DispatchRunner:
             # deferred guard from the 2026-08-30 duplicate-reply work; silence
             # beats mailing Mike his own question back.
             is_echo = await _is_stimulus_echo(result, claimed_ids, history_repo)
+            # Narration guard (2026-09-19): a reply that CLAIMS tool calls it
+            # never made must not be delivered as-is — the fabricated
+            # "[tools used: …]" prefix leaks into chat and the promised work
+            # never runs. One retry round with an explicit correction; if the
+            # retry still refuses the tools, deliver the STRIPPED prose.
+            narrated = _narrated_tool_calls(result)
+            if narrated:
+                logger.warning(
+                    "narration guard: %s turn narrated tool calls it did not "
+                    "make (session=%s, dispatch=%s) — retrying with correction",
+                    spec.call_category, session_key, spec.dispatch_id)
+                try:
+                    retry_messages = messages + [
+                        {"role": "assistant", "content": result[:2000]},
+                        {"role": "user", "content":
+                         "[System correction] Your previous reply NARRATED "
+                         "tool calls (send/create_subagent) without actually "
+                         "calling them — the transcript shows zero tool "
+                         "calls, so nothing was sent and nothing was "
+                         "started. Reply again and ACTUALLY CALL the tools "
+                         "you intend (send_whatsapp_message to deliver your "
+                         "reply; create_subagent to start work). Never write "
+                         "tool-call transcripts as text."},
+                    ]
+                    from server.services.llm_dispatch import LLMDispatchService
+                    result = await LLMDispatchService(self.ctx).chat_with_tools(
+                        retry_messages, spec.tools,
+                        call_category=spec.call_category,
+                        session_key=session_key,
+                        dispatch_id=spec.dispatch_id,
+                        contact_id=spec.contact_id,
+                    )
+                    narrated = _narrated_tool_calls(result)
+                except Exception:
+                    logger.exception(
+                        "narration retry failed (session=%s, dispatch=%s)",
+                        session_key, spec.dispatch_id)
             if (not spec.message_was_sent[0]
                     and spec.send_tool_name
                     and spec.call_category in _SEND_RESCUE_CATEGORIES
@@ -440,13 +502,16 @@ class DispatchRunner:
                     (t for t in spec.tools if t.name == spec.send_tool_name), None)
                 if send_tool is not None:
                     try:
-                        await send_tool.handler(result)
+                        deliverable = _strip_narration(result) if narrated else result
+                        await send_tool.handler(deliverable)
                         logger.warning(
                             "send-tool rescue: %s turn wrote a reply without "
                             "calling %s; delivered by the runner "
-                            "(session=%s, dispatch=%s)",
+                            "(session=%s, dispatch=%s)%s",
                             spec.call_category, spec.send_tool_name,
-                            session_key, spec.dispatch_id)
+                            session_key, spec.dispatch_id,
+                            " [narration stripped after failed retry]"
+                            if narrated else "")
                     except Exception:
                         logger.exception(
                             "send-tool rescue failed (session=%s, dispatch=%s)",

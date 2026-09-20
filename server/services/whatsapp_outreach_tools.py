@@ -242,15 +242,20 @@ def make_whatsapp_outreach_tools(
 
         db = ctx.db
 
-        # Look up contact — by id first, then by name (goal rooms and other
-        # headless turns hold no contact-id roster; a name like "Rupert
-        # Quekett" must resolve or the room is stuck refusing to guess ids.
-        # Mirrors get_contact_session_messages' resolution.)
+        # Look up contact — by id first, then by name, then by SLUG-normalised
+        # name (goal rooms and other headless turns hold no contact-id roster,
+        # and the model invents slug-style ids from the entity ids in its
+        # context — "rupert-quekett" for "Rupert Quekett". The merch room
+        # burned three days of "Contact not found" on exactly that, 2026-09-19.)
         from server.repositories.contacts import ContactRepository
         c_repo = ContactRepository(db)
         contact = await c_repo.get(contact_id)
         if contact is None:
             contact = await c_repo.search_by_name(f"%{contact_id}%")
+        if contact is None:
+            slugish = re.sub(r"[-_]+", "%", contact_id.strip())
+            if "%" in slugish:
+                contact = await c_repo.search_by_name(f"%{slugish}%")
         if contact is None:
             return json.dumps({"ok": False, "error": "Contact not found"})
 
@@ -308,41 +313,79 @@ def make_whatsapp_outreach_tools(
             if requestor:
                 requestor_name = requestor["name"]
 
-        # Bob3 Phase V + Increment 3: outreach state lives ON the goal
-        # (strategy carries requestor/message for the target-side prompt).
-        # A 24h deadline wakeup resurfaces unanswered outreach in the origin
-        # conversation. Bob Events: a parented outreach inherits the parent's
-        # entity refs so the target DM's §2.0 candidate seeding offers the
-        # plan's entities — otherwise the extractor there mints duplicate
-        # slugs and the reply never ref-matches back into the plan.
+        # Outreach state (Phase 2 of the task registry, 2026-09-19): the
+        # waiter/completer/waker trio is now a TASK — this conversation
+        # waits, the target DM completes (finish_outreach → task_complete),
+        # the settle effect wakes us back with the result. The delegation
+        # (target-DM wake + instruction + refs inheritance for extraction
+        # seeding) rides register_task's steer. 24h due = the outreach
+        # resurface cadence (task default is 1h; humans answer slower).
+        # BOB_OUTREACH_VIA_TASKS=off = legacy outreach-goal path.
         goal_id = None
-        try:
-            from datetime import datetime, timedelta, timezone
+        import os as _os
+        via_tasks = _os.getenv("BOB_OUTREACH_VIA_TASKS", "on").strip().lower() \
+            not in ("off", "0", "false", "no")
+        if via_tasks:
+            try:
+                from server.services.tasks import register_task, tasks_enabled
+                phone_digits_g = re.sub(r"\D", "", phone)
+                target = f"agent:main:whatsapp:dm:{phone_digits_g}"
+                refs = []
+                if parent_goal:
+                    from server.repositories.goals import GoalRepository
+                    from server.services.goal_state_service import parse_strategy
+                    parent = await GoalRepository(db).get(parent_goal)
+                    if parent is not None:
+                        refs = list(parse_strategy(parent).refs.entities)
+                instruction = (
+                    f"You (Bob) proactively messaged {contact['name']} on "
+                    f"behalf of {requestor_name}: \"{message[:300]}\". "
+                    f"Achieve this objective through the conversation with "
+                    f"{contact['name']}; when you have the answer or outcome, "
+                    f"call finish_outreach to relay the result back.")
+                task = await register_task(
+                    ctx, waiter_session=current_session_key,
+                    title=f"Outreach: {objective[:120]}",
+                    instruction=instruction,
+                    expected_completer=target,
+                    due_minutes=24 * 60,
+                    refs=refs, source_goal_id=parent_goal or None,
+                    extra_payload={"outreach": {
+                        "contact_id": contact["id"],
+                        "requestor": requestor_name,
+                        "message": message[:1000]}})
+                goal_id = task["id"]  # downstream logging/return shape
+            except Exception:
+                logger.warning("outreach task registration failed",
+                               exc_info=True)
+        else:
+            try:
+                from datetime import datetime, timedelta, timezone
 
-            from server.services.goal_service import create_goal
-            phone_digits_g = re.sub(r"\D", "", phone)
-            strategy = {"requestor": requestor_name, "message": message}
-            if parent_goal:
-                from server.repositories.goals import GoalRepository
-                from server.services.goal_state_service import parse_strategy
-                parent = await GoalRepository(db).get(parent_goal)
-                if parent is not None:
-                    refs = parse_strategy(parent).refs.entities
-                    if refs:
-                        strategy["refs"] = {"entities": list(refs), "claims": []}
-            goal = await create_goal(
-                ctx,
-                conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
-                objective=objective,
-                origin_conversation_id=current_session_key,
-                kind="outreach",
-                strategy=strategy,
-                deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-                parent_goal_id=parent_goal,
-            )
-            goal_id = goal["id"]
-        except Exception:
-            logger.warning("failed to create outreach goal", exc_info=True)
+                from server.services.goal_service import create_goal
+                phone_digits_g = re.sub(r"\D", "", phone)
+                strategy = {"requestor": requestor_name, "message": message}
+                if parent_goal:
+                    from server.repositories.goals import GoalRepository
+                    from server.services.goal_state_service import parse_strategy
+                    parent = await GoalRepository(db).get(parent_goal)
+                    if parent is not None:
+                        refs = parse_strategy(parent).refs.entities
+                        if refs:
+                            strategy["refs"] = {"entities": list(refs), "claims": []}
+                goal = await create_goal(
+                    ctx,
+                    conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
+                    objective=objective,
+                    origin_conversation_id=current_session_key,
+                    kind="outreach",
+                    strategy=strategy,
+                    deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                    parent_goal_id=parent_goal,
+                )
+                goal_id = goal["id"]
+            except Exception:
+                logger.warning("failed to create outreach goal", exc_info=True)
 
         # Goal rooms: engagement must flow back (goal-rooms plan D8/D10).
         # The settle rollup only fires when the outreach goal CLOSES — a
@@ -507,7 +550,21 @@ def make_outreach_reply_tools(
 
         db = ctx.db
 
-        # The active outreach goal held by this conversation IS the state.
+        # Task-registry path first (Phase 2): settle the pending outreach
+        # TASK this conversation owes; the task_settle effect wakes the
+        # waiter with the provenance header.
+        from server.repositories.tasks import TaskRepository
+        owed = [t for t in await TaskRepository(db).list_for_completer(
+            current_session_key) if "outreach" in (t["title"] or "").lower()]
+        if owed:
+            from server.services.tasks import settle_task
+            out = await settle_task(
+                ctx, owed[0]["id"], to_status="completed",
+                result=f"Outreach result (via {current_session_key}):\n{result}",
+                completed_by=f"conversation:{current_session_key}")
+            return json.dumps(out)
+
+        # Legacy path: the active outreach goal held by this conversation.
         from server.repositories.goals import GoalRepository
         goal = await GoalRepository(db).active_outreach(current_session_key)
         if not goal or not goal["origin_conversation_id"]:

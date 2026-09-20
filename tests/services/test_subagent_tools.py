@@ -120,3 +120,17 @@ async def test_registry_gives_untrusted_sessions_subagent_tools(ctx):
     off_names = {t.name for t in build_common_tools(
         ctx, session_key=DM_KEY, is_trusted=True, include_routines=False)}
     assert "create_subagent" not in off_names
+
+
+def test_bg_process_tool_present_for_all_trust_levels(ctx):
+    from server.services.subagent_tools import make_subagent_tools
+    """The 2026-09-20 reface: background shell commands are process
+    supervision, exposed as run_bg_process — present for trusted AND
+    untrusted sessions (same sandbox as bash), and no longer advertised as
+    a create_subagent agent_type."""
+    names = {t.name for t in make_subagent_tools(ctx, "s-1", is_trusted=True)}
+    untrusted = {t.name for t in make_subagent_tools(ctx, "s-1", is_trusted=False)}
+    assert "run_bg_process" in names and "run_bg_process" in untrusted
+
+    # (create_subagent still accepts the legacy 'script' type defensively —
+    # the service normalises it — but the advertised path is run_bg_process)

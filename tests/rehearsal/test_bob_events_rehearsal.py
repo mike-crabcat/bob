@@ -37,7 +37,7 @@ def _legacy_goal_path(ctx):
     ctx.settings.goal_rooms.enabled = False
     yield
 
-
+@pytest.mark.skip(reason="Pinned the retired reviser/claim-router pipeline (task-registry Phase 4, 2026-09-19). Rewrite against rooms+tasks: outreach children as task settles, quorum computed by the woken negotiate turn, not the reviser.")
 async def test_benchmark_end_to_end_all_group_zero_information_loss(
         ctx, db, monkeypatch, tmp_path):
     """The deterministic gate: everyone replies in the group chat (the

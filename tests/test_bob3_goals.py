@@ -138,34 +138,14 @@ async def test_due_wakeup_fires_with_goal_context(ctx, db, monkeypatch):
 
     # 2026-09-16: the deadline also enqueues a reviser stimulus (durable,
     # idempotent per goal+deadline-day) so state folds — close-if-achieved
-    # or materialise the escalation ladder — alongside the wake.
-    assert await db.fetch_one(
-        "SELECT 1 FROM effects WHERE kind = 'goal_revise_state' "
-        "AND idempotency_key LIKE 'goal_revise:%:deadline:%'") is not None
+    # (The deadline reviser stimulus is retired — Phase 4, task registry:
+    # the woken turn owns its own state now.)
 
     # Claimed exactly once: a second pump finds nothing.
     assert await goal_service.pump_due_wakeups(ctx) == 0
     assert goal["id"]  # goal untouched by deadline fire
     row = await GoalRepository(db).get(goal["id"])
     assert row["status"] == "active"
-
-
-async def test_deadline_fire_skips_reviser_for_tool_booked_wakeups(ctx, db, monkeypatch):
-    """Reminder wakeups booked via schedule_goal_wakeup carry
-    scheduled_by=tool — they are reminders, not the deadline, and must not
-    trigger the deadline reviser stimulus (2026-09-16)."""
-    wake = AsyncMock()
-    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
-    goal = await GoalRepository(db).create(
-        conversation_id="c", objective="remind me")
-    await WakeupRepository(db).schedule(
-        conversation_id="c", not_before=_past(), goal_id=goal["id"],
-        payload={"note": "call mum", "scheduled_by": "tool"})
-
-    assert await goal_service.pump_due_wakeups(ctx) == 1
-    wake.assert_awaited_once()
-    assert await db.fetch_one(
-        "SELECT 1 FROM effects WHERE kind = 'goal_revise_state'") is None
 
 
 async def test_create_goal_seeds_fallback_action_for_deadline(ctx, db):

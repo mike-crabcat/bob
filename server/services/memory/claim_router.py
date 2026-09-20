@@ -217,9 +217,12 @@ async def handle_extraction_batch(
         logger.exception("goal-rooms claim sensation emission failed for %s",
                          session_key)
 
-    routed = await _route_batch(ctx, session_key=session_key, cid=cid,
-                                turn_message_id=turn_message_id, batch=batch)
-    return {"status": "routed", "event_id": event_id, **routed}
+    # Routing to goals is retired (task-registry Phase 4, 2026-09-19):
+    # goal rooms receive claims via their sensation subscriptions; the
+    # legacy candidate-match + probe + reviser-fold pipeline is deleted.
+    # The event_log row + watermark remain the durable emission record.
+    return {"status": "emitted", "event_id": event_id,
+            "sensations": True}
 
 
 async def _batch_for_turn(db: Any, turn_message_id: str) -> dict[str, Any]:
@@ -396,115 +399,6 @@ async def _entity_display_names(db: Any, entity_ids: list[str]) -> dict[str, str
         f"WHERE entity_id IN ({marks})", tuple(entity_ids))
     return {r["entity_id"]: r["display_name"] for r in rows or []}
 
-
-async def _route_batch(
-    ctx: AppContext, *, session_key: str, cid: str, turn_message_id: str,
-    batch: dict[str, Any],
-) -> dict[str, Any]:
-    from server.repositories.goals import GoalRepository
-    from server.services.goal_state_service import enqueue_revision
-
-    stimulus = await _render_stimulus(ctx.db, session_key, cid, batch)
-    goals = await _candidate_goals(ctx.db, cid, batch["entity_ids"])
-    repo = GoalRepository(ctx.db)
-
-    delivered = skipped = already_routed = 0
-    for goal_id, match_type in goals:
-        goal = await repo.get(goal_id)
-        if goal is None or goal["status"] != "active":
-            continue
-        # Goal rooms receive claims via their sensation subscriptions, not
-        # candidate matching + probe — structural matching over-delivers to
-        # a room that already has an explicit attention set.
-        from server.services.goal_rooms import is_room_session
-        if is_room_session(goal["conversation_id"]):
-            continue
-
-        # Inline delivery + watermark replay race (2026-09-14): the inline
-        # path after an extraction turn doesn't advance the watermark, so the
-        # heartbeat sweep re-routes the same batch — a duplicate probe LLM
-        # call and a duplicate routing-log row per goal. The revise effect
-        # key already dedupes the wake itself; skip the rerun instead. Rows
-        # that ended in an enqueue error stay retryable.
-        seen = await ctx.db.fetch_one(
-            "SELECT 1 FROM memory_routing_log "
-            "WHERE stimulus_id = ? AND goal_id = ? AND revise_outcome != 'error' "
-            "LIMIT 1",
-            (turn_message_id, goal_id),
-        )
-        if seen:
-            already_routed += 1
-            continue
-
-        # Every match tier is probed (2026-09-10): ref/mention matching was
-        # delivering blind, and a goal whose state has accreted refs becomes
-        # a magnet for unrelated claims (steak preferences reaching an AFL
-        # scoreline goal). The probe is cheap and fails open, so the worst
-        # case is the old behavior.
-        probe_verdict = "skipped"
-        verdict = await _probe_relevance(ctx, goal, stimulus)
-        # Fail open: probe errors deliver as if relevant.
-        if verdict == "ignore":
-            await _log_decision(ctx, turn_message_id, cid, goal_id, batch,
-                                match_type, probe_verdict="ignore",
-                                revise_outcome="skipped", wake="no_wake",
-                                detail="probe ignored")
-            skipped += 1
-            continue
-        probe_verdict = verdict
-
-        try:
-            result = await enqueue_revision(
-                ctx, goal_id, stimulus, stimulus_id=turn_message_id)
-            ok = bool(result.get("ok"))
-        except Exception:
-            logger.exception("claim routing enqueue failed for goal %s", goal_id)
-            ok = False
-        await _log_decision(ctx, turn_message_id, cid, goal_id, batch,
-                            match_type, probe_verdict=probe_verdict,
-                            revise_outcome="enqueued" if ok else "error",
-                            wake="pending",
-                            detail="" if ok else "enqueue failed")
-        delivered += 1 if ok else 0
-
-    if goals:
-        logger.info("claim router: %d claim(s) from %s → %d goal(s) "
-                    "(%d probe-ignored, %d already routed)",
-                    len(batch["claim_ids"]), session_key, delivered, skipped,
-                    already_routed)
-    return {"candidates": len(goals), "delivered": delivered,
-            "probe_ignored": skipped, "already_routed": already_routed}
-
-
-async def _log_decision(
-    ctx: AppContext, stimulus_id: str, source_cid: str, goal_id: str,
-    batch: dict[str, Any], match_type: str, *, probe_verdict: str,
-    revise_outcome: str, wake: str, detail: str = "",
-) -> None:
-    try:
-        await ctx.db.execute(
-            """INSERT INTO memory_routing_log
-               (id, stimulus_id, source_conversation_id, goal_id, claim_ids,
-                entity_ids, match_type, probe_verdict, revise_outcome,
-                wake_decision, detail, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (str(uuid4()), stimulus_id, source_cid, goal_id,
-             json.dumps(batch["claim_ids"]), json.dumps(batch["entity_ids"]),
-             match_type, probe_verdict, revise_outcome, wake,
-             detail[:500] or None, _now_iso()),
-        )
-    except Exception:
-        logger.warning("routing log write failed", exc_info=True)
-
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ---------------------------------------------------------------------------
-# Watermark + replay sweep (plan §2.2 durability)
-# ---------------------------------------------------------------------------
 
 async def get_watermark(db: Any) -> str | None:
     row = await db.fetch_one(

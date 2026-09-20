@@ -618,6 +618,7 @@ class OpenAIService(BaseService):
         session_key: str | None = None,
         log_id: str | None = None,
         budget_stats: dict[str, bool] | None = None,
+        force_first_tool_choice: bool = False,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -647,6 +648,14 @@ class OpenAIService(BaseService):
             "model": resolved_model,
             "tools": merged_tools,
         }
+        # Eval verification aid (Phase 0, 2026-09-19): GLM narrates tool use
+        # instead of calling it on short minimal-context prompts ("The agenda
+        # has been updated" with zero calls — the send-tool-skip quirk's
+        # general shape). Forcing tool_choice on the FIRST request only makes
+        # tool_call_made checks deterministic; later rounds stay auto so the
+        # loop converges instead of calling tools forever.
+        if force_first_tool_choice and merged_tools:
+            request_kwargs["tool_choice"] = "required"
         effort = _effective_reasoning_effort(
             resolved_model, None, self._get_settings())
         if effort is not None:
@@ -679,6 +688,12 @@ class OpenAIService(BaseService):
 
         try:
             for iteration in range(max_iterations):
+                if iteration > 0:
+                    # forced-choice applies to the FIRST request only —
+                    # leaving it set makes every round call a tool and the
+                    # loop never converges (found live 2026-09-19: the probe
+                    # called update_agenda until the wall clock killed it).
+                    request_kwargs.pop("tool_choice", None)
                 now = time.monotonic()
                 if (wrap.enabled and not nudged
                         and ((nudge_at is not None and now >= nudge_at)

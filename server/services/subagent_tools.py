@@ -1,4 +1,7 @@
-"""Subagent tools — let Bob's LLM manage async subagents."""
+"""Subagent tools — let Bob's LLM manage async subagents, plus
+run_bg_process: supervised background shell commands (process
+supervision deliberately NOT modelled as a subagent — 2026-09-20, after
+four prose-briefs-into-bash spawn failures came from the confusion)."""
 
 from __future__ import annotations
 
@@ -18,11 +21,12 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     """Create subagent management tools for a session.
 
     Trusted sessions get the full toolbox. Untrusted sessions (group chats,
-    untrusted DM contacts) get script-only subagents — the async-execution
-    mechanism the skill index advertises to every session — because a script
-    subagent runs in the same workspace sandbox as the bash tool the session
-    already has. LLM-loop (claude/local) and phone (openai_voice) subagents
-    spend tokens or place real calls, so they stay trusted-only, and
+    untrusted DM contacts) get run_bg_process — supervised background shell
+    commands in the same workspace sandbox as the bash tool the session
+    already has — while LLM-loop (claude/local) and phone (openai_voice)
+    subagents spend tokens or place real calls, so they stay trusted-only
+    (create_subagent refuses non-script types when untrusted; the legacy
+    script type is still accepted for in-flight prompts), and
     message_subagent (which drives further LLM runs) is withheld entirely.
     """
 
@@ -41,18 +45,9 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         agent_type:
         - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
         - 'local': runs in-process via chat_with_tools (faster, no subprocess).
-        - 'script': runs `task` as a literal bash command in the workspace
-          (same sandbox/env as the bash tool) WITHOUT blocking this conversation.
-          USE THIS for any skill script expected to take more than ~10 seconds —
-          image generation (openai-image), browser automation, PDF rendering,
-          video/audio processing. Flow: (1) send the user a short ack message
-          FIRST ("On it — image coming shortly"), (2) create_subagent(
-          task="python skills/openai-image/openai_image.py --prompt '...' --output
-          /home/bob/workspace/generated-images/car.png", agent_type='script'),
-          (3) END YOUR TURN — do NOT poll check_subagent. When the script
-          finishes you will be woken automatically with the output; send the
-          artifact to the user then. Never run slow scripts with the bash tool —
-          it freezes the whole conversation while they run.
+        (For background shell commands use run_bg_process — that is process
+        supervision, not a subagent: no model, no judgment, just a command
+        whose completion wakes this conversation.)
         - 'openai_voice': places a real voice call to a contact. `task` is a FACTUAL
           BRIEF, not a script: what to find out or achieve, plus constraints (budget,
           dates, what to avoid) — under ~80 words, e.g. "Ask if they have a Sega
@@ -115,6 +110,30 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         return json.dumps(result)
 
     @tool
+    async def run_bg_process(command: str, goal_parent_id: str = "") -> str:
+        """Run a shell COMMAND as a supervised background process and return
+        its handle immediately. NOT a subagent — no model, no judgment, no
+        briefs: `command` is literal bash in the workspace sandbox (same env
+        as your bash tool) that outlives this turn with NO wall-clock cap.
+        THE tool for any script expected to take more than ~10 seconds —
+        image generation, browser automation, PDF rendering, indexing, data
+        imports. When the process exits you are woken automatically with its
+        output; send any artifact to the user then. Flow: (1) send the user a
+        short ack FIRST ("On it — image coming shortly"), (2) run_bg_process(
+        command="python skills/openai-image/openai_image.py --prompt '...' \
+--output /home/bob/workspace/generated-images/car.png"), (3) END YOUR TURN —
+        do NOT poll. If you find yourself writing a PROSE BRIEF here, stop:
+        you want create_subagent(agent_type='claude'). Never run slow
+        commands with the bash tool — it freezes the whole conversation."""
+        from server.services.subagent_service import SubagentService
+
+        svc = SubagentService(ctx)
+        result = await svc.create_subagent(
+            command, session_key, agent_type="script",
+            goal_parent_id=goal_parent_id or None)
+        return json.dumps(result)
+
+    @tool
     async def check_subagent(subagent_id: str) -> str:
         """Check the status and result of a subagent. Returns current status and result if available."""
         from server.services.subagent_service import SubagentService
@@ -152,7 +171,8 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         result = await svc.kill_subagent(subagent_id, parent_session_key=session_key)
         return json.dumps(result)
 
-    tools = [create_subagent, check_subagent, list_subagents, kill_subagent]
+    tools = [create_subagent, run_bg_process, check_subagent,
+             list_subagents, kill_subagent]
     if is_trusted:
         tools.append(message_subagent)
     return tools

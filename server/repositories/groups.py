@@ -17,6 +17,12 @@ class GroupRepository:
 
     # ------------------------------------------------------------- groups
 
+    async def search_by_name(self, name_like: str) -> list[dict[str, Any]]:
+        """Groups whose roster name matches a LIKE pattern (case-insensitive)."""
+        return await self.db.fetch_all(
+            "SELECT whatsapp_jid, name FROM whatsappgroups "
+            "WHERE lower(name) LIKE lower(?)", (name_like,))
+
     async def get_by_jid(self, whatsapp_jid: str) -> dict[str, Any] | None:
         row = await self.db.fetch_one(
             "SELECT * FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",

@@ -92,6 +92,16 @@ class WakeupRepository:
             (routine_id,),
         )
 
+    async def cancel_for_task(self, task_id: str) -> int:
+        """Cancel a settled task's due backstop (task registry: the promise
+        resolved, so the liveness wake stands down)."""
+        return await self.db.execute(
+            "UPDATE wakeups SET status = 'cancelled' "
+            "WHERE kind = 'task_due' AND status = 'scheduled' "
+            "AND json_extract(payload_json, '$.task_id') = ?",
+            (task_id,),
+        )
+
     async def claim_due(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Claim due wakeups by CAS scheduled→fired one at a time; only rows
         this caller flipped are returned, so two pumps never double-fire.

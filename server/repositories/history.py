@@ -117,6 +117,40 @@ class HistoryRepository:
             tuple(params),
         )
 
+    async def search_dialogue(
+        self, session_key: str, query: str, *,
+        limit: int = 20, since_hours: float | None = None,
+    ) -> list[dict]:
+        """Case-insensitive substring search over this conversation's
+        dialogue rows, same replay semantics as recent_dialogue (internal
+        bookkeeping excluded; routine replies in, routine prompts out).
+        Newest ``limit`` matches, returned oldest-first. Added for the
+        2026-09-18 record-discipline work (Freo-tip incident: a pre-game
+        prediction fell outside the 100-row turn window) — the live search
+        path is search_session_messages; this remains the scoped seam it
+        and any future caller share."""
+        escaped = (query.replace("\\", "\\\\")
+                   .replace("%", r"\%").replace("_", r"\_"))
+        like = f"%{escaped}%"
+        cid = await self._cid(session_key)
+        since_clause = ""
+        if since_hours is not None:
+            since_clause = " AND datetime(created_at) > datetime('now', ?) "
+        match = (f"conversation_id = ? AND role IN {_DIALOGUE_ROLES} "
+                 f"AND (content LIKE ? ESCAPE '\\' OR sender_id LIKE ? ESCAPE '\\') "
+                 f"{_INTERNAL_FILTER}{since_clause}")
+        if since_hours is not None:
+            params: list[Any] = [cid, like, like, f"-{since_hours} hours"]
+        else:
+            params = [cid, like, like]
+        return await self.db.fetch_all(
+            f"SELECT * FROM messages WHERE rowid IN "
+            f"(SELECT rowid FROM messages WHERE {match} "
+            f"ORDER BY created_at DESC, rowid DESC LIMIT ?) "
+            f"ORDER BY created_at ASC, rowid ASC",
+            tuple(params + [limit]),
+        )
+
     async def count_dialogue(self, session_key: str, since_iso: str | None = None) -> int:
         cid = await self._cid(session_key)
         if since_iso:
@@ -386,13 +420,15 @@ class HistoryRepository:
         if not row or not row["content"]:
             return ""
         text = row["content"]
-        # Drop the leading fallback header ("[bg task …] finished without
-        # posting anything. …" — detach v2; the v1 header "[Background
+        # Drop the leading fallback header ("[bg turn …] finished without
+        # posting anything. …" — detach v2; "[bg task …]" is the
+        # pre-2026-09-20 spelling, kept for historical rows — the v1 header "[Background
         # task …] FINISHED — IMPORTANT: nothing in it has been delivered…"
         # leaked to WhatsApp verbatim on 2026-09-06, hence the strip). The
         # header is one block ending at the first blank line.
         head, sep, rest = text.partition("\n\n")
-        if sep and (head.startswith("[bg task ") or
+        if sep and (head.startswith("[bg turn ") or
+                    head.startswith("[bg task ") or
                     head.startswith("[Background task ")):
             text = rest
         # Drop the trailing directives — the rescue delivers the payload,

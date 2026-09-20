@@ -176,6 +176,15 @@ async def _generic_wake_dispatch(
     # The wake is system-initiated, so no separate trust gate applies.
     from server.services.goal_tools import make_goal_tools
     tools.extend(make_goal_tools(ctx, session_key))
+    # Session tools (find/search history — the same search_session_messages
+    # the chat path carries, 2026-09-18 consolidation: one tool, one name,
+    # one habit) + the record-discipline note below.
+    from server.services.session_tools import make_session_tools
+    tools.extend(make_session_tools(ctx, session_key=session_key))
+    # Task registry tools on the generic wake path (rooms, utilities, wakes).
+    from server.services.tasks import make_task_tools, tasks_enabled
+    if tasks_enabled():
+        tools.extend(make_task_tools(ctx, session_key))
     from server.services.approval_tools import make_approval_tools
     tools.extend(make_approval_tools(ctx, session_key))
     tools.extend(utility_tools)
@@ -187,8 +196,13 @@ async def _generic_wake_dispatch(
                 settings.harness.workspace_dir, db=ctx.db)
             from server.services.context_assembler import ContextAssembler
             goals_prompt = await ContextAssembler(ctx).goals_block(session_key)
+            from server.services.history_tools import HISTORY_DISCIPLINE_NOTE
+            from server.services.tasks import tasks_enabled, tasks_block
+            _tb = (await tasks_block(session_key, ctx.db)
+                   if tasks_enabled() else "")
             system_content = "\n\n".join(
-                p for p in (workspace_prompt, goals_prompt, charter_block) if p)
+                p for p in (workspace_prompt, goals_prompt, charter_block,
+                            HISTORY_DISCIPLINE_NOTE, _tb) if p)
             messages = await build_chat_messages(
                 content, session_key, db=ctx.db,
                 system_content=system_content, max_history=20,

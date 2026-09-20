@@ -150,7 +150,7 @@ async def test_relay_no_reply_dead_man_delivers_payload(
     svc = SessionService(ctx)
     await svc.add_message(
         key, "user",
-        "[bg task abcd1234] finished without posting anything. Everything "
+        "[bg turn abcd1234] finished without posting anything. Everything "
         "it did via tools already happened for real — do NOT redo it. Its "
         "result, for context:\n\n"
         "Reply sent to Andrew with the deep-dive sources: METR report et al.\n\n"
@@ -175,7 +175,7 @@ async def test_relay_delivered_turn_no_dead_man(
     svc = SessionService(ctx)
     await svc.add_message(
         key, "user",
-        "[bg task abcd1234] finished without posting anything. Its result, "
+        "[bg turn abcd1234] finished without posting anything. Its result, "
         "for context:\n\nresult body\n\n"
         "Tell Mike briefly what came of it.",
         dispatched=0, provenance="task_relay")
@@ -196,7 +196,7 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     # Bob Security Guard group verbatim).
     await svc.add_message(
         key, "user",
-        "[bg task abcd1234] finished without posting anything. Everything "
+        "[bg turn abcd1234] finished without posting anything. Everything "
         "it did via tools already happened for real — do NOT redo it.\n\n"
         "payload text\n\n"
         "Tell Mike briefly what came of it if anything here is worth saying; "
@@ -206,7 +206,8 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     payload = await HistoryRepository(db).relay_payload(ids)
     assert payload == "payload text"
 
-    # Headerless rows (older/hand-rolled shapes) keep their first line
+    # Headerless rows keep their first line; legacy "[bg task" spelling
+    # (pre-2026-09-20) must still strip
     key2 = "test:relay:payload:headerless"
     await svc.add_message(
         key2, "user", "bare result body\n\n"
@@ -221,7 +222,7 @@ async def test_relay_payload_strips_boilerplate_and_caps(ctx, db):
     key3 = "test:relay:payload:new-tails"
     await svc.add_message(
         key3, "user",
-        "[bg task abcd1234] finished without posting anything AND made no "
+        "[bg turn abcd1234] finished without posting anything AND made no "
         "tool calls — no tool ran.\n\n"
         "payload text\n\n"
         "Tell the person in THIS chat plainly what came of it — never "

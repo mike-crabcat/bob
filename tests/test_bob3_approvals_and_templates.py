@@ -196,8 +196,11 @@ async def test_template_tools_roundtrip(ctx, db, mock_wake):
     assert not bad["ok"]
 
 
-async def test_outreach_tool_parents_under_goal(ctx, db, mock_wake):
-    """The negotiation fan-out's outreach goals roll up into the plan."""
+async def test_outreach_tool_parents_under_goal(ctx, db, mock_wake, monkeypatch):
+    """Phase 2 (task registry, 2026-09-19): a parented outreach registers a
+    TASK under the plan (source_goal_id + inherited refs + completer = the
+    target DM); finish_outreach settles the task and wakes the waiter. The
+    legacy goal path remains behind BOB_OUTREACH_VIA_TASKS=off."""
     from server.services import goal_service
     root = await goal_service.create_goal(
         ctx, conversation_id="work", objective="plan lunch",
@@ -225,6 +228,31 @@ async def test_outreach_tool_parents_under_goal(ctx, db, mock_wake):
         parent_goal_id=root["id"]))
     assert out["ok"]
 
+    # New contract: a task under the plan, completer = target DM,
+    # refs inherited, waiter = the sending conversation.
+    from server.repositories.tasks import TaskRepository
+    owed = await TaskRepository(db).list_for_completer(
+        "agent:main:whatsapp:dm:61400000002")
+    assert owed and owed[0]["source_goal_id"] == root["id"]
+    assert json.loads(owed[0]["refs_json"]) == ["group-ai-doom"]
+    assert owed[0]["waiter_session"] == "work"
+
+    # finish_outreach from the target DM settles it and wakes the waiter.
+    from server.services.whatsapp_outreach_tools import make_outreach_reply_tools
+    finish = {t.name: t for t in make_outreach_reply_tools(
+        ctx, _FakeBridge(), "agent:main:whatsapp:dm:61400000002")}
+    res = json.loads(await finish["finish_outreach"].handler(
+        result="Alice: Thursday 12:30 works"))
+    assert res["ok"]
+    settled = await TaskRepository(db).get(owed[0]["id"])
+    assert settled["status"] == "completed"
+
+    # Legacy mode still mints the outreach goal.
+    monkeypatch.setenv("BOB_OUTREACH_VIA_TASKS", "off")
+    out = json.loads(await tools["send_whatsapp_to_contact"].handler(
+        contact_id="c-alice", message="again",
+        objective="Get availability", parent_goal_id=root["id"]))
+    assert out["ok"]
     goals = await GoalRepository(db).children_of(root["id"])
     outreach = [g for g in goals if g["kind"] == "outreach"]
     assert outreach and outreach[0]["parent_goal_id"] == root["id"]

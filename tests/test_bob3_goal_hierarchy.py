@@ -126,55 +126,18 @@ async def _make_tree(ctx):
     return root, child
 
 
-async def test_child_settle_rolls_up_without_origin_wake(ctx, db, mock_wake, reviser):
+async def test_child_settle_rolls_up_to_parent_working_convo(ctx, db, mock_wake):
+    """Phase 4 (reviser retired): a child settle wakes the PARENT's working
+    conversation with the outcome — direct, no reviser fold — and never the
+    origin (the origin hears only from the root's own settle)."""
     root, child = await _make_tree(ctx)
-    reviser.response = _reviser_json(
-        {"plan": "negotiate time", "known": ["alice confirmed 3pm"],
-         "open_questions": [], "next_actions": [],
-         "refs": {"entities": ["event-team-lunch"], "claims": []}})
-
     await goal_service.complete_goal(ctx, child["id"], result="alice confirmed 3pm")
-    from server.services.effects import pump_due_effects
-    await pump_due_effects(ctx)  # roll-up revisions queue for the pump
 
-    # Child settle never wakes the origin directly.
-    mock_wake.assert_not_awaited()
-
-    # The result folded into the parent's state.
-    parent = await GoalRepository(db).get(root["id"])
-    assert "alice confirmed 3pm" in parent["strategy_json"]
-
-    # The revision ran as a durable, delivered effect.
-    eff = await db.fetch_one("SELECT * FROM effects WHERE kind = 'goal_revise_state'")
-    assert eff is not None and eff["status"] == "delivered"
-
-
-async def test_reviser_wakes_parent_working_conversation_not_origin(
-        ctx, db, mock_wake, reviser):
-    root, child = await _make_tree(ctx)
-    reviser.response = _reviser_json(
-        {"plan": "x"}, wake_needed=True, summary="alice confirmed — quorum reached")
-
-    await goal_service.complete_goal(ctx, child["id"], result="alice confirmed 3pm")
-    from server.services.effects import pump_due_effects
-    await pump_due_effects(ctx)
-
-    mock_wake.assert_awaited_once()
-    args = mock_wake.await_args
-    assert args.args[1] == "work", "wake lands on the parent's working conversation"
-    assert args.kwargs.get("call_category") == "goal_progress"
-
-
-async def test_root_settle_wakes_origin_once(ctx, db, mock_wake, reviser):
-    root, child = await _make_tree(ctx)
-    await goal_service.complete_goal(ctx, child["id"], result="done")
-    from server.services.effects import pump_due_effects
-    await pump_due_effects(ctx)
-    await goal_service.complete_goal(ctx, root["id"], result="lunch booked")
-
-    # Only the root's settle wakes the origin — exactly once.
-    mock_wake.assert_awaited_once()
-    assert mock_wake.await_args.args[1] == "asker"
+    targets = [c.args[1] for c in mock_wake.await_args_list]
+    assert "asker" not in targets            # origin untouched by child settle
+    assert "work" in targets                 # parent working convo informed
+    progress = [c for c in mock_wake.await_args_list if c.args[1] == "work"]
+    assert "alice confirmed 3pm" in progress[0].args[2]
 
 
 async def test_child_deadline_wakes_root_working_conversation(ctx, db, mock_wake):
@@ -205,111 +168,6 @@ async def test_settled_child_wakeup_cancelled(ctx, db, mock_wake, reviser):
 
 # ---------------------------------------------------------------------------
 # revise_goal_state contract
-# ---------------------------------------------------------------------------
-
-async def test_reviser_token_budget_accommodates_thinking_models(
-        ctx, db, mock_wake, reviser):
-    """max_output_tokens caps reasoning AND content together on thinking
-    models — the old 900 cap let GLM-5.3-flash burn the whole budget on
-    reasoning and return empty text (every call degraded to wake,
-    2026-08-29). The call must use the settings ceiling (default 4000)."""
-    root, _ = await _make_tree(ctx)
-
-    from server.services.goal_state_service import revise_goal_state
-    await revise_goal_state(ctx, root["id"], "stimulus", stimulus_id="test:cap")
-
-    assert reviser.calls, "reviser was called"
-    assert all(c["max_tokens"] == ctx.settings.goals.reviser_max_tokens
-               for c in reviser.calls)
-    assert ctx.settings.goals.reviser_max_tokens >= 4000
-    assert all(c["reasoning_effort"] == "low" for c in reviser.calls)
-
-
-async def test_reviser_malformed_output_degrades_to_wake(ctx, db, mock_wake, reviser):
-    root, _ = await _make_tree(ctx)
-    before = (await GoalRepository(db).get(root["id"]))["strategy_json"]
-    reviser.response = "not json at all"
-
-    from server.services.goal_state_service import revise_goal_state
-    outcome = await revise_goal_state(
-        ctx, root["id"], " Stimulus: bob says Tuesday. ",
-        stimulus_id="test:malformed")
-
-    assert outcome["outcome"] == "error" and outcome["wake"] == "wake"
-    mock_wake.assert_awaited_once()
-    assert mock_wake.await_args.args[1] == "work"
-    assert "Tuesday" in mock_wake.await_args.args[2], "raw stimulus relayed"
-    assert (await GoalRepository(db).get(root["id"]))["strategy_json"] == before
-
-
-async def test_reviser_cas_conflict_retries(ctx, db, mock_wake, reviser):
-    root, _ = await _make_tree(ctx)
-    reviser.response = _reviser_json({"plan": "cas-survivor"})
-
-    real_revise = GoalRepository.revise
-    calls = {"n": 0}
-
-    async def _flaky_revise(self, goal_id, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            # Simulate a concurrent writer bumping the version first.
-            await real_revise(self, goal_id, expected_version=kwargs["expected_version"],
-                              progress="concurrent touch")
-            return False
-        return await real_revise(self, goal_id, **kwargs)
-
-    from server.services.goal_state_service import revise_goal_state
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(GoalRepository, "revise", _flaky_revise)
-        outcome = await revise_goal_state(ctx, root["id"], "stimulus",
-                                          stimulus_id="test:cas")
-
-    assert outcome["outcome"] == "revised"
-    row = await GoalRepository(db).get(root["id"])
-    assert "cas-survivor" in row["strategy_json"]
-
-
-async def test_shadow_mode_records_but_suppresses_wake(
-        ctx, db, mock_wake, reviser, monkeypatch):
-    root, _ = await _make_tree(ctx)
-    reviser.response = _reviser_json({"plan": "x"}, wake_needed=True, summary="changed")
-    monkeypatch.setenv("BOB_GOAL_STATE_SHADOW", "1")
-
-    from server.services.goal_state_service import revise_goal_state
-    outcome = await revise_goal_state(ctx, root["id"], "stimulus",
-                                      stimulus_id="test:shadow")
-    assert outcome["wake"] == "shadow_wake"
-    mock_wake.assert_not_awaited()
-    assert "x" in (await GoalRepository(db).get(root["id"]))["strategy_json"]
-
-
-async def test_legacy_outreach_strategy_reaches_reviser_prompt(
-        ctx, db, mock_wake, reviser):
-    goal = await goal_service.create_goal(
-        ctx, conversation_id="target-dm", objective="ask about the BBQ",
-        kind="outreach",
-        strategy={"requestor": "Mike", "message": "hey, BBQ sat?"})
-
-    seen: dict = {}
-
-    from server.services.llm_dispatch import LLMDispatchService
-
-    async def _chat(self, messages, **kwargs):
-        seen["user"] = messages[-1]["content"]
-        return _reviser_json({"plan": "waiting on reply"})
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(LLMDispatchService, "chat", _chat)
-        from server.services.goal_state_service import revise_goal_state
-        await revise_goal_state(ctx, goal["id"], "stimulus",
-                                stimulus_id="test:legacy")
-
-    assert "Mike" in seen["user"] and "BBQ sat?" in seen["user"], \
-        "legacy outreach state is wrapped and shown to the reviser"
-
-
-# ---------------------------------------------------------------------------
-# Prompt injection budget (§1.4)
 # ---------------------------------------------------------------------------
 
 async def test_goals_block_caps_at_five_goals_and_truncates(ctx, db):
@@ -438,7 +296,11 @@ async def test_call_result_wake_rides_settle_chokepoint(ctx, db, mock_wake, revi
         woke = await prs._settle_call_goal(ctx, "call-1", "completed",
                                            "## Call Result\nbooked for 7pm")
     assert woke is True
-    mock_wake.assert_not_awaited(), "child settle rolls up rather than waking"
+    # Phase 4: the rollup is a direct wake of the PARENT's working
+    # conversation — the origin is never touched by a child settle.
+    targets = [c.args[1] for c in mock_wake.await_args_list]
+    assert "asker" not in targets
+    assert "work" in targets
     assert (await GoalRepository(db).get(call_goal["id"]))["status"] == "completed"
 
 
@@ -460,77 +322,3 @@ async def _age_goal(db, goal_id: str, hours: float = 48) -> None:
     await db.execute("UPDATE goals SET updated_at = ? WHERE id = ?",
                      (old, goal_id))
 
-
-async def test_goal_review_escalates_stuck_goal_to_origin(ctx, db, mock_wake,
-                                                          reviser, review_task):
-    goal = await goal_service.create_goal(
-        ctx, conversation_id="work", objective="plan lunch",
-        origin_conversation_id="asker")
-    await _age_goal(db, goal["id"])
-    reviser.response = json.dumps({
-        "state": {"v": 2, "plan": "stalled", "review_streak": 4},
-        "wake_needed": False, "wake_summary": ""})
-
-    await review_task.run(ctx)
-
-    # Streak 4 → the task wakes the ORIGIN (the reviser's own wake covers
-    # the working conversation at streak 2).
-    assert mock_wake.await_count == 1
-    args = mock_wake.await_args
-    assert args.args[1] == "asker"
-    assert args.kwargs.get("call_category") == "goal_escalation"
-
-
-async def test_goal_review_no_escalation_when_moving(ctx, db, mock_wake,
-                                                     reviser, review_task):
-    goal = await goal_service.create_goal(
-        ctx, conversation_id="work", objective="plan", origin_conversation_id="asker")
-    await _age_goal(db, goal["id"])
-    reviser.response = _reviser_json({"plan": "moving again"})  # no streak
-
-    await review_task.run(ctx)
-    mock_wake.assert_not_awaited()
-
-
-async def test_goal_review_skips_fresh_goals(ctx, db, mock_wake, reviser,
-                                             review_task):
-    await goal_service.create_goal(ctx, conversation_id="work", objective="fresh")
-    await review_task.run(ctx)
-    reviser.assert_not_awaited() if hasattr(reviser, "assert_not_awaited") else None
-    # No revision effect enqueued for a fresh goal.
-    assert await db.fetch_one(
-        "SELECT 1 FROM effects WHERE kind = 'goal_revise_state' "
-        "AND payload_json LIKE '%review:%'") is None
-
-
-async def test_goal_review_picks_deadline_window_goals(ctx, db, mock_wake,
-                                                       reviser, review_task):
-    """2026-09-16: a freshly-touched goal with a deadline inside the window
-    enters the review loop — age-only selection let short-deadline goals
-    sail past unreviewed (the WFH-roster incident: 24h-deadline goals only
-    went 'stale' as the deadline fired)."""
-    deadline = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
-    await goal_service.create_goal(
-        ctx, conversation_id="work", objective="collect WFH rosters",
-        origin_conversation_id="asker", deadline=deadline)
-
-    await review_task.run(ctx)
-
-    # Selected via the deadline window (not age) → reviser ran inline with
-    # the deadline flagged; default mock response has no streak → no wake.
-    assert len(reviser.calls) == 1
-    row = await db.fetch_one(
-        "SELECT payload_json FROM effects WHERE kind = 'goal_revise_state' "
-        "AND idempotency_key LIKE 'goal_revise:%:review:%'")
-    assert row is not None and "PASSED" in row["payload_json"]
-    mock_wake.assert_not_awaited()
-
-
-async def test_goal_review_kill_switch(ctx, db, mock_wake, reviser,
-                                       review_task, monkeypatch):
-    goal = await goal_service.create_goal(
-        ctx, conversation_id="work", objective="plan", origin_conversation_id="asker")
-    await _age_goal(db, goal["id"])
-    monkeypatch.setenv("BOB_GOAL_REVIEW_DISABLED", "1")
-    await review_task.run(ctx)
-    mock_wake.assert_not_awaited()

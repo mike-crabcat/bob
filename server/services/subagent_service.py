@@ -105,21 +105,36 @@ class SubagentService(BaseService):
             persona=int(persona), model=model, contact_id=contact_id,
             modality=modality, now_iso=now)
 
-        # Bob3 Phase V: a subagent is a goal held on behalf of the parent
-        # conversation. Completion settles the goal and wakes the parent.
+        # Task registry (Phase 3, 2026-09-19): a subagent run is a promise —
+        # the parent conversation waits, the subagent completes, the settle
+        # effect wakes the parent with the result. Restart-safe by
+        # construction (the OOM-orphaned-Meshy class: completer death is a
+        # reconcilable task state, not a silent stall).
         try:
-            from server.services.goal_service import create_goal
-            await create_goal(
-                self.ctx,
-                conversation_id=session_key,
-                objective=task[:2000],
-                origin_conversation_id=parent_session_key,
-                kind="call" if agent_type == "openai_voice" else "subagent",
-                external_ref=subagent_id,
-                parent_goal_id=goal_parent_id,
-            )
+            from server.services.tasks import register_task, tasks_enabled
+            if tasks_enabled():
+                await register_task(
+                    self.ctx, waiter_session=parent_session_key,
+                    title=f"subagent {agent_type}: {task[:100]}",
+                    instruction=task[:2000],
+                    expected_completer=subagent_id,
+                    due_minutes=24 * 60,
+                    source_goal_id=goal_parent_id or None,
+                    extra_payload={"subagent_session": session_key},
+                )
+            else:
+                from server.services.goal_service import create_goal
+                await create_goal(
+                    self.ctx,
+                    conversation_id=session_key,
+                    objective=task[:2000],
+                    origin_conversation_id=parent_session_key,
+                    kind="call" if agent_type == "openai_voice" else "subagent",
+                    external_ref=subagent_id,
+                    parent_goal_id=goal_parent_id,
+                )
         except Exception:
-            logger.warning("failed to create goal for subagent %s", short_id, exc_info=True)
+            logger.warning("failed to create task/goal for subagent %s", short_id, exc_info=True)
 
         # openai_voice dispatches synchronously so we can return voice_url / call_sid
         # to the LLM in the tool result. No background task — the row stays in
@@ -451,6 +466,20 @@ class SubagentService(BaseService):
         except Exception:
             logger.warning("failed to cancel goal for killed subagent %s",
                            subagent_id[:8], exc_info=True)
+        # Task path (Phase 3): the promise settles too — parent hears
+        # "killed" instead of riding to the due backstop.
+        try:
+            from server.repositories.tasks import TaskRepository
+            from server.services.tasks import settle_task
+            pending = [t for t in await TaskRepository(self.db).pending_all()
+                       if t.get("expected_completer") == subagent_id]
+            for t in pending:
+                await settle_task(self.ctx, t["id"], to_status="cancelled",
+                                  result="subagent killed",
+                                  completed_by=f"subagent:{subagent_id[:8]}")
+        except Exception:
+            logger.warning("failed to cancel task for killed subagent %s",
+                           subagent_id[:8], exc_info=True)
         logger.info("Subagent %s killed", subagent_id[:8])
         return {"ok": True, "subagent_id": subagent_id, "status": "killed"}
 
@@ -488,8 +517,8 @@ class SubagentService(BaseService):
         short_id = subagent_id[:8]
         if row["agent_type"] == "script":
             content = (
-                f"[Script {short_id}] {result_text}\n\n"
-                f"This background script you started has finished. If it produced "
+                f"[bg process {short_id}] {result_text}\n\n"
+                f"This background process you started has finished. If it produced "
                 f"an artifact the user asked for (image, document, file), send it "
                 f"to them now with a short comment in your own voice. If it "
                 f"failed, tell the user plainly and decide whether to retry."
@@ -506,16 +535,35 @@ class SubagentService(BaseService):
         from server.services.wake_service import wake_conversation
 
         settled = False
+        # Task path (Phase 3): settle the promise; the effect wakes the
+        # parent with the provenance header. Falls through to legacy
+        # goal/direct-wake when no task exists.
         try:
-            goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
-            if goal and goal["status"] == "active":
-                settled = await settle_goal(
-                    self.ctx, goal["id"],
-                    status="failed" if failed else "completed",
-                    result=content,
-                )
+            from server.services.tasks import settle_task
+            from server.repositories.tasks import TaskRepository
+            pending = [t for t in await TaskRepository(self.db).pending_all()
+                       if t.get("expected_completer") == subagent_id]
+            if pending:
+                out = await settle_task(
+                    self.ctx, pending[0]["id"],
+                    to_status="failed" if failed else "completed",
+                    result=content if not failed else None,
+                    error=content if failed else None,
+                    completed_by=f"subagent:{short_id}")
+                settled = bool(out.get("ok"))
         except Exception:
-            logger.warning("failed to settle goal for subagent %s", short_id, exc_info=True)
+            logger.warning("failed to settle task for subagent %s", short_id, exc_info=True)
+        if not settled:
+            try:
+                goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
+                if goal and goal["status"] == "active":
+                    settled = await settle_goal(
+                        self.ctx, goal["id"],
+                        status="failed" if failed else "completed",
+                        result=content,
+                    )
+            except Exception:
+                logger.warning("failed to settle goal for subagent %s", short_id, exc_info=True)
 
         if not settled:
             try:
@@ -578,9 +626,11 @@ class SubagentService(BaseService):
         syntax_error = await bash_syntax_check(command)
         if syntax_error:
             raise RuntimeError(
-                f"script blocked by shell syntax: {syntax_error} — fix the "
-                "quoting (backslash does not escape apostrophes in single "
-                "quotes; use --prompt-file or a heredoc for prose)")
+                f"command blocked by shell syntax: {syntax_error} — run_bg_process "
+                "takes a shell COMMAND, not a prose brief (briefs belong "
+                "to create_subagent agent_type='claude'). Fix the "
+                "quoting: backslash does not escape apostrophes in single "
+                "quotes; use a heredoc or --prompt-file for prose")
 
         venv_dir = settings.harness.venv_dir.expanduser()
         logger.info("script subagent: %s", command)

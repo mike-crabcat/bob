@@ -7,12 +7,21 @@ from server.evals.registry import eval_case
 def _extract_tool_calls(messages: list) -> list[dict]:
     calls = []
     for msg in messages:
+        # Chat-completions shape…
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 calls.append({
                     "name": tc["function"]["name"],
                     "arguments": tc["function"]["arguments"],
                 })
+        # …and Responses-API items (what the service actually appends — the
+        # chat-completions branch never matched, so tool_call_made failed
+        # even when calls fired; Phase 0 eval-harness fix 2026-09-19).
+        if msg.get("type") == "function_call":
+            calls.append({
+                "name": msg.get("name", ""),
+                "arguments": msg.get("arguments", ""),
+            })
     return calls
 
 
@@ -65,6 +74,10 @@ async def tool_calling_update_agenda(ctx):
         messages, tools,
         call_category="eval",
         session_key=session_key,
+        # GLM narrates tool use on minimal prompts instead of calling (the
+        # send-tool-skip quirk's general shape) — force the first round so
+        # this case verifies the loop itself, not model willingness.
+        force_first_tool_choice=True,
     )
 
     updated_agenda = await agenda_svc.get_agenda(session_key) or ""

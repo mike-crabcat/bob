@@ -441,8 +441,8 @@ async def test_post_detach_send_delivers_attributed(ctx, bb):
     spec.flight["detach_task"] = asyncio.current_task()
     out = await send_tool.handler("here is the answer you asked for")
 
-    assert "attributed to background task" in out, out
-    assert "detached background task" in out, "the regime note must ride the response"
+    assert "attributed to background turn" in out, out
+    assert "detached background turn" in out, "the regime note must ride the response"
     after = await ctx.db.fetch_one("SELECT COUNT(*) AS n FROM effects")
     assert after["n"] == before["n"] + 1, "the flight's send must actually deliver"
     assert spec.flight["sent"] is True
@@ -481,7 +481,7 @@ async def test_reflown_spec_keeps_the_live_voice(ctx, bb):
 
         out = await send_tool.handler("live voice reply")
 
-        assert "attributed to background task" not in out, out
+        assert "attributed to background turn" not in out, out
         assert spec.flight["sent"] is False, "must not mark the flight as spoken"
         row = await ctx.db.fetch_one(
             "SELECT COUNT(*) AS n FROM messages "
@@ -720,7 +720,7 @@ async def test_recovery_settles_orphaned_goals(ctx, bb):
     row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
     assert row["status"] == "failed"
     msgs = await _messages(ctx)
-    assert any("lost this background task" in m["content"] for m in msgs)
+    assert any("lost this background turn" in m["content"] for m in msgs)
     assert any(m["provenance"] == "task_relay" for m in msgs), (
         "restart-loss relays must be speak-expected too")
 

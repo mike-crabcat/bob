@@ -795,21 +795,6 @@ CREATE TABLE IF NOT EXISTS claim_router_watermark (
     event_id TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS outreach_probe_log (
-    id TEXT PRIMARY KEY,
-    goal_id TEXT NOT NULL,
-    message_id TEXT NOT NULL,           -- messages.id of the inbound message
-    verdict TEXT NOT NULL,              -- satisfied|not_satisfied|error
-    note TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    UNIQUE(goal_id, message_id)
-);
-CREATE INDEX IF NOT EXISTS idx_outreach_probe_log_goal ON outreach_probe_log (goal_id, created_at);
-CREATE TABLE IF NOT EXISTS outreach_detector_watermark (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    event_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS "approvals" (
     id TEXT PRIMARY KEY,
     approval_type TEXT NOT NULL CHECK(approval_type IN ('project_plan', 'strategy_refinement', 'task_creation', 'follow_up_tasks', 'purchase', 'group_send', 'conversation_steer')),

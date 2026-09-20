@@ -59,7 +59,7 @@ async def test_script_subagent_runs_and_wakes_parent(ctx, monkeypatch, tmp_path)
     conv, content = woken[0]
     assert conv == "agent:main:whatsapp:group:test"
     assert "hello-from-script" in content
-    assert "[Script" in content or "Goal completed" in content
+    assert "[bg process" in content or "Goal completed" in content
 
 
 @pytest.mark.asyncio

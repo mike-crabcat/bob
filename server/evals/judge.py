@@ -179,6 +179,19 @@ class LLMJudge:
         if input_messages:
             formatted = []
             for msg in input_messages:
+                # Responses-API items (what chat_with_tools actually appends
+                # to the message list — without this branch the judge never
+                # saw tool calls and scored completeness 0 for "did not call
+                # the tool" on calls that fired; Phase 0 fix 2026-09-19).
+                if msg.get("type") == "function_call":
+                    formatted.append(
+                        f"[assistant called tool]: {msg.get('name', '?')}"
+                        f"({str(msg.get('arguments', ''))[:200]})")
+                    continue
+                if msg.get("type") == "function_call_output":
+                    formatted.append(
+                        f"[tool result]: {str(msg.get('output', ''))[:200]}")
+                    continue
                 role = msg.get("role", "unknown")
                 content = msg.get("content", "")
                 tool_calls = msg.get("tool_calls")
@@ -202,6 +215,10 @@ class LLMJudge:
             f"EVAL CASE: {case.description}\n"
             f"{input_section}\n"
             f"RESPONSE TO EVALUATE:\n{response}\n\n"
+            f"EVIDENCE RULE: lines marked [assistant called tool] in INPUT MESSAGES "
+            f"are actions the assistant actually took (they are recorded tool "
+            f"calls, not claims) — count them as demonstrated behavior even if "
+            f"the response text doesn't restate them.\n"
             f"DIMENSIONS:\n" + "\n".join(dimensions) + extra +
             "\n\nRespond with valid JSON only:\n"
             '{"correctness": 0.0, "relevance": 0.0, "completeness": 0.0, '

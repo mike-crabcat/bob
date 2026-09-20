@@ -1021,6 +1021,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             human_initiated=True,
             sender_name=sender_name,
             text_preview=text[:100],
+            inbound_text=text,
         )
 
         async def _run_dispatch() -> str:
@@ -1041,7 +1042,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                     session_key=session_key, chat_id=chat_id,
                     chat_kind=chat_kind, contact_id=contact_id,
                     is_trusted=is_trusted, human_initiated=True,
-                    sender_name=sender_name, text_preview=text[:100])
+                    sender_name=sender_name, text_preview=text[:100],
+                    inbound_text=text)
                 spec_to_run.sent_texts.extend(dispatch_spec.sent_texts)
                 logger.info(
                     "dispatch: re-flying detached spec for %s — fresh spec "
@@ -1103,6 +1105,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         sender_name: str = "",
         text_preview: str = "",
         extra_system_note: str = "",
+        inbound_text: str | None = None,
     ) -> "DispatchSpec":
         """Assemble the full inbound-WhatsApp DispatchSpec (system prompt,
         tools, send tool, quota handling). Shared by the live inbound path
@@ -1149,13 +1152,29 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         # The turn-start clock is appended by build_chat_messages (2026-09-01
         # fan-out to every channel) — date-relative reasoning ("tomorrow",
         # "this week") and local-vs-UTC arithmetic need a grounded now.
+        # Record discipline (2026-09-18 Freo-tip incident): rides wherever
+        # the history-search tool rides — assert nothing about the past
+        # unsearched, including "I have no record of that".
+        from server.services.history_tools import (
+            HISTORY_DISCIPLINE_NOTE, past_reference_note,
+        )
+        jit_note = past_reference_note(
+            inbound_text if inbound_text is not None else text_preview)
+        # Task registry completer-side visibility (docs/task-registry-plan.md
+        # D6): pending tasks this conversation owes ride in every dispatch —
+        # the outreach-goal trick generalized (the reply hours later still
+        # sees the promise).
+        from server.services.tasks import tasks_enabled, tasks_block
+        _tasks_block = (await tasks_block(session_key, self.db)
+                        if tasks_enabled() else "")
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, dream_plans_prompt, goals_prompt) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, dream_plans_prompt, goals_prompt, HISTORY_DISCIPLINE_NOTE, _tasks_block) if p
         )
         # Channel note appended for special wake shapes (reactions): rides
         # after the context blocks so it reads as current-turn guidance.
-        if extra_system_note:
-            system_content = f"{system_content}\n\n{extra_system_note}"
+        if extra_system_note or jit_note:
+            system_content = "\n\n".join(
+                p for p in (system_content, extra_system_note, jit_note) if p)
 
         from server.services.llm_dispatch import LLMDispatchService
         from server.services.tools import Tool
@@ -1235,6 +1254,16 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             # Bob Events §3.4: the payment gate's human side.
             from server.services.approval_tools import make_approval_tools
             tools.extend(make_approval_tools(self.ctx, session_key))
+
+        # History search lives here already via build_common_tools
+        # (search_session_messages — consolidated 2026-09-18: one tool,
+        # one name; the record-discipline NOTE in the system prompt is the
+        # other half of the pair).
+
+        # Task registry tools (docs/task-registry-plan.md) on every chat path.
+        if tasks_enabled():
+            from server.services.tasks import make_task_tools
+            tools.extend(make_task_tools(self.ctx, session_key))
 
         # Voice outreach: attach whenever the requester is a trusted contact, in any
         # chat context (DM or group). Untrusted users don't get the tool — it costs
@@ -1328,8 +1357,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                     await self._record_bg_send(session_key, bg, delivered)
                     flight["texts"] = flight.get("texts", []) + [delivered]
                     flight["sent"] = True
-                    return (f"Media sent, attributed to background task "
-                            f"{bg[:8]} — you are a detached background task; "
+                    return (f"Media sent, attributed to background turn "
+                            f"{bg[:8]} — you are a detached background turn; "
                             "keep working and finish, don't treat this as "
                             f"conversation. (request_id={result.get('external_result_id')})")
                 return f"Media sent (request_id={result.get('external_result_id')})"
@@ -1345,8 +1374,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 await self._record_bg_send(session_key, bg, text)
                 flight["texts"] = flight.get("texts", []) + [text]
                 flight["sent"] = True
-                return (f"Message sent, attributed to background task "
-                        f"{bg[:8]} — you are a detached background task; "
+                return (f"Message sent, attributed to background turn "
+                        f"{bg[:8]} — you are a detached background turn; "
                         "keep working and finish, don't treat this as "
                         f"conversation. (request_id={result.get('external_result_id')})")
             return f"Message sent (request_id={result.get('external_result_id')})"
