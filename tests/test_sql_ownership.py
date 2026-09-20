@@ -44,6 +44,7 @@ OWNERS: dict[str, list[str]] = {
     "goal_transitions": ["repositories/goals.py"],
     "goal_conversations": ["repositories/goals.py"],
     "tasks": ["repositories/tasks.py"],
+    "bg_jobs": ["repositories/bg_jobs.py"],
     "claim_router_watermark": ["services/memory/claim_router.py"],
     "approvals": ["repositories/approvals.py"],
     "wakeups": ["repositories/wakeups.py"],

@@ -60,17 +60,20 @@ async def test_untrusted_create_subagent_rejects_non_script(ctx):
         svc_cls.assert_not_called()
 
 
-async def test_untrusted_create_subagent_allows_script(ctx):
+async def test_untrusted_create_subagent_refused_for_every_type(ctx):
+    """Since the script type retired (2026-09-20), untrusted sessions get NO
+    create_subagent path at all — run_bg_process is their command surface."""
     tools = _tools(ctx, GROUP_KEY, is_trusted=False)
+    assert "run_bg_process" in tools
     with patch("server.services.subagent_service.SubagentService") as svc_cls:
         svc_cls.return_value.create_subagent = AsyncMock(
             return_value={"ok": True, "subagent_id": "sa-1"})
-        out = json.loads(await tools["create_subagent"].handler(
-            task="python skills/openai-image/openai_image.py --prompt x",
-            agent_type=" Script "))
-    assert out["ok"]
-    call = svc_cls.return_value.create_subagent.await_args
-    assert call.kwargs["agent_type"] == " Script "
+        for agent_type in ("claude", "local", "script", " Script ", "phone-call"):
+            out = json.loads(await tools["create_subagent"].handler(
+                task="do a thing", agent_type=agent_type))
+            assert not out["ok"], agent_type
+            assert "untrusted" in out["error"].lower()
+    svc_cls.return_value.create_subagent.assert_not_awaited()
 
 
 async def test_check_and_kill_scoped_to_parent_session(ctx):

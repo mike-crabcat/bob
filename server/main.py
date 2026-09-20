@@ -249,18 +249,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     pass
 
         wakeup_pump_worker = asyncio.create_task(_wakeup_pump_loop())
+
+        # bg jobs: one-time import of the legacy .bg/processes.json registry,
+        # then the exit watcher — records process exits and delivers the
+        # completion wakes owed by wake-flagged jobs (BOB_BG_WAKE_ENABLED=off
+        # disables the loop; jobs still run and go terminal in the table).
+        bg_wake_worker = None
+        try:
+            from server.services.process_tools import bg_wake_loop, import_legacy_registry
+            await import_legacy_registry(app_ctx)
+            if resolved_settings.harness.bg_wake_enabled:
+                bg_wake_worker = asyncio.create_task(bg_wake_loop(app_ctx, stop_event))
+        except Exception:
+            logger.exception("bg wake watcher failed to start")
+
         try:
             yield
         finally:
             stop_event.set()
 
-            heartbeat_worker.cancel()
-            wakeup_pump_worker.cancel()
-            for worker in (heartbeat_worker, wakeup_pump_worker):
-                try:
-                    await worker
-                except asyncio.CancelledError:
-                    pass
+            workers = [heartbeat_worker, wakeup_pump_worker, bg_wake_worker]
+            for worker in workers:
+                if worker is not None:
+                    worker.cancel()
+            for worker in workers:
+                if worker is not None:
+                    try:
+                        await worker
+                    except asyncio.CancelledError:
+                        pass
 
             if wa_bridge_service is not None:
                 await wa_bridge_service.stop()

@@ -61,7 +61,7 @@ def build_common_tools(
 
     # Core tools — available in every session
     _extend(make_workspace_tools(ctx, session_key=session_key))
-    _extend(make_process_tools(ctx))
+    _extend(make_process_tools(ctx, session_key=session_key))
     _extend(make_memory_tools(ctx, session_key=session_key))
     _extend(make_docs_tools(ctx, session_key=session_key))
     _extend(make_changelog_tools(ctx, session_key=session_key))

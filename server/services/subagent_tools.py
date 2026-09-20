@@ -1,7 +1,9 @@
 """Subagent tools — let Bob's LLM manage async subagents, plus
 run_bg_process: supervised background shell commands (process
 supervision deliberately NOT modelled as a subagent — 2026-09-20, after
-four prose-briefs-into-bash spawn failures came from the confusion)."""
+four prose-briefs-into-bash spawn failures came from the confusion; the
+script agent_type was retired the same day and its engine folded into the
+bg machinery: one process mechanism, one advertised surface)."""
 
 from __future__ import annotations
 
@@ -23,11 +25,11 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     Trusted sessions get the full toolbox. Untrusted sessions (group chats,
     untrusted DM contacts) get run_bg_process — supervised background shell
     commands in the same workspace sandbox as the bash tool the session
-    already has — while LLM-loop (claude/local) and phone (openai_voice)
-    subagents spend tokens or place real calls, so they stay trusted-only
-    (create_subagent refuses non-script types when untrusted; the legacy
-    script type is still accepted for in-flight prompts), and
-    message_subagent (which drives further LLM runs) is withheld entirely.
+    already has (with a mandatory RuntimeMaxSec TTL) — while LLM-loop
+    (claude/local) and phone (openai_voice) subagents spend tokens or place
+    real calls, so create_subagent refuses every agent type when untrusted,
+    and message_subagent (which drives further LLM runs) is withheld
+    entirely.
     """
 
     @tool
@@ -81,18 +83,18 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         Use check_subagent to poll for results and message_subagent for follow-up."""
         from server.services.subagent_service import SubagentService
 
-        if not is_trusted and (agent_type or "").strip().lower() != "script":
+        if not is_trusted:
             # Fail before the service's alias normalisation can coerce an
             # invented type: untrusted input must never reach the LLM-loop
-            # or phone-call paths.
+            # or phone-call paths. Background commands are the one thing
+            # untrusted sessions keep — via run_bg_process, TTL-capped.
             return json.dumps({
                 "ok": False,
                 "error": (
-                    "This conversation is untrusted: only "
-                    "agent_type='script' subagents are allowed here "
-                    "(async bash commands in the workspace sandbox, e.g. "
-                    "image generation). Other agent types require a "
-                    "trusted contact."
+                    "This conversation is untrusted: subagents are not "
+                    "available here. For a background command use "
+                    "run_bg_process(command=...) — same workspace sandbox "
+                    "as your bash tool (with a run-time cap)."
                 ),
             })
 
@@ -110,27 +112,27 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         return json.dumps(result)
 
     @tool
-    async def run_bg_process(command: str, goal_parent_id: str = "") -> str:
+    async def run_bg_process(command: str) -> str:
         """Run a shell COMMAND as a supervised background process and return
         its handle immediately. NOT a subagent — no model, no judgment, no
         briefs: `command` is literal bash in the workspace sandbox (same env
-        as your bash tool) that outlives this turn with NO wall-clock cap.
-        THE tool for any script expected to take more than ~10 seconds —
-        image generation, browser automation, PDF rendering, indexing, data
-        imports. When the process exits you are woken automatically with its
-        output; send any artifact to the user then. Flow: (1) send the user a
-        short ack FIRST ("On it — image coming shortly"), (2) run_bg_process(
-        command="python skills/openai-image/openai_image.py --prompt '...' \
---output /home/bob/workspace/generated-images/car.png"), (3) END YOUR TURN —
-        do NOT poll. If you find yourself writing a PROSE BRIEF here, stop:
-        you want create_subagent(agent_type='claude'). Never run slow
-        commands with the bash tool — it freezes the whole conversation."""
-        from server.services.subagent_service import SubagentService
+        as your bash tool) that outlives this turn with NO wall-clock cap
+        and SURVIVES bob-server restarts. THE tool for any script expected
+        to take more than ~10 seconds — image generation, browser
+        automation, PDF rendering, indexing, data imports, long downloads.
+        When the process exits you are woken automatically with its exit
+        code and log tail; send any artifact to the user then. Flow:
+        (1) send the user a short ack FIRST ("On it — image coming shortly"),
+        (2) run_bg_process(command="python skills/openai-image/openai_image.py \
+--prompt '...' --output /home/bob/workspace/generated-images/car.png"),
+        (3) END YOUR TURN — do NOT poll (bg_logs <name> if you must peek).
+        If you find yourself writing a PROSE BRIEF here, stop: you want
+        create_subagent(agent_type='claude'). Never run slow commands with
+        the bash tool — it freezes the whole conversation."""
+        from server.services.process_tools import start_bg_job
 
-        svc = SubagentService(ctx)
-        result = await svc.create_subagent(
-            command, session_key, agent_type="script",
-            goal_parent_id=goal_parent_id or None)
+        result = await start_bg_job(
+            ctx, session_key, command, is_trusted=is_trusted)
         return json.dumps(result)
 
     @tool

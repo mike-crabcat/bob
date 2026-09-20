@@ -74,6 +74,22 @@ class SubagentService(BaseService):
         modality: str = "phone",
         goal_parent_id: str | None = None,
     ) -> dict[str, Any]:
+        # The script type is retired (2026-09-20): its executor moved to the
+        # bg machinery — run_bg_process is the same contract with no 900 s
+        # cap and restart survival. Hard error, not a silent alias: the
+        # alias is what let the retired spelling keep getting narrated as a
+        # distinct mechanism.
+        if (agent_type or "").strip().lower() == "script":
+            return {
+                "ok": False,
+                "error": (
+                    "agent_type='script' is retired — use run_bg_process("
+                    "command=...) for background commands: same wake-on-"
+                    "completion contract, no wall-clock cap, and it survives "
+                    "bob restarts."
+                ),
+            }
+
         # Normalise voice-agent aliases the parent LLM invents. Anything in the
         # voice vocabulary routes to the openai_voice path; the stored values
         # are the canonical ones so dashboards/logs are consistent. As a stronger
@@ -85,7 +101,7 @@ class SubagentService(BaseService):
 
         requested_modality = modality
         normalised_type = _normalise_voice_agent_type(agent_type)
-        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local", "script")):
+        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local")):
             agent_type = "openai_voice"
             # Unknown modality vocabulary defaults to phone — never guess toward
             # a modality the caller didn't clearly pick... except that bare
@@ -244,12 +260,6 @@ class SubagentService(BaseService):
                     persona=persona,
                     model=model,
                 )
-            elif agent_type == "script":
-                from server.services.session_service import SessionService
-                await SessionService(self.ctx).add_message(
-                    session_key, "user", task, channel="subagent",
-                )
-                result = await self._run_script(task)
             else:
                 workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
                 result = await self._run_claude(
@@ -277,7 +287,7 @@ class SubagentService(BaseService):
         # (user message already stored before execution for local, or stored here for claude)
         from server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
-        if agent_type not in ("local", "script"):
+        if agent_type != "local":
             await session_svc.add_message(session_key, "user", task, channel="subagent")
         await session_svc.add_message(session_key, "assistant", result_text, channel="subagent")
 
@@ -515,20 +525,11 @@ class SubagentService(BaseService):
         parent_session_key = row["parent_session_key"]
 
         short_id = subagent_id[:8]
-        if row["agent_type"] == "script":
-            content = (
-                f"[bg process {short_id}] {result_text}\n\n"
-                f"This background process you started has finished. If it produced "
-                f"an artifact the user asked for (image, document, file), send it "
-                f"to them now with a short comment in your own voice. If it "
-                f"failed, tell the user plainly and decide whether to retry."
-            )
-        else:
-            content = (
-                f"[Subagent {short_id}] {result_text}\n\n"
-                f"Relay this result to the user with a summary. "
-                f"You can also use message_subagent to reply or kill_subagent to terminate."
-            )
+        content = (
+            f"[Subagent {short_id}] {result_text}\n\n"
+            f"Relay this result to the user with a summary. "
+            f"You can also use message_subagent to reply or kill_subagent to terminate."
+        )
 
         from server.repositories.goals import GoalRepository
         from server.services.goal_service import settle_goal
@@ -599,65 +600,6 @@ class SubagentService(BaseService):
                 "subagent_id": subagent_id,
                 "status": status,
             })
-
-    async def _run_script(self, command: str) -> dict[str, Any]:
-        """Run a shell command in the workspace as a background job (Bob3:
-        async skill execution). Same sandbox and skill env as the bash tool;
-        the parent conversation is woken with the output when it finishes."""
-        from server.services.skill_env import build_skill_env
-        from server.services.workspace_tools import _check_command_safety
-
-        settings = self._get_settings()
-        workspace = settings.harness.workspace_dir.expanduser().resolve()
-        violation = _check_command_safety(
-            command,
-            db_path=settings.db_path,
-            data_dir=settings.data_dir,
-            config_dir=settings.config_dir,
-        )
-        if violation:
-            raise RuntimeError(f"script blocked by sandbox: {violation}")
-
-        # Quoting preflight (2026-09-05 crayon-portrait goal): a command the
-        # shell can't even parse used to surface only as a failed background
-        # goal minutes later. Reject up front — the parent wake then carries
-        # the syntax error, and the retry can fix the quoting.
-        from server.services.workspace_tools import bash_syntax_check
-        syntax_error = await bash_syntax_check(command)
-        if syntax_error:
-            raise RuntimeError(
-                f"command blocked by shell syntax: {syntax_error} — run_bg_process "
-                "takes a shell COMMAND, not a prose brief (briefs belong "
-                "to create_subagent agent_type='claude'). Fix the "
-                "quoting: backslash does not escape apostrophes in single "
-                "quotes; use a heredoc or --prompt-file for prose")
-
-        venv_dir = settings.harness.venv_dir.expanduser()
-        logger.info("script subagent: %s", command)
-        proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", command,
-            cwd=str(workspace),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError("script timed out after 900s")
-
-        out = stdout.decode(errors="replace").strip()
-        err = stderr.decode(errors="replace").strip()
-        parts = [f"exit_code={proc.returncode}"]
-        if out:
-            parts.append(f"stdout:\n{out[-4000:]}")
-        if err:
-            parts.append(f"stderr:\n{err[-2000:]}")
-        result_text = "\n".join(parts)
-        if proc.returncode != 0:
-            raise RuntimeError(f"script failed: {result_text}")
-        return {"result": result_text, "cost_usd": 0.0, "session_id": ""}
 
     async def _run_local(
         self,
