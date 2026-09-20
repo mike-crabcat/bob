@@ -10,9 +10,18 @@ app = typer.Typer(help="MCP tool servers: global or per-conversation")
 _BASE = "/dashboard/api/mcp"
 
 
+def _mcp_api(method: str, path: str, data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """_api_call wraps every response in {"data": ...}; unwrap it so the
+    documented endpoint shapes ({"servers": ...}, {"server": ...},
+    {"error": ...}) reach the command bodies — including error keys, which
+    the envelope otherwise hides from the "error" in result checks."""
+    result = _api_call(method, path, data)
+    return result.get("data", result)
+
+
 def _resolve_server_id(server: str) -> str:
     """Accept a server id or name."""
-    servers = _api_call("GET", f"{_BASE}/servers")["servers"]
+    servers = _mcp_api("GET", f"{_BASE}/servers")["servers"]
     for row in servers:
         if row["id"] == server or row["name"] == server:
             return row["id"]
@@ -23,7 +32,7 @@ def _resolve_server_id(server: str) -> str:
 @app.command("list")
 def list_servers() -> None:
     """List servers with cache status."""
-    result = _api_call("GET", f"{_BASE}/servers")
+    result = _mcp_api("GET", f"{_BASE}/servers")
     if not result["servers"]:
         typer.echo("No MCP servers registered.")
         return
@@ -72,7 +81,7 @@ def add_server(
         body["headers"] = dict(h.split(":", 1) for h in header)
     if timeout is not None:
         body["timeout_seconds"] = timeout
-    result = _api_call("POST", f"{_BASE}/servers", body)
+    result = _mcp_api("POST", f"{_BASE}/servers", body)
     if "error" in result:
         typer.echo(f"Error: {result['error']}", err=True)
         raise typer.Exit(code=1)
@@ -101,7 +110,7 @@ def update_server(
     if not body:
         typer.echo("Nothing to update.", err=True)
         raise typer.Exit(code=1)
-    result = _api_call("PUT", f"{_BASE}/servers/{server_id}", body)
+    result = _mcp_api("PUT", f"{_BASE}/servers/{server_id}", body)
     if "error" in result:
         typer.echo(f"Error: {result['error']}", err=True)
         raise typer.Exit(code=1)
@@ -112,7 +121,7 @@ def update_server(
 def remove_server(server: str) -> None:
     """Delete a server and its conversation attachments."""
     server_id = _resolve_server_id(server)
-    result = _api_call("DELETE", f"{_BASE}/servers/{server_id}")
+    result = _mcp_api("DELETE", f"{_BASE}/servers/{server_id}")
     if "error" in result:
         typer.echo(f"Error: {result['error']}", err=True)
         raise typer.Exit(code=1)
@@ -123,7 +132,7 @@ def remove_server(server: str) -> None:
 def enable_server(server: str, enabled: bool = typer.Option(True, "--enabled/--disabled")) -> None:
     """Toggle a server without deleting it."""
     server_id = _resolve_server_id(server)
-    _api_call("POST", f"{_BASE}/servers/{server_id}/enabled",
+    _mcp_api("POST", f"{_BASE}/servers/{server_id}/enabled",
               {"enabled": enabled})
     typer.echo("Enabled." if enabled else "Disabled.")
 
@@ -132,7 +141,7 @@ def enable_server(server: str, enabled: bool = typer.Option(True, "--enabled/--d
 def test_server(server: str) -> None:
     """Fresh-connection health check + tool listing."""
     server_id = _resolve_server_id(server)
-    result = _api_call("POST", f"{_BASE}/servers/{server_id}/test")
+    result = _mcp_api("POST", f"{_BASE}/servers/{server_id}/test")
     if result.get("ok"):
         typer.echo(f"OK — {len(result['tools'])} tools:")
         for name in result["tools"]:
@@ -149,7 +158,7 @@ def attach(
 ) -> None:
     """Attach servers to a conversation (replaces current attachments)."""
     ids = [_resolve_server_id(s) for s in server]
-    result = _api_call(
+    result = _mcp_api(
         "PUT", f"/dashboard/api/conversations/{conversation}/mcp",
         {"server_ids": ids})
     if "error" in result:
@@ -161,7 +170,7 @@ def attach(
 @app.command("detach")
 def detach(conversation: str = typer.Option(..., "--from")) -> None:
     """Remove all MCP attachments from a conversation."""
-    result = _api_call(
+    result = _mcp_api(
         "PUT", f"/dashboard/api/conversations/{conversation}/mcp",
         {"server_ids": []})
     if "error" in result:
@@ -174,7 +183,7 @@ def detach(conversation: str = typer.Option(..., "--from")) -> None:
 def tools(server: str) -> None:
     """List the tool names a server currently exposes (from cache)."""
     server_id = _resolve_server_id(server)
-    result = _api_call("GET", f"{_BASE}/servers/{server_id}")
+    result = _mcp_api("GET", f"{_BASE}/servers/{server_id}")
     row = result["server"]
     if row.get("cache_error"):
         typer.echo(f"Cache error: {row['cache_error']}", err=True)
