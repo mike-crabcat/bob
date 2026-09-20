@@ -250,14 +250,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         wakeup_pump_worker = asyncio.create_task(_wakeup_pump_loop())
 
-        # bg jobs: one-time import of the legacy .bg/processes.json registry,
-        # then the exit watcher — records process exits and delivers the
+        # bg jobs: the exit watcher — records process exits and delivers the
         # completion wakes owed by wake-flagged jobs (BOB_BG_WAKE_ENABLED=off
         # disables the loop; jobs still run and go terminal in the table).
+        # The one-time .bg/processes.json import was deliberately NOT wired
+        # to boot: lifespan runs under test settings too, and boot-magic
+        # here archived the real registry from a test context (2026-09-20).
+        # It ran as a one-off against the production DB instead.
         bg_wake_worker = None
         try:
-            from server.services.process_tools import bg_wake_loop, import_legacy_registry
-            await import_legacy_registry(app_ctx)
+            from server.services.process_tools import bg_wake_loop
             if resolved_settings.harness.bg_wake_enabled:
                 bg_wake_worker = asyncio.create_task(bg_wake_loop(app_ctx, stop_event))
         except Exception:
