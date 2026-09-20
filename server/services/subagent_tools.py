@@ -126,6 +126,9 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         (2) run_bg_process(command="python skills/openai-image/openai_image.py \
 --prompt '...' --output /home/bob/workspace/generated-images/car.png"),
         (3) END YOUR TURN — do NOT poll (bg_logs <name> if you must peek).
+        stdout/stderr are captured to the job log automatically and ride the
+        completion wake — do NOT redirect output inside the command; write
+        artifacts to files via the script's own --output flags instead.
         If you find yourself writing a PROSE BRIEF here, stop: you want
         create_subagent(agent_type='claude'). Never run slow commands with
         the bash tool — it freezes the whole conversation."""

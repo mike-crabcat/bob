@@ -69,8 +69,9 @@ def load_skills_index(workspace_dir: Path) -> str:
         "(image generation, browser automation, PDF/video rendering), do NOT run it "
         "with the bash tool — that blocks this whole conversation. Instead: send the "
         "user a short ack first, then run_bg_process(command='<the exact bash "
-        "command>') and end your turn. You'll be woken with the output when "
-        "it finishes; send the artifact then.\n"
+        "command>') and end your turn. Output is captured to the job log "
+        "automatically — don't redirect inside the command. You'll be woken with "
+        "the output when it finishes; send the artifact then.\n"
     )
     for skill_name in sorted(mtimes):
         md = skills_dir / skill_name / "skill.md"

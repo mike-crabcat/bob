@@ -45,7 +45,7 @@ Image generation takes 30–90 seconds. NEVER run this script with the `bash`
 tool — it blocks the whole conversation. Instead:
 
 1. Send the user a short ack first ("On it — image coming shortly").
-2. `create_subagent(task="python skills/openai-image/openai_image.py --prompt '...' --output /home/bob/workspace/generated-images/<name>.png --size 1024x1024", agent_type='script')`
+2. `run_bg_process(command="python skills/openai-image/openai_image.py --prompt '...' --output /home/bob/workspace/generated-images/<name>.png --size 1024x1024")`
 3. End your turn. You will be woken automatically when it finishes — send the
    generated image to the user then, with a short comment.
 
@@ -144,3 +144,8 @@ Short apostrophe-free prompts may still use `--prompt '…'`.
 ## Notes
 
 The OpenAI Image API supports edits with one or more image inputs. Masked edits are supported; with multiple input images, the mask applies to the first image.
+
+## Gotchas (from memory, 2026-09-14)
+
+- Prompts containing apostrophes must be written to a file and passed via --prompt-file — inline single-quoted prompts die on shell quoting.
+- Image-edits that fully cover a child's face in fur/animal features can trip output moderation — rephrase the prompt to be less transformative.

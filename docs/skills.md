@@ -251,6 +251,12 @@ Every `bash` call from `workspace_tools.py` runs `bash -c <command>` with:
 - **sandbox guardrails**: `_check_command_safety()` screens every command with layered regex checks — direct database clients (`sqlite3`, `psql`, …), references to the bob DB file or `BOB_DB_PATH`, privilege escalation (`sudo`/`su`/…), the configured DB/data/config directories, sensitive system paths (`/etc`, `~/.ssh`, `.env`, …), and `..` path traversal. Blocked commands return a `BLOCKED: …` error instead of executing. The system prompt carries matching language.
 - **limits**: 900-second timeout; output above 30,000 characters is truncated with a pointer to `head`/`tail`/`sed -n`/`grep` for paging. Non-zero exit codes return `Error (exit code N):` followed by stderr (or stdout).
 
+### Slow scripts → `run_bg_process`
+
+Anything expected to take more than ~10 seconds (image/video generation, browser runs, indexing, big downloads) must not run through `bash` — it blocks the whole conversation. The flow is: short ack to the user, `run_bg_process(command=...)`, END TURN; the conversation is woken with the exit code and log tail when the job exits. No wall-clock cap, survives bob restarts (own systemd unit).
+
+**Output handling — do not redirect inside the command.** The job's stdout+stderr are captured automatically to `.bg/logs/<job-<id>.log`, and that file is what the completion wake carries and what `bg_logs <name>` reads. A `> somewhere.log 2>&1` inside the command sends the detail to a place the wake never sees — the job finishes "silently" with an empty log tail (bit a real corpus job on 2026-09-20). Write *artifacts* to files via the script's own flags (`--output path.png`); let ordinary progress output flow to the captured log.
+
 ---
 
 ## Component Reference
