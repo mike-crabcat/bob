@@ -33,9 +33,10 @@ def ws(ctx, monkeypatch, tmp_path):
     calls: list[dict] = []
 
     async def fake_spawn(inner_ctx, name, command, log, *, collect=True,
-                         ttl_seconds=0):
+                         ttl_seconds=0, remain_after_exit=False):
         calls.append({"name": name, "command": command, "collect": collect,
-                      "ttl_seconds": ttl_seconds})
+                      "ttl_seconds": ttl_seconds,
+                      "remain_after_exit": remain_after_exit})
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("fake job output\n")
         return os.getpid()
@@ -128,21 +129,23 @@ async def test_sandbox_blocks_before_row(ctx, ws):
 # ------------------------------------------------------------------- watcher
 
 
+def _state_fake(props: dict):
+    async def fake(unit):
+        return props
+    return fake
+
+
 @pytest.mark.asyncio
 async def test_exit_wakes_parent_with_result(ctx, ws, monkeypatch):
     tmp, calls = ws
     result = await start_bg_job(ctx, SESSION, "bash -c 'exit 0'")
-    repo = BgJobsRepository(ctx.db)
     job_id = result["job_id"]
 
-    async def fake_alive(entry):
-        return False
-
-    async def fake_exit_state(unit):
-        return ("exited", "success", 0)
-
-    monkeypatch.setattr(process_tools, "_entry_alive", fake_alive)
-    monkeypatch.setattr(process_tools, "_unit_exit_state", fake_exit_state)
+    # RemainAfterExit parks a finished job in active(exited)
+    monkeypatch.setattr(process_tools, "_unit_state", _state_fake({
+        "LoadState": "loaded", "ActiveState": "active", "SubState": "exited",
+        "Result": "success", "ExecMainStatus": "0",
+    }))
 
     woken: list[tuple[str, str]] = []
 
@@ -165,19 +168,28 @@ async def test_exit_wakes_parent_with_result(ctx, ws, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_running_job_not_terminaled(ctx, ws, monkeypatch):
+    tmp, calls = ws
+    result = await start_bg_job(ctx, SESSION, "sleep 60")
+    monkeypatch.setattr(process_tools, "_unit_state", _state_fake({
+        "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+        "Result": "success", "ExecMainStatus": "0",
+    }))
+    await poll_bg_jobs(ctx)
+    row = await ctx.db.fetch_one("SELECT status FROM bg_jobs WHERE id = ?",
+                                 (result["job_id"],))
+    assert row["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_failed_exit_and_wake_retry(ctx, ws, monkeypatch):
     tmp, calls = ws
     result = await start_bg_job(ctx, SESSION, "bash -c 'exit 3'")
-    repo = BgJobsRepository(ctx.db)
 
-    async def fake_alive(entry):
-        return False
-
-    async def fake_exit_state(unit):
-        return ("failed", "exited", 3)
-
-    monkeypatch.setattr(process_tools, "_entry_alive", fake_alive)
-    monkeypatch.setattr(process_tools, "_unit_exit_state", fake_exit_state)
+    monkeypatch.setattr(process_tools, "_unit_state", _state_fake({
+        "LoadState": "loaded", "ActiveState": "failed", "SubState": "failed",
+        "Result": "exited", "ExecMainStatus": "3",
+    }))
 
     attempts: list[str] = []
 
@@ -205,14 +217,10 @@ async def test_orphaned_unit_marks_reboot(ctx, ws, monkeypatch):
     tmp, calls = ws
     result = await start_bg_job(ctx, SESSION, "echo hi")
 
-    async def fake_alive(entry):
-        return False
-
-    async def fake_exit_state(unit):
-        return ("orphaned", "unit not found (machine reboot?)", None)
-
-    monkeypatch.setattr(process_tools, "_entry_alive", fake_alive)
-    monkeypatch.setattr(process_tools, "_unit_exit_state", fake_exit_state)
+    monkeypatch.setattr(process_tools, "_unit_state", _state_fake({
+        "LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead",
+        "Result": "", "ExecMainStatus": "",
+    }))
 
     async def fake_wake(_ctx, session_key, content, **kwargs):
         return True
@@ -230,29 +238,33 @@ async def test_orphaned_unit_marks_reboot(ctx, ws, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unit_exit_state_parses_by_key_not_position(ctx, monkeypatch):
+async def test_unit_state_parses_by_key_not_position(ctx, monkeypatch):
     """systemctl show prints keyed lines in canonical order — a positional
     parse misread ExecMainStatus as Result (clean exits called failed)."""
     async def fake_run_cmd(cmd):
-        return 0, "LoadState=loaded\nExecMainStatus=0\nResult=success"
+        return 0, "LoadState=loaded\nExecMainStatus=0\nResult=success\nActiveState=active\nSubState=exited"
 
     monkeypatch.setattr(process_tools, "_run_cmd", fake_run_cmd)
-    assert await process_tools._unit_exit_state("bg-x.service") == \
-        ("exited", "success", 0)
+    props = await process_tools._unit_state("bg-x.service")
+    assert props["Result"] == "success" and props["ExecMainStatus"] == "0"
+    assert process_tools._classify_unit_exit(props) == ("exited", "success", 0)
+    assert process_tools._job_still_running(props) is False  # parked, not running
 
     async def fake_run_cmd2(cmd):
         return 0, "LoadState=loaded\nResult=exited\nExecMainStatus=3"
 
     monkeypatch.setattr(process_tools, "_run_cmd", fake_run_cmd2)
-    assert await process_tools._unit_exit_state("bg-x.service") == \
-        ("failed", "exited", 3)
+    props = await process_tools._unit_state("bg-x.service")
+    assert process_tools._classify_unit_exit(props) == ("failed", "exited", 3)
 
     async def fake_run_cmd3(cmd):
         return 0, "LoadState=not-found"
 
     monkeypatch.setattr(process_tools, "_run_cmd", fake_run_cmd3)
-    assert await process_tools._unit_exit_state("bg-x.service") == \
+    props = await process_tools._unit_state("bg-x.service")
+    assert process_tools._classify_unit_exit(props) == \
         ("orphaned", "unit not found (machine reboot?)", None)
+    assert process_tools._job_still_running(props) is False
 
 
 # ------------------------------------------------------- legacy registry import

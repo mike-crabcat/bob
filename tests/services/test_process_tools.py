@@ -152,9 +152,9 @@ async def test_dead_row_is_replaced_by_new_start(bg_ctx):
         assert res.startswith(f"Started {name}"), res
         assert (await _row(bg_ctx, name))["pid"] != pid
         rows = [r for r in await repo.list(limit=20) if r["name"] == name]
-        # the watcher terminalised the old row first, so it keeps that
-        # status (replaced only applies to stale running rows); history kept
-        assert {r["status"] for r in rows} == {"failed", "running"}
+        # the watcher terminalised the old row first (collected daemon — no
+        # exit status available), so it keeps that status; history kept
+        assert {r["status"] for r in rows} == {"exited", "running"}
     finally:
         await _stop(bg_ctx, name)
 
@@ -207,6 +207,7 @@ async def test_wake_job_unit_has_no_collect_and_ttl_property(bg_ctx):
         job_cmd = next(c for c in captured if f"--unit=bg-{name}.service" in " ".join(c))
         daemon_cmd = next(c for c in captured if f"--unit=bg-{daemon}.service" in " ".join(c))
         assert "--collect" not in job_cmd
+        assert "--property=RemainAfterExit=yes" in job_cmd  # exit stays readable
         assert any(a.startswith("--property=RuntimeMaxSec=120s") for a in job_cmd)
         assert "--collect" in daemon_cmd
         await _stop(bg_ctx, daemon)

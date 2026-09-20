@@ -180,14 +180,17 @@ def _unit_env(ctx: AppContext) -> dict[str, str]:
 
 async def _spawn_systemd(
     ctx: AppContext, name: str, command: str, log: Path, *,
-    collect: bool = True, ttl_seconds: int = 0,
+    collect: bool = True, ttl_seconds: int = 0, remain_after_exit: bool = False,
 ) -> int:
     """Spawn via a transient user unit; returns the MainPID.
 
-    collect=False (wake jobs) keeps the exited unit queryable — the exit
-    watcher needs Result/ExecMainStatus after the process is gone, and
-    resets/unloads the unit once it has read them. ttl_seconds adds
-    RuntimeMaxSec: systemd kills the job at the cap (Result=timeout).
+    Wake jobs set remain_after_exit: systemd garbage-collects successfully-
+    exited transient units IMMEDIATELY (--collect only covers failed ones),
+    which races the watcher's Result/ExecMainStatus read. RemainAfterExit
+    parks the finished unit in active(exited) — properties readable for as
+    long as needed; the watcher stops + reset-fails it once recorded.
+    ttl_seconds adds RuntimeMaxSec: systemd kills the job at the cap
+    (Result=timeout).
     """
     unit = f"{_UNIT_PREFIX}{name}.service"
     inner = f"exec bash -c {shlex.quote(command)} >> {shlex.quote(str(log))} 2>&1"
@@ -199,6 +202,8 @@ async def _spawn_systemd(
     ]
     if collect:
         cmd.append("--collect")
+    if remain_after_exit:
+        cmd.append("--property=RemainAfterExit=yes")
     if ttl_seconds > 0:
         cmd.append(f"--property=RuntimeMaxSec={int(ttl_seconds)}s")
     for key, value in _unit_env(ctx).items():
@@ -371,7 +376,7 @@ async def _start_core(
             mechanism = "systemd"
             pid = await _spawn_systemd(
                 ctx, name, command, log,
-                collect=not wake, ttl_seconds=ttl_seconds,
+                collect=not wake, ttl_seconds=ttl_seconds, remain_after_exit=wake,
             )
         else:
             pid = await _spawn_setsid(ctx, name, command, log)
@@ -427,29 +432,31 @@ async def start_bg_job(
 # exit watcher
 # --------------------------------------------------------------------------- #
 
-async def _unit_exit_state(unit: str) -> tuple[str, str, int | None]:
-    """(status, systemd_result, exit_code) for a dead (or gone) unit.
-
-    systemctl show prints keyed `Prop=value` lines in ITS canonical order,
-    not request order — parse by key, never by position (the positional
-    version read ExecMainStatus as Result and called clean exits failed).
-    """
+async def _unit_state(unit: str) -> dict[str, str]:
+    """Keyed `systemctl show` read. systemctl prints properties in ITS
+    canonical order, not request order — parse the Prop=value lines by key,
+    never by position (the positional version read ExecMainStatus as Result
+    and called clean exits failed)."""
     rc, out = await _run_cmd([
         "systemctl", "--user", "show", unit,
-        "-p", "LoadState", "-p", "Result", "-p", "ExecMainStatus",
+        "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+        "-p", "Result", "-p", "ExecMainStatus",
     ])
     props: dict[str, str] = {}
     for line in (out or "").splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
             props[key.strip()] = value.strip()
-    load_state = props.get("LoadState", "")
-    result = props.get("Result", "")
-    status_s = props.get("ExecMainStatus", "")
-    if load_state == "not-found":
+    return props
+
+
+def _classify_unit_exit(props: dict[str, str]) -> tuple[str, str, int | None]:
+    """(status, systemd_result, exit_code) for a finished job unit."""
+    if props.get("LoadState") == "not-found":
         return "orphaned", "unit not found (machine reboot?)", None
+    result = props.get("Result", "")
     try:
-        exit_code: int | None = int(status_s)
+        exit_code: int | None = int(props.get("ExecMainStatus", ""))
     except ValueError:
         exit_code = None
     if result == "success":
@@ -457,6 +464,18 @@ async def _unit_exit_state(unit: str) -> tuple[str, str, int | None]:
     if result == "timeout":
         return "timeout", result, exit_code
     return "failed", result or "unknown", exit_code
+
+
+def _job_still_running(props: dict[str, str]) -> bool:
+    """Wake jobs use RemainAfterExit: a finished job parks in
+    active(exited) — still 'active' to is-active, but the main process is
+    gone. Running means the process itself is alive."""
+    active, sub = props.get("ActiveState", ""), props.get("SubState", "")
+    if props.get("LoadState") == "not-found":
+        return False
+    if active == "activating":
+        return True
+    return active == "active" and sub == "running"
 
 
 def _wake_content(row: dict, log_tail: str) -> str:
@@ -511,18 +530,42 @@ async def poll_bg_jobs(ctx: AppContext) -> None:
             logger.info("bg job %s wake delivered (retry)", row["name"])
 
     for row in await repo.running_rows():
-        if await _entry_alive(row):
-            continue
         if row.get("mechanism") == "systemd" and row.get("unit"):
-            status, result, exit_code = await _unit_exit_state(row["unit"])
+            props = await _unit_state(row["unit"])
+            if row["wake_on_exit"]:
+                # jobs use RemainAfterExit: 'active(exited)' means finished
+                running = _job_still_running(props)
+                status, result, exit_code = (
+                    _classify_unit_exit(props) if not running else (None, None, None))
+            else:
+                # daemons have no RemainAfterExit: 'active' means alive
+                running = props.get("ActiveState") in ("active", "activating") \
+                    and props.get("LoadState") != "not-found"
+                if running:
+                    continue
+                if props.get("LoadState") == "not-found":
+                    # --collect daemons unload on death (any cause incl.
+                    # reboot) — 'orphaned' is reserved for wake jobs
+                    status, result, exit_code = \
+                        "exited", "collected (exit status unavailable)", None
+                else:
+                    status, result, exit_code = _classify_unit_exit(props)
         else:
-            status, result, exit_code = "exited", None, None
+            running = await _entry_alive(row)
+            status, result, exit_code = ("exited", None, None) if not running \
+                else (None, None, None)
+        if running:
+            continue
         await repo.mark_terminal(
             row["id"], status=status, exit_code=exit_code,
             systemd_result=result, now_iso=now)
         logger.info("bg job %s terminal: %s (%s, exit=%s)",
                     row["name"], status, result, exit_code)
-        if row.get("unit"):  # unload the lingering job unit, if any
+        if row["wake_on_exit"] and row.get("unit"):
+            # Release the parked RemainAfterExit unit: stop transitions it
+            # out of active(exited); reset-failed unloads failed/transient
+            # remains. Both are no-ops on an already-gone unit.
+            await _run_cmd(["systemctl", "--user", "stop", row["unit"]])
             await _run_cmd(["systemctl", "--user", "reset-failed", row["unit"]])
         if row["wake_on_exit"]:
             await repo.set_delivery(row["id"], "pending", now)
