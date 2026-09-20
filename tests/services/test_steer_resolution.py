@@ -112,3 +112,32 @@ async def test_owner_no_match_lists_bobs_active_groups(ctx):
     assert result["ok"] is False
     assert "that Mike or Bob belongs to" in result["error"]
     assert [c["name"] for c in result["candidates"]] == [NIKESH_GROUP["name"]]
+
+
+async def test_group_registration_seeds_full_patience_default(ctx):
+    """2026-09-20 operator default: every non-DM conversation gets the Tier 2
+    relevance gate (patience_enabled + patience_relevance_gating) at
+    registration; DMs seed nothing; an explicit policy is never overwritten."""
+    from server.repositories.conversations import ConversationRepository
+
+    convs = ConversationRepository(ctx.db)
+    await convs.register_endpoint(
+        "agent:main:whatsapp:group:120363430999999999",
+        endpoint_kind="group", address="120363430999999999@g.us")
+    assert await convs.get_policy(
+        "agent:main:whatsapp:group:120363430999999999") == (
+        ConversationRepository.GROUP_DEFAULT_POLICY)
+
+    await convs.register_endpoint(
+        "agent:main:whatsapp:dm:61400000001",
+        endpoint_kind="dm", contact_id=None)
+    assert await convs.get_policy("agent:main:whatsapp:dm:61400000001") == {}
+
+    # deliberate opt-out survives re-registration (idempotent, no clobber)
+    await convs.set_policy("agent:main:whatsapp:group:120363430999999999",
+                           {"patience_enabled": False})
+    await convs.register_endpoint(
+        "agent:main:whatsapp:group:120363430999999999",
+        endpoint_kind="group", address="120363430999999999@g.us")
+    policy = await convs.get_policy("agent:main:whatsapp:group:120363430999999999")
+    assert policy["patience_enabled"] is False

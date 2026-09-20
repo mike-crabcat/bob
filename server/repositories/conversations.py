@@ -60,6 +60,15 @@ def _channel_of(session_key: str) -> str:
 
 
 class ConversationRepository:
+    # Group conversations seed full patience (Tier 2 relevance gate) at
+    # registration — the operator default for every non-DM conversation
+    # (2026-09-20). DMs never seed: Tier 0 already ACTs all DM traffic, so
+    # the gate has nothing to decide there.
+    GROUP_DEFAULT_POLICY: dict[str, Any] = {
+        "patience_enabled": True,
+        "patience_relevance_gating": True,
+    }
+
     def __init__(self, db: Database) -> None:
         self.db = db
 
@@ -293,7 +302,12 @@ class ConversationRepository:
         routing truth (address, endpoint_kind, contact_id). This replaced
         session_routes.create_route (Increment 4): channel ingress paths call
         it whenever a message arrives on an endpoint. Idempotent; fills in
-        blanks on existing bindings, never overwrites."""
+        blanks on existing bindings, never overwrites.
+
+        Groups seed full patience by default (2026-09-20, Mike's call): the
+        Tier 2 relevance gate is the desired state for every non-DM
+        conversation — only an explicit /patience off (or a pre-default
+        policy that deliberately omits the flags) turns it off."""
         if not address and contact_id:
             c = await self.db.fetch_one(
                 "SELECT phone_number, email FROM contacts WHERE id = ?",
@@ -306,6 +320,8 @@ class ConversationRepository:
                 """UPDATE bindings SET contact_id = COALESCE(contact_id, ?), is_active = 1
                    WHERE session_key = ?""",
                 (str(contact_id), session_key))
+        if endpoint_kind == "group" and not await self.get_policy(session_key):
+            await self.set_policy(session_key, self.GROUP_DEFAULT_POLICY)
 
     async def merge(
         self,
