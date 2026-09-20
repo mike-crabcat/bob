@@ -418,6 +418,10 @@ class BackburnerService(BaseService):
                     spec.session_key, "assistant",
                     "\n\n".join(p for p in list(spec.sent_texts) if p.strip()),
                     channel=spec.channel, dispatch_id=spec.dispatch_id)
+                # Recorded by this snapshot — advance the cursor so the
+                # inline fallback (detach failed past this point) doesn't
+                # re-record them in _record_history.
+                spec.recorded_texts = len(spec.sent_texts)
 
             # c. The turn is answered — by the holding ack. Frees the claim
             #    for the next turn.

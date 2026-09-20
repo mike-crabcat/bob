@@ -1045,6 +1045,11 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                     sender_name=sender_name, text_preview=text[:100],
                     inbound_text=text)
                 spec_to_run.sent_texts.extend(dispatch_spec.sent_texts)
+                # Inherited texts already have rows of their own (recorded
+                # by their round, or bg_send rows for the detached flight)
+                # — mark them recorded so this run's _record_history only
+                # writes its own new sends (2026-09-20 duplicate rows).
+                spec_to_run.recorded_texts = len(spec_to_run.sent_texts)
                 logger.info(
                     "dispatch: re-flying detached spec for %s — fresh spec "
                     "built, %d prior send(s) inherited for the duplicate "

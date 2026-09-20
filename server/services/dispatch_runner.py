@@ -173,6 +173,13 @@ class DispatchSpec:
     history_policy: str = "delivered_only"  # delivered_only | merged_always | merged_skip_no_reply
     message_was_sent: list = field(default_factory=lambda: [False])
     sent_texts: list = field(default_factory=list)
+    # Cursor into sent_texts: how many leading entries already have their
+    # own assistant row. A re-flown spec (attention coordinator re-arms it
+    # for mid-turn arrivals) accumulates sent_texts across rounds — without
+    # the cursor, _record_history re-joins EVERY prior round's text into a
+    # fresh row per re-flight, which is what duplicated sends in the chat
+    # view (2026-09-20 Thomas DM: 7 rows for 4 real deliveries).
+    recorded_texts: int = 0
     # WhatsApp send tracking (reactions): entries appended by the send tool
     # after each delivered effect — {request_id, text, wa_message_id?,
     # message_id?}. _record_history stamps the assistant row id onto them so
@@ -597,33 +604,49 @@ class DispatchRunner:
         return await resolve_session_model(self.db, self.ctx.settings, session_key)
 
     async def _record_history(self, spec: DispatchSpec, session_svc: Any, result: str) -> None:
+        # Multi-round safety (2026-09-20 duplicate rows): a re-flown spec
+        # accumulates sent_texts/send_records across rounds. Record only
+        # what THIS round added — a re-flight that sent nothing new (e.g.
+        # NO_REPLY after a task wake) writes no row at all, instead of
+        # re-joining every prior round's text into a fresh duplicate row.
+        new_texts = spec.sent_texts[spec.recorded_texts:]
+        # Send-tracking entries not yet attached to a row are exactly this
+        # round's (earlier rounds' entries keep their first stamp). Stamped
+        # by row PK, so a late send_message_result frame back-fills the
+        # row that actually carried the send.
+        fresh_records = [r for r in spec.send_records if not r.get("message_id")]
+
         def _send_metadata() -> dict | None:
-            if not spec.send_records:
+            if not fresh_records:
                 return None
             return {"sends": [
                 {"request_id": r.get("request_id"),
                  "wa_message_id": r.get("wa_message_id")}
-                for r in spec.send_records if r.get("request_id")]}
+                for r in fresh_records if r.get("request_id")]}
 
         def _stamp_row_ids(row_id: str | None) -> None:
             if row_id:
-                for r in spec.send_records:
+                for r in fresh_records:
                     r["message_id"] = row_id
+
+        def _advance_cursor() -> None:
+            spec.recorded_texts = len(spec.sent_texts)
 
         if spec.history_policy == "delivered_only":
             # Only delivered replies belong in replayed history; raw output
             # can leak <tool_call> XML. Nothing sent → nothing recorded.
-            if spec.message_was_sent[0] and spec.sent_texts:
-                assistant_text = "\n\n".join(p for p in spec.sent_texts if p.strip())
+            if new_texts:
+                assistant_text = "\n\n".join(p for p in new_texts if p.strip())
                 row_id = await session_svc.add_message(
                     spec.session_key, "assistant", assistant_text,
                     channel=spec.channel, dispatch_id=spec.dispatch_id,
                     metadata=_send_metadata())
                 _stamp_row_ids(row_id)
+                _advance_cursor()
             return
 
         # Merged policies: LLM text output + actually-sent bodies.
-        parts = [p for p in ([result] if result.strip() else []) + spec.sent_texts
+        parts = [p for p in ([result] if result.strip() else []) + new_texts
                  if p.strip()]
         assistant_text = "\n\n".join(parts) if parts else result
 
@@ -636,6 +659,7 @@ class DispatchRunner:
             channel=spec.channel, dispatch_id=spec.dispatch_id,
             metadata=_send_metadata())
         _stamp_row_ids(row_id)
+        _advance_cursor()
 
 
 def _is_quota_error(exc: Exception) -> bool:
