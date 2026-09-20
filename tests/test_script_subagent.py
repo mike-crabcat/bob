@@ -226,6 +226,35 @@ async def test_orphaned_unit_marks_reboot(ctx, ws, monkeypatch):
     assert row["delivery"] == "delivered"
 
 
+# ------------------------------------------------------------ exit classification
+
+
+@pytest.mark.asyncio
+async def test_unit_exit_state_parses_by_key_not_position(ctx, monkeypatch):
+    """systemctl show prints keyed lines in canonical order — a positional
+    parse misread ExecMainStatus as Result (clean exits called failed)."""
+    async def fake_run_cmd(cmd):
+        return 0, "LoadState=loaded\nExecMainStatus=0\nResult=success"
+
+    monkeypatch.setattr(process_tools, "_run_cmd", fake_run_cmd)
+    assert await process_tools._unit_exit_state("bg-x.service") == \
+        ("exited", "success", 0)
+
+    async def fake_run_cmd2(cmd):
+        return 0, "LoadState=loaded\nResult=exited\nExecMainStatus=3"
+
+    monkeypatch.setattr(process_tools, "_run_cmd", fake_run_cmd2)
+    assert await process_tools._unit_exit_state("bg-x.service") == \
+        ("failed", "exited", 3)
+
+    async def fake_run_cmd3(cmd):
+        return 0, "LoadState=not-found"
+
+    monkeypatch.setattr(process_tools, "_run_cmd", fake_run_cmd3)
+    assert await process_tools._unit_exit_state("bg-x.service") == \
+        ("orphaned", "unit not found (machine reboot?)", None)
+
+
 # ------------------------------------------------------- legacy registry import
 
 

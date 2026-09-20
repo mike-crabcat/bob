@@ -428,17 +428,24 @@ async def start_bg_job(
 # --------------------------------------------------------------------------- #
 
 async def _unit_exit_state(unit: str) -> tuple[str, str, int | None]:
-    """(status, systemd_result, exit_code) for a dead (or gone) unit."""
+    """(status, systemd_result, exit_code) for a dead (or gone) unit.
+
+    systemctl show prints keyed `Prop=value` lines in ITS canonical order,
+    not request order — parse by key, never by position (the positional
+    version read ExecMainStatus as Result and called clean exits failed).
+    """
     rc, out = await _run_cmd([
         "systemctl", "--user", "show", unit,
-        "-p", "LoadState", "-p", "Result", "-p", "ExecMainStatus", "--value",
+        "-p", "LoadState", "-p", "Result", "-p", "ExecMainStatus",
     ])
-    # --value prints one line per property, in order, skipping empty values
-    # is NOT a thing it does — but absent properties print nothing, so pad.
-    fields = [line.strip() for line in out.splitlines()] if out else []
-    while len(fields) < 3:
-        fields.append("")
-    load_state, result, status_s = fields[0], fields[1], fields[2]
+    props: dict[str, str] = {}
+    for line in (out or "").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            props[key.strip()] = value.strip()
+    load_state = props.get("LoadState", "")
+    result = props.get("Result", "")
+    status_s = props.get("ExecMainStatus", "")
     if load_state == "not-found":
         return "orphaned", "unit not found (machine reboot?)", None
     try:
