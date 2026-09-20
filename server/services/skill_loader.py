@@ -68,8 +68,8 @@ def load_skills_index(workspace_dir: Path) -> str:
         "SLOW SCRIPTS: if a skill script is expected to take more than ~10 seconds "
         "(image generation, browser automation, PDF/video rendering), do NOT run it "
         "with the bash tool — that blocks this whole conversation. Instead: send the "
-        "user a short ack first, then create_subagent(task='<the exact bash command>', "
-        "agent_type='script') and end your turn. You'll be woken with the output when "
+        "user a short ack first, then run_bg_process(command='<the exact bash "
+        "command>') and end your turn. You'll be woken with the output when "
         "it finishes; send the artifact then.\n"
     )
     for skill_name in sorted(mtimes):
