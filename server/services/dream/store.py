@@ -359,22 +359,13 @@ class DreamStore(BaseService):
                 "UPDATE dream_plans SET status = ?, updated_at = ? WHERE id = ?",
                 (status, iso_utc(), plan_id),
             )
-        # Goal-rooms seeding (goal-rooms-plan.md D15): an approved plan is a
-        # ready-made charter — the room works it, dream_plans.task_id finally
-        # gets its writer. Every approval path funnels through here. Never
-        # raises into the caller; no task_id clobbering on re-approval.
-        if status == "approved":
-            try:
-                existing = await self.db.fetch_one(
-                    "SELECT task_id FROM dream_plans WHERE id = ?", (plan_id,))
-                if existing is not None and not existing.get("task_id"):
-                    from server.services import goal_rooms
-                    plan = await self.get_plan(plan_id)
-                    if plan is not None:
-                        await goal_rooms.seed_room_for_plan(ctx=self.ctx, plan=plan)
-            except Exception:
-                logger.exception(
-                    "dream plan %s: goal-room seeding failed at approval", plan_id)
+        # D15 approval-time seeding RETIRED (Mike 2026-09-20): the dream
+        # proposes and the announcement asks — only the PEOPLE'S REPLY
+        # raises a goal. The announce pipeline now registers an offer-task
+        # (completer = the announced conversation) whose reply-turn creates
+        # the goal; approval alone spawns nothing. dream_plans.task_id gets
+        # written by that reply path (create_goal result recorded against
+        # the plan) rather than here.
 
     async def list_plans(self, statuses: list[str] | None = None, limit: int = 200) -> list[dict]:
         if statuses:

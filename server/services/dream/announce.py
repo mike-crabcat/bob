@@ -100,6 +100,41 @@ class AnnounceService(BaseService):
                     "UPDATE dream_plans SET announced_at = ?, updated_at = ? WHERE id = ?",
                     (iso_utc(), iso_utc(), plan["id"]),
                 )
+                # Reply-commissioned work (Mike 2026-09-20): the dream
+                # PROPOSES, the announcement ASKS, and only the people's
+                # REPLY raises a goal. The announcement registers an open
+                # question as a task whose completer is this conversation —
+                # every later turn here sees the offer pending, and the
+                # reply turn creates the goal and settles the task. Silence
+                # resolves via the due backstop + reconcile sweep, aligned
+                # with the plan's engagement-expiry. Approval (auto or
+                # operator) no longer spawns machinery by itself.
+                try:
+                    from server.services.tasks import register_task, tasks_enabled
+                    if tasks_enabled():
+                        await register_task(
+                            self.ctx,
+                            waiter_session=session_key,
+                            title=f"[plan {plan['id']}] offered help — awaiting their answer",
+                            instruction=(
+                                f"You (Bob) offered help in this "
+                                f"conversation: {plan['title']}. Proposed "
+                                f"assistance: {str(plan.get('assistance_method') or '')[:300]} "
+                                f"When someone REPLIES expressing interest, "
+                                f"create the goal (create_goal with "
+                                f"parent_goal_id empty — this conversation "
+                                f"works it) and settle this task with "
+                                f"task_complete(result=the goal id and what "
+                                f"they want). If they decline or the "
+                                f"question is moot, task_fail with the "
+                                f"reason. Do not create the goal before a "
+                                f"human asks for it."),
+                            expected_completer=session_key,
+                            due_minutes=48 * 60,
+                            extra_payload={"dream_plan_id": plan["id"]})
+                except Exception:
+                    logger.exception("dream announce: offer-task registration failed for %s",
+                                     plan["id"])
             result["sessions"] += 1
             result["plans_announced"] += len(plans)
             logger.info("dream announce: %d plan(s) announced in %s", len(plans), session_key)
