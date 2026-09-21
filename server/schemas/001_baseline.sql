@@ -621,7 +621,7 @@ CREATE TABLE IF NOT EXISTS effects (
     kind TEXT NOT NULL,                      -- e.g. 'whatsapp_send', 'email_send', 'call_place'
     idempotency_key TEXT NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivering|delivered|failed|dead
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivering|delivered|failed|dead|discarded
     attempt INTEGER NOT NULL DEFAULT 0,
     available_at TEXT NOT NULL,              -- retry backoff gate
     delivered_at TEXT,

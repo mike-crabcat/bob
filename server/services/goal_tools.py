@@ -62,6 +62,7 @@ def _register_goal_executors() -> None:
 
     async def _exec_revise(ctx, payload):
         from server.repositories.goals import GoalRepository
+        from server.services.effects import PermanentEffectError
         ok = await GoalRepository(ctx.db).revise(
             payload["goal_id"],
             expected_version=payload["expected_version"],
@@ -70,18 +71,21 @@ def _register_goal_executors() -> None:
             deadline=payload.get("deadline"),
         )
         if not ok:
-            raise RuntimeError("stale version or goal not active")
+            # A stale write can never become fresh by retrying (the guard
+            # exists to reject it) — moot, not broken.
+            raise PermanentEffectError("stale version or goal not active")
         return payload["goal_id"]
 
     async def _exec_state_write(ctx, payload):
         from server.repositories.goals import GoalRepository
+        from server.services.effects import PermanentEffectError
         ok = await GoalRepository(ctx.db).revise(
             payload["goal_id"],
             expected_version=payload["expected_version"],
             strategy_json=payload["strategy_json"],
         )
         if not ok:
-            raise RuntimeError("stale version or goal not active")
+            raise PermanentEffectError("stale version or goal not active")
         return payload["goal_id"]
 
     async def _exec_complete(ctx, payload):

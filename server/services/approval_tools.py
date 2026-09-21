@@ -95,6 +95,7 @@ async def _run_on_rejected(ctx: Any, row: dict[str, Any]) -> None:
 
 def _register_approval_executors() -> None:
     from server.services import effects as effects_svc
+    from server.services.effects import PermanentEffectError
 
     async def _exec_request(ctx, payload):
         from server.repositories.approvals import ApprovalRepository
@@ -145,7 +146,7 @@ def _register_approval_executors() -> None:
                 await _run_on_approved(ctx, already)
                 await _run_on_rejected(ctx, already)
                 return already["id"]
-            raise RuntimeError("approval already settled or not found")
+            raise PermanentEffectError("approval already settled or not found")
         # Approving records the decision. Acting on it is the agent's job on
         # the wake that follows — with one narrow exception: platform-native
         # effects (see _ON_APPROVED) are executed here, deterministically,

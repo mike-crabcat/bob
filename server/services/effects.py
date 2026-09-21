@@ -15,6 +15,14 @@ Executors are registered per kind at service start:
 - non-retryable kinds (e.g. call placement) fail straight to dead: a
   duplicate phone call is worse than a lost one.
 
+Retryability is per-KIND (can the pump usefully retry this kind at all?);
+per-FAILURE permanence is the executor's call — raising
+``PermanentEffectError`` marks the row ``discarded`` with the reason
+instead of retrying or dead-lettering. Domain rejections (stale goal
+version, settled approval) are permanent: a retry can never make a stale
+write fresh, and dead-listing them just cries wolf on the ops screen
+(2026-09-20: 8 dead rows, all already-handled rejections).
+
 Observed results are appended to the event log (``effect.delivered`` /
 ``effect.failed``) — best-effort, never blocking delivery itself.
 """
@@ -25,6 +33,13 @@ import logging
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+
+class PermanentEffectError(Exception):
+    """A domain-level rejection that can never succeed on retry (stale
+    version, settled approval, moot target). Delivery marks the effect
+    ``discarded`` with the reason — no backoff attempts, no dead-listing."""
+
 
 # kind -> (executor(ctx, payload) -> external_result_id | None, pump_retryable)
 _EXECUTORS: dict[str, tuple[Callable[[Any, dict], Awaitable[str | None]], bool]] = {}
@@ -137,6 +152,19 @@ async def deliver(ctx: Any, effect: dict[str, Any]) -> dict[str, Any]:
 
     try:
         external_id = await fn(ctx, payload)
+    except PermanentEffectError as exc:
+        # Moot, not broken: the rejection is the correct outcome (the
+        # emitter already saw it inline). Discard with the reason — never
+        # retry, never occupy the ops dead list.
+        await ctx.db.execute(
+            "UPDATE effects SET status = 'discarded', error = ? "
+            "WHERE id = ? AND status != 'delivered'",
+            (str(exc)[:2000], effect["id"]))
+        logger.info("effect %s (%s) permanently rejected -> discarded: %s",
+                    effect["id"], kind, exc)
+        await _append_result_event(ctx, effect, "effect.discarded", error=str(exc))
+        return {"ok": False, "effect_id": effect["id"], "error": str(exc),
+                "status": "discarded"}
     except Exception as exc:
         if retryable:
             status = await repo.mark_failed(effect["id"], str(exc))

@@ -130,3 +130,62 @@ async def test_exhausted_attempts_dead_letter(ctx, db):
     row = await db.fetch_one("SELECT * FROM effects WHERE idempotency_key = 'doomed'")
     assert row["status"] == "dead"
     assert row["attempt"] >= 5
+
+
+async def test_permanent_rejection_discards_without_retry(ctx, db):
+    """A domain rejection (stale version, settled approval) is moot, not
+    broken: no backoff attempts, no dead-letter on the ops screen — the row
+    lands 'discarded' with the reason, once (2026-09-20: 8 dead rows that
+    were all already-handled rejections)."""
+    executor = AsyncMock(
+        side_effect=effects_svc.PermanentEffectError("stale version or goal not active"))
+    effects_svc.register_executor("test_goal_revise", executor)
+
+    result = await effects_svc.emit_and_deliver(
+        ctx, kind="test_goal_revise", idempotency_key="stale1", payload={})
+
+    assert not result["ok"]
+    assert result["status"] == "discarded"
+    assert "stale version" in result["error"]
+    row = await db.fetch_one("SELECT * FROM effects WHERE idempotency_key = 'stale1'")
+    assert row["status"] == "discarded"
+    assert row["attempt"] == 1, "permanent rejections must not be re-attempted"
+    assert "stale version" in row["error"]
+
+    # The pump has nothing to retry.
+    await db.execute(
+        "UPDATE effects SET available_at = '2000-01-01T00:00:00' "
+        "WHERE idempotency_key = 'stale1'")
+    assert await effects_svc.pump_due_effects(ctx) == 0
+    executor.assert_awaited_once()
+
+
+async def test_goal_stale_version_effect_discarded(ctx, db):
+    """End-to-end wiring: update_goal against a superseded version returns
+    the stale error to the caller AND discards the effect row (not dead)."""
+    from server.services.goal_tools import _register_goal_executors
+
+    _register_goal_executors()
+    from server.services import goal_service
+    goal = await goal_service.create_goal(
+        ctx, conversation_id="test:effects:goal", objective="prove the guard")
+
+    result = await effects_svc.emit_and_deliver(
+        ctx, kind="goal_revise",
+        idempotency_key=f"goal_revise:{goal['id']}:999",
+        payload={"goal_id": goal["id"], "progress": "late write",
+                 "expected_version": 999})
+
+    assert not result["ok"] and result["status"] == "discarded"
+    row = await db.fetch_one(
+        "SELECT * FROM effects WHERE idempotency_key = ?", (f"goal_revise:{goal['id']}:999",))
+    assert row["status"] == "discarded"
+
+    # Sanity: the same executor at the CURRENT version still delivers.
+    current = await db.fetch_one("SELECT version FROM goals WHERE id = ?", (goal["id"],))
+    ok = await effects_svc.emit_and_deliver(
+        ctx, kind="goal_revise",
+        idempotency_key=f"goal_revise:{goal['id']}:{current['version']}",
+        payload={"goal_id": goal["id"], "progress": "fresh write",
+                 "expected_version": current["version"]})
+    assert ok["ok"]
