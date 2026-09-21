@@ -90,25 +90,6 @@ async def create_goal(
         if origin_cid is None:
             origin_cid = await conv_repo.resolve_cid(conversation_id)
 
-    # Follow-through seed (2026-09-16): a deadlined goal created with no
-    # dated next_action gets one due at deadline−4h, so the due-action
-    # sweep produces a working-conversation re-drive even if the reviser
-    # never runs — the 2026-09-14 WFH-roster stall shape (asks sent,
-    # next_actions stayed empty, only the deadline wake fired, into the
-    # origin group).
-    if deadline and not (strategy or {}).get("next_actions"):
-        seed_due = extract_due_instant(deadline)
-        if seed_due is not None:
-            strategy = {
-                **(strategy or {}), "v": 2,
-                "next_actions": [{
-                    "action": "(seeded) Re-drive this goal at the deadline: "
-                              "act, escalate per any authorised ladder, or "
-                              "close if already met",
-                    "due": (seed_due - timedelta(hours=4)).isoformat(),
-                }],
-            }
-
     goal = await repo.create(
         conversation_id=cid,
         objective=objective,
@@ -125,17 +106,20 @@ async def create_goal(
         await repo.add_holder(goal["id"], origin_cid, role="origin")
 
     if use_room:
-        # Seed the attention set (D8) and the check-in series (D13). The
-        # deadline wakeup below still lands via _wakeup_target — for a room
-        # goal that IS the room (deadlines follow brains, plan D10).
+        # Seed the attention set (D8) and the pulse. With the goal loop
+        # enabled (docs/goal-execution-plan.md) the pulse is the
+        # continuation contract + dead-man heartbeat; without it, the
+        # legacy fixed check-in series. The deadline wakeup below still
+        # lands via _wakeup_target — for a room goal that IS the room
+        # (deadlines follow brains, plan D10).
         await goal_rooms.seed_subscriptions(
             ctx, room_key=cid, origin_session=origin_cid or "",
             strategy=strategy)
-        await goal_rooms.schedule_checkin(ctx, goal)
-        # An operator-directed scan cadence rides the strategy's ``scan``
-        # block (rooms own it via room_state once live).
-        if (strategy or {}).get("scan"):
-            await goal_rooms.schedule_scan(ctx, goal)
+        from server.services import goal_loop
+        if goal_loop.loop_enabled(ctx):
+            await goal_loop.ensure_loop(ctx, goal)
+        else:
+            await goal_rooms.schedule_checkin(ctx, goal)
 
     if deadline:
         await WakeupRepository(ctx.db).schedule(
@@ -381,8 +365,6 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
                     so a slow LLM run never blocks the pump). Deleted/disabled
                     routines end their series; a validity-window miss skips
                     the run but keeps the series alive.
-      action_due  — a goal next_action entering its due window (scheduled by
-                    schedule_due_action_wakes; payload carries the action).
       goal_checkin — a goal room's check-in (goal-rooms plan D13): wakes the
                     ROOM with the state block, the claims digest since the
                     last check-in, and the pick-up-the-thread brief.
@@ -454,38 +436,44 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
         )
         return True
 
-    if wakeup.get("kind") == "goal_scan":
-        # Room scheduled scan (operator-directed cadence, e.g. the merch
-        # morning scan): the brief comes from the goal's own scan block —
-        # groups to read, what to look for, where pitches go.
-        from server.services import goal_rooms
-        if goal is None:
-            return True
+    if wakeup.get("kind") == "goal_continue":
+        # Goal loop (docs/goal-execution-plan.md): the goal's single
+        # continuation slot fired. One-shot — the NEXT slot is scheduled by
+        # the settle path (end_turn), never by recurrence.
+        from server.services import goal_loop
+        if goal is None or goal["status"] != "active":
+            return False  # settled since armed; no series to keep
+        payload = json.loads(wakeup.get("payload_json") or "{}")
+        content = await goal_loop.handle_continue_wakeup(ctx, goal, payload)
         await wake_conversation(
-            ctx, goal["conversation_id"],
-            await goal_rooms.render_scan(ctx, goal),
-            call_category="goal_scan",
-            metadata={"wakeup_id": wakeup["id"], "goal_id": goal["id"]},
+            ctx, goal["conversation_id"], content,
+            call_category="goal_continue",
+            metadata={"wakeup_id": wakeup["id"], "goal_id": goal["id"],
+                      "loop_kind": goal_loop.CONTINUE_KIND,
+                      "frame": payload.get("frame")},
+        )
+        return False
+
+    if wakeup.get("kind") == "goal_deadman":
+        # Liveness floor (D3): fires only when the room has been silent a
+        # full interval. Recurring series — return True to keep it.
+        from server.services import goal_loop
+        if goal is None or goal["status"] != "active":
+            return False
+        if not goal_loop.loop_enabled(ctx):
+            return False  # kill switch: the series ends, no zombie pulses
+        content = await goal_loop.handle_deadman_wakeup(ctx, goal)
+        if content is None:
+            return True  # healthy room; skip this occurrence
+        await wake_conversation(
+            ctx, goal["conversation_id"], content,
+            call_category="goal_deadman",
+            metadata={"wakeup_id": wakeup["id"], "goal_id": goal["id"],
+                      "loop_kind": goal_loop.DEADMAN_KIND},
         )
         return True
 
-    if wakeup.get("kind") == "action_due":
-        payload = json.loads(wakeup.get("payload_json") or "{}")
-        content = (
-            "## Goal action due\n"
-            f"Objective: {goal['objective'] if goal else '(goal gone)'}\n"
-            f"Due by {payload.get('due', '(unknown)')}: "
-            f"{payload.get('action', '(action not recorded)')}\n\n"
-            "Do it now, or — when the timing must be precise, or acting now "
-            "would land at an awkward hour — schedule a one-shot routine for "
-            "the right moment instead of sending immediately. Then update the "
-            "goal state so the action is not chased again."
-        )
-        category = "goal_action_due"
-        # action_due wakeups are scheduled against the working
-        # conversation already (schedule_due_action_wakes).
-        target = wakeup["conversation_id"]
-    elif goal:
+    if goal:
         content = (
             f"## Goal deadline reached\n"
             f"Objective: {goal['objective']}\n"
@@ -570,52 +558,3 @@ async def pump_due_wakeups(ctx: AppContext, *, limit: int = 20) -> int:
     return len(claimed)
 
 
-async def schedule_due_action_wakes(
-    ctx: AppContext, *,
-    lookahead_hours: float = 12.0,
-    overdue_hours: float = 24.0,
-    limit: int = 5,
-) -> int:
-    """Turn next_action dues into actual triggers (the 2026-08-31 coffee gap:
-    the reminder action sat in state with ``due: before 10am`` and nothing in
-    the system ever read it).
-
-    For every active goal, each next_action whose due instant falls in
-    (now - overdue_hours, now + lookahead_hours] gets ONE wakeup, firing at
-    due-minus-lookahead (the evening before for a morning due) so the woken
-    turn can act early or schedule a precise one-shot. Idempotent per
-    (goal, normalized due) across scheduled AND fired rows; dues older than
-    the overdue window are left to GoalReviewTask's stall escalation."""
-    from server.services.goal_state_service import parse_strategy
-
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(hours=overdue_hours)
-    window_end = now + timedelta(hours=lookahead_hours)
-    repo = GoalRepository(ctx.db)
-    wake_repo = WakeupRepository(ctx.db)
-    scheduled = 0
-    for goal in await repo.list_active(limit=200):
-        for action in parse_strategy(goal).next_actions:
-            due_at = extract_due_instant(action.due)
-            if due_at is None or not (window_start < due_at <= window_end):
-                continue
-            due_key = due_at.astimezone(timezone.utc).isoformat()
-            if await wake_repo.action_due_scheduled(goal["id"], due_key):
-                continue
-            # Fire as the due enters the window (due-minus-lookahead, clamped
-            # to now for already-overdue dues) — the evening before for a
-            # morning due, so the woken turn can act early or schedule a
-            # precise one-shot. Wakes the WORKING conversation (§1.2 wake
-            # matrix — same target as reviser wakes, not the origin).
-            fire_at = max(due_at - timedelta(hours=lookahead_hours), now)
-            await wake_repo.schedule(
-                conversation_id=goal["conversation_id"],
-                not_before=fire_at.astimezone(timezone.utc).isoformat(),
-                goal_id=goal["id"],
-                kind="action_due",
-                payload={"due": due_key, "action": action.action[:400]},
-            )
-            scheduled += 1
-            if scheduled >= limit:
-                return scheduled
-    return scheduled

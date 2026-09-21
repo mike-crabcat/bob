@@ -63,7 +63,8 @@ def _register_goal_executors() -> None:
     async def _exec_revise(ctx, payload):
         from server.repositories.goals import GoalRepository
         from server.services.effects import PermanentEffectError
-        ok = await GoalRepository(ctx.db).revise(
+        repo = GoalRepository(ctx.db)
+        ok = await repo.revise(
             payload["goal_id"],
             expected_version=payload["expected_version"],
             objective=payload.get("objective"),
@@ -74,6 +75,17 @@ def _register_goal_executors() -> None:
             # A stale write can never become fresh by retrying (the guard
             # exists to reject it) — moot, not broken.
             raise PermanentEffectError("stale version or goal not active")
+        if (payload.get("progress") or "").strip():
+            # Scope notes are evidence: fold origin-side update_goal text
+            # into the known-list so the room's state block carries it
+            # (progress alone is not rendered in room_state views).
+            try:
+                await repo.append_known_line(
+                    payload["goal_id"],
+                    f"[note] {str(payload['progress'])[:500]}")
+            except Exception:
+                logger.warning("goal %s: progress fold to known failed",
+                               payload["goal_id"], exc_info=True)
         return payload["goal_id"]
 
     async def _exec_state_write(ctx, payload):
@@ -136,8 +148,14 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
     ) -> str:
         """Create a goal this conversation is working toward.
 
-        - objective: the concrete outcome needed.
-        - kind: task | outreach | subagent | call | email_thread | negotiate | event_plan.
+        - objective: the concrete outcome needed — it must name the
+          artefact/answer AND the proof that it's done. For research/
+          build/negotiate/event goals, consult the goal-craft skill
+          (use_skill "goal-craft") BEFORE writing the objective.
+        - kind: task | research | build | sales_target | negotiate | event_plan |
+          outreach | subagent | call | email_thread. Pick from the WORK's
+          shape: revenue/sales → sales_target; human confirmations →
+          negotiate; investigation → research; artefact → build.
         - deadline (optional, ISO 8601 UTC): schedules a wakeup — if the goal
           is still open then, the ROOT goal's working conversation is woken to
           follow up.

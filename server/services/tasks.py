@@ -199,6 +199,19 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
     # the effect retries; the crash window the other way (woken, stamp
     # lost) costs at most one duplicate wake — benign against a lost one.
     await TaskRepository(ctx.db).mark_delivered(task_id)
+    # Goal loop (docs/goal-execution-plan.md D4): the settled task IS
+    # evidence — append it to the source goal's known-list so any later
+    # round (or the dashboard) sees it without re-deriving from history.
+    if task.get("source_goal_id"):
+        try:
+            from server.repositories.goals import GoalRepository
+            excerpt = (task["result"] or task["error"] or "")[:400]
+            await GoalRepository(ctx.db).append_known_line(
+                task["source_goal_id"],
+                f"[task {task['id']} {task['status']}] "
+                f"{task['title'][:120]}: {excerpt}")
+        except Exception:
+            logger.exception("task %s: goal evidence append failed", task_id)
     return True
 
 

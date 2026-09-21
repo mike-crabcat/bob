@@ -222,7 +222,7 @@ turn; strategies tree records pruned approaches with verdicts.
 | 3 | Frames: review frame on evidence wakes, stall frame + zero-delta micro-judge; charter templates per kind (research/build/negotiate kinds added to `room_kinds`) | each kind runs one real goal end-to-end (merch-style live test) |
 | 4 | Observability: `GET /api/goals/{id}` + list summary fields; rebuilt `/goals` list (next-run, branches, budget, flags); new drill-down page (state panel, strategies tree, branches, timeline); nudge/pause actions | Mike can follow the pilot goal end-to-end from the dashboard without opening a DB — verified visually (screenshot walkthrough of list → drill-down → timeline against the live pilot) |
 | 5 | goal-craft skill (workspace + repo bundle), `create_goal` pointer, eval cases from the worked examples | eval suite green on current model; skill index delta = 1 line |
-| 6 | Retire `action_due` scanning, `goal_scan`, fixed check-in recurrence; default `BOB_GOAL_LOOP=on` | metrics gate below, one clean week |
+| 6 | Retire `action_due` scanning, `goal_scan`, fixed check-in recurrence; default `BOB_GOAL_LOOP=on` | **EXECUTED 2026-09-22** (Mike's call one day into the metrics week; Phase 6a overlap-elimination the evening before). The due-action sweep, scan series, follow-through seed, and their heartbeat task/tests are deleted; the loop is default-on with `BOB_GOAL_LOOP=off` as the kill switch (off-mode falls back to the fixed check-in, kept deliberately as D9's fallback). |
 
 ## Testing & verification
 

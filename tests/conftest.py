@@ -33,6 +33,9 @@ async def db():
 async def ctx(db):
     """Provide an AppContext with the test database and default settings."""
     settings = Settings.from_env()
+    # Operator env (~/config/.env) loads into from_env() — pin feature
+    # switches tests assume are OFF; loop tests opt back in explicitly.
+    settings.goal_loop.enabled = False
     return AppContext(db=db, settings=settings)
 
 

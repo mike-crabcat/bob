@@ -646,3 +646,25 @@ class HistoryRepository:
             ") ORDER BY sm.created_at ASC",
             (await self._cid(session_key), limit))
         return [dict(r) for r in rows] if rows else []
+
+    async def last_message_at(self, session_key: str, role: str | None = None) -> str | None:
+        """Newest message timestamp in a conversation (optionally by role) —
+        the goal loop's dead-man health check."""
+        cid = await self._cid(session_key)
+        if role is None:
+            row = await self.db.fetch_one(
+                "SELECT created_at FROM messages WHERE conversation_id = ? "
+                "ORDER BY created_at DESC LIMIT 1", (cid,))
+        else:
+            row = await self.db.fetch_one(
+                "SELECT created_at FROM messages WHERE conversation_id = ? "
+                "AND role = ? ORDER BY created_at DESC LIMIT 1", (cid, role))
+        return row["created_at"] if row else None
+
+    async def recent_messages(self, session_key: str, *, limit: int = 25) -> list[dict]:
+        """Newest-first slice — the goal dashboard's timeline view (the
+        legacy ``messages`` is oldest-first with LIMIT at the old end)."""
+        cid = await self._cid(session_key)
+        return await self.db.fetch_all(
+            "SELECT * FROM messages WHERE conversation_id = ? "
+            "ORDER BY created_at DESC LIMIT ?", (cid, limit))

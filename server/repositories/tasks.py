@@ -111,3 +111,48 @@ class TaskRepository:
         return await self.db.fetch_all(
             "SELECT * FROM tasks WHERE status = 'pending' "
             "ORDER BY created_at LIMIT ?", (limit,))
+
+    # -- goal loop (docs/goal-execution-plan.md): branches per goal --------
+
+    async def counts_for_goal(
+        self, goal_id: str, room_session: str, *, since_iso: str | None = None,
+    ) -> dict[str, int]:
+        """Loop delta metrics: open now; spawned/settled since a turn start.
+        Scope = registered by the goal (source_goal_id) or awaited by its
+        room — both shapes are the goal's branches."""
+        scope = "(source_goal_id = ? OR waiter_session = ?)"
+        if since_iso is not None:
+            open_now = await self.db.fetch_one(
+                f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
+                "AND status = 'pending'", (goal_id, room_session))
+            spawned = await self.db.fetch_one(
+                f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
+                "AND created_at >= ?", (goal_id, room_session, since_iso))
+            settled = await self.db.fetch_one(
+                f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
+                "AND status != 'pending' AND completed_at >= ?",
+                (goal_id, room_session, since_iso))
+            return {"open": open_now["n"], "spawned": spawned["n"],
+                    "settled": settled["n"]}
+        open_now = await self.db.fetch_one(
+            f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
+            "AND status = 'pending'", (goal_id, room_session))
+        return {"open": open_now["n"], "spawned": 0, "settled": 0}
+
+    async def open_counts_by_goal(self, goal_ids: list[str]) -> dict[str, int]:
+        if not goal_ids:
+            return {}
+        marks = ",".join("?" * len(goal_ids))
+        rows = await self.db.fetch_all(
+            f"SELECT source_goal_id AS gid, COUNT(*) AS n FROM tasks "
+            f"WHERE status = 'pending' AND source_goal_id IN ({marks}) "
+            f"GROUP BY source_goal_id", tuple(goal_ids))
+        return {r["gid"]: r["n"] for r in rows}
+
+    async def list_for_goal(
+        self, goal_id: str, room_session: str, *, limit: int = 60,
+    ) -> list[dict[str, Any]]:
+        return await self.db.fetch_all(
+            "SELECT * FROM tasks WHERE source_goal_id = ? "
+            "OR waiter_session = ? ORDER BY created_at DESC LIMIT ?",
+            (goal_id, room_session, limit))

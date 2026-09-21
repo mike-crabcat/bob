@@ -169,6 +169,12 @@ async def _generic_wake_dispatch(
             from server.services.goal_rooms import room_turn_tools
             utility_tools = list(utility_tools) + room_turn_tools(
                 ctx, session_key)
+            # Goal loop (docs/goal-execution-plan.md): the continuation
+            # contract + strategies-tree tools, when the loop is enabled.
+            from server.services import goal_loop
+            if goal_loop.loop_enabled(ctx):
+                utility_tools = list(utility_tools) + goal_loop.make_loop_tools(
+                    ctx, session_key)
 
     tools = make_workspace_tools(ctx, session_key=session_key)
     # Bob Events §1.5: goal tools on the generic wake path — a goal_deadline
@@ -189,6 +195,17 @@ async def _generic_wake_dispatch(
     tools.extend(make_approval_tools(ctx, session_key))
     tools.extend(utility_tools)
     dispatch_id = str(uuid4())
+
+    # Goal loop (docs/goal-execution-plan.md): arm the room turn — event
+    # beats timer (pending continuation slot cancelled; any wake supersedes
+    # a declared wait) + the before-snapshot the settle-path delta uses.
+    loop_token = None
+    if session_key.startswith("agent:goal-"):
+        try:
+            from server.services import goal_loop
+            loop_token = await goal_loop.begin_turn(ctx, session_key)
+        except Exception:
+            logger.exception("goal loop: begin_turn failed for %s", session_key)
 
     async def _run() -> None:
         try:
@@ -219,6 +236,13 @@ async def _generic_wake_dispatch(
             if result.strip():
                 await SessionService(ctx).add_message(
                     session_key, "assistant", result, dispatch_id=dispatch_id)
+            if loop_token is not None:
+                try:
+                    from server.services import goal_loop
+                    await goal_loop.end_turn(ctx, loop_token, result)
+                except Exception:
+                    logger.exception("goal loop: end_turn failed for %s",
+                                     session_key)
         except Exception:
             logger.exception("wake: generic dispatch failed for %s", session_key)
 

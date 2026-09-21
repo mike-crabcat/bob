@@ -148,37 +148,6 @@ async def test_due_wakeup_fires_with_goal_context(ctx, db, monkeypatch):
     assert row["status"] == "active"
 
 
-async def test_create_goal_seeds_fallback_action_for_deadline(ctx, db):
-    """2026-09-16: a deadlined goal created with no dated next_action gets
-    a seeded re-drive due at deadline−4h, so the due-action sweep produces
-    a working-conversation wake even if the reviser never runs — the
-    WFH-roster stall shape (asks sent, next_actions stayed empty, only the
-    deadline wake fired)."""
-    from server.services.goal_service import extract_due_instant
-    from server.services.goal_state_service import parse_strategy
-
-    deadline = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-    goal = await goal_service.create_goal(
-        ctx, conversation_id="c", objective="collect rosters",
-        deadline=deadline)
-    state = parse_strategy(goal)
-    assert len(state.next_actions) == 1
-    assert state.next_actions[0].action.startswith("(seeded)")
-    expected = extract_due_instant(deadline) - timedelta(hours=4)
-    assert extract_due_instant(state.next_actions[0].due) == expected
-
-    # Explicit next_actions are left alone, and no deadline means no seed.
-    goal2 = await goal_service.create_goal(
-        ctx, conversation_id="c", objective="with actions",
-        deadline=_future(),
-        strategy={"v": 2, "next_actions": [{"action": "already planned",
-                                            "due": ""}]})
-    assert [na.action for na in parse_strategy(goal2).next_actions] == [
-        "already planned"]
-    goal3 = await goal_service.create_goal(
-        ctx, conversation_id="c", objective="no deadline")
-    assert parse_strategy(goal3).next_actions == []
-
 
 async def test_wakeup_for_settled_goal_is_moot(ctx, db, monkeypatch):
     wake = AsyncMock()

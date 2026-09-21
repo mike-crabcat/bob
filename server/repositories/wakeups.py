@@ -136,18 +136,6 @@ class WakeupRepository:
                     claimed.append(wakeup)
         return claimed
 
-    async def action_due_scheduled(self, goal_id: str, due_key: str) -> bool:
-        """Dedup for the due-action sweep: has this (goal, due) already been
-        woken — scheduled OR already fired? Fired rows must count, or the next
-        sweep would re-create the wake forever."""
-        row = await self.db.fetch_one(
-            """SELECT 1 FROM wakeups
-               WHERE goal_id = ? AND kind = 'action_due'
-               AND json_extract(payload_json, '$.due') = ?
-               AND status IN ('scheduled', 'fired') LIMIT 1""",
-            (goal_id, due_key),
-        )
-        return row is not None
 
     async def list_all_scheduled(self, *, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
@@ -198,3 +186,41 @@ class WakeupRepository:
             "SELECT 1 FROM wakeups WHERE goal_id = ? AND kind = ? "
             "AND status = 'scheduled' LIMIT 1", (goal_id, kind))
         return row is not None
+
+    # -- goal loop (docs/goal-execution-plan.md): the continuation slot ----
+
+    async def cancel_kind_for_goal(self, goal_id: str, kind: str) -> int:
+        """Cancel the goal's pending wakeups of one kind — the single
+        continuation slot's upsert half (event beats timer, plan D2)."""
+        return await self.db.execute(
+            "UPDATE wakeups SET status = 'cancelled' "
+            "WHERE goal_id = ? AND kind = ? AND status = 'scheduled'",
+            (goal_id, kind))
+
+    async def pending_of_kind(self, goal_id: str, kind: str) -> dict[str, Any] | None:
+        return await self.db.fetch_one(
+            "SELECT * FROM wakeups WHERE goal_id = ? AND kind = ? "
+            "AND status = 'scheduled' ORDER BY not_before LIMIT 1",
+            (goal_id, kind))
+
+    async def has_scheduled_kind(self, goal_id: str, kind: str) -> bool:
+        row = await self.db.fetch_one(
+            "SELECT id FROM wakeups WHERE goal_id = ? AND kind = ? "
+            "AND status = 'scheduled' LIMIT 1", (goal_id, kind))
+        return row is not None
+
+    async def list_for_goal(self, goal_id: str, *, limit: int = 40) -> list[dict[str, Any]]:
+        return await self.db.fetch_all(
+            "SELECT id, kind, not_before, status, created_at FROM wakeups "
+            "WHERE goal_id = ? ORDER BY not_before DESC LIMIT ?",
+            (goal_id, limit))
+
+    async def pending_kind_rows(self, goal_ids: list[str], kind: str) -> list[dict[str, Any]]:
+        """Bulk pending-slot lookup for the dashboard goal list."""
+        if not goal_ids:
+            return []
+        marks = ",".join("?" * len(goal_ids))
+        return await self.db.fetch_all(
+            f"SELECT goal_id, not_before, payload_json FROM wakeups "
+            f"WHERE kind = ? AND status = 'scheduled' "
+            f"AND goal_id IN ({marks})", (kind, *goal_ids))

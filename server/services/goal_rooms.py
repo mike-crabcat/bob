@@ -108,8 +108,10 @@ Standing rules:
 
 
 def build_charter(*, goal_id: str, objective: str, kind: str,
-                  deadline: str | None, origin: str) -> str:
+                  deadline: str | None, origin: str,
+                  loop_block: str = "") -> str:
     dl = f"\nDeadline: {deadline}" if deadline else "\nDeadline: none set"
+    loop = f"\n\n{loop_block}" if loop_block else ""
     return (
         f"[Goal {goal_id}]\n"
         f"You are the goal room working exactly one goal:\n"
@@ -117,7 +119,7 @@ def build_charter(*, goal_id: str, objective: str, kind: str,
         f"Kind: {kind}{dl}\n"
         f"Origin conversation (where the goal was asked, and where your "
         f"reports go): {origin}\n\n"
-        f"{_STANDING_RULES}"
+        f"{_STANDING_RULES}{loop}"
     )
 
 
@@ -136,11 +138,17 @@ async def ensure_room(
     await ConversationRepository(ctx.db).ensure(
         session_key, title=f"goal: {objective[:60]}")
     repo = UtilityConversationRepository(ctx.db)
+    # Goal loop: the continuation contract rides the charter (its text is
+    # behaviour spec, so it lives where every round reads it).
+    from server.services import goal_loop
+    loop_block = (goal_loop.charter_loop_block(kind)
+                  if goal_loop.loop_enabled(ctx) else "")
     row = await repo.upsert(
         session_key=session_key,
         title=f"goal: {objective[:60]}",
         charter=build_charter(goal_id=goal_id, objective=objective, kind=kind,
-                              deadline=deadline, origin=origin_session),
+                              deadline=deadline, origin=origin_session,
+                              loop_block=loop_block),
         created_by="goal_rooms",
     )
     # report_to = the origin (plan: humans get reports, rooms get work). For
@@ -362,71 +370,8 @@ def _parse_ts(ts: str) -> datetime | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Scheduled scans (operator-directed; delivered by goal_service.fire_wakeup)
-# ---------------------------------------------------------------------------
-
-_SCAN_DEFAULT_CRON = "0 9 * * *"     # daily 09:00 local
-_SCAN_DEFAULT_TZ = "Australia/Perth"
 
 
-def scan_spec_of(goal: dict[str, Any]) -> dict[str, Any]:
-    """The goal's ``scan`` block from its state (rooms own it via room_state —
-    extra keys round-trip the strategy envelope): {"cron", "tz", "brief",
-    "groups": [session keys]}. Empty when the room has no scan cadence."""
-    from server.services.goal_state_service import parse_strategy
-    extra = parse_strategy(goal).model_extra or {}
-    spec = extra.get("scan")
-    return spec if isinstance(spec, dict) else {}
-
-
-async def schedule_scan(ctx: AppContext, goal: dict[str, Any]) -> None:
-    """The scan wakeup series: a second named cadence on the room (the
-    check-in's sibling). Recurrence is cron-with-tz so it stays at local 9am
-    across DST; the series dies with the goal like every other wakeup."""
-    from server.repositories.wakeups import WakeupRepository
-
-    spec = scan_spec_of(goal) or {}
-    # not_before=now: the series fires once immediately (a fresh scan spec
-    # should produce a scan, not wait for tomorrow), then the cron recurrence
-    # takes over — next_cron_occurrence computes the 9am slot from now.
-    await WakeupRepository(ctx.db).schedule(
-        conversation_id=goal["conversation_id"],
-        not_before=_now_iso(),
-        goal_id=goal["id"],
-        recurrence=f"cron:{spec.get('cron') or _SCAN_DEFAULT_CRON}",
-        tz=spec.get("tz") or _SCAN_DEFAULT_TZ,
-        kind="goal_scan",
-        payload={"note": "goal room scheduled scan"},
-    )
-
-
-async def render_scan(ctx: AppContext, goal: dict[str, Any]) -> str:
-    spec = scan_spec_of(goal)
-    groups = spec.get("groups") or []
-    lines = [
-        f"## Morning scan — {goal['objective']}",
-        "",
-        "Read the last ~24h of these conversations (read_group_history):",
-    ]
-    for g in groups:
-        lines.append(f"- {g}")
-    lines += [
-        "",
-        str(spec.get("brief") or
-            "Note anything merch-relevant: designs people mention, in-jokes, "
-            "running bits, upcoming events, quotable moments."),
-        "",
-        "Propose at most ONE new idea per scan: record it in your state with "
-        "evidence (group + message time), then pitch it where it belongs — a "
-        "clear individual target gets a DM (send_whatsapp_to_contact, "
-        "parent_goal_id = your goal so the reply rolls back here); group "
-        "pitches belong to the origin conversation, not to you. Do not "
-        "re-propose an idea already recorded in `known`. If nothing new, say "
-        "so and skip — a quiet scan is a fine outcome. End with room_state "
-        "if anything changed.",
-    ]
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -889,36 +834,3 @@ async def adopt_goal(ctx: AppContext, goal_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Dream-plan seeding (plan D15 — dream_plans.task_id finally gets a writer)
-# ---------------------------------------------------------------------------
-
-async def seed_room_for_plan(ctx: AppContext, plan: dict[str, Any]) -> dict[str, Any]:
-    """Approved dream plan → goal room. Charter from the plan's proposed
-    action + assistance method; the plan's linked session becomes the
-    origin. Returns the room result; never raises into the caller."""
-    try:
-        if not rooms_enabled(ctx):
-            return {"ok": False, "error": "disabled"}
-        from server.services import goal_service
-        from server.services.dream.store import DreamStore
-        # The plan's evidence session is the origin — the room's reports go
-        # where the commitment was detected (dream links carry session_key).
-        session_key = (await DreamStore(ctx).link_session_for_item(
-            "plan", plan["id"])) or ""
-        goal = await goal_service.create_goal(
-            ctx, conversation_id=session_key or "agent:main:internal",
-            objective=f"[dream plan {plan['id']}] {plan['title']}",
-            kind="task",
-            origin_conversation_id=session_key or None,
-            strategy={"v": 2, "plan": str(plan.get("proposed_action") or ""),
-                      "known": [f"assistance: {plan.get('assistance_method') or ''}"],
-                      "open_questions": [], "next_actions": [],
-                      "refs": {"entities": [], "claims": []}},
-        )
-        await DreamStore(ctx).set_plan_task_id(plan["id"], goal["id"])
-        return {"ok": True, "goal_id": goal["id"],
-                "room": goal["conversation_id"]}
-    except Exception:
-        logger.exception("dream plan %s: goal-room seeding failed",
-                         plan.get("id"))
-        return {"ok": False, "error": "seeding failed (logged)"}

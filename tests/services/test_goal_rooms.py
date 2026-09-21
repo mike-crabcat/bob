@@ -75,8 +75,9 @@ async def test_wrapper_kind_stays_legacy(ctx):
 
 
 async def test_due_action_and_deadline_wakes_target_the_room(ctx):
-    """Deadlines follow brains: both the deadline wakeup and the due-action
-    sweep land in the ROOM (which carries the goal tools), never the origin."""
+    """Deadlines follow brains: the deadline wakeup lands in the ROOM
+    (which carries the goal tools), never the origin. (The due-action
+    sweep half retired with Phase 6b, 2026-09-22.)"""
     from datetime import datetime as _dt
 
     deadline = _iso(_dt.now(timezone.utc) + timedelta(days=2))
@@ -92,13 +93,6 @@ async def test_due_action_and_deadline_wakes_target_the_room(ctx):
     assert deadline_wakes and all(
         w["conversation_id"] == room for w in deadline_wakes)
     assert not await wake_repo.list_scheduled(ORIGIN)
-
-    scheduled = await goal_service.schedule_due_action_wakes(
-        ctx, lookahead_hours=72.0)
-    assert scheduled == 1
-    due_rows = [w for w in await wake_repo.list_scheduled(room)
-                if w["kind"] == "action_due"]
-    assert due_rows and due_rows[0]["conversation_id"] == room
 
 
 async def test_kill_switch_off_is_legacy(monkeypatch, ctx):
@@ -166,37 +160,6 @@ async def test_room_turn_tools_add_outreach_only_when_bridge_up(ctx):
     assert not any("group" in n for n in names_up - names_down)
     ctx.whatsapp_bridge = None
 
-
-async def test_scan_series_created_and_fires_brief(ctx):
-    """An operator-directed scan block in the strategy gets a cron wakeup
-    series on the room; firing it wakes the room with the group list."""
-    scan = {"cron": "0 9 * * *", "tz": "Australia/Perth",
-            "groups": ["agent:main:whatsapp:group:120363422982048691"],
-            "brief": "merch-relevant chatter only"}
-    goal = await goal_service.create_goal(
-        ctx, conversation_id=ORIGIN, objective="merch", kind="task",
-        strategy={"v": 2, "refs": {"entities": [], "claims": []},
-                  "scan": scan})
-    room = goal["conversation_id"]
-    scans = [w for w in await WakeupRepository(ctx.db).list_scheduled(room)
-             if w["kind"] == "goal_scan"]
-    assert scans and scans[0]["recurrence"] == "cron:0 9 * * *"
-    assert scans[0]["tz"] == "Australia/Perth"
-
-    brief = await goal_rooms.render_scan(ctx, goal)
-    assert "agent:main:whatsapp:group:120363422982048691" in brief
-    assert "merch-relevant chatter only" in brief
-    assert "ONE new idea" in brief
-
-    # Firing the wakeup wakes the room with the brief.
-    wakes = []
-    with patch("server.services.wake_service.wake_conversation",
-               new=AsyncMock(side_effect=lambda c, t, content, **kw:
-                             wakes.append((t, content)) or True)):
-        rescheduled = await goal_service.fire_wakeup(ctx, scans[0])
-    assert rescheduled is True
-    assert wakes and wakes[0][0] == room
-    assert "Morning scan" in wakes[0][1]
 
 
 async def test_read_group_history_is_group_scoped(ctx):
@@ -541,7 +504,10 @@ async def test_emission_skips_self_and_relationship_noise(ctx):
 
 # ----------------------------------------------------------------- dream D15
 
-async def test_dream_plan_approval_seeds_room(ctx):
+async def test_dream_approval_no_longer_seeds_room(ctx):
+    """D15 retired (Mike 2026-09-20): the dream PROPOSES, the announcement
+    ASKS, and only the PEOPLE'S REPLY raises a goal. Approval — operator or
+    auto — spawns no machinery."""
     from server.services.dream.store import DreamStore
 
     store = DreamStore(ctx)
@@ -558,19 +524,82 @@ async def test_dream_plan_approval_seeds_room(ctx):
         "VALUES ('plan-1', 'book the venue', 'talked about it', 'call them', "
         "'draft the message', 'draft', 'dream-1', ?, ?)",
         (_iso(datetime.now(timezone.utc)), _iso(datetime.now(timezone.utc))))
-    await ctx.db.execute(
-        "INSERT INTO dream_item_links (item_type, item_id, session_key) "
-        "VALUES ('plan', 'plan-1', ?)", (ORIGIN,))
 
-    with patch("server.services.wake_service.wake_conversation",
-               new=AsyncMock(return_value=True)):
-        await store.set_plan_status("plan-1", "approved", approved_by="operator")
+    await store.set_plan_status("plan-1", "approved", approved_by="auto")
 
     row = await ctx.db.fetch_one("SELECT task_id FROM dream_plans WHERE id = 'plan-1'")
-    assert row["task_id"]  # D15: the reserved column finally has a writer
-    goal = await GoalRepository(ctx.db).get(row["task_id"])
-    assert goal is not None and goal_rooms.is_room_session(goal["conversation_id"])
-    assert "book the venue" in goal["objective"]
+    assert not row["task_id"]                    # nothing seeded at approval
+    assert not await GoalRepository(ctx.db).list_active()  # no goal at all
+
+
+async def test_dream_announcement_registers_offer_task(ctx):
+    """The reply-commissioned path: announcing a plan registers an offer-task
+    whose completer is the announced conversation — the reply turn creates
+    the goal and settles the task; approval never did it."""
+    from unittest.mock import MagicMock
+
+    from server.services.dream.announce import AnnounceService
+
+    await ctx.db.execute(
+        "INSERT INTO dream_runs (id, started_at, window_start, window_end, "
+        "status, trigger, model) VALUES ('dream-2', ?, ?, ?, 'complete', "
+        "'cli', 'm')",
+        (_iso(datetime.now(timezone.utc)),
+         _iso(datetime.now(timezone.utc) - timedelta(days=1)),
+         _iso(datetime.now(timezone.utc))))
+    import json as _j
+    await ctx.db.execute(
+        "INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, "
+        "assistance_method, status, source_run_id, approved_by, approved_at, "
+        "evidence_json, created_at, updated_at) "
+        "VALUES ('plan-2', 'sanrio gift', 'talked about it', 'follow up', "
+        "'name the products', 'approved', 'dream-2', 'auto', ?, ?, ?, ?)",
+        (_iso(datetime.now(timezone.utc)),
+         _j.dumps([{"session_key": ORIGIN, "kind": "commitment",
+                    "excerpt": "Helen asked for links", "run_id": "dream-2"}]),
+         _iso(datetime.now(timezone.utc)), _iso(datetime.now(timezone.utc))))
+    await ctx.db.execute(
+        "INSERT INTO dream_item_links (item_type, item_id, session_key) "
+        "VALUES ('plan', 'plan-2', ?)", (ORIGIN,))
+
+    ctx.settings.dream.announce_factcheck = False  # no LLM in unit tests
+    bridge = MagicMock()
+    bridge.connected = True
+    bridge.send_message = AsyncMock(return_value="req-1")
+    ctx.whatsapp_bridge = bridge
+    with patch.object(AnnounceService, "_compose",
+                      new=AsyncMock(return_value="checking in!")):
+        result = await AnnounceService(ctx).flush()
+    ctx.whatsapp_bridge = None
+
+    assert result["plans_announced"] == 1
+    from server.repositories.tasks import TaskRepository
+    repo = TaskRepository(ctx.db)
+    owed = await repo.list_for_completer(ORIGIN)
+    assert owed and owed[0]["expected_completer"] == ORIGIN
+    assert "plan-2" in owed[0]["title"] and "awaiting their answer" in owed[0]["title"]
+    import json as _json
+    assert _json.loads(owed[0]["payload_json"]).get("dream_plan_id") == "plan-2"
+    # No goal spawned by announcing.
+    assert not await GoalRepository(ctx.db).list_active()
+
+    # The reply turn: complete the offer task + create the goal.
+    from server.services import goal_service
+    from server.services.tasks import settle_task
+    goal = await goal_service.create_goal(
+        ctx, conversation_id=ORIGIN, objective="sanrio gift follow-up",
+        kind="task",
+        strategy={"v": 2, "refs": {"entities": [], "claims": []}})
+    out = await settle_task(
+        ctx, owed[0]["id"], to_status="completed",
+        result=f"reply expressed interest — goal {goal['id']} created",
+        completed_by=f"conversation:{ORIGIN}")
+    assert out["ok"]
+    await ctx.db.execute(
+        "UPDATE dream_plans SET task_id = ?, updated_at = ? WHERE id = 'plan-2'",
+        (goal["id"], _iso(datetime.now(timezone.utc))))
+    row = await ctx.db.fetch_one("SELECT task_id FROM dream_plans WHERE id = 'plan-2'")
+    assert row["task_id"] == goal["id"]
 
 
 # ------------------------------------------------------------------ adopt

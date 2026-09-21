@@ -250,6 +250,38 @@ class GoalRepository:
         )
         return bool(count)
 
+    async def append_known_line(self, goal_id: str, line: str) -> bool:
+        """Append ONE evidence line to the strategy known-list — the
+        append-only evidence path (goal-execution-plan D4). No
+        expected_version: appends from any conversation (task settlements,
+        rooms) must never collide with the room's tree rewrites. Bumps
+        version so tree writers see the change and re-read."""
+        import json as _json
+        row = await self.db.fetch_one(
+            "SELECT strategy_json FROM goals WHERE id = ? AND status = 'active'",
+            (goal_id,))
+        if row is None:
+            return False
+        try:
+            state = _json.loads(row["strategy_json"] or "{}")
+        except (TypeError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {"v": 2, "legacy": state}
+        known = state.get("known")
+        if not isinstance(known, list):
+            known = []
+        known.append(str(line))
+        state["known"] = known
+        if "v" not in state:
+            state["v"] = 2
+        count = await self.db.execute(
+            "UPDATE goals SET strategy_json = ?, version = version + 1, "
+            "updated_at = ? WHERE id = ? AND status = 'active'",
+            (_json.dumps(state, ensure_ascii=False), _now_iso(), goal_id),
+        )
+        return bool(count)
+
     async def transition(
         self,
         goal_id: str,
@@ -302,7 +334,8 @@ class GoalRepository:
     async def list_recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
             """SELECT id, conversation_id, origin_conversation_id, kind, objective,
-                      progress, result, status, deadline, created_at, updated_at
+                      progress, result, status, deadline, created_at, updated_at,
+                      version, strategy_json, loop_state_json
                FROM goals
                ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC
                LIMIT ?""", (limit,))
@@ -431,3 +464,11 @@ class GoalRepository:
             "SELECT * FROM goal_transitions WHERE goal_id = ? ORDER BY created_at",
             (goal_id,),
         )
+
+    # -- goal loop (docs/goal-execution-plan.md): system-owned runtime state
+
+    async def set_loop_state(self, goal_id: str, state: dict[str, Any]) -> None:
+        import json as _json
+        await self.db.execute(
+            "UPDATE goals SET loop_state_json = ? WHERE id = ?",
+            (_json.dumps(state), goal_id))

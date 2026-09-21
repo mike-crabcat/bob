@@ -533,7 +533,8 @@ class GoalRoomsSettings:
     """
 
     enabled: bool = True
-    room_kinds: str = "task,event_plan,negotiate,coordination,commerce,sales_target,merch_order"
+    room_kinds: str = ("task,research,build,event_plan,negotiate,coordination,"
+                       "commerce,sales_target,merch_order")
     checkin_minutes_deadline: int = 1440     # daily while a deadline is set
     checkin_minutes_plain: int = 10080       # weekly otherwise
     max_routes_per_room: int = 20
@@ -543,6 +544,36 @@ class GoalRoomsSettings:
 
     def kind_gets_room(self, kind: str) -> bool:
         return kind in {k.strip() for k in self.room_kinds.split(",") if k.strip()}
+
+
+@dataclass(slots=True)
+class GoalLoopSettings:
+    """Goal execution loop (docs/goal-execution-plan.md).
+
+    ON by default (Phase 6b, Mike's call 2026-09-22 — a day early vs the
+    plan's metrics week; pilot numbers were green: ~10% skips, 0 stalls,
+    0 stale rejections). BOB_GOAL_LOOP=off is the kill switch: rooms fall
+    back to the fixed check-in cadence and the continuation contract goes
+    inert. With it on:
+    rooms self-schedule via the single goal_continue slot, a dead-man
+    heartbeat bounds silence, frames carry review/stall/terminal briefs,
+    and turns spend round budgets. Rooms without the loop keep the fixed
+    check-in cadence (the Phase-6 retirement undoes that only after a
+    metrics-clean week).
+    """
+
+    enabled: bool = True
+    deadman_minutes: int = 1440          # liveness floor between room turns
+    stall_minutes: int = 30              # zero-delta turn → stall frame slot
+    continue_cap: int = 3                # max consecutive continue_now chains
+    initial_delay_minutes: int = 2       # opening carry slot after creation
+    budget_rounds_default: int = 40
+    budget_rounds_human_paced: int = 60  # negotiate/event_plan kinds
+
+    def budget_for(self, kind: str) -> int:
+        if kind in ("negotiate", "event_plan"):
+            return self.budget_rounds_human_paced
+        return self.budget_rounds_default
 
 
 @dataclass(slots=True)
@@ -583,6 +614,7 @@ class Settings:
     dream: DreamSettings = field(default_factory=DreamSettings)
     goals: GoalsSettings = field(default_factory=GoalsSettings)
     goal_rooms: GoalRoomsSettings = field(default_factory=GoalRoomsSettings)
+    goal_loop: GoalLoopSettings = field(default_factory=GoalLoopSettings)
     heartbeat_interval_seconds: float = 60.0
     public_url: str = ""  # Public URL for callbacks (e.g., http://localhost:8420)
     # Dedicated token for POST /api/v1/stimulus/events (external feeds).
@@ -974,8 +1006,8 @@ class Settings:
                 not in ("off", "0", "false", "no"),
                 room_kinds=os.getenv(
                     "BOB_GOAL_ROOM_KINDS",
-                    "task,event_plan,negotiate,coordination,commerce,"
-                    "sales_target,merch_order"),
+                    "task,research,build,event_plan,negotiate,coordination,"
+                    "commerce,sales_target,merch_order"),
                 checkin_minutes_deadline=int(os.getenv(
                     "BOB_GOAL_ROOM_CHECKIN_DEADLINE_MIN", "1440")),
                 checkin_minutes_plain=int(os.getenv(
@@ -984,6 +1016,19 @@ class Settings:
                 max_children_per_parent=int(os.getenv(
                     "BOB_GOAL_ROOM_MAX_CHILDREN", "8")),
                 max_goal_depth=int(os.getenv("BOB_GOAL_ROOM_MAX_DEPTH", "3")),
+            ),
+            goal_loop=GoalLoopSettings(
+                enabled=os.getenv("BOB_GOAL_LOOP", "on").strip().lower()
+                not in ("off", "0", "false", "no"),
+                deadman_minutes=int(os.getenv("BOB_GOAL_LOOP_DEADMAN_MIN", "1440")),
+                stall_minutes=int(os.getenv("BOB_GOAL_LOOP_STALL_MIN", "30")),
+                continue_cap=int(os.getenv("BOB_GOAL_LOOP_CONTINUE_CAP", "3")),
+                initial_delay_minutes=int(os.getenv(
+                    "BOB_GOAL_LOOP_INITIAL_MIN", "2")),
+                budget_rounds_default=int(os.getenv(
+                    "BOB_GOAL_LOOP_BUDGET_ROUNDS", "40")),
+                budget_rounds_human_paced=int(os.getenv(
+                    "BOB_GOAL_LOOP_BUDGET_ROUNDS_HUMAN", "60")),
             ),
         )
 
