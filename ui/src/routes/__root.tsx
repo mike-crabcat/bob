@@ -61,7 +61,7 @@ function RootLayout() {
     queryFn: () => fetchAPI<{ questions: { id: string }[] }>("/memory/questions?status=open"),
     refetchInterval: 30000,
   });
-  const openQuestionCount = questionsData?.questions.length ?? 0;
+  const openQuestionCount = questionsData?.questions?.length ?? 0;
 
   useEffect(() => {
     if (!overflowOpen) return;

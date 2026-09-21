@@ -16,11 +16,13 @@ import { Route as WorkspaceIndexRouteImport } from './routes/workspace/index'
 import { Route as SkillsIndexRouteImport } from './routes/skills/index'
 import { Route as PhoneIndexRouteImport } from './routes/phone/index'
 import { Route as MemoryIndexRouteImport } from './routes/memory/index'
+import { Route as GoalsIndexRouteImport } from './routes/goals.index'
 import { Route as DreamsIndexRouteImport } from './routes/dreams/index'
 import { Route as ConversationsIndexRouteImport } from './routes/conversations/index'
 import { Route as ContactsIndexRouteImport } from './routes/contacts/index'
 import { Route as SkillsDelegationIdRouteImport } from './routes/skills/$delegationId'
 import { Route as SessionsSplatRouteImport } from './routes/sessions.$'
+import { Route as GoalsGoalIdRouteImport } from './routes/goals.$goalId'
 import { Route as ConversationsSessionKeyRouteImport } from './routes/conversations/$sessionKey'
 import { Route as ContactsContactIdRouteImport } from './routes/contacts/$contactId'
 import { Route as PhoneCallIdIndexRouteImport } from './routes/phone/$callId/index'
@@ -62,6 +64,11 @@ const MemoryIndexRoute = MemoryIndexRouteImport.update({
   path: '/memory/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GoalsIndexRoute = GoalsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => GoalsRoute,
+} as any)
 const DreamsIndexRoute = DreamsIndexRouteImport.update({
   id: '/dreams/',
   path: '/dreams/',
@@ -86,6 +93,11 @@ const SessionsSplatRoute = SessionsSplatRouteImport.update({
   id: '/$',
   path: '/$',
   getParentRoute: () => SessionsRoute,
+} as any)
+const GoalsGoalIdRoute = GoalsGoalIdRouteImport.update({
+  id: '/$goalId',
+  path: '/$goalId',
+  getParentRoute: () => GoalsRoute,
 } as any)
 const ConversationsSessionKeyRoute = ConversationsSessionKeyRouteImport.update({
   id: '/conversations/$sessionKey',
@@ -117,15 +129,17 @@ const ConversationsSessionKeyCallsCallIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/goals': typeof GoalsRoute
+  '/goals': typeof GoalsRouteWithChildren
   '/sessions': typeof SessionsRouteWithChildren
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
+  '/goals/$goalId': typeof GoalsGoalIdRoute
   '/sessions/$': typeof SessionsSplatRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
   '/conversations/': typeof ConversationsIndexRoute
   '/dreams/': typeof DreamsIndexRoute
+  '/goals/': typeof GoalsIndexRoute
   '/memory/': typeof MemoryIndexRoute
   '/phone/': typeof PhoneIndexRoute
   '/skills/': typeof SkillsIndexRoute
@@ -136,14 +150,15 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/goals': typeof GoalsRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/contacts/$contactId': typeof ContactsContactIdRoute
+  '/goals/$goalId': typeof GoalsGoalIdRoute
   '/sessions/$': typeof SessionsSplatRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts': typeof ContactsIndexRoute
   '/conversations': typeof ConversationsIndexRoute
   '/dreams': typeof DreamsIndexRoute
+  '/goals': typeof GoalsIndexRoute
   '/memory': typeof MemoryIndexRoute
   '/phone': typeof PhoneIndexRoute
   '/skills': typeof SkillsIndexRoute
@@ -155,15 +170,17 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/goals': typeof GoalsRoute
+  '/goals': typeof GoalsRouteWithChildren
   '/sessions': typeof SessionsRouteWithChildren
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
+  '/goals/$goalId': typeof GoalsGoalIdRoute
   '/sessions/$': typeof SessionsSplatRoute
   '/skills/$delegationId': typeof SkillsDelegationIdRoute
   '/contacts/': typeof ContactsIndexRoute
   '/conversations/': typeof ConversationsIndexRoute
   '/dreams/': typeof DreamsIndexRoute
+  '/goals/': typeof GoalsIndexRoute
   '/memory/': typeof MemoryIndexRoute
   '/phone/': typeof PhoneIndexRoute
   '/skills/': typeof SkillsIndexRoute
@@ -180,11 +197,13 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/contacts/$contactId'
     | '/conversations/$sessionKey'
+    | '/goals/$goalId'
     | '/sessions/$'
     | '/skills/$delegationId'
     | '/contacts/'
     | '/conversations/'
     | '/dreams/'
+    | '/goals/'
     | '/memory/'
     | '/phone/'
     | '/skills/'
@@ -195,14 +214,15 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/goals'
     | '/sessions'
     | '/contacts/$contactId'
+    | '/goals/$goalId'
     | '/sessions/$'
     | '/skills/$delegationId'
     | '/contacts'
     | '/conversations'
     | '/dreams'
+    | '/goals'
     | '/memory'
     | '/phone'
     | '/skills'
@@ -217,11 +237,13 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/contacts/$contactId'
     | '/conversations/$sessionKey'
+    | '/goals/$goalId'
     | '/sessions/$'
     | '/skills/$delegationId'
     | '/contacts/'
     | '/conversations/'
     | '/dreams/'
+    | '/goals/'
     | '/memory/'
     | '/phone/'
     | '/skills/'
@@ -233,7 +255,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  GoalsRoute: typeof GoalsRoute
+  GoalsRoute: typeof GoalsRouteWithChildren
   SessionsRoute: typeof SessionsRouteWithChildren
   ContactsContactIdRoute: typeof ContactsContactIdRoute
   ConversationsSessionKeyRoute: typeof ConversationsSessionKeyRouteWithChildren
@@ -299,6 +321,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MemoryIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/goals/': {
+      id: '/goals/'
+      path: '/'
+      fullPath: '/goals/'
+      preLoaderRoute: typeof GoalsIndexRouteImport
+      parentRoute: typeof GoalsRoute
+    }
     '/dreams/': {
       id: '/dreams/'
       path: '/dreams'
@@ -333,6 +362,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/sessions/$'
       preLoaderRoute: typeof SessionsSplatRouteImport
       parentRoute: typeof SessionsRoute
+    }
+    '/goals/$goalId': {
+      id: '/goals/$goalId'
+      path: '/$goalId'
+      fullPath: '/goals/$goalId'
+      preLoaderRoute: typeof GoalsGoalIdRouteImport
+      parentRoute: typeof GoalsRoute
     }
     '/conversations/$sessionKey': {
       id: '/conversations/$sessionKey'
@@ -372,6 +408,18 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface GoalsRouteChildren {
+  GoalsGoalIdRoute: typeof GoalsGoalIdRoute
+  GoalsIndexRoute: typeof GoalsIndexRoute
+}
+
+const GoalsRouteChildren: GoalsRouteChildren = {
+  GoalsGoalIdRoute: GoalsGoalIdRoute,
+  GoalsIndexRoute: GoalsIndexRoute,
+}
+
+const GoalsRouteWithChildren = GoalsRoute._addFileChildren(GoalsRouteChildren)
+
 interface SessionsRouteChildren {
   SessionsSplatRoute: typeof SessionsSplatRoute
 }
@@ -403,7 +451,7 @@ const ConversationsSessionKeyRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  GoalsRoute: GoalsRoute,
+  GoalsRoute: GoalsRouteWithChildren,
   SessionsRoute: SessionsRouteWithChildren,
   ContactsContactIdRoute: ContactsContactIdRoute,
   ConversationsSessionKeyRoute: ConversationsSessionKeyRouteWithChildren,

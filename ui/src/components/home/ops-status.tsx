@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { fetchAPI, postAPI } from "@/lib/api";
 
 export interface OpsStatus {
@@ -155,7 +156,12 @@ export function NeedsAttention() {
           </div>
         ))}
         {s.goals.overdue.map((g) => (
-          <div key={g.id} className="p-2 flex items-start gap-2">
+          <Link
+            key={g.id}
+            to="/goals/$goalId"
+            params={{ goalId: g.id }}
+            className="p-2 flex items-start gap-2 hover:bg-surface"
+          >
             <span className="text-yellow-400 shrink-0">overdue goal</span>
             <div className="min-w-0 flex-1">
               <div className="text-text truncate">{g.objective}</div>
@@ -163,7 +169,7 @@ export function NeedsAttention() {
                 {g.kind} · due {new Date(g.deadline).toLocaleString()}
               </div>
             </div>
-          </div>
+          </Link>
         ))}
         {s.stuck_turns.map((t) => (
           <div key={t.id} className="p-2 flex items-start gap-2">

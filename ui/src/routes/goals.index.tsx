@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
 import { fetchAPI, postAPI } from "@/lib/api";
+import { parseTs } from "@/lib/time";
 
 interface GoalTransition {
   from_status: string | null;
@@ -10,344 +10,173 @@ interface GoalTransition {
   created_at: string;
 }
 
-interface NextAction {
-  action: string;
-  due: string;
+interface NextRun {
+  at: string;
+  frame: string | null;
 }
 
-interface GoalState {
-  plan: string;
-  known: number;
-  open_questions: string[];
-  next_actions: NextAction[];
-  entities: string[];
+interface LoopSummary {
+  on: boolean;
+  budget_total: number | null;
+  budget_spent: number | null;
+  stall_streak: number;
+  skip_streak: number;
+  open_tasks: number;
+  next_run: NextRun | null;
 }
 
 interface Goal {
   id: string;
   conversation_id: string;
   origin_conversation_id: string | null;
-  parent_goal_id: string | null;
-  children: string[];
   kind: string;
   objective: string;
-  progress: string | null;
-  result: string;
   status: string;
   deadline: string | null;
   created_at: string;
   updated_at: string;
-  state?: GoalState;
+  children: string[];
+  loop: LoopSummary;
   transitions: GoalTransition[];
 }
 
-interface RoutingDecision {
-  id: string;
-  stimulus_id: string;
-  source_conversation_id: string;
-  goal_id: string;
-  match_type: string;
-  probe_verdict: string | null;
-  revise_outcome: string | null;
-  wake_decision: string | null;
-  created_at: string;
-}
-
-interface Wakeup {
-  id: string;
-  conversation_id: string;
-  goal_id: string | null;
-  kind: string;
-  not_before: string;
-  recurrence: string | null;
-  tz: string | null;
-  status: string;
-  payload: string;
+interface GoalsSnapshot {
+  goals: Goal[];
 }
 
 const STATUS_COLOR: Record<string, string> = {
-  active: "text-success",
-  completed: "text-accent",
-  failed: "text-error",
+  active: "text-green-500",
+  completed: "text-blue-400",
   cancelled: "text-muted",
+  failed: "text-red-400",
 };
 
-function fmtTs(iso: string | null): string {
-  if (!iso) return "--";
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function Countdown({ iso }: { iso: string }) {
-  const diff = new Date(iso).getTime() - Date.now();
-  if (isNaN(diff)) return <span className="text-muted">--</span>;
-  if (diff < 0) return <span className="text-yellow-400">due</span>;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return <span className="text-text">{mins}m</span>;
-  const hours = Math.floor(mins / 60);
-  if (hours < 48) return <span className="text-text">{hours}h {mins % 60}m</span>;
-  return <span className="text-text">{Math.floor(hours / 24)}d</span>;
-}
-
-function GoalCard({ goal, parentObjective }: { goal: Goal; parentObjective?: string | null }) {
-  const [open, setOpen] = useState(false);
-  const qc = useQueryClient();
-  const cancel = useMutation({
-    mutationFn: () => postAPI(`/goals/${goal.id}/cancel`, {}),
-    onSettled: () => qc.invalidateQueries({ queryKey: ["goals"] }),
+function fmtTs(ts: string | null | undefined): string {
+  if (!ts) return "—";
+  return parseTs(ts).toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
+}
 
+function untilTs(ts: string): string {
+  const diffMs = parseTs(ts).getTime() - Date.now();
+  if (diffMs <= 0) return "due now";
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 90) return `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
+function LoopLine({ loop }: { loop: LoopSummary }) {
+  if (!loop.on) return null;
+  const parts: string[] = [];
+  if (loop.next_run) {
+    parts.push(`next ${untilTs(loop.next_run.at)}`);
+  } else if (loop.open_tasks > 0) {
+    parts.push(`waiting on ${loop.open_tasks} branch${loop.open_tasks > 1 ? "es" : ""}`);
+  } else {
+    parts.push("idle — dead-man");
+  }
+  if (loop.budget_total) {
+    parts.push(`budget ${loop.budget_spent ?? 0}/${loop.budget_total}`);
+  }
+  const flags: string[] = [];
+  if (loop.stall_streak > 0) flags.push(`stalled ×${loop.stall_streak}`);
+  if (loop.skip_streak > 3) flags.push(`skips ×${loop.skip_streak}`);
   return (
-    <div className="bg-surface border border-border">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-start gap-2 p-2 text-left"
-      >
+    <span className="text-[10px] text-muted">
+      {" · "}
+      {parts.join(" · ")}
+      {flags.length > 0 && <span className="text-amber-500"> · {flags.join(" · ")}</span>}
+    </span>
+  );
+}
+
+function GoalRow({ goal }: { goal: Goal }) {
+  return (
+    <Link
+      to="/goals/$goalId"
+      params={{ goalId: goal.id }}
+      className="block bg-surface border border-border p-2 hover:border-accent"
+    >
+      <div className="flex items-start gap-2">
         <span className={`text-[9px] uppercase mt-0.5 shrink-0 ${STATUS_COLOR[goal.status] ?? "text-muted"}`}>
           {goal.status}
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-xs text-text break-words">{goal.objective}</div>
-          {parentObjective && (
-            <div className="text-[10px] text-muted mt-0.5 truncate" title={parentObjective}>
-              under: {parentObjective}
-            </div>
-          )}
           <div className="text-[10px] text-muted mt-0.5">
             {goal.kind}
             {goal.deadline && <> · due {fmtTs(goal.deadline)}</>}
             {" · "}updated {fmtTs(goal.updated_at)}
+            <LoopLine loop={goal.loop} />
           </div>
         </div>
-        <span className="text-muted text-xs shrink-0">{open ? "▾" : "▸"}</span>
-      </button>
-      {open && (
-        <div className="border-t border-border p-2 text-[11px] flex flex-col gap-2">
-          <div className="text-muted break-all">
-            conversation:{" "}
-            <Link
-              to="/conversations/$sessionKey"
-              params={{ sessionKey: goal.conversation_id }}
-              className="text-accent hover:underline"
-            >
-              {goal.conversation_id}
-            </Link>
-            {goal.parent_goal_id && <> · child of <span className="text-accent">{goal.parent_goal_id.slice(0, 8)}</span></>}
-            {goal.children.length > 0 && <> · {goal.children.length} child goal{goal.children.length > 1 ? "s" : ""}</>}
-          </div>
-          {goal.state && (
-            <div className="border border-border p-1.5 flex flex-col gap-1">
-              {goal.state.plan && <div className="text-text">{goal.state.plan}</div>}
-              {goal.state.next_actions.length > 0 && (
-                <div>
-                  <div className="text-[9px] uppercase text-muted mb-0.5">next actions</div>
-                  {goal.state.next_actions.map((na, i) => (
-                    <div key={i} className="text-text">
-                      · {na.action}{na.due && <span className="text-muted"> (due {fmtTs(na.due)})</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {goal.state.open_questions.length > 0 && (
-                <div>
-                  <div className="text-[9px] uppercase text-muted mb-0.5">open</div>
-                  {goal.state.open_questions.map((q, i) => (
-                    <div key={i} className="text-muted">? {q}</div>
-                  ))}
-                </div>
-              )}
-              {goal.state.entities.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {goal.state.entities.map((e) => (
-                    <span key={e} className="border border-border px-1 text-[10px] text-muted">{e}</span>
-                  ))}
-                </div>
-              )}
-              <div className="text-[10px] text-muted">{goal.state.known} known fact(s)</div>
-            </div>
-          )}
-          {goal.progress && <div className="text-text whitespace-pre-wrap">{goal.progress}</div>}
-          {goal.result && <div className="text-muted whitespace-pre-wrap">{goal.result}</div>}
-          {goal.transitions.length > 0 && (
-            <div>
-              <div className="text-[9px] uppercase text-muted mb-0.5">history</div>
-              {goal.transitions.map((t, i) => (
-                <div key={i} className="text-muted">
-                  {fmtTs(t.created_at)} · {t.from_status ?? "·"}→{t.to_status}
-                  {t.note && ` — ${t.note}`}
-                </div>
-              ))}
-            </div>
-          )}
-          {goal.status === "active" && (
-            <button
-              className="self-start border border-border px-2 py-0.5 text-muted hover:bg-border"
-              disabled={cancel.isPending}
-              onClick={() => cancel.mutate()}
-            >
-              cancel goal
-            </button>
-          )}
-        </div>
-      )}
-    </div>
+        <span className="text-muted text-[10px] shrink-0">{goal.id.slice(0, 8)}</span>
+      </div>
+    </Link>
   );
 }
 
-function GoalsPage() {
-  const qc = useQueryClient();
-  const { data: goalsData } = useQuery<{ goals: Goal[] }>({
+function Goals() {
+  const { data, isLoading } = useQuery({
     queryKey: ["goals"],
-    queryFn: () => fetchAPI<{ goals: Goal[] }>("/goals"),
-    refetchInterval: 30_000,
+    queryFn: () => fetchAPI<GoalsSnapshot>("/goals"),
+    refetchInterval: 15000,
   });
-  const { data: wakeupsData } = useQuery<{ scheduled: Wakeup[]; recent: Wakeup[] }>({
-    queryKey: ["wakeups"],
-    queryFn: () => fetchAPI<{ scheduled: Wakeup[]; recent: Wakeup[] }>("/wakeups"),
-    refetchInterval: 30_000,
-  });
-  const cancelWakeup = useMutation({
-    mutationFn: (id: string) => postAPI(`/wakeups/${id}/cancel`, {}),
-    onSettled: () => qc.invalidateQueries({ queryKey: ["wakeups"] }),
+  const qc = useQueryClient();
+  const cancel = useMutation({
+    mutationFn: (id: string) => postAPI(`/goals/${id}/cancel`, {}),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["goals"] }),
   });
 
-  const goals = goalsData?.goals ?? [];
+  if (isLoading) return <div className="p-4 text-muted text-xs">loading goals…</div>;
+  const goals = data?.goals ?? [];
   const active = goals.filter((g) => g.status === "active");
   const settled = goals.filter((g) => g.status !== "active");
-  const scheduled = wakeupsData?.scheduled ?? [];
-  const { data: routingData } = useQuery<{ decisions: RoutingDecision[] }>({
-    queryKey: ["routing-log"],
-    queryFn: () => fetchAPI<{ decisions: RoutingDecision[] }>("/memory/routing-log"),
-    refetchInterval: 30_000,
-  });
-  const routing = routingData?.decisions ?? [];
-
-  // Goal tree: roots are goals whose parent isn't in the visible window.
-  const byId = new Map(goals.map((g) => [g.id, g]));
-  const isChild = (g: Goal) => !!g.parent_goal_id && byId.has(g.parent_goal_id);
-  const roots = active.filter((g) => !isChild(g));
-  // Parent context for cards NOT shown nested (active roots with a settled
-  // parent, and the flat settled list) so a settled child never reads as
-  // standalone.
-  const parentObjective = (g: Goal) =>
-    g.parent_goal_id ? byId.get(g.parent_goal_id)?.objective ?? null : null;
 
   return (
-    <div className="flex flex-col gap-4 p-3">
-      <section>
-        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">
-          active goals ({active.length})
-        </h2>
-        <div className="flex flex-col gap-1.5">
-          {active.length === 0 && (
-            <div className="text-xs text-muted text-center py-2">no active goals</div>
-          )}
-          {roots.map((g) => (
-            <div key={g.id} className="flex flex-col gap-1.5">
-              <GoalCard goal={g} parentObjective={parentObjective(g)} />
-              <div className="pl-3 flex flex-col gap-1.5 border-l border-border">
-                {g.children
-                  .map((cid) => byId.get(cid))
-                  .filter((c): c is Goal => !!c && c.status === "active")
-                  .map((c) => <GoalCard key={c.id} goal={c} />)}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
+    <div className="p-4 flex flex-col gap-4">
+      <div className="flex items-baseline justify-between">
+        <h1 className="text-sm text-text">Goals</h1>
+        <span className="text-[10px] text-muted">
+          {active.length} active · {settled.length} settled
+        </span>
+      </div>
 
-      <section>
-        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">
-          scheduled wakeups ({scheduled.length})
-        </h2>
-        <div className="bg-surface border border-border divide-y divide-border text-[11px]">
-          {scheduled.length === 0 && (
-            <div className="p-2 text-muted text-center">none scheduled</div>
-          )}
-          {scheduled.map((w) => (
-            <div key={w.id} className="flex items-center gap-2 px-2 py-1.5">
-              <span className="uppercase text-[9px] text-accent shrink-0">{w.kind}</span>
-              <div className="min-w-0 flex-1">
-                <Link
-                  to="/conversations/$sessionKey"
-                  params={{ sessionKey: w.conversation_id }}
-                  className="text-text hover:underline truncate block"
-                >
-                  {w.conversation_id}
-                </Link>
-                <div className="text-[10px] text-muted">
-                  {fmtTs(w.not_before)}
-                  {w.recurrence && ` · ${w.recurrence}`}
-                  {w.tz && ` · ${w.tz}`}
-                </div>
-              </div>
-              <span className="shrink-0 tabular-nums text-[10px]">
-                <Countdown iso={w.not_before} />
-              </span>
+      <section className="flex flex-col gap-1">
+        {active.length === 0 && (
+          <div className="text-[11px] text-muted">No active goals.</div>
+        )}
+        {active.map((g) => (
+          <div key={g.id} className="relative group">
+            <GoalRow goal={g} />
+            {g.status === "active" && (
               <button
-                className="border border-border px-1.5 py-0.5 text-muted hover:bg-border shrink-0"
-                disabled={cancelWakeup.isPending}
-                onClick={() => cancelWakeup.mutate(w.id)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (confirm(`Cancel goal "${g.objective.slice(0, 60)}"?`)) cancel.mutate(g.id);
+                }}
+                className="absolute right-1 top-1 hidden group-hover:block text-[9px] uppercase text-red-400 border border-red-900 px-1"
               >
                 cancel
               </button>
-            </div>
-          ))}
-        </div>
+            )}
+          </div>
+        ))}
       </section>
 
       {settled.length > 0 && (
-        <section>
-          <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">
-            settled goals ({settled.length})
-          </h2>
-          <div className="flex flex-col gap-1.5">
-            {settled.map((g) => <GoalCard key={g.id} goal={g} parentObjective={parentObjective(g)} />)}
-          </div>
+        <section className="flex flex-col gap-1">
+          <div className="text-[9px] uppercase text-muted">settled</div>
+          {settled.slice(0, 20).map((g) => (
+            <GoalRow key={g.id} goal={g} />
+          ))}
         </section>
       )}
-
-      <section>
-        <h2 className="text-xs text-muted font-sans uppercase tracking-wider mb-2">
-          memory routing ({routing.length})
-        </h2>
-        <div className="bg-surface border border-border divide-y divide-border text-[11px]">
-          {routing.length === 0 && (
-            <div className="p-2 text-muted text-center">no routing decisions yet</div>
-          )}
-          {routing.map((r) => (
-            <div key={r.id} className="flex items-center gap-2 px-2 py-1.5">
-              <span className="text-[9px] uppercase text-accent shrink-0">{r.match_type}</span>
-              <div className="min-w-0 flex-1">
-                <Link
-                  to="/conversations/$sessionKey"
-                  params={{ sessionKey: r.source_conversation_id }}
-                  className="text-text hover:underline truncate block"
-                >
-                  {r.source_conversation_id}
-                </Link>
-                <div className="text-[10px] text-muted">
-                  → goal {r.goal_id.slice(0, 8)} · {fmtTs(r.created_at)}
-                </div>
-              </div>
-              <span className="shrink-0 text-[10px] text-muted">
-                {r.probe_verdict && r.probe_verdict !== "skipped" ? `probe:${r.probe_verdict} ` : ""}
-                {r.revise_outcome ?? "?"} / {r.wake_decision ?? "?"}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
     </div>
   );
 }
 
-export const Route = createFileRoute("/goals")({ component: GoalsPage });
+export const Route = createFileRoute("/goals/")({ component: Goals });
