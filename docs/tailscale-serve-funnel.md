@@ -5,7 +5,7 @@ something (paths dropped, dashboard exposed, Twilio webhooks unreachable).
 This is the canonical snapshot + rebuild commands + rules. **Re-read it
 before touching `tailscale serve`, and update it after every change.**
 
-Snapshot date: **2026-09-20** (tailscale 1.86.2 — **the serve/funnel CLI
+Snapshot date: **2026-09-23** (tailscale 1.86.2 — **the serve/funnel CLI
 syntax changed in 1.86**; the rebuild commands below are the new
 `--set-path` form, verified live). Re-capture the live truth any time with:
 
@@ -39,15 +39,32 @@ line is load-bearing for a live integration:
 | `/radio` | `http://127.0.0.1:8010/stream` | `bg-bob-fm.service` (`skills/radio/station.py`) | Bob's Pirate Radio stream mount |
 | `/aus-legal` | `http://127.0.0.1:8017/mcp` | `bg-aus-legal.service` (`skills/aus-legal/scripts/aus_legal_mcp.py`) | Australian legal corpus MCP — bearer-gated (token = `BOB_AUS_LEGAL_TOKEN` / `skills/aus-legal/api_key`); ONLY `/mcp` is public, the plain-HTTP `/doc` `/search` `/cite` routes stay loopback-only |
 | `/radiotranscript` | `http://127.0.0.1:8011/radiotranscript` | radio transcript host (python, 8011) | Live radio transcript feed |
-| `/figurine/bob-figurine-v2.stl` | `http://127.0.0.1:8777/…` | `bg-stl-server.service` (`http.server` on scratch/) | Figurine print downloads |
-| `/figurine/bob-figurine-source.png` | `http://127.0.0.1:8777/…` | 〃 | 〃 |
-| `/figurine/bob-figurine-watertight.stl` | `http://127.0.0.1:8777/…` | 〃 | 〃 |
+
+Removed 2026-09-23: the three `/figurine/*` paths (upstream 8777) and
+`/gnome` (upstream 8778, added 2026-09-22 by Bob for the smith-gnome share
+without a doc update) — both local `http.server` upstreams were retired when
+file sharing moved to the `share-files` skill (onlyfiles.com links; see
+2026-09-23 changelog). The paths 502'd from the moment their servers died;
+removal syntax that worked: `tailscale serve --https=443
+--set-path=<path> --yes off` (note: `serve clear <svc:…>` is for service
+proxies, not paths). Large-file sharing now goes through the skill, so no
+funnel file paths should be re-added ad hoc.
 
 ## Vhost: 8443 — **tailnet only (NOT funnelled)**
 
 | Path | Upstream | Served by | What it is |
 |---|---|---|---|
 | `/` | `http://127.0.0.1:5173` | `bob-ui.service` (vite dev server) | Dashboard SPA — **must stay tailnet-only** |
+| `/blackline` | `http://127.0.0.1:8788` | `bg-blackline.service` (`skills/blackline/blackline.py`) | Document-sanitisation UI (Helen's tool) — tailnet-only by design: it holds sensitive case data |
+
+**Incident 2026-09-23:** launching blackline, the funnel ROOT `/` was
+re-mounted from 8420 → 8788 to make the bare tailnet URL serve the UI —
+hijacking Bob's API root AND stripping the funnel (rule 8; Twilio webhooks
+down for hours, compounded by the earlier figurine/gnome removals also
+stripping it). Restored: root → 8420, funnel re-applied, blackline given
+its own tailnet-only path on 8443 instead. **New services NEVER get the
+funnel root — they get a named path, and tailnet-only unless public access
+is the point.**
 
 ## Rules for changes
 
@@ -88,9 +105,6 @@ tailscale serve --bg --https=443 --set-path=/phone/status --yes http://127.0.0.1
 tailscale serve --bg --https=443 --set-path=/perth        --yes http://127.0.0.1:8460
 tailscale serve --bg --https=443 --set-path=/radio        --yes http://127.0.0.1:8010/stream
 tailscale serve --bg --https=443 --set-path=/radiotranscript --yes http://127.0.0.1:8011/radiotranscript
-tailscale serve --bg --https=443 --set-path=/figurine/bob-figurine-v2.stl         --yes http://127.0.0.1:8777/bob-figurine-v2.stl
-tailscale serve --bg --https=443 --set-path=/figurine/bob-figurine-source.png      --yes http://127.0.0.1:8777/bob-figurine-source.png
-tailscale serve --bg --https=443 --set-path=/figurine/bob-figurine-watertight.stl  --yes http://127.0.0.1:8777/bob-figurine-watertight.stl
 tailscale serve --bg --https=443 --set-path=/aus-legal    --yes http://127.0.0.1:8017/mcp
 
 # turn the whole 443 vhost public (the only funnel step — mounts above are tailnet-only until this runs)
