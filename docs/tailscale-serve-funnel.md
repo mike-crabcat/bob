@@ -38,6 +38,7 @@ line is load-bearing for a live integration:
 | `/perth` | `http://127.0.0.1:8460` | `perth` (python, port 8460) | PERTH 2032 game |
 | `/radio` | `http://127.0.0.1:8010/stream` | `bg-bob-fm.service` (`skills/radio/station.py`) | Bob's Pirate Radio stream mount |
 | `/aus-legal` | `http://127.0.0.1:8017/mcp` | `bg-aus-legal.service` (`skills/aus-legal/scripts/aus_legal_mcp.py`) | Australian legal corpus MCP — bearer-gated (token = `BOB_AUS_LEGAL_TOKEN` / `skills/aus-legal/api_key`); ONLY `/mcp` is public, the plain-HTTP `/doc` `/search` `/cite` routes stay loopback-only |
+| `/blackline` | `http://127.0.0.1:8788` | `bg-blackline.service` (`skills/blackline/blackline.py`) | Document-sanitisation UI (Helen's tool) — app-level password gate on ALL routes + 5-fail/10-min login lockout (added 2026-09-23 with the public mount); holds sensitive case data |
 | `/radiotranscript` | `http://127.0.0.1:8011/radiotranscript` | radio transcript host (python, 8011) | Live radio transcript feed |
 
 Removed 2026-09-23: the three `/figurine/*` paths (upstream 8777) and
@@ -106,6 +107,7 @@ tailscale serve --bg --https=443 --set-path=/perth        --yes http://127.0.0.1
 tailscale serve --bg --https=443 --set-path=/radio        --yes http://127.0.0.1:8010/stream
 tailscale serve --bg --https=443 --set-path=/radiotranscript --yes http://127.0.0.1:8011/radiotranscript
 tailscale serve --bg --https=443 --set-path=/aus-legal    --yes http://127.0.0.1:8017/mcp
+tailscale serve --bg --https=443 --set-path=/blackline   --yes http://127.0.0.1:8788
 
 # turn the whole 443 vhost public (the only funnel step — mounts above are tailnet-only until this runs)
 tailscale funnel --bg --https=443 --set-path=/ --yes http://127.0.0.1:8420
