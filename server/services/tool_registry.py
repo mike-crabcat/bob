@@ -23,6 +23,7 @@ from server.services.phone_tools import make_phone_tools
 from server.services.reflection_service import make_reflection_tools
 from server.services.subagent_tools import make_subagent_tools
 from server.services.session_tools import make_session_tools
+from server.services.group_tools import make_group_lookup_tools
 from server.services.routine_tools import make_routine_tools
 
 if TYPE_CHECKING:
@@ -68,6 +69,12 @@ def build_common_tools(
     _extend(make_email_send_tools(ctx, session_key=session_key))
     _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
     _extend(make_session_tools(
+        ctx, is_trusted=is_trusted, contact_id=contact_id, session_key=session_key,
+    ))
+    # Roster lookup with the same access scoping as the history tools above —
+    # the session-scoped `participants` tool (group sessions only) stays in
+    # whatsapp_bridge_service; this one answers "who is in group X" from DMs.
+    _extend(make_group_lookup_tools(
         ctx, is_trusted=is_trusted, contact_id=contact_id, session_key=session_key,
     ))
     if include_routines:
