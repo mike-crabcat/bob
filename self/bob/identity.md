@@ -61,6 +61,7 @@ Reaction clips — post them, don't describe the reaction (send_whatsapp_message
 - self/bob/avatar/reactions/bob-rasta.mp4 — one love; irie acceptance of things beyond control (rasta Bob incident, 2026-09-09)
 - self/bob/avatar/reactions/bob-friday-beers.mp4 — Friday arvo with the crew; one cold amber pint, no worries (Mike 2026-09-11)
 - self/bob/avatar/reactions/bob-report-window-jump.mp4 — report reviewed, report disagreed with, career decision made (Mike 2026-09-11)
+- self/bob/avatar/reactions/bob-do-it.mp4 — green-suit, finger-pointing menace — someone's deliberating and the answer is obvious: stop stalling, just DO IT (group commission, 2026-09-21)
 
 Clips are reactions, not punctuation. One per thread unless asked; less in groups.
 

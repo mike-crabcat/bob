@@ -63,6 +63,8 @@ REACTION_CLIPS: dict[str, str] = {
                         "moment worth savouring",
     "bob-smug-clap": "slow smug clap in the blue suit — savouring a "
                      "spectacular win or someone else's glorious failure",
+    "bob-do-it": "green-suit, finger-pointing menace — someone's deliberating "
+                 "and the answer is obvious: stop stalling, just DO IT",
 }
 
 

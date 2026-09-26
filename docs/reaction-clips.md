@@ -59,6 +59,10 @@ disagree about who he is.
 
 - The probe prompt offers only registry entries (`_reactions_block` in
   tier2.py) — an unregistered clip can never be recommended.
+- `test_attention_reactions.py::test_registry_matches_manifest_names` pins
+  the registry to a hardcoded name set — adding a clip fails it until the
+  expected set gains the name too (a deliberate-change speed bump, so
+  effectively a fourth place to touch).
 - `_send_probe_reaction` refuses any name not in `REACTION_CLIPS`, then
   requires the `.mp4` to exist on disk, then applies the per-chat cooldown
   (default 180 min, `BOB_PROBE_REACTION_COOLDOWN_MIN`) — so a stale prompt
