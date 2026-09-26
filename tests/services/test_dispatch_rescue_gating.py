@@ -237,3 +237,28 @@ async def test_bracketed_prefix_with_real_reply_still_rescued(
     await DispatchRunner(ctx).run(_spec(key, send_tool))
 
     assert send_tool.delivered == [stub_llm["reply"]]
+
+
+# ---------------------------------------------------------------------------
+# is_no_reply: prose must not trigger silence (2026-09-23 Mike-DM incident)
+# ---------------------------------------------------------------------------
+
+async def test_is_no_reply_prose_does_not_silence():
+    """The reply '…one message from me, no reply from you yet' was swallowed
+    twice (containment matched the plain-English phrase), the turn recorded
+    message_was_sent=True, and the rescue stayed quiet — a succeeded turn
+    that answered nothing."""
+    from server.services.dispatch_runner import is_no_reply
+
+    assert not is_no_reply("Yes — I can search and read full threads. One "
+                           "message from me, no reply from you yet.")
+    assert not is_no_reply("There's nothing to say about the price, but "
+                           "here's the quote anyway.")
+    # canonical token still containment-matched, decorated or bare
+    assert is_no_reply("NO_REPLY")
+    assert is_no_reply("[NO_REPLY — Simon asked for silence]")
+    # plain-English variants only as the whole (bracket-stripped) message
+    assert is_no_reply("No reply")
+    assert is_no_reply("no reply.")
+    assert is_no_reply("[NO REPLY]")
+    assert is_no_reply("Nothing to say.")

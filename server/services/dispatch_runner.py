@@ -30,20 +30,26 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-_NO_REPLY_VARIANTS = ("NO_REPLY", "NO REPLY", "NOTHING TO SAY")
-
-
 def is_no_reply(text: str | None) -> bool:
-    """True if a silence marker appears ANYWHERE in the text.
+    """True when the text IS a silence marker, not merely mentions one.
 
-    Exact-match let decorated variants through to the chat ('[NO_REPLY —
-    Simon asked for silence…]'); containment is the rule now: any
-    occurrence of a marker suppresses the whole message.
+    The canonical ``NO_REPLY`` token stays containment-matched — models
+    decorate it ('[NO_REPLY — Simon asked for silence…]'). The
+    plain-English variants match only as the whole (bracket-stripped)
+    message: containment there silently ate real replies whose prose used
+    the phrase — '…one message from me, no reply from you yet' (Mike-DM
+    2026-09-23: the send was swallowed twice, ``message_was_sent`` still
+    reported True, the rescue stayed quiet — a succeeded turn that
+    answered nothing).
     """
     if not text:
         return False
     upper = text.upper()
-    return any(v in upper for v in _NO_REPLY_VARIANTS)
+    if "NO_REPLY" in upper:
+        return True
+    stripped = upper.strip().strip("[]").strip()
+    return stripped in ("NO REPLY", "NO REPLY.", "NOTHING TO SAY",
+                        "NOTHING TO SAY.")
 
 # Categories where a finished turn that never called its send tool gets the
 # final text delivered by the runner (see the rescue in run()). WhatsApp
