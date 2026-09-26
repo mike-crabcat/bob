@@ -99,7 +99,10 @@ async def wake_conversation(
         bridge = getattr(ctx, "whatsapp_bridge", None)
         if bridge is not None:
             try:
-                await bridge.wake_session(session_key)
+                # call_category rides along so wake-path turns log as their
+                # trigger (steer/routine/…) instead of whatsapp_incoming —
+                # a human row in the batch still wins inside wake_session.
+                await bridge.wake_session(session_key, call_category=call_category)
                 return True
             except Exception:
                 logger.exception("wake: WhatsApp dispatch failed for %s", session_key)

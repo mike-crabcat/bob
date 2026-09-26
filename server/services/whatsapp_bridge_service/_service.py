@@ -96,6 +96,28 @@ from server.services.whatsapp_bridge_service._group_events import GroupEventsMix
 from server.services.whatsapp_bridge_service._slash_commands import SlashCommandsMixin
 
 
+async def _resolve_wake_category(db: Any, session_key: str,
+                                 requested: str | None) -> str:
+    """The llm_call_log category for a wake-path WhatsApp dispatch.
+
+    Raw human rows keep whatsapp_incoming (they ARE conversation); pure wake
+    batches take the triggering wake's category, else the shared provenance
+    of the claimed rows (steer/routine/wake_nudge/…), else "wakeup".
+    2026-09-24: stimulus-steered crypto signal wakes were logged as
+    whatsapp_incoming — ~90% of that group's "incoming" volume was
+    machinery, invisible as its own line in the dashboard rollups.
+    """
+    from server.repositories.history import HistoryRepository
+    provs = await HistoryRepository(db).undispatched_provenances(session_key)
+    if any(p is None for p in provs):
+        return "whatsapp_incoming"
+    if requested:
+        return requested
+    if len(provs) == 1:
+        return provs[0] or "wakeup"
+    return "wakeup"
+
+
 class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, ReactionsMixin):
     """WebSocket client connecting to the whatsappbridge Go companion service."""
 
@@ -1111,6 +1133,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         text_preview: str = "",
         extra_system_note: str = "",
         inbound_text: str | None = None,
+        call_category: str = "whatsapp_incoming",
     ) -> "DispatchSpec":
         """Assemble the full inbound-WhatsApp DispatchSpec (system prompt,
         tools, send tool, quota handling). Shared by the live inbound path
@@ -1415,10 +1438,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         # MCP tools last: global + this conversation's attached servers,
         # namespaced mcp_<server>_<tool> (services/mcp_service.py). No-op
         # unless Mike has registered servers.
-        from server.services.mcp_service import make_mcp_tools
+        from server.services.mcp_service import make_mcp_tools, mcp_transparency_note
         tools.extend(await make_mcp_tools(
             self.ctx, session_key=session_key, is_trusted=is_trusted,
             reserved={t.name for t in tools}))
+        mcp_note = await mcp_transparency_note(
+            self.ctx, session_key=session_key, is_trusted=is_trusted)
+        if mcp_note:
+            system_content += "\n\n" + mcp_note
 
         async def _send_holding_ack(text: str) -> None:
             """Backburner holding ack — sent by the detach sequence while the
@@ -1453,7 +1480,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             session_key=session_key,
             system_content=system_content,
             tools=tools,
-            call_category="whatsapp_incoming",
+            call_category=call_category,
             send_tool_name="send_whatsapp_message",
             dispatch_id=dispatch_id,
             contact_id=contact_id,
@@ -1498,7 +1525,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 logger.warning("recovery: failed to resume %s", session_key, exc_info=True)
         return resumed
 
-    async def wake_session(self, session_key: str) -> None:
+    async def wake_session(self, session_key: str, *,
+                           call_category: str | None = None) -> None:
         """Arm a dispatch for a session with stored-but-undispatched messages.
 
         Shared by the crash-recovery sweep and the Bob3 wake path (goal
@@ -1509,7 +1537,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         The turn counts as human-initiated when any undispatched row is a
         raw inbound message (no provenance label) — e.g. post-call occupancy
         drain of queued human texts, or crash recovery of a never-dispatched
-        inbound. Pure wake-content rows keep the turn autonomous.
+        inbound. Pure wake-content rows keep the turn autonomous. The logged
+        call category follows the same split (see _resolve_wake_category).
         """
         from server.repositories.conversations import (
             ConversationRepository, wa_send_jid)
@@ -1534,6 +1563,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             is_trusted=is_trusted,
             human_initiated=await HistoryRepository(self.db).has_undispatched_inbound(
                 session_key),
+            call_category=await _resolve_wake_category(
+                self.db, session_key, call_category),
         )
 
         from server.services.attention import AttentionCoordinator

@@ -484,6 +484,16 @@ class HistoryRepository:
             f"AND created_at >= datetime('now', '-{int(hours)} hours')")
         return int(row["n"]) if row else 0
 
+    async def undispatched_provenances(self, session_key: str) -> list[str | None]:
+        """Distinct provenance labels of a session's undispatched user rows.
+        Wake batches carry their trigger (steer/routine/wake_nudge/…);
+        NULL = raw human inbound."""
+        rows = await self.db.fetch_all(
+            "SELECT DISTINCT provenance FROM messages "
+            "WHERE role = 'user' AND dispatched = 0 AND conversation_id = ?",
+            (session_key,))
+        return [r["provenance"] for r in rows] if rows else []
+
     async def undispatched_conversations(self, *, channel: str) -> list[str]:
         """Conversations holding stored-but-unclaimed user messages (crash recovery)."""
         rows = await self.db.fetch_all(
