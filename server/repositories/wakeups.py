@@ -224,3 +224,24 @@ class WakeupRepository:
             f"SELECT goal_id, not_before, payload_json FROM wakeups "
             f"WHERE kind = ? AND status = 'scheduled' "
             f"AND goal_id IN ({marks})", (kind, *goal_ids))
+
+    async def cancel_task_due_for_conversation(self, conversation_id: str) -> int:
+        """Kill pending task_due backstops aimed at one conversation — the
+        room-disable companion (a disabled room's backstops would otherwise
+        fire into a dispatch gate and store undispatched forever)."""
+        return await self.db.execute(
+            "UPDATE wakeups SET status = 'cancelled' "
+            "WHERE kind = 'task_due' AND status = 'scheduled' "
+            "AND conversation_id = ?", (conversation_id,))
+
+    async def repoint_task_backstop(self, task_id: str,
+                                    new_conversation_id: str) -> int:
+        """Move a task's pending due backstop to a new waiter conversation —
+        the half the 2026-09-26 zombie missed: tasks were re-pointed to the
+        new room but their pre-scheduled backstops kept waking the old,
+        cancelled one."""
+        return await self.db.execute(
+            "UPDATE wakeups SET conversation_id = ? "
+            "WHERE kind = 'task_due' AND status = 'scheduled' "
+            "AND json_extract(payload_json, '$.task_id') = ?",
+            (new_conversation_id, task_id))

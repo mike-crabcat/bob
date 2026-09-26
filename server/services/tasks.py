@@ -59,6 +59,26 @@ async def register_task(
     from server.repositories.tasks import TaskRepository
     from server.repositories.wakeups import WakeupRepository
 
+    # Per-person work never delegates to a GROUP (Mike 2026-09-26, the
+    # AI-doom spam root cause): a group turn can only speak in the group —
+    # no DM tool — so a "chase X via DM" task steered there is an
+    # unresolvable obligation that loops until its iteration cap. REFUSED
+    # at registration (no row, no backstop, no steer); the caller
+    # re-registers against a DM-capable session or does the outreach
+    # itself. Rooms have send_whatsapp_to_contact; groups get outcomes.
+    if (waiter_session.startswith("agent:goal-")
+            and expected_completer
+            and ":group:" in expected_completer):
+        note = ("per-person work was NOT registered: the group conversation "
+                "cannot DM individuals (its turns can only reply in the "
+                "group). Re-register with completer_session = the person's "
+                "DM conversation (agent:main:whatsapp:dm:<phone>), or do "
+                "the outreach yourself with send_whatsapp_to_contact.")
+        logger.warning("register_task refused room->group delegation: "
+                       "waiter=%s completer=%s", waiter_session,
+                       expected_completer)
+        return {"ok": False, "error": note}
+
     due = due_at or (
         datetime.now(timezone.utc)
         + timedelta(minutes=DEFAULT_DUE_MINUTES if due_minutes is None
@@ -76,16 +96,63 @@ async def register_task(
     # Subagent ids and 'script' are spawned WITH the task — a delegation
     # wake to them is a misdirected turn (found live in Phase 3 tests:
     # the parent's first wake went to the subagent uuid).
+    steer_note = ""
     if (expected_completer and expected_completer != waiter_session
             and ":" in expected_completer
             and not expected_completer.startswith("subagent")):
-        await _steer_completer(ctx, task)
-    logger.info("task %s registered (waiter=%s completer=%s due=%s)",
-                task["id"], waiter_session, expected_completer, due)
+        # Rooms delegating per-person work to their ORIGIN GROUP (2026-09-25:
+        # figurine chases posted publicly in AI Doom): warn, don't block —
+        # group completers are for group-wide outcomes only.
+        if (waiter_session.startswith("agent:goal-")
+                and ":group:" in expected_completer):
+            steer_note = ("per-person work (offers/chases/confirmations) "
+                          "belongs in that person's DM — a group completer "
+                          "posts the chase publicly; keep group completers "
+                          "for group-wide outcomes only")
+            logger.warning("task %s: room delegated to origin group: %s",
+                           task["id"], steer_note)
+        target, note = await _resolve_completer(ctx, expected_completer)
+        if target is None:
+            # The model invented a plausible-looking key (live 2026-09-21:
+            # 'session:Rupert Quekett') — steering would store a message no
+            # dispatcher can ever claim. Keep the task; skip the delegation.
+            steer_note = note
+            logger.warning("task %s: %s", task["id"], steer_note)
+        elif not await _steer_completer(ctx, task, target):
+            steer_note = ("delegation stored but no dispatcher was available — "
+                          "it stays undispatched for recovery")
+    logger.info("task %s registered (waiter=%s completer=%s due=%s%s)",
+                task["id"], waiter_session, expected_completer, due,
+                f"; {steer_note}" if steer_note else "")
+    task["steer_note"] = steer_note
     return task
 
 
-async def _steer_completer(ctx: AppContext, task: dict[str, Any]) -> None:
+async def _resolve_completer(ctx: AppContext, completer: str) -> tuple[str | None, str]:
+    """Canonicalise a conversation-shaped completer key against the
+    bindings/conversations tables. Returns (target_key, note): the target is
+    the live conversation to steer (merge chains followed), or None with a
+    caller-facing note when the key names nothing."""
+    from server.repositories.conversations import ConversationRepository
+    repo = ConversationRepository(ctx.db)
+    key = completer
+    seen: set[str] = set()
+    while key not in seen:
+        seen.add(key)
+        conv = await repo.resolve(key) or await repo.get(key)
+        if conv is None:
+            return None, (f"completer conversation '{completer}' does not exist — "
+                          "task registered WITHOUT delegation; pass a real "
+                          "conversation key or complete it yourself")
+        merged_into = conv.get("merged_into")
+        if not merged_into:
+            return conv["id"], ""
+        key = merged_into
+    return None, f"completer conversation '{completer}' merge chain loops"
+
+
+async def _steer_completer(ctx: AppContext, task: dict[str, Any],
+                           target: str | None = None) -> bool:
     """Wake the completer conversation with the task instruction. Best-effort
     with a visible failure log — the due backstop still guarantees the
     waiter hears eventually."""
@@ -101,14 +168,23 @@ async def _steer_completer(ctx: AppContext, task: dict[str, Any]) -> None:
             + (f"Context entities: {', '.join(refs)}\n" if refs else "")
             + "Work the objective through THIS conversation; when you have "
               "the answer or the outcome, call task_complete with this task "
-              "id. If it can't be done, task_fail with the reason.")
-        await wake_conversation(
-            ctx, task["expected_completer"], content,
+              "id.\n"
+              "IF YOUR TOOLS CANNOT DO WHAT THIS TASK ASKS (e.g. it asks you "
+              "to DM a person and this conversation has no DM tool), call "
+              f"task_fail(task_id=\"{task['id']}\", error=\"no <capability> "
+              "in this conversation\") IMMEDIATELY, on your FIRST attempt. "
+              "A task you cannot do does not go away by retrying or by "
+              "substituting another channel — every retry risks duplicate "
+              "messages to humans. task_fail is a successful outcome: it "
+              "hands the task back to its owner to reroute.")
+        return await wake_conversation(
+            ctx, target or task["expected_completer"], content,
             call_category="task_delegation",
             metadata={"task_id": task["id"]},
             provenance="steer")
     except Exception:
         logger.exception("task %s: completer steer failed", task["id"])
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +320,11 @@ async def tasks_block(session_key: str, db) -> str:
         "",
         "Another conversation is waiting on these. Work them through THIS "
         "conversation; settle each with task_complete(task_id, result) — or "
-        "task_fail(task_id, error) if it can't be done. Do not narrate a "
-        "settlement you didn't perform.",
+        "task_fail(task_id, error) the MOMENT you see you cannot do it (no "
+        "such tool in this conversation, no such contact, wrong channel). "
+        "Retrying an undoable task or substituting a group message for a DM "
+        "request spams humans — task_fail it immediately and move on. Do "
+        "not narrate a settlement you didn't perform.",
         "",
     ]
     for t in pending:
@@ -381,8 +460,12 @@ def make_task_tools(ctx: AppContext, session_key: str) -> list:
             instruction=instruction,
             expected_completer=completer_session.strip() or None,
             due_minutes=due_minutes or None, refs=refs_list)
-        return json.dumps({"ok": True, "task_id": task["id"],
-                           "due": task["due"]})
+        if not task.get("ok", True):
+            return json.dumps(task)  # refusal: guidance, no task created
+        resp = {"ok": True, "task_id": task["id"], "due": task["due"]}
+        if task.get("steer_note"):
+            resp["warning"] = task["steer_note"]
+        return json.dumps(resp)
 
     @tool
     async def task_complete(task_id: str, result: str) -> str:
@@ -395,8 +478,11 @@ def make_task_tools(ctx: AppContext, session_key: str) -> list:
 
     @tool
     async def task_fail(task_id: str, error: str) -> str:
-        """Settle a task as failed with the reason. Same rules as
-        task_complete."""
+        """CALL THIS IMMEDIATELY when this conversation lacks what the task
+        needs (a tool, a channel, a contact) — that is the task succeeding
+        at rerouting, not you failing at it. Also for genuine failure: the
+        reason rides to the waiter. Never retry an undoable task and never
+        substitute a different channel — that spams humans."""
         return json.dumps(await _resolve_and_settle(
             ctx, session_key, task_id, to_status="failed", error=error))
 
@@ -441,3 +527,18 @@ async def _resolve_and_settle(
 
 
 register_executor()
+
+
+async def repoint_task(ctx: AppContext, task_id: str, *,
+                       waiter_session: str) -> bool:
+    """Move a pending task (and its due backstop) to a new waiter — the
+    safe carry-over for goal recreates. Both halves move together: the
+    task row AND its already-scheduled task_due wakeup (2026-09-26: only
+    the row moved, and the backstop woke the cancelled goal's room)."""
+    from server.repositories.tasks import TaskRepository
+    from server.repositories.wakeups import WakeupRepository
+    n = await TaskRepository(ctx.db).repoint_waiter(task_id, waiter_session)
+    if not n:
+        return False
+    await WakeupRepository(ctx.db).repoint_task_backstop(task_id, waiter_session)
+    return True

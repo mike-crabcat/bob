@@ -37,7 +37,17 @@ async def _register(ctx, **kw):
         **kw)
 
 
+async def _ensure_conversation(ctx, key: str, *, merged_into: str | None = None):
+    """Seed a conversation row so delegation targets resolve (register_task
+    validates completer keys against the conversations table)."""
+    await ctx.db.execute(
+        "INSERT OR IGNORE INTO conversations (id, kind, merged_into, created_at, updated_at) "
+        "VALUES (?, 'group', ?, datetime('now'), datetime('now'))",
+        (key, merged_into))
+
+
 async def test_register_creates_promise_due_and_delegation(ctx):
+    await _ensure_conversation(ctx, COMPLETER)
     wakes = []
     with patch("server.services.wake_service.wake_conversation",
                new=AsyncMock(side_effect=lambda c, t, content, **k:
@@ -46,6 +56,7 @@ async def test_register_creates_promise_due_and_delegation(ctx):
                                refs=["file-bob-liebherr-v3-white"])
     assert task["status"] == "pending"
     assert task["expected_completer"] == COMPLETER
+    assert task["steer_note"] == ""
 
     # Due backstop scheduled against the waiter.
     due_rows = [w for w in await WakeupRepository(ctx.db).list_scheduled(WAITER)
@@ -116,12 +127,45 @@ async def test_settle_effect_replays_after_crash(ctx):
 
 
 async def test_tasks_block_scoped_to_completer(ctx):
+    await _ensure_conversation(ctx, COMPLETER)
     await _register(ctx, expected_completer=COMPLETER)
     mine = await task_svc.tasks_block(COMPLETER, ctx.db)
     assert "meshy refine" in mine and "task_complete" in mine
     assert await task_svc.tasks_block(WAITER, ctx.db) == ""  # waiter sees none owed
     assert await task_svc.tasks_block(
         "agent:main:whatsapp:group:999999", ctx.db) == ""
+
+
+async def test_register_refuses_phantom_completer(ctx):
+    """The 2026-09-21 goal-room case: a plausible-looking invented key must
+    not get a delegation message stored into a conversation that doesn't
+    exist (permanently undispatched + a task pending forever)."""
+    phantom = "agent:main:whatsapp:session:Rupert Quekett"
+    wakes = []
+    with patch("server.services.wake_service.wake_conversation",
+               new=AsyncMock(side_effect=lambda c, t, content, **k:
+                             wakes.append((t, content)) or True)):
+        task = await _register(ctx, expected_completer=phantom)
+    assert task["status"] == "pending"          # the promise still exists
+    assert "does not exist" in task["steer_note"]
+    assert not wakes                            # nothing steered into the void
+    row = await ctx.db.fetch_one(
+        "SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?", (phantom,))
+    assert row["n"] == 0
+
+
+async def test_register_canonicalises_merged_completer(ctx):
+    """A merged-away completer key steers the surviving conversation."""
+    survivor = "agent:main:whatsapp:dm:61456224868"
+    await _ensure_conversation(ctx, survivor)
+    await _ensure_conversation(ctx, COMPLETER, merged_into=survivor)
+    wakes = []
+    with patch("server.services.wake_service.wake_conversation",
+               new=AsyncMock(side_effect=lambda c, t, content, **k:
+                             wakes.append((t, content)) or True)):
+        task = await _register(ctx, expected_completer=COMPLETER)
+    assert task["steer_note"] == ""
+    assert [t for t, _ in wakes] == [survivor]
 
 
 async def test_short_id_resolution(ctx):
