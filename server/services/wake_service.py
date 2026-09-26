@@ -169,6 +169,17 @@ async def _generic_wake_dispatch(
             from server.services.goal_rooms import room_turn_tools
             utility_tools = list(utility_tools) + room_turn_tools(
                 ctx, session_key)
+            # Creator-scoped capabilities (2026-09-25): the room inherits its
+            # creator's principal — roster lookup with the creator's own
+            # trust, so a member's goal room sees only what the member
+            # could see. NULL creator (system/dream) → untrusted defaults.
+            from server.services.goal_rooms import room_creator_principal
+            from server.services.group_tools import make_group_lookup_tools
+            cr_trusted, cr_contact_id = await room_creator_principal(
+                ctx, session_key)
+            utility_tools = list(utility_tools) + make_group_lookup_tools(
+                ctx, is_trusted=cr_trusted, contact_id=cr_contact_id,
+                session_key=session_key)
             # Goal loop (docs/goal-execution-plan.md): the continuation
             # contract + strategies-tree tools, when the loop is enabled.
             from server.services import goal_loop

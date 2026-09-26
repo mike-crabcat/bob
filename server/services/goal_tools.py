@@ -57,6 +57,7 @@ def _register_goal_executors() -> None:
             external_ref=payload.get("external_ref"),
             parent_goal_id=payload.get("parent_goal_id"),
             goal_id=payload.get("goal_id"),
+            creator_contact_id=payload.get("creator_contact_id"),
         )
         return goal["id"]
 
@@ -145,6 +146,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
         deadline: str = "",
         parent_goal_id: str = "",
         strategy: str = "",
+        owner: str = "",
     ) -> str:
         """Create a goal this conversation is working toward.
 
@@ -161,12 +163,37 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
           follow up.
         - parent_goal_id (optional): make this a sub-goal. Its results roll up
           into the parent's state instead of waking anyone directly.
+        - owner (optional, contact name or phone): WHO this goal is for —
+          their trust scopes the goal room's reach (e.g. which group rosters
+          it may read). In a GROUP: ask who owns the goal before creating it
+          (unless they already said) and pass that person. In a DM: leave
+          empty — the person you're talking to is the owner.
         - strategy (optional, JSON): the v2 state worksheet —
           {"plan": str, "known": [str], "open_questions": [str],
            "next_actions": [{"action": str, "due": str}],
            "refs": {"entities": [str], "claims": [str]}}
           plus scenario data (e.g. decision rules)."""
         from server.services.effects import emit_and_deliver
+
+        # Kind gate (2026-09-25: 'event' instead of 'event_plan' silently
+        # created a room-less, loop-less goal). Canonicalise aliases, then
+        # REJECT unknowns with the valid list so the model retries — the
+        # service layer canonicalises too, but only the tool can correct
+        # the caller.
+        from server.services.goal_service import normalise_goal_kind
+        kind = normalise_goal_kind(kind)
+        _valid_kinds = {
+            "task", "research", "build", "sales_target", "negotiate",
+            "event_plan", "coordination", "commerce", "merch_order",
+            "performance", "outreach", "subagent", "call", "email_thread",
+        }
+        if kind not in _valid_kinds:
+            return json.dumps({
+                "ok": False,
+                "error": f"unknown kind '{kind}' — valid kinds: "
+                         f"{', '.join(sorted(_valid_kinds))}. "
+                         "Pick the closest match (event-shaped → event_plan).",
+            })
 
         strategy_payload: dict | None = None
         if strategy.strip():
@@ -183,6 +210,16 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
                                    "error": "parent goal not found or not active"})
 
         goal_id = str(uuid4())
+        creator_contact_id: str | None = None
+        if owner.strip():
+            from server.repositories.contacts import ContactRepository
+            contacts = ContactRepository(ctx.db)
+            hit = (await contacts.get_by_phone_fuzzy(owner.strip())
+                   or await contacts.search_by_name(owner.strip()))
+            if not hit:
+                return json.dumps({"ok": False, "error":
+                                   f"owner {owner!r} matches no contact"})
+            creator_contact_id = hit["id"]
         result = await emit_and_deliver(
             ctx, kind="goal_create",
             idempotency_key=f"goal_create:{goal_id}",
@@ -194,6 +231,7 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
                 "parent_goal_id": parent,
                 "strategy": strategy_payload,
                 "goal_id": goal_id,
+                "creator_contact_id": creator_contact_id,
             })
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "failed")})

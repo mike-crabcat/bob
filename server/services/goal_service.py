@@ -46,6 +46,23 @@ def extract_due_instant(due: str | None) -> datetime | None:
     return parsed
 
 
+# Kind aliases: the model shortens/renames kinds (live 2026-09-25: 'event'
+# instead of 'event_plan' — one word silently cost the goal its room, loop
+# and playbook). Canonicalise before anything consults room_kinds.
+_KIND_ALIASES = {
+    "event": "event_plan",
+    "events": "event_plan",
+    "sales": "sales_target",
+    "investigate": "research",
+    "investigation": "research",
+}
+
+
+def normalise_goal_kind(kind: str) -> str:
+    k = (kind or "").strip()
+    return _KIND_ALIASES.get(k.lower(), k)
+
+
 async def create_goal(
     ctx: AppContext,
     *,
@@ -58,6 +75,7 @@ async def create_goal(
     external_ref: str | None = None,
     parent_goal_id: str | None = None,
     goal_id: str | None = None,
+    creator_contact_id: str | None = None,
 ) -> dict[str, Any]:
     """Create an active goal; a deadline schedules a wakeup so unanswered
     goals resurface.
@@ -68,11 +86,29 @@ async def create_goal(
     conversation, never the child's own channel endpoint."""
     from server.repositories.conversations import ConversationRepository
 
+    # Kind canonicalisation BEFORE any room_kinds consult: 'event' vs
+    # 'event_plan' silently decided whether the goal got a room, loop and
+    # playbook (live 2026-09-25).
+    kind = normalise_goal_kind(kind)
     repo = GoalRepository(ctx.db)
     conv_repo = ConversationRepository(ctx.db)
     cid = await conv_repo.resolve_cid(conversation_id)
     origin_cid = (await conv_repo.resolve_cid(origin_conversation_id)
                   if origin_conversation_id else None)
+
+    # Creator pinning (2026-09-25): the goal room inherits its creator's
+    # principal. Explicit owner wins (group flow — Bob asks who owns the
+    # goal); children inherit the parent's creator; otherwise derive from
+    # the commissioning conversation when it's a 1:1 DM. System/dream
+    # goals stay NULL → room tool scoping falls back to untrusted.
+    if creator_contact_id is None and parent_goal_id:
+        parent = await repo.get(parent_goal_id)
+        creator_contact_id = (parent or {}).get("creator_contact_id")
+    if creator_contact_id is None:
+        from server.repositories.contacts import ContactRepository
+        dm_contact = await ContactRepository(ctx.db).get_for_dm_conversation(
+            await conv_repo.resolve_cid(conversation_id))
+        creator_contact_id = dm_contact["id"] if dm_contact else None
 
     # Goal rooms (docs/goal-rooms-plan.md): qualifying kinds get their own
     # utility conversation as the working surface — the charter carries the
@@ -100,6 +136,7 @@ async def create_goal(
         external_ref=external_ref,
         parent_goal_id=parent_goal_id,
         goal_id=gid,
+        creator_contact_id=creator_contact_id,
     )
     await repo.add_holder(goal["id"], cid, role="worker")
     if origin_cid and origin_cid != cid:
@@ -226,6 +263,24 @@ async def settle_goal(
             await goal_rooms.prune_room_routes(ctx, goal_id)
         except Exception:
             logger.exception("goal %s: room route prune failed", goal_id)
+        # The room itself is disabled (2026-09-26 zombie-room incident: a
+        # cancelled goal's room was still enabled, and a stale task_due
+        # backstop woke it at 05:52 — stale status reports to the origin
+        # group and group-completer chases from beyond the grave). Enabled
+        # is the dispatch gate for utility sessions; a dead goal's room
+        # must never run another round, whatever lands in it.
+        try:
+            from server.repositories.utility_conversations import (
+                UtilityConversationRepository,
+            )
+            await UtilityConversationRepository(ctx.db).set_enabled(
+                goal["conversation_id"], False)
+            # backstops aimed at the now-disabled room die with it (they
+            # are task-keyed, not goal-keyed — cancel_for_goal misses them)
+            await WakeupRepository(ctx.db).cancel_task_due_for_conversation(
+                goal["conversation_id"])
+        except Exception:
+            logger.exception("goal %s: room disable failed", goal_id)
         if status == "cancelled":
             for child in await repo.children_of(goal_id, status="active"):
                 await settle_goal(

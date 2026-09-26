@@ -41,6 +41,24 @@ class ContactRepository:
             "SELECT * FROM contacts WHERE phone_number = ? AND deleted_at IS NULL LIMIT 1",
             (phone_number,))
 
+    async def get_for_dm_conversation(self, conversation_id: str | None) -> dict | None:
+        """The contact behind a conversation when it is a 1:1 whatsapp DM —
+        digit-normalised phone match (binding addresses vary: +614…, bare,
+        @s.whatsapp.net-suffixed). Same join as the 013 goals backfill."""
+        if not conversation_id:
+            return None
+        row = await self.db.fetch_one(
+            """SELECT ct.* FROM bindings b
+               JOIN conversations cv ON cv.id = b.conversation_id AND cv.kind = 'dm'
+               JOIN contacts ct ON ct.deleted_at IS NULL
+                   AND replace(replace(ct.phone_number, '+', ''), ' ', '') =
+                       replace(replace(replace(b.address, '+', ''), ' ', ''),
+                               '@s.whatsapp.net', '')
+               WHERE b.conversation_id = ? AND b.channel = 'whatsapp'
+               LIMIT 1""",
+            (conversation_id,))
+        return dict(row) if row else None
+
     async def get_by_phone_fuzzy(self, phone_number: str) -> dict | None:
         """Exact match first, then prefix-match fallback.
 

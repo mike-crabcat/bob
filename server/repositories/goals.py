@@ -43,6 +43,7 @@ class GoalRepository:
         external_ref: str | None = None,
         parent_goal_id: str | None = None,
         goal_id: str | None = None,
+        creator_contact_id: str | None = None,
     ) -> dict[str, Any]:
         gid = goal_id or str(uuid.uuid4())
         now = _now_iso()
@@ -50,10 +51,11 @@ class GoalRepository:
             """INSERT INTO goals
                (id, conversation_id, origin_conversation_id, kind, objective,
                 strategy_json, deadline, external_ref, parent_goal_id, status,
-                version, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)""",
+                version, created_at, updated_at, creator_contact_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)""",
             (gid, conversation_id, origin_conversation_id, kind, objective,
-             strategy_json, deadline, external_ref, parent_goal_id, now, now),
+             strategy_json, deadline, external_ref, parent_goal_id, now, now,
+             creator_contact_id),
         )
         return (await self.get(gid))  # type: ignore[return-value]
 
@@ -337,7 +339,10 @@ class GoalRepository:
                       progress, result, status, deadline, created_at, updated_at,
                       version, strategy_json, loop_state_json
                FROM goals
-               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC
+               ORDER BY CASE status WHEN 'active' THEN 0
+                         WHEN conversation_id LIKE 'agent:goal-%' THEN 1
+                         ELSE 2 END,
+                        updated_at DESC
                LIMIT ?""", (limit,))
         return [dict(r) for r in rows] if rows else []
 

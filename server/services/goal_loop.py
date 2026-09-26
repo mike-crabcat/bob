@@ -642,6 +642,24 @@ _KIND_PLAYBOOKS = {
         "channel completers; the date hardens only from written "
         "confirmations. Ladder on silence; close with the settled "
         "arrangement as evidence."),
+    "performance": (
+        "Performance discipline — IMPROVE THE STRATEGY, don't just mind "
+        "the store. Periodic review rounds (at least weekly, and whenever "
+        "the evidence warrants): run the performance attribution (e.g. "
+        "`python skills/cryptobro/cryptobro.py attribution` — realized "
+        "P&L and win-rate by ENTRY signal family), record the numbers as "
+        "evidence (goal_evidence), and act on them: branch more of what "
+        "pays (strategy_open → sized entries), prune what loses "
+        "(strategy_prune with the attribution as the reason). Experiment "
+        "lane: probe-size tranches (the $15 shape) on new candidates "
+        "within the operator's standing permissions — any direct-book "
+        "asset passes the diligence gate (research it and post your "
+        "reasoning BEFORE the buy; no sub-#200 market caps; retroactive "
+        "veto applies). The rules file (strategy.toml) is OPERATOR-OWNED, "
+        "every line: amounts and timing discretion inside the band is "
+        "yours; rule changes are requested via send_report to the origin, "
+        "never edited. Verdicts on the strategies tree are how 'we tried "
+        "that' stops being re-derived every round."),
 }
 
 

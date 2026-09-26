@@ -192,4 +192,13 @@ class ContextAssembler:
                     "information needed, call finish_outreach to relay the result back.")
             blocks.append("\n".join(lines))
 
-        return "## Active Goals\n\n" + "\n\n".join(blocks)
+        return (
+            "## Active Goals\n\n" + "\n\n".join(blocks) +
+            "\n\nIf this conversation decides, agrees, or learns anything about "
+            "one of these goals — including on behalf of the owner or a third "
+            "party (e.g. someone relaying another person's confirmation) — you "
+            "MUST write it to the goal (update_goal / update_goal_state): the "
+            "goal's room only knows what is written to the goal, and a "
+            "decision recorded only as memory never reaches it (the 2026-09-25 "
+            "figurine doc: two agreements known to this conversation were "
+            "absent from the goal's final artefact).")

@@ -541,6 +541,12 @@ class GoalRoomsSettings:
     max_children_per_parent: int = 8
     max_goal_depth: int = 3
     subscribe_sources: str = "memory"        # room self-serve source allowlist
+    # Memory-sensation routes for rooms (claim.write.<entity> subscriptions
+    # waking rooms on corrections). OFF 2026-09-26 (Mike): the wake tier
+    # requires supersessions, which effectively never fire for followed
+    # entities — zero room deliveries ever; route sets seeded as origin
+    # chatter noise. Reversible: BOB_GOAL_ROOM_SENSATIONS=on.
+    sensation_routes: bool = False
 
     def kind_gets_room(self, kind: str) -> bool:
         return kind in {k.strip() for k in self.room_kinds.split(",") if k.strip()}
@@ -1016,6 +1022,8 @@ class Settings:
                 max_children_per_parent=int(os.getenv(
                     "BOB_GOAL_ROOM_MAX_CHILDREN", "8")),
                 max_goal_depth=int(os.getenv("BOB_GOAL_ROOM_MAX_DEPTH", "3")),
+                sensation_routes=os.getenv("BOB_GOAL_ROOM_SENSATIONS", "off").strip().lower()
+                in ("on", "1", "true", "yes"),
             ),
             goal_loop=GoalLoopSettings(
                 enabled=os.getenv("BOB_GOAL_LOOP", "on").strip().lower()

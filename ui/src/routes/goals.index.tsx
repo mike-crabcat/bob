@@ -168,12 +168,14 @@ function Goals() {
       </section>
 
       {settled.length > 0 && (
-        <section className="flex flex-col gap-1">
-          <div className="text-[9px] uppercase text-muted">settled</div>
-          {settled.slice(0, 20).map((g) => (
+        <details className="flex flex-col gap-1">
+          <summary className="text-[9px] uppercase text-muted cursor-pointer">
+            settled ({settled.length})
+          </summary>
+          {settled.map((g) => (
             <GoalRow key={g.id} goal={g} />
           ))}
-        </section>
+        </details>
       )}
     </div>
   );

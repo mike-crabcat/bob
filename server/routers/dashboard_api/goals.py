@@ -23,7 +23,7 @@ async def list_goals(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    rows = await GoalRepository(db).list_recent(limit=100)
+    rows = await GoalRepository(db).list_recent(limit=300)
     goals = [
         {
             "id": r["id"],

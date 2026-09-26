@@ -118,26 +118,36 @@ class TaskRepository:
         self, goal_id: str, room_session: str, *, since_iso: str | None = None,
     ) -> dict[str, int]:
         """Loop delta metrics: open now; spawned/settled since a turn start.
-        Scope = registered by the goal (source_goal_id) or awaited by its
-        room — both shapes are the goal's branches."""
-        scope = "(source_goal_id = ? OR waiter_session = ?)"
+        Scope = registered by the goal (source_goal_id), plus tasks awaited
+        on its ROOM session when the goal has one. Non-room goals work
+        inside a group/DM that awaits plenty of unrelated tasks — the
+        waiter clause is room-shaped only (the 2026-09-25 mug-delivery
+        leak onto the figurine-set goal's drill-down)."""
+        base, params = self._goal_scope(goal_id, room_session)
         if since_iso is not None:
             open_now = await self.db.fetch_one(
-                f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
-                "AND status = 'pending'", (goal_id, room_session))
+                f"SELECT COUNT(*) AS n FROM tasks WHERE {base} "
+                "AND status = 'pending'", tuple(params))
             spawned = await self.db.fetch_one(
-                f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
-                "AND created_at >= ?", (goal_id, room_session, since_iso))
+                f"SELECT COUNT(*) AS n FROM tasks WHERE {base} "
+                "AND created_at >= ?", tuple(params + [since_iso]))
             settled = await self.db.fetch_one(
-                f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
+                f"SELECT COUNT(*) AS n FROM tasks WHERE {base} "
                 "AND status != 'pending' AND completed_at >= ?",
-                (goal_id, room_session, since_iso))
+                tuple(params + [since_iso]))
             return {"open": open_now["n"], "spawned": spawned["n"],
                     "settled": settled["n"]}
         open_now = await self.db.fetch_one(
-            f"SELECT COUNT(*) AS n FROM tasks WHERE {scope} "
-            "AND status = 'pending'", (goal_id, room_session))
+            f"SELECT COUNT(*) AS n FROM tasks WHERE {base} AND status = 'pending'",
+            tuple(params))
         return {"open": open_now["n"], "spawned": 0, "settled": 0}
+
+    def _goal_scope(self, goal_id: str, room_session: str) -> tuple[str, list]:
+        """(WHERE-fragment-without-WHERE, params) for a goal's branch scope."""
+        if room_session.startswith("agent:goal-"):
+            return ("(source_goal_id = ? OR waiter_session = ?)",
+                    [goal_id, room_session])
+        return ("source_goal_id = ?", [goal_id])
 
     async def open_counts_by_goal(self, goal_ids: list[str]) -> dict[str, int]:
         if not goal_ids:
@@ -152,7 +162,15 @@ class TaskRepository:
     async def list_for_goal(
         self, goal_id: str, room_session: str, *, limit: int = 60,
     ) -> list[dict[str, Any]]:
+        base, params = self._goal_scope(goal_id, room_session)
         return await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE source_goal_id = ? "
-            "OR waiter_session = ? ORDER BY created_at DESC LIMIT ?",
-            (goal_id, room_session, limit))
+            f"SELECT * FROM tasks WHERE {base} "
+            "ORDER BY created_at DESC LIMIT ?", tuple(params + [limit]))
+
+    async def repoint_waiter(self, task_id: str, waiter_session: str) -> int:
+        """CAS-ish move of a pending task to a new waiter (goal recreate
+        carry-over; the backstop repoint lives in wakeups repo)."""
+        return await self.db.execute(
+            "UPDATE tasks SET waiter_session = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (waiter_session, _now_iso(), task_id))

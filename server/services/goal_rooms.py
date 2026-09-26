@@ -77,6 +77,27 @@ def room_session_key(goal_id: str) -> str:
     return f"{ROOM_PREFIX}{goal_id}{ROOM_SUFFIX}"
 
 
+async def room_creator_principal(
+    ctx: "AppContext", session_key: str,
+) -> tuple[bool, str | None]:
+    """(is_trusted, contact_id) for a goal room's creator — the principal
+    the room acts as (2026-09-25 creator pinning). NULL creator (system/
+    dream goal) → (False, None): the room's capability scoping falls back
+    to untrusted rather than assuming owner-grade reach."""
+    goal_id = session_key.removeprefix(ROOM_PREFIX).removesuffix(ROOM_SUFFIX)
+    from server.repositories.goals import GoalRepository
+    from server.repositories.contacts import ContactRepository
+
+    goal = await GoalRepository(ctx.db).get(goal_id)
+    creator_id = (goal or {}).get("creator_contact_id")
+    if not creator_id:
+        return False, None
+    contact = await ContactRepository(ctx.db).get(creator_id)
+    if not contact:
+        return False, None
+    return bool(contact.get("is_trusted", 0)), creator_id
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -91,9 +112,6 @@ Standing rules:
   with room_state(...) — plan, known, open_questions, next_actions (each
   next_action carries an ISO-with-offset due). Keep it honest; it is what
   your check-ins and the dashboard read.
-- Subscriptions are your attention: list_subscriptions / subscribe /
-  unsubscribe. At each check-in ask what you are NOT listening to that you
-  should be, and prune what has been noise.
 - Outreach: when connected you can DM a contact directly
   (send_whatsapp_to_contact; pass parent_goal_id = your goal so the reply
   rolls back to you). Use it for individual follow-ups — chase the person,
@@ -103,15 +121,38 @@ Standing rules:
   claim ids that prove the objective is met. Verify results before claiming
   success; report a stall honestly (send_report) instead of waiting in
   silence.
+- Per-person COLLECTION — offers, chases, confirmations, approvals —
+  happens in THAT PERSON'S DM (task completer = the DM conversation), never
+  through a group; the origin group never carries that process (2026-09-25:
+  a figurine room publicly chased members in the origin group). But shared
+  ARTEFACTS are group content: when the goal produces something the group is
+  waiting to see (a figurine, a mockup, a lineup), POST it to the group as
+  it lands — reveals belong to the room's audience, not to a DM.
+- The origin/owner is a PARTICIPANT, not a bystander: ask them directly for
+  their own request or decision instead of searching history — "no record"
+  for the person the goal was asked by is a bug, not a finding. The same
+  goes for anything they relay about someone else: an origin-relayed
+  agreement is authoritative — record it and branch on it immediately
+  (2026-09-25 figurine doc: the owner's and a relayed member's agreements
+  never entered the goal, so no mockups were made for them).
 - Deliberate here; act through the platform's tools. Humans read your
   send_report, not this conversation."""
 
 
+_SUBSCRIPTION_RULES = (
+    "- Subscriptions are your attention: list_subscriptions / subscribe / "
+    "unsubscribe. Ask what you are NOT listening to that you should be, "
+    "and prune what has been noise.\n"
+)
+
+
 def build_charter(*, goal_id: str, objective: str, kind: str,
                   deadline: str | None, origin: str,
-                  loop_block: str = "") -> str:
+                  loop_block: str = "", subscriptions: bool = False) -> str:
     dl = f"\nDeadline: {deadline}" if deadline else "\nDeadline: none set"
     loop = f"\n\n{loop_block}" if loop_block else ""
+    rules = (_SUBSCRIPTION_RULES + _STANDING_RULES) if subscriptions \
+        else _STANDING_RULES
     return (
         f"[Goal {goal_id}]\n"
         f"You are the goal room working exactly one goal:\n"
@@ -119,7 +160,7 @@ def build_charter(*, goal_id: str, objective: str, kind: str,
         f"Kind: {kind}{dl}\n"
         f"Origin conversation (where the goal was asked, and where your "
         f"reports go): {origin}\n\n"
-        f"{_STANDING_RULES}{loop}"
+        f"{rules}{loop}"
     )
 
 
@@ -143,12 +184,13 @@ async def ensure_room(
     from server.services import goal_loop
     loop_block = (goal_loop.charter_loop_block(kind)
                   if goal_loop.loop_enabled(ctx) else "")
+    _subs = getattr(ctx.settings.goal_rooms, "sensation_routes", False)
     row = await repo.upsert(
         session_key=session_key,
         title=f"goal: {objective[:60]}",
         charter=build_charter(goal_id=goal_id, objective=objective, kind=kind,
                               deadline=deadline, origin=origin_session,
-                              loop_block=loop_block),
+                              loop_block=loop_block, subscriptions=_subs),
         created_by="goal_rooms",
     )
     # report_to = the origin (plan: humans get reports, rooms get work). For
@@ -167,6 +209,8 @@ async def seed_subscriptions(
     index), capped at max_routes_per_room. All memory-source, action-level,
     ceiling-valved; the room prunes and widens from here."""
     settings = ctx.settings.goal_rooms
+    if not getattr(settings, "sensation_routes", False):
+        return 0  # off (2026-09-26): room memory-routes removed for now
     entity_ids: list[str] = []
     refs = ((strategy or {}).get("refs") or {})
     for eid in refs.get("entities") or []:
@@ -243,6 +287,8 @@ async def emit_claim_sensations(
     out = {"emitted": 0, "action": 0, "info": 0, "skipped_room": False}
     if not rooms_enabled(ctx):
         return out
+    if not getattr(ctx.settings.goal_rooms, "sensation_routes", False):
+        return out  # off (2026-09-26): rooms do not wake on memory for now
     if is_room_session(session_key):
         out["skipped_room"] = True
         return out
@@ -519,10 +565,15 @@ def make_goal_room_tools(ctx: AppContext, session_key: str) -> list:
         goal = await _room_goal(ctx, session_key)
         if goal is None:
             return json.dumps({"ok": False, "error": "no active goal in this room"})
-        try:
-            raw = json.loads(state or "{}")
-        except json.JSONDecodeError as exc:
-            return json.dumps({"ok": False, "error": f"state is not valid JSON: {exc}"})
+        if isinstance(state, dict):
+            # models sometimes pass the documented JSON object directly
+            # instead of its string form (live against GLM 2026-09-21)
+            raw = state
+        else:
+            try:
+                raw = json.loads(state or "{}")
+            except json.JSONDecodeError as exc:
+                return json.dumps({"ok": False, "error": f"state is not valid JSON: {exc}"})
         if not isinstance(raw, dict):
             return json.dumps({"ok": False, "error": "state must be a JSON object"})
         from server.services.goal_tools import _validate_strategy_payload
@@ -723,8 +774,10 @@ def make_goal_room_tools(ctx: AppContext, session_key: str) -> list:
             for m in (messages or [])
         ]})
 
-    return [room_state, room_close, room_spawn, subscribe, unsubscribe,
-            list_subscriptions, read_group_history]
+    base = [room_state, room_close, room_spawn, read_group_history]
+    if getattr(ctx.settings.goal_rooms, "sensation_routes", False):
+        base[3:3] = [subscribe, unsubscribe, list_subscriptions]
+    return base
 
 
 def room_turn_tools(ctx: AppContext, session_key: str) -> list:

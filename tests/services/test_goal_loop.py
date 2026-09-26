@@ -372,3 +372,211 @@ async def test_ensure_loop_cancels_legacy_checkin(ctx, loop_on):
         "SELECT * FROM wakeups WHERE goal_id = ? AND kind = 'goal_checkin' "
         "AND status = 'scheduled'", (goal["id"],))
     assert not remaining, "ensure_loop retires the legacy series"
+
+
+def test_performance_charter_mandates_improvement():
+    """The crypto-goal gap (Mike 2026-09-22): performance rooms were
+    custodians — reconcile-and-report — with no mandate to improve the
+    strategy. The playbook must require attribution review, the probe
+    lane, and operator-owned rules."""
+    block = goal_loop.charter_loop_block("performance")
+    assert "IMPROVE THE STRATEGY" in block
+    assert "attribution" in block, "review rounds run the attribution"
+    assert "strategy.toml" in block and "OPERATOR-OWNED" in block
+    assert "send_report" in block, "rule changes route via the origin"
+    assert "diligence gate" in block, "the open-list standing rules apply"
+
+
+async def test_goals_block_demands_writes(ctx):
+    """The figurine-doc intake gap (Mike 2026-09-25): agreements known to a
+    conversation but recorded only as memory never reach the room — the
+    goals block must instruct every goal-visible conversation to write
+    decisions back to the goal."""
+    from server.context import AppContext  # noqa: F401
+    from server.services.context_assembler import ContextAssembler
+    goal = await _make_goal(ctx)
+    block = await ContextAssembler(ctx).goals_block(ORIGIN)
+    assert "MUST write it to the goal" in block, \
+        "goal-visible conversations are told decisions go to update_goal"
+
+
+def test_standing_rules_make_origin_a_participant():
+    from server.services.goal_rooms import build_charter
+    charter = build_charter(goal_id="g", objective="o", kind="event_plan",
+                            deadline=None, origin="agent:x:y")
+    assert "PARTICIPANT" in charter
+    assert "origin-relayed" in charter
+
+
+async def test_branch_scope_excludes_nonroom_waiter_noise(ctx, loop_on):
+    """2026-09-25 mug-delivery leak: a non-room goal (kind event, works in
+    its origin group) showed every task the GROUP awaits as its branches.
+    The waiter clause must apply to room sessions only."""
+    from server.repositories.tasks import TaskRepository
+    goal = await _make_goal(ctx, kind="outreach")  # wrapper kind: no room, works in group
+    group = goal["conversation_id"]
+    from server.services import tasks as task_svc
+    await task_svc.register_task(ctx, waiter_session=group,
+                                 title="Mike mug delivery weekend",
+                                 due_minutes=120)   # unrelated, no source_goal
+    await task_svc.register_task(ctx, waiter_session=group,
+                                 title="real branch",
+                                 due_minutes=120, source_goal_id=goal["id"])
+    repo = TaskRepository(ctx.db)
+    titles = [t["title"] for t in await repo.list_for_goal(goal["id"], group)]
+    assert titles == ["real branch"], \
+        "group-awaited tasks are not a non-room goal's branches"
+    counts = await repo.counts_for_goal(goal["id"], group)
+    assert counts["open"] == 1
+
+
+async def test_event_alias_gets_the_room(ctx, loop_on):
+    """2026-09-25 live miss: the model created a figurine goal as kind
+    'event' — one word off 'event_plan' — and silently lost the room, loop
+    and playbook. Aliases canonicalise; unknown kinds are refused at the
+    tool with the valid list."""
+    goal = await _make_goal(ctx, kind="event")
+    assert goal["kind"] == "event_plan"
+    assert goal["conversation_id"].startswith("agent:goal-"), \
+        "the alias must reach the room decision, not just the row"
+
+
+async def test_tool_rejects_unknown_kind(ctx):
+    from server.services.goal_tools import make_goal_tools
+    tools = {t.name: t for t in make_goal_tools(ctx, ORIGIN)}
+    r = json.loads(await tools["create_goal"].handler(
+        objective="x", kind="celebration"))
+    assert not r["ok"] and "event_plan" in r["error"], \
+        "unknown kinds echo the valid list back to the model"
+    r = json.loads(await tools["create_goal"].handler(
+        objective="x", kind="event"))  # alias passes the gate
+    assert r["ok"], r
+
+
+def test_charter_keeps_perperson_work_out_of_groups():
+    from server.services.goal_rooms import build_charter
+    charter = build_charter(goal_id="g", objective="o", kind="event_plan",
+                            deadline=None, origin="agent:main:whatsapp:group:x")
+    assert "in THAT PERSON'S DM" in charter
+    assert "never carries that process" in charter
+    assert "POST it to the group" in charter, \
+        "shared artefacts (reveals) are group content, not DM-only"
+
+
+async def test_settle_disables_the_room_and_kills_backstops(ctx, loop_on):
+    """2026-09-26 zombie room: a cancelled goal's room stayed enabled and a
+    stale task_due backstop woke it at 05:52 — stale reports + group chases
+    from a dead goal. Settle must disable the room AND cancel task_due
+    backstops aimed at it (they are task-keyed; cancel_for_goal misses
+    them)."""
+    from server.repositories.utility_conversations import (
+        UtilityConversationRepository,
+    )
+    from server.services import goal_service, tasks as task_svc
+    goal = await _make_goal(ctx, kind="task")
+    room = goal["conversation_id"]
+    await task_svc.register_task(ctx, waiter_session=room, title="branch",
+                                 due_minutes=600, source_goal_id=goal["id"])
+    assert (await UtilityConversationRepository(ctx.db).get(room))["enabled"]
+
+    ok = await goal_service.settle_goal(ctx, goal["id"], status="cancelled",
+                                        result="done", note="test")
+    assert ok
+    row = await UtilityConversationRepository(ctx.db).get(room)
+    assert not row["enabled"], "a settled goal's room must never run again"
+    due = await ctx.db.fetch_all(
+        "SELECT * FROM wakeups WHERE kind='task_due' AND conversation_id=? "
+        "AND status='scheduled'", (room,))
+    assert not due, "backstops into a disabled room die with the goal"
+
+
+async def test_repoint_moves_task_and_backstop(ctx, loop_on):
+    """The carry-over half the 2026-09-26 zombie missed: repointing a task's
+    waiter must move its already-scheduled backstop too."""
+    from server.services import tasks as task_svc
+    goal = await _make_goal(ctx, kind="task")
+    room = goal["conversation_id"]
+    task = await task_svc.register_task(ctx, waiter_session=room,
+                                        title="carry", due_minutes=600)
+    other = "agent:goal-00000000-0000-0000-0000-000000000001:utility"
+    assert await task_svc.repoint_task(ctx, task["id"], waiter_session=other)
+    w = await ctx.db.fetch_one(
+        "SELECT waiter_session FROM tasks WHERE id=?", (task["id"],))
+    assert w["waiter_session"] == other
+    b = await ctx.db.fetch_one(
+        "SELECT conversation_id FROM wakeups WHERE kind='task_due' "
+        "AND status='scheduled' AND json_extract(payload_json,'$.task_id')=?",
+        (task["id"],))
+    assert b and b["conversation_id"] == other, \
+        "the backstop follows the task, not the old waiter"
+
+
+async def test_sensation_routes_off_by_default(ctx, loop_on):
+    """2026-09-26 (Mike): rooms waking on memory removed for now — no route
+    seeding, no claim events emitted, no subscription tools or charter
+    rules. The wake tier needed supersessions that never fire; zero room
+    deliveries ever happened. Reversible via BOB_GOAL_ROOM_SENSATIONS=on."""
+    from server.services import goal_rooms
+    goal = await _make_goal(ctx, kind="task")
+    routes = await ctx.db.fetch_all(
+        "SELECT * FROM stimulus_routes WHERE target_session=?",
+        (goal["conversation_id"],))
+    assert not routes, "no subscription routes are seeded while off"
+    out = await goal_rooms.emit_claim_sensations(
+        ctx, session_key=ORIGIN, turn_message_id="m", batch={
+            "claims": [{"id": "c1", "subject_id": "person-x",
+                        "claim_type_key": "preference"}]})
+    assert out["emitted"] == 0, "no claim events emitted while off"
+    names = {t.name for t in goal_rooms.make_goal_room_tools(
+        ctx, goal["conversation_id"])}
+    assert "subscribe" not in names and "list_subscriptions" not in names
+
+
+async def test_task_prompts_command_immediate_fail_on_no_capability(ctx):
+    """2026-09-26 AI-doom spam root cause: the steered task demanded a DM,
+    the group turn had no DM tool, and the model reasoned 'I can't DM from
+    here' three times without ever calling task_fail — an unresolvable
+    obligation cycling until the iteration cap. Every layer that mentions
+    task_fail must command the immediate call with a concrete shape."""
+    from server.services import tasks as task_svc
+    import inspect
+    src = inspect.getsource(task_svc)
+    assert "IF YOUR TOOLS CANNOT DO WHAT THIS TASK ASKS" in src
+    assert "task_fail it immediately and move on" in src
+    # the tool surface carries it too
+    tools = {t.name: t for t in task_svc.make_task_tools(ctx, "agent:x:y")}
+    assert "CALL THIS IMMEDIATELY" in tools["task_fail"].description[:200]
+
+
+async def test_room_to_group_delegation_refused(ctx, loop_on):
+    """The bouncer (Mike 2026-09-26): a goal room delegating per-person
+    work to a GROUP is refused at registration — no task, no backstop, no
+    steer — with guidance to re-register against the person's DM. The
+    AI-doom spam was exactly this delegation sailing through warn-only."""
+    from server.services import tasks as task_svc
+    goal = await _make_goal(ctx, kind="task")
+    room = goal["conversation_id"]
+    out = await task_svc.register_task(
+        ctx, waiter_session=room, title="Chase Chris re figurine concept",
+        instruction="chase Chris via DM",
+        expected_completer="agent:main:whatsapp:group:120363422982048691",
+        due_minutes=240)
+    assert not out.get("ok", True) and "cannot DM individuals" in out["error"]
+    rows = await ctx.db.fetch_all("SELECT * FROM tasks WHERE waiter_session=?", (room,))
+    assert not rows, "no task row is created for the refused delegation"
+    b = await ctx.db.fetch_all(
+        "SELECT * FROM wakeups WHERE kind='task_due' AND conversation_id=?", (room,))
+    assert not b, "no backstop armed for the refused delegation"
+
+    # The correct shape still works: DM completer, and the tool surfaces it
+    out = await task_svc.register_task(
+        ctx, waiter_session=room, title="Chase Chris",
+        instruction="reply in Chris's DM thread",
+        expected_completer="agent:main:whatsapp:dm:61424616977",
+        due_minutes=60)
+    assert out.get("ok", True) and out["id"]
+    # non-room waiters delegating to groups is out of scope (unchanged)
+    out = await task_svc.register_task(
+        ctx, waiter_session=ORIGIN, title="group thing",
+        expected_completer="agent:main:whatsapp:group:120363422982048691")
+    assert out.get("ok", True)

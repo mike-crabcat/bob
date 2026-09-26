@@ -32,6 +32,15 @@ from server.services import goal_rooms, goal_service
 ORIGIN = "agent:main:whatsapp:group:120363422982048691"
 
 
+@pytest.fixture
+def sensations_on(monkeypatch, ctx):
+    """Opt into the (2026-09-26 off-by-default) room memory-sensation
+    feature — the ON-path tests below keep guarding it for the day it
+    returns (BOB_GOAL_ROOM_SENSATIONS=on)."""
+    monkeypatch.setattr(ctx.settings.goal_rooms, "sensation_routes", True)
+
+
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
@@ -138,7 +147,21 @@ async def test_room_state_write_and_due_validation(ctx):
     assert not res["ok"]
 
 
-async def test_room_turn_tools_add_outreach_only_when_bridge_up(ctx):
+async def test_room_state_accepts_dict_payload(ctx):
+    """GLM sometimes passes the documented JSON as an object instead of its
+    string form — that shape wrote nothing for a full day (2026-09-21)
+    before the dict normalisation."""
+    goal = await _roomed_goal(ctx)
+    tools = _tools(ctx, goal["conversation_id"])
+    good = {"plan": "chase people", "known": ["a"], "open_questions": [],
+            "next_actions": [], "refs": {"entities": [], "claims": []}}
+    res = json.loads(await tools["room_state"](good))
+    assert res["ok"], res
+    stored = json.loads((await GoalRepository(ctx.db).get(goal["id"]))["strategy_json"])
+    assert stored["plan"] == "chase people"
+
+
+async def test_room_turn_tools_add_outreach_only_when_bridge_up(ctx, sensations_on):
     """The room's hands match its mandate: with the bridge connected the DM
     outreach tool is present (chase individuals directly); disconnected it is
     absent, and group-send tools are NEVER included (broadcasts keep the
@@ -206,7 +229,7 @@ def _batch(*claims, turn="t1"):
             "entity_ids": sorted({c["subject_id"] for c in claims})}
 
 
-async def test_sensation_tiering_and_coalescing(ctx):
+async def test_sensation_tiering_and_coalescing(ctx, sensations_on):
     turn = "msg-turn-1"
     batch = _batch(
         {"id": "c1", "claim_type_key": "preference", "subject_id": "person-david-shedden",
@@ -230,7 +253,7 @@ async def test_sensation_tiering_and_coalescing(ctx):
     assert out2["emitted"] == 0
 
 
-async def test_sensation_correction_is_action(ctx):
+async def test_sensation_correction_is_action(ctx, sensations_on):
     # An existing claim superseded by this batch's new claim → action level.
     await ctx.db.execute(
         "INSERT INTO memory_claims (id, claim_type_key, subject_id, object_id, "
@@ -250,7 +273,7 @@ async def test_sensation_correction_is_action(ctx):
     assert ev["level"] == "action"
 
 
-async def test_self_echo_room_batches_skipped(ctx):
+async def test_self_echo_room_batches_skipped(ctx, sensations_on):
     batch = _batch({"id": "c1", "claim_type_key": "preference",
                     "subject_id": "person-david-shedden", "object_id": "",
                     "value": "x"})
@@ -280,7 +303,7 @@ async def test_extraction_candidates_exclude_goal_rooms(ctx):
 
 # ---------------------------------------------------------- subscriptions
 
-async def test_subscribe_allowlist_ceilings_and_cap(ctx):
+async def test_subscribe_allowlist_ceilings_and_cap(ctx, sensations_on):
     goal = await _roomed_goal(
         ctx, strategy={"v": 2, "refs": {
             "entities": ["person-david-shedden", "person-chris"], "claims": []}})
@@ -319,7 +342,7 @@ async def test_subscribe_allowlist_ceilings_and_cap(ctx):
 
 # ------------------------------------------------------ routing + rollup
 
-async def test_room_gets_claim_via_router_not_reviser(ctx):
+async def test_room_gets_claim_via_router_not_reviser(ctx, sensations_on):
     """An action-level claim sensation steers the subscribed ROOM through the
     stimulus router — and the legacy claim router skips room goals."""
     from server.services import stimulus_router
@@ -399,7 +422,7 @@ async def test_close_door_evidence_and_children(ctx):
     assert "Evidence: msg 1, claim 2" in row["result"]
 
 
-async def test_settle_prunes_routes_and_cancel_cascades(ctx):
+async def test_settle_prunes_routes_and_cancel_cascades(ctx, sensations_on):
     parent = await _roomed_goal(
         ctx, objective="parent", strategy={"v": 2, "refs": {
             "entities": ["person-david-shedden"], "claims": []}})
@@ -446,7 +469,7 @@ async def test_hygiene_sweep_prunes_orphan_routes(ctx):
 
 # ---------------------------------------------------------------- check-in
 
-async def test_checkin_carries_full_claim_activity(ctx):
+async def test_checkin_carries_full_claim_activity(ctx, sensations_on):
     """The check-in brief lists EVERY claim event in the window — ✓ for
     followed entities, · for unfollowed — plus subscribe candidates and
     quiet subscriptions. The room sees what went past, not just what it
@@ -483,7 +506,7 @@ async def test_checkin_carries_full_claim_activity(ctx):
          if r["type_pattern"] != "claim.write.person-chris"])
 
 
-async def test_emission_skips_self_and_relationship_noise(ctx):
+async def test_emission_skips_self_and_relationship_noise(ctx, sensations_on):
     """self-bob / relationship-bob claims never become sensations — 25% of
     the live stream had no possible consumer (self material feeds the
     self-brief, not goal attention)."""
