@@ -1,40 +1,34 @@
 ---
 name: browser
-description: Real browser access — drives Bob's own headless Chrome (persistent profile, CDP attach) via the browser-use CLI. Use for JS-rendered pages curl can't read, clicking, form filling, Bob's own logged-in sessions, and page screenshots.
+description: Real browser access — drives Bob's own headless Chrome (persistent profile at workspace/browser-profile, CDP port 9223) via the browser-use CLI. Use for JS-rendered pages curl can't read, clicking, form filling, Bob's own logged-in sessions, and page screenshots.
 trigger: when a task needs a real browser — a JS-heavy page that returns a shell to curl/fetch, clicking buttons or links, filling forms, logging into sites under Bob's own profile, taking screenshots of pages, or any "open / go to / do X on this website" request needing interaction
 ---
 
 # browser
 
-Bob drives its **own headless Chrome** through the `browser-use` CLI. The browser keeps a
-**persistent profile** (cookies and logins survive across sessions). Connection is CDP attach:
-the endpoint is **`BU_CDP_URL`** — default `http://127.0.0.1:9223` (locally-launched Chrome with
-its profile at `/home/bob/workspace/browser-profile`); container instances get
-`BU_CDP_URL=http://chrome:9222` from their environment, where a chrome sidecar owns the browser.
+Bob drives its **own headless Chrome** (user `bob`, not Mike's desktop browser) through the
+`browser-use` CLI. The browser keeps a **persistent profile** at `/home/bob/workspace/browser-profile`,
+so cookies and logins survive across sessions. Connection is CDP on `127.0.0.1:9223`.
 
 **Escalation rule:** try `curl`/plain fetch first. Only use the browser when the task needs
 interaction, JS rendering, login state, or a screenshot. If a plain fetch already worked, don't browse.
 
-## 1. Ensure the browser is reachable
+## 1. Ensure the browser is running
 
-Run this before the first browser command in a task (idempotent — takes ~5s when starting a local browser; container sidecars are always up, so this is a no-op check there):
+Run this before the first browser command in a task (idempotent — takes ~5s when starting):
 
 ```bash
-CDP="${BU_CDP_URL:-http://127.0.0.1:9223}"
-curl -fsS "$CDP/json/version" >/dev/null 2>&1 \
-  || { [[ "$CDP" == http://127.0.0.1:* && -x /usr/bin/google-chrome ]] \
-       && setsid nohup /usr/bin/google-chrome --headless=new --remote-debugging-port=9223 --remote-debugging-address=127.0.0.1 --user-data-dir=/home/bob/workspace/browser-profile --no-first-run --disable-dev-shm-usage about:blank >/tmp/bob-chrome.log 2>&1 < /dev/null & sleep 5; }; \
-  curl -fsS "$CDP/json/version" | head -2
+curl -fsS http://127.0.0.1:9223/json/version >/dev/null 2>&1 || setsid nohup /usr/bin/google-chrome --headless=new --remote-debugging-port=9223 --remote-debugging-address=127.0.0.1 --user-data-dir=/home/bob/workspace/browser-profile --no-first-run --disable-dev-shm-usage about:blank >/tmp/bob-chrome.log 2>&1 < /dev/null & sleep 5; curl -fsS http://127.0.0.1:9223/json/version | head -2
 ```
 
-If the endpoint still doesn't answer: locally, check `tail -5 /tmp/bob-chrome.log`; in a container, the chrome sidecar may need a restart — say so and continue without the browser rather than retrying.
+If the port still doesn't answer after that, check `tail -5 /tmp/bob-chrome.log`.
 
 ## 2. Drive it
 
 Always prefix `BU_CDP_URL` (the daemon auto-starts on first call and connects to the browser):
 
 ```bash
-BU_CDP_URL="${BU_CDP_URL:-http://127.0.0.1:9223}" browser-use <<'PY'
+BU_CDP_URL=http://127.0.0.1:9223 browser-use <<'PY'
 new_tab("https://example.com")
 wait_for_load()
 print(page_info())
@@ -90,12 +84,12 @@ Fall back to `js(...)` when the AX tree lacks the element (canvas, exotic widget
   they bill money and send traffic through Browser Use Cloud. Local browser only.
 - **No recordings** unless the user asks for one.
 - **Tidy up:** `close_tab` tabs you opened once the task is done. Leave Chrome itself running
-  (staying warm is the point); to restart a locally-launched Chrome after a crash:
-  `pkill -f remote-debugging-port=9223`, then run the step-1 snippet again.
+  (staying warm is the point); to restart it after a crash: `pkill -f remote-debugging-port=9223`,
+  then run the step-1 snippet again.
 - Downloads land in the profile's download dir — prefer scraping text via `js()` instead.
 
 ## 5. Diagnostics
 
 - `browser-use doctor` — install/daemon/browser state
-- `BU_CDP_URL="${BU_CDP_URL:-http://127.0.0.1:9223}" browser-use --version` — sanity check
-- Chrome log (local launches): `/tmp/bob-chrome.log`; CDP health: `curl -s "${BU_CDP_URL:-http://127.0.0.1:9223}/json/version"`
+- `BU_CDP_URL=http://127.0.0.1:9223 browser-use --version` — sanity check
+- Chrome log: `/tmp/bob-chrome.log`; CDP health: `curl -s http://127.0.0.1:9223/json/version`

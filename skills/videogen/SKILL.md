@@ -20,7 +20,7 @@ Video generation takes **1–10 minutes**. NEVER run this with the `bash` tool i
 blocking way. Follow the same pattern as `skills/openai-image`:
 
 1. Ack briefly ("On it — video rendering, few minutes").
-2. `create_subagent(task="python skills/videogen/videogen.py --image ... --prompt '...' --output /home/bob/workspace/generated-images/<name>.mp4", agent_type='script')`
+2. `run_bg_process(command="python skills/videogen/videogen.py --image ... --prompt '...' --output /home/bob/workspace/generated-images/<name>.mp4")`
 3. End your turn; you will be woken when it finishes.
 
 ## Basic usage
@@ -91,7 +91,7 @@ Asking for an unavailable model exits 1 with the list of what *is* available.
 
 ## API key — never print it
 
-Preferred: set `RUNWARE_API_KEY` in the instance environment (`.env`). A file at `skills/videogen/apikey` (chmod `600`, raw key) also works locally. Resolution order: `--apikey` → `$RUNWARE_API_KEY` → `skills/videogen/apikey`.
+The key lives in `skills/videogen/apikey` (chmod `600`, raw key, no quotes).
 Resolution order: `--apikey` → `$RUNWARE_API_KEY` → `skills/videogen/apikey`.
 
 **Never** hardcode the key, echo it, paste it into a prompt or a commit, or log
@@ -147,3 +147,11 @@ and work fine at low balance.
 
 `python` (shared venv), `requests`, `pillow`, and `ffmpeg`/`ffprobe` for GIF
 extraction and duration probing. All present.
+
+## Gotchas (from memory, 2026-09-14)
+
+- Gemini Omni Flash 1.1 is the default video model (solves facial expressions, ~43s per 5s clip); Gemini models are weak at replicating a fixed character design — prefer Wan when character fidelity matters.
+- Wan 3.0 rejects square sizes like 1024x1024 (HTTP 400 unsupportedModelResolution) — use 1280x720 or 720x1280.
+- Read the Runware key from config — never scrape/regex it out of source (produced a 401).
+- Runware imageUpscale works with the existing key (imageUpload + 2x upscale).
+- Post reaction clips to WhatsApp as silent mp4 (WhatsApp auto-loops them); gifs don't loop properly.
