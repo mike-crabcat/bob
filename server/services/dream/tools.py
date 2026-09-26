@@ -36,6 +36,23 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
             return next((p for p in plans if p["id"] == plan_id), None)
         return plans[0] if len(plans) == 1 else None
 
+    async def _settled_for_id(plan_id: str) -> dict | None:
+        """A plan linked to this session that is no longer open — powers the
+        idempotent settle replies. 2026-09-24 Family-assistant incident: the
+        first plan_complete succeeded, every repeat fell into the generic
+        not-found error, and the model read that as retry-bait — 13 rephrased
+        re-sends to the chat before the loop budget ran out."""
+        if not plan_id:
+            return None
+        rows = await store.items_for_session(session_key, item_type="plan")
+        for r in rows:
+            if r["item_id"] != plan_id:
+                continue
+            plan = await store.get_plan(r["item_id"])
+            if plan and plan["status"] not in _ACTIVE_PLAN_STATUSES:
+                return plan
+        return None
+
     def _plan_line(p: dict) -> str:
         return (
             f"{p['id']} [{p['status']}] {p['title']} — next step: {p['proposed_action']}"
@@ -59,6 +76,11 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
         plan = await _resolve(plan_id or None)
         if plan is None:
+            settled = await _settled_for_id((plan_id or "").strip())
+            if settled is not None:
+                return json.dumps({"ok": True, "already": settled["status"],
+                                   "note": f"plan is already {settled['status']} — nothing to "
+                                           "do; do not retry or resend"})
             return json.dumps({"ok": False, "error": "plan not found in this session (or ambiguous — pass plan_id from list_plans)"})
         await store.set_plan_status(
             plan["id"], "dismissed",
@@ -74,6 +96,11 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
         plan = await _resolve(plan_id or None)
         if plan is None:
+            settled = await _settled_for_id((plan_id or "").strip())
+            if settled is not None:
+                return json.dumps({"ok": True, "already": settled["status"],
+                                   "note": f"plan is already {settled['status']} — nothing to "
+                                           "do; do not retry or resend"})
             return json.dumps({"ok": False, "error": "plan not found in this session (or ambiguous — pass plan_id from list_plans)"})
         await store.set_plan_status(
             plan["id"], "completed",
@@ -97,6 +124,11 @@ def make_dream_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
 
         plan = await _resolve(plan_id or None)
         if plan is None:
+            settled = await _settled_for_id((plan_id or "").strip())
+            if settled is not None:
+                return json.dumps({"ok": False,
+                                   "error": f"plan is already {settled['status']} — nothing "
+                                            "to update; do not retry or resend"})
             return json.dumps({"ok": False, "error": "plan not found in this session (or ambiguous — pass plan_id from list_plans)"})
         if not any([due_hint, proposed_action, assistance_method, progress]):
             return json.dumps({"ok": False, "error": "nothing to update"})

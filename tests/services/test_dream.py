@@ -509,6 +509,49 @@ async def test_plan_tools_session_bound(ctx):
     assert out2["ok"] is False
 
 
+async def test_plan_settles_are_idempotent_no_retry_loop(ctx):
+    """2026-09-24 Family-assistant incident: after the first plan_complete
+    succeeded, every repeat fell into the generic not-found error and the
+    model retried (rephrasing + RESENDING) 13 times. Settled plans must
+    answer terminally: ok-already for complete/cancel, an explicit
+    already-settled error for update."""
+    await _seed_run_row(ctx.db)
+    from server.services.dream.tools import make_dream_tools
+
+    now = iso_utc()
+    await ctx.db.execute(
+        """INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, assistance_method,
+             status, evidence_json, source_run_id, created_at, updated_at)
+           VALUES ('plan-pi1', 't', 'd', 'a', 'm', 'approved', ?, 'dream-x', ?, ?)""",
+        (json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
+    )
+    await ctx.db.execute(
+        "INSERT INTO dream_item_links (item_type, item_id, session_key) VALUES ('plan', 'plan-pi1', ?)",
+        (SK,),
+    )
+    tools = {t.name: t for t in make_dream_tools(ctx, session_key=SK)}
+
+    out1 = json.loads(await tools["plan_complete"].handler("plan-pi1"))
+    assert out1["ok"] is True and out1["completed"] == "plan-pi1"
+
+    # the loop shape: model calls complete again with the same id
+    out2 = json.loads(await tools["plan_complete"].handler("plan-pi1"))
+    assert out2["ok"] is True and out2["already"] == "completed"
+    assert "do not retry" in out2["note"]
+
+    # cancel on a completed plan is terminal too, not retry-bait
+    out3 = json.loads(await tools["plan_cancel"].handler("it's off", "plan-pi1"))
+    assert out3["ok"] is True and out3["already"] == "completed"
+
+    # update on a settled plan gets the explicit settled error
+    out4 = json.loads(await tools["plan_update"].handler("plan-pi1", progress="x"))
+    assert out4["ok"] is False and "already completed" in out4["error"]
+
+    # a genuinely unknown id keeps the guided error
+    out5 = json.loads(await tools["plan_complete"].handler("plan-nope"))
+    assert out5["ok"] is False and "plan not found" in out5["error"]
+
+
 async def test_plan_update_progress_moves_to_actioned(ctx):
     await _seed_run_row(ctx.db)
     from server.services.dream.tools import make_dream_tools
