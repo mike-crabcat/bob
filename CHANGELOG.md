@@ -957,3 +957,21 @@ All notable changes to Bob are documented here. Entries are based on analysis of
 - Add notification delivery system with channel routing, session route registry, and webhook processing
 - Add OpenClaw integration with hook-based gateway communication
 - Add test suites for API endpoints, CLI commands, project execution, and webhooks
+
+## 2026-09-23 (later)
+
+### Added
+- Steerable email threads (operator path): `bob steer` / the dashboard wake endpoint now accept email-thread bindings — previously "no active dm/group binding". `wake_conversation` gained an email branch that dispatches through `EmailPollingService.wake_thread`, running the turn with the thread's real toolset (email_reply + common + goal/approval/MCP tools — `_email_turn_tools`, extracted and shared with inbound dispatch so the two paths can't drift). Verified live with a no-send wake on Jason Buisman's thread. Contacts still cannot request email steers (`resolve_target` matches DMs/groups only — deliberate v1 scope)
+
+### Fixed
+- Jason's smith-gnome links (follow-up to the file-share fix): Bob's 09-22 email carried funnel URLs proxied to the since-retired local server (HTTP 502). Fresh permanent onlyfiles links sent in-thread via `bob email reply` (note: reply needs `--inbox <uuid>` — auto-resolve picks the address, not the id)
+
+## 2026-09-23 (latest)
+
+### Fixed
+- `is_no_reply` prose false-positive (Mike-DM, 2026-09-23 23:01): the reply "…one message from me, no reply from you yet" was matched by containment against the plain-English silence variants ("NO REPLY", "NOTHING TO SAY") — the send was swallowed twice, `message_was_sent` still reported True (the flag is set before the silence check), so the send-tool rescue stayed quiet and the turn ended "succeeded" with zero output. The canonical `NO_REPLY` token stays containment-matched (models decorate it); the plain-English variants now match only as the whole bracket-stripped message. One matcher, ten callers covered (send paths, cutoff rescue, backburner quiet-detection, attention probe, memory extraction, history replay)
+
+## 2026-09-24
+
+### Fixed
+- Email attachment guard was set 3× above the provider's real cap: `MAX_ATTACHMENT_SIZE` allowed 25 MB/file while AgentMail's send API rejects request bodies over ~10 MB (base64 inflates ~33%) — observed live 2026-09-22 when a ~9 MB PNG and a 25 MB STL both passed the guard and dead-lettered after 5 retries each (the STL failure is what started the whole LAN-link → share-files saga). Now 8 MB/file + 11 MB combined base64, checked at attachment-read time in both `email_reply` and `email_send`, with the rejection error naming the cap and routing straight to the share-files skill ("upload it and send the download link instead"); both tool docstrings state the caps. The two dead effects were acknowledged via the dashboard discard API (the correct operator surface — dead rows never retry)
