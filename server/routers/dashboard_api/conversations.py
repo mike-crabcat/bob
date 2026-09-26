@@ -45,6 +45,7 @@ async def list_conversations(request: Request) -> dict[str, Any]:
     rows = await ConversationRepository(db).dashboard_overview(limit=200)
 
     conv_ids = [r["id"] for r in rows]
+    display_names = await ConversationRepository(db).display_names(conv_ids)
     bindings_by_conv: dict[str, list[dict[str, Any]]] = {}
     for b in await ConversationRepository(db).bindings_for_many(conv_ids):
         bindings_by_conv.setdefault(b["conversation_id"], []).append({
@@ -61,6 +62,7 @@ async def list_conversations(request: Request) -> dict[str, Any]:
             "id": r["id"],
             "kind": r["kind"],
             "title": r["title"],
+            "display_name": display_names.get(r["id"]),
             "merged_into": r["merged_into"],
             "channel": _parse_channel(r["id"]),
             "binding_count": r["binding_count"],
@@ -430,7 +432,9 @@ async def post_conversation_wake(request: Request) -> dict[str, Any]:
         session_key = resolution["target_key"]
 
     binding = await conv_repo.active_binding(session_key)
-    if not binding or binding.get("endpoint_kind") not in ("dm", "group"):
+    # "thread" = email conversations (steerable since 2026-09-23: the wake
+    # path dispatches them with the thread's email toolset).
+    if not binding or binding.get("endpoint_kind") not in ("dm", "group", "thread"):
         return {"error": f"no active dm/group binding for {session_key}"}
 
     content = build_wake_content(

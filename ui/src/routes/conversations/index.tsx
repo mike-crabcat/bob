@@ -15,6 +15,7 @@ interface ConversationItem {
   id: string;
   kind: string;
   title: string | null;
+  display_name: string | null;
   merged_into: string | null;
   channel: string;
   binding_count: number;
@@ -94,7 +95,10 @@ function ConversationsPage() {
         {filtered.length === 0 ? (
           <div className="p-4 text-muted text-center text-xs">no conversations</div>
         ) : (
-          filtered.map((c) => (
+          filtered.map((c) => {
+            const label = c.display_name || c.title || c.id;
+            const showKey = label !== c.id;
+            return (
             <Link
               key={c.id}
               to="/conversations/$sessionKey"
@@ -104,10 +108,10 @@ function ConversationsPage() {
               <div className="flex flex-col items-start gap-0.5 min-w-0 flex-1">
                 <div className="flex items-center gap-1.5 min-w-0 w-full">
                   <ChannelDot channel={c.channel} />
-                  <span className={`text-[10px] uppercase ${CHANNEL_COLORS[c.channel] ?? "text-muted"}`}>
+                  <span className={`text-[10px] uppercase shrink-0 ${CHANNEL_COLORS[c.channel] ?? "text-muted"}`}>
                     {c.channel}
                   </span>
-                  <span className="text-text truncate text-xs">{c.title || c.id}</span>
+                  <span className="text-text truncate text-sm font-medium">{label}</span>
                   {c.merged_into && (
                     <span className="text-[9px] px-1 border border-yellow-500/60 text-yellow-400 shrink-0">
                       → merged
@@ -124,6 +128,11 @@ function ConversationsPage() {
                     </span>
                   )}
                 </div>
+                {showKey ? (
+                  <div className="text-[10px] text-muted/60 font-mono truncate w-full">
+                    {c.id}
+                  </div>
+                ) : null}
                 <div className="text-[10px] text-muted">
                   {c.kind} · {c.turn_count} turns
                   {c.active_goals > 0 && ` · ${c.active_goals} goals`}
@@ -136,7 +145,8 @@ function ConversationsPage() {
                 <span className="text-muted text-xs">&rsaquo;</span>
               </div>
             </Link>
-          ))
+            );
+          })
         )}
       </div>
     </div>

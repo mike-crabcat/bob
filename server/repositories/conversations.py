@@ -121,6 +121,66 @@ class ConversationRepository:
             tuple(conversation_ids))
         return [dict(r) for r in rows]
 
+    async def display_names(
+            self, conversation_ids: list[str]) -> dict[str, str]:
+        """Human display names for the dashboard conversation list
+        (cross-domain read-only rollup, the
+        UtilityConversationRepository.dashboard_overview precedent):
+        WhatsApp group name > contact name > email thread subject.
+        Absent entries fall back to whatever the caller chooses (title or
+        the conversation id itself)."""
+        if not conversation_ids:
+            return {}
+        marks = ",".join("?" * len(conversation_ids))
+        bindings = await self.db.fetch_all(
+            f"SELECT conversation_id, session_key, channel, address, "
+            f"contact_id FROM bindings WHERE conversation_id IN ({marks}) "
+            f"AND is_active = 1", tuple(conversation_ids))
+
+        names: dict[str, str] = {}
+
+        # WhatsApp groups: name via the group JID on the binding
+        group_rows = await self.db.fetch_all(
+            "SELECT whatsapp_jid, name FROM whatsappgroups")
+        jid_to_name = {r["whatsapp_jid"]: r["name"] for r in group_rows}
+        for b in bindings:
+            if b["channel"] != "whatsapp" or ":group:" not in b["session_key"]:
+                continue
+            jid = b["address"] or b["session_key"].rsplit(":", 1)[-1] + "@g.us"
+            name = jid_to_name.get(jid)
+            if name:
+                names.setdefault(b["conversation_id"], name)
+
+        # Contacts: name via the binding's contact_id (DMs, email threads)
+        contact_ids = list({b["contact_id"] for b in bindings
+                            if b["contact_id"]})
+        if contact_ids:
+            cmarks = ",".join("?" * len(contact_ids))
+            contact_rows = await self.db.fetch_all(
+                f"SELECT id, name FROM contacts WHERE id IN ({cmarks})",
+                tuple(contact_ids))
+            id_to_name = {r["id"]: r["name"] for r in contact_rows}
+            for b in bindings:
+                name = id_to_name.get(b["contact_id"]) if b["contact_id"] else None
+                if name:
+                    names.setdefault(b["conversation_id"], name)
+
+        # Email threads: subject via the session key
+        email_keys = [b["session_key"] for b in bindings
+                      if b["channel"] == "email"]
+        if email_keys:
+            key_to_conv = {b["session_key"]: b["conversation_id"]
+                           for b in bindings}
+            emarks = ",".join("?" * len(email_keys))
+            email_rows = await self.db.fetch_all(
+                f"SELECT session_key, subject FROM email_threads "
+                f"WHERE session_key IN ({emarks})", tuple(email_keys))
+            for r in email_rows:
+                conv_id = key_to_conv.get(r["session_key"])
+                if conv_id and r["subject"]:
+                    names.setdefault(conv_id, r["subject"])
+        return names
+
     async def session_labels_for_cids(
         self, conversation_ids: list[str],
     ) -> dict[str, dict[str, str]]:

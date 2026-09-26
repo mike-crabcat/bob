@@ -117,6 +117,11 @@ async def get_utility_behaviors(request: Request) -> dict[str, Any]:
     rows = await UtilityConversationRepository(db).dashboard_overview()
     behaviors: dict[str, dict[str, Any]] = {}
     for r in rows:
+        # Goal rooms are excluded (Mike 2026-09-25): /goals shows them with
+        # strictly richer data (loop state, budget, branches, drill-down).
+        # This panel keeps the true watcher utilities + their route stats.
+        if r["session_key"].startswith("agent:goal-"):
+            continue
         b = behaviors.setdefault(r["session_key"], {
             "session_key": r["session_key"],
             "title": r["title"],
