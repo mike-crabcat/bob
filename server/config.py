@@ -230,6 +230,14 @@ class OpenRouterSettings:
 
     api_key: str = ""
     base_url: str = "https://openrouter.ai/api/v1"
+    # Routing constraint (2026-09-26): comma-separated quantization allowlist
+    # sent as provider.quantizations on every OpenRouter request. The default
+    # router freely serves glm-5.3-flash from fp4/nvfp4/unknown-quant hosts
+    # (33 endpoints declared; the fp4 ones are the cheapest, so they win
+    # often) — fp8 keeps price/latency competition among full-precision hosts
+    # and excludes endpoints that don't declare their quant. "" or "off"
+    # disables the filter (OpenRouter default routing).
+    quantizations: str = "fp8"
 
     @property
     def enabled(self) -> bool:
@@ -829,6 +837,7 @@ class Settings:
         openrouter = OpenRouterSettings(
             api_key=openrouter_key,
             base_url=os.getenv("BOB_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/"),
+            quantizations=os.getenv("BOB_OPENROUTER_QUANTIZATIONS", "fp8"),
         )
 
         realtime_voice = os.getenv("BOB_OPENAI_REALTIME_VOICE", "cedar")

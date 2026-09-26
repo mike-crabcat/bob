@@ -218,6 +218,7 @@ async def _record_log(
     dispatch_id: str | None = None,
     contact_id: str | None = None,
     tool_blocks_json: str | None = None,
+    generation_id: str | None = None,
 ) -> str:
     """Record or update an LLM call log entry. Returns the log_id.
 
@@ -237,7 +238,8 @@ async def _record_log(
             cached_tokens=cached_tokens, status=status,
             error_message=error_message, project_id=project_id,
             task_id=task_id, dispatch_id=dispatch_id, contact_id=contact_id,
-            tool_blocks_json=tool_blocks_json)
+            tool_blocks_json=tool_blocks_json,
+            generation_id=generation_id)
     except Exception:
         logger.warning("Failed to record LLM call log", exc_info=True)
         return log_id or str(uuid4())
@@ -363,6 +365,7 @@ class LLMDispatchService(BaseService):
 
         try:
             stream_result = StreamResult()
+            call_meta: dict[str, Any] = {}
             result = await service.chat(
                 messages=messages,
                 model=resolved_model,
@@ -370,6 +373,7 @@ class LLMDispatchService(BaseService):
                 max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
                 stream_result=stream_result,
+                call_meta=call_meta,
             )
             elapsed = time.monotonic() - t0
 
@@ -382,6 +386,7 @@ class LLMDispatchService(BaseService):
                 system_prompt=system_prompt,
                 user_message=user_message,
                 messages_json=messages_json,
+                generation_id=call_meta.get("generation_id"),
                 response_text=result or "",
                 latency_seconds=elapsed,
                 prompt_tokens=stream_result.prompt_tokens,
@@ -608,6 +613,7 @@ class LLMDispatchService(BaseService):
         )
         try:
             stream_result = StreamResult()
+            call_meta: dict[str, Any] = {}
 
             async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
                 await _record_log(self.db, log_id=log_id,
@@ -629,6 +635,7 @@ class LLMDispatchService(BaseService):
                 session_key=session_key,
                 log_id=log_id,
                 budget_stats=budget_stats,
+                call_meta=call_meta,
                 force_first_tool_choice=force_first_tool_choice,
             )
             elapsed = time.monotonic() - t0
@@ -647,6 +654,7 @@ class LLMDispatchService(BaseService):
                 total_tokens=stream_result.total_tokens,
                 cached_tokens=stream_result.cached_tokens,
                 messages_json=json.dumps(_sanitize_for_json(messages)),
+                generation_id=call_meta.get("generation_id"),
                 status="completed",
                 tool_blocks_json=_serialize_trace_items(trace),
             )

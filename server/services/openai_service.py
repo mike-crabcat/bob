@@ -359,6 +359,38 @@ class StreamResult:
 _clients: dict[tuple[str, str], Any] = {}
 
 
+def _routing_extra(settings: Any, resolved_model: str) -> dict[str, Any]:
+    """OpenRouter routing constraint (2026-09-26): the default router serves
+    glm-5.3-flash (and other routed slugs) from a 33-endpoint pool that
+    includes fp4/nvfp4 and undeclared-quant hosts — the fp4 ones are the
+    cheapest, so they win price-weighted routing often. settings.openrouter
+    .quantizations (comma list, "" or "off" to disable) becomes
+    provider.quantizations, keeping competition among the allowed-precision
+    hosts and excluding endpoints that don't declare a listed quant. Sent via
+    extra_body on every request shape (chat/completions and responses both
+    honour it; verified live 2026-09-26). Non-OpenRouter models get {}."""
+    from server.services import model_registry
+    if model_registry.provider_for(resolved_model) != model_registry.PROVIDER_OPENROUTER:
+        return {}
+    raw = getattr(settings.openrouter, "quantizations", "") or ""
+    quants = [q.strip() for q in raw.split(",") if q.strip()]
+    if not quants or quants == ["off"]:
+        return {}
+    return {"extra_body": {"provider": {"quantizations": quants}}}
+
+
+def _note_generation(call_meta: dict | None, response: Any) -> None:
+    """Stash the OpenRouter generation id on the caller's out-param dict —
+    the Responses API returns gen-… ids in-band but NOT the serving
+    provider; the attribution sweep resolves provider/quant from the
+    generation endpoint afterwards (heartbeat OpenRouterAttributionTask).
+    A tool loop makes one request per iteration; the LAST round's id wins."""
+    if call_meta is not None:
+        gen_id = getattr(response, "id", None)
+        if gen_id:
+            call_meta["generation_id"] = gen_id
+
+
 def _get_cached_client(
     api_key: str, base_url: str, *, default_headers: dict[str, str] | None = None,
 ) -> Any:
@@ -470,6 +502,7 @@ class OpenAIService(BaseService):
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
         stream_result: StreamResult | None = None,
+        call_meta: dict | None = None,
     ) -> str:
         """Non-streaming chat completion via Responses API."""
         resolved_model = model or self._get_settings().openai.default_model
@@ -489,6 +522,7 @@ class OpenAIService(BaseService):
         tools = self._merge_tools(model=resolved_model)
         if tools:
             kwargs["tools"] = tools
+        kwargs.update(_routing_extra(self._get_settings(), resolved_model))
 
         t0 = time.monotonic()
         try:
@@ -496,6 +530,7 @@ class OpenAIService(BaseService):
             elapsed = time.monotonic() - t0
             content = _response_text_with_citations(response)
             usage = getattr(response, "usage", None)
+            _note_generation(call_meta, response)
 
             cached_tokens = self._extract_cached_tokens(usage)
 
@@ -532,6 +567,7 @@ class OpenAIService(BaseService):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         stream_result: StreamResult | None = None,
+        call_meta: dict | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion via Responses API, yielding text deltas."""
         resolved_model = model or self._get_settings().openai.default_model
@@ -552,6 +588,7 @@ class OpenAIService(BaseService):
         tools = self._merge_tools(model=resolved_model)
         if tools:
             kwargs["tools"] = tools
+        kwargs.update(_routing_extra(self._get_settings(), resolved_model))
 
         t0 = time.monotonic()
         first_token_time: float | None = None
@@ -574,6 +611,7 @@ class OpenAIService(BaseService):
                 elif event.type == "response.completed":
                     final_usage = getattr(event.response, "usage", None)
                     response_id = getattr(event.response, "id", None)
+                    _note_generation(call_meta, event.response)
         except Exception as exc:
             logger.error("OpenAI streaming error: %s", exc)
             _raise_openai_error(exc)
@@ -618,6 +656,7 @@ class OpenAIService(BaseService):
         session_key: str | None = None,
         log_id: str | None = None,
         budget_stats: dict[str, bool] | None = None,
+        call_meta: dict | None = None,
         force_first_tool_choice: bool = False,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
@@ -660,6 +699,7 @@ class OpenAIService(BaseService):
             resolved_model, None, self._get_settings())
         if effort is not None:
             request_kwargs["reasoning"] = {"effort": effort}
+        request_kwargs.update(_routing_extra(self._get_settings(), resolved_model))
         t0 = time.monotonic()
         deadline = t0 + time_limit_seconds if time_limit_seconds is not None else None
 
@@ -735,6 +775,7 @@ class OpenAIService(BaseService):
                     if use_view else messages,
                     **request_kwargs,
                 )
+                _note_generation(call_meta, response)
 
                 usage = getattr(response, "usage", None)
                 if usage:
@@ -988,6 +1029,7 @@ class OpenAIService(BaseService):
             resolved_model, None, self._get_settings())
         if effort is not None:
             request_kwargs["reasoning"] = {"effort": effort}
+        request_kwargs.update(_routing_extra(self._get_settings(), resolved_model))
         t0 = time.monotonic()
 
         total_input = total_output = total_total = 0

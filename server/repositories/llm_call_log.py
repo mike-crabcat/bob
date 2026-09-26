@@ -41,6 +41,7 @@ class LlmCallLogRepository:
         dispatch_id: str | None = None,
         contact_id: str | None = None,
         tool_blocks_json: str | None = None,
+        generation_id: str | None = None,
     ) -> str:
         """Record or update a call log entry; returns the log id.
 
@@ -55,11 +56,13 @@ class LlmCallLogRepository:
                        response_text=?, latency_seconds=?, ttft_seconds=?,
                        prompt_tokens=?, completion_tokens=?, total_tokens=?, cached_tokens=?,
                        status=?, error_message=?, messages_json=COALESCE(?, messages_json),
-                       tool_blocks_json=COALESCE(?, tool_blocks_json)
+                       tool_blocks_json=COALESCE(?, tool_blocks_json),
+                       generation_id=COALESCE(?, generation_id)
                        WHERE id = ?""",
                     (response_text, latency_seconds, ttft_seconds,
                      prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                     status, error_message, messages_json, tool_blocks_json, log_id))
+                     status, error_message, messages_json, tool_blocks_json,
+                     generation_id, log_id))
                 return log_id
 
         row_id = log_id or str(uuid4())
@@ -70,15 +73,41 @@ class LlmCallLogRepository:
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                 status, error_message, project_id, task_id, dispatch_id, contact_id,
-                tool_blocks_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tool_blocks_json, generation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (row_id, provider, model, call_category, session_key,
              system_prompt, user_message, messages_json, tools_json,
              response_text, latency_seconds, ttft_seconds,
              prompt_tokens, completion_tokens, total_tokens, cached_tokens,
              status, error_message, project_id, task_id, dispatch_id, contact_id,
-             tool_blocks_json))
+             tool_blocks_json, generation_id))
         return row_id
+
+    async def unattributed_generations(
+        self, *, since_iso: str, limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """OpenRouter rows with a generation id not yet resolved to a serving
+        provider — the attribution sweep's work queue (2026-09-26). Only
+        recent rows: OpenRouter retains generation details for a limited
+        window and old ids 404."""
+        rows = await self.db.fetch_all(
+            """SELECT id, generation_id, created_at FROM llm_call_log
+               WHERE provider = 'openrouter'
+                 AND generation_id IS NOT NULL
+                 AND served_by IS NULL
+                 AND created_at >= ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (since_iso, limit))
+        return [dict(r) for r in rows or []]
+
+    async def set_served(
+        self, log_id: str, *, served_by: str, served_quant: str | None,
+    ) -> None:
+        """Stamp the serving provider (+quant when OpenRouter declares it)
+        onto a call row — written by the attribution sweep."""
+        await self.db.execute(
+            "UPDATE llm_call_log SET served_by=?, served_quant=? WHERE id = ?",
+            (served_by, served_quant, log_id))
 
     # -------------------------------------------------------- maintenance
 
@@ -118,7 +147,8 @@ class LlmCallLogRepository:
                       system_prompt, user_message, messages_json, tools_json,
                       response_text, latency_seconds, ttft_seconds,
                       prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                      status, error_message, tool_blocks_json
+                      status, error_message, tool_blocks_json,
+                      generation_id, served_by, served_quant
                FROM llm_call_log WHERE id = ?""",
             (call_id,))
         return dict(row) if row else None

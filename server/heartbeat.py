@@ -630,6 +630,7 @@ class DeletionPropagationTask:
 
 
 _last_growth_check: datetime | None = None
+_last_deletion_propagation: datetime | None = None
 
 
 class GrowthMonitoringTask:
@@ -674,3 +675,79 @@ class StimulusRouterTask:
         counts = await drain(ctx)
         if counts.get("pending"):
             logger.info("stimulus router: %s", counts)
+
+
+class OpenRouterAttributionTask:
+    """Serving-provider attribution for OpenRouter calls (2026-09-26).
+
+    The Responses API returns the generation id in-band but not which
+    endpoint served the request, so llm_call_log rows carry generation_id
+    and this sweep resolves provider/quant via GET /api/v1/generation —
+    batched, off the hot path (minutes later is fine; attribution is
+    forensic, not latency-sensitive). Bound by retention: OpenRouter keeps
+    generation details for a limited window, so only the last 24h of
+    unattributed rows are tried; 404s resolve to served_by='(gone)' so they
+    aren't retried forever. Kill switch: BOB_OPENROUTER_ATTRIBUTION=off."""
+
+    name = "openrouter_attribution"
+    _THROTTLE = timedelta(minutes=10)
+
+    async def run(self, ctx: AppContext) -> None:
+        import os as _os
+        if _os.getenv("BOB_OPENROUTER_ATTRIBUTION", "on").strip().lower() in (
+                "0", "false", "no", "off"):
+            return
+        settings = ctx.settings
+        if not settings.openrouter.enabled:
+            return
+
+        from datetime import datetime, timezone as _tz
+        # llm_call_log.created_at is SQLite datetime('now') — space-separated
+        # ('2026-09-26 04:00:00'); an offset-isoformat literal silently
+        # matches nothing in the TEXT compare (the 2026-08-30 gotcha).
+        since = (datetime.now(_tz.utc) - timedelta(hours=24)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+
+        from server.repositories.llm_call_log import LlmCallLogRepository
+        repo = LlmCallLogRepository(ctx.db)
+        rows = await repo.unattributed_generations(since_iso=since, limit=8)
+        if not rows:
+            return
+
+        import httpx
+        from datetime import datetime as _dt
+        hour_ago_plain = (_dt.now(_tz.utc)
+                          - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        attributed = 0
+        async with httpx.AsyncClient(
+                base_url=settings.openrouter.base_url,
+                headers={"Authorization": f"Bearer {settings.openrouter.api_key}"},
+                timeout=15.0) as client:
+            for row in rows:
+                try:
+                    resp = await client.get(
+                        "/generation", params={"id": row["generation_id"]})
+                    if resp.status_code == 404:
+                        # 404 on a FRESH row is indexing lag (verified live
+                        # 2026-09-26: ids resolve ~90s after the call) —
+                        # leave it queued for the next sweep. Only rows over
+                        # an hour old are marked gone, so retries cap at ~6.
+                        if (row.get("created_at") or "") < hour_ago_plain:
+                            await repo.set_served(
+                                row["id"], served_by="(gone)", served_quant=None)
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json().get("data") or {}
+                    name = data.get("provider_name") or "(unknown)"
+                    await repo.set_served(
+                        row["id"], served_by=name,
+                        served_quant=data.get("quantization"))
+                    attributed += 1
+                except Exception:
+                    logger.warning(
+                        "attribution: generation lookup failed for %s",
+                        row["generation_id"], exc_info=True)
+                    continue
+                await asyncio.sleep(0.3)  # polite: one lookup at a time
+        if attributed:
+            logger.info("openrouter attribution: %d call(s) resolved", attributed)
