@@ -379,10 +379,14 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
 
         # MCP tools last: global + this conversation's attached servers,
         # namespaced mcp_<server>_<tool> (services/mcp_service.py).
-        from server.services.mcp_service import make_mcp_tools
+        from server.services.mcp_service import make_mcp_tools, mcp_transparency_note
         tools.extend(await make_mcp_tools(
             ctx, session_key=session_key, is_trusted=is_trusted,
             reserved={t.name for t in tools}))
+        mcp_note = await mcp_transparency_note(
+            ctx, session_key=session_key, is_trusted=is_trusted)
+        if mcp_note:
+            workspace_prompt += "\n\n" + mcp_note
 
         dispatch_id = str(uuid4())
         budget: dict[str, bool] = {}

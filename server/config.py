@@ -428,6 +428,7 @@ class McpSettings:
     max_tool_description_chars: int = 400     # trim stage before budget drops tools
     max_output_chars: int = 24000             # flattened call result cap
     max_servers: int = 12                     # blast-radius cap on registrations
+    transparency_note: bool = True            # nudge: name the MCP source in replies
     env_allowlist: str = "HOME,PATH,LANG,TZ,SSL_CERT_FILE"
 
 
@@ -1000,6 +1001,7 @@ class Settings:
                     os.getenv("BOB_MCP_MAX_TOOL_DESCRIPTION_CHARS", "400")),
                 max_output_chars=int(os.getenv("BOB_MCP_MAX_OUTPUT_CHARS", "24000")),
                 max_servers=int(os.getenv("BOB_MCP_MAX_SERVERS", "12")),
+                transparency_note=_env_bool("BOB_MCP_TRANSPARENCY", True),
                 env_allowlist=os.getenv(
                     "BOB_MCP_ENV_ALLOWLIST", "HOME,PATH,LANG,TZ,SSL_CERT_FILE"),
             ),

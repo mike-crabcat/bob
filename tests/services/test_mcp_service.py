@@ -347,3 +347,44 @@ async def test_refresh_error_shows_root_cause(db):
     cache = await manager.refresh_server(row)
     assert "auth rejected 1001" in cache.error
     assert "ExceptionGroup" not in cache.error
+
+
+# ── transparency note (2026-09-24: guided MCP-source mentions) ───────
+
+async def test_transparency_note_lists_serving_servers(db):
+    from server.services.mcp_service import mcp_transparency_note
+
+    settings = Settings.from_env()
+    manager = _manager(settings, db=db)
+    ctx = SimpleNamespace(db=db, settings=settings, mcp=manager)
+    repo = McpServerRepository(db)
+    glob = await repo.create(name="glob", transport="http",
+                             url="http://x.test", is_global=True)
+    await repo.create(name="broken", transport="http", url="http://x.test",
+                      is_global=True)   # registered but cache empty
+    manager._cache[glob["id"]] = _cache(glob["id"], "glob", [
+        {"name": "t", "description": "d", "input_schema": {}}])
+
+    note = await mcp_transparency_note(ctx, session_key="unbound-key",
+                                       is_trusted=True)
+    assert "## MCP sources" in note and "glob" in note
+    assert "broken" not in note          # only servers actually serving tools
+    assert "Don't cite tools you didn't use" in note
+
+
+async def test_transparency_note_off_branches(db):
+    from server.services.mcp_service import mcp_transparency_note
+
+    settings = Settings.from_env()
+    settings.mcp.transparency_note = False
+    ctx = SimpleNamespace(db=db, settings=settings, mcp=_manager(settings, db=db))
+    assert await mcp_transparency_note(ctx, session_key="k") == ""
+
+    settings.mcp.transparency_note = True
+    ctx2 = SimpleNamespace(db=db, settings=settings, mcp=None)
+    assert await mcp_transparency_note(ctx2, session_key="k") == ""
+
+    # unattached session with no global servers → empty
+    ctx3 = SimpleNamespace(db=db, settings=settings,
+                           mcp=_manager(settings, db=db))
+    assert await mcp_transparency_note(ctx3, session_key="k") == ""

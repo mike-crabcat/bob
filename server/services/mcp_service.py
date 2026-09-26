@@ -614,3 +614,38 @@ async def make_mcp_tools(ctx: Any, *, session_key: str,
     if not rows:
         return []
     return manager.tools_for(rows, reserved=reserved)
+
+
+async def mcp_transparency_note(ctx: Any, *, session_key: str,
+                                is_trusted: bool = False) -> str:
+    """Grounding nudge for turns where MCP tools are attached: if the reply
+    relies on what one returned, name the source naturally. Empty string
+    whenever no MCP tools would actually be offered (same scoping as
+    make_mcp_tools) or the note is switched off — so ordinary turns are
+    byte-identical to before."""
+    # getattr guards: fake contexts in other suites' tests carry bare
+    # settings objects without an mcp block — the note degrades to nothing
+    mcp_settings = getattr(ctx.settings, "mcp", None)
+    if mcp_settings is None or not mcp_settings.enabled \
+            or not mcp_settings.transparency_note:
+        return ""
+    manager = getattr(ctx, "mcp", None)
+    if manager is None:
+        return ""
+    from server.repositories.conversations import ConversationRepository
+    from server.repositories.mcp import McpServerRepository
+
+    cid = await ConversationRepository(ctx.db).resolve_cid(session_key)
+    rows = await McpServerRepository(ctx.db).servers_for_conversation(cid)
+    if not is_trusted:
+        rows = [r for r in rows if not r["trusted_only"]]
+    names = [r["name"] for r in rows if manager.tools_for([r])]
+    if not names:
+        return ""
+    listed = ", ".join(names)
+    return (
+        "## MCP sources\n"
+        f"Tools from {listed} are available this turn. If your reply relies "
+        "on what one of them returned, say so naturally in your own words "
+        "(e.g. \"checked via Z.AI search\") — the same way you'd name who "
+        "told you something. Don't cite tools you didn't use.")
