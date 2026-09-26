@@ -96,6 +96,35 @@ async def test_start_bg_job_creates_wake_row(ctx, ws):
 
 
 @pytest.mark.asyncio
+async def test_start_bg_job_accepts_explicit_name(ctx, ws):
+    """Explicit name/description override the random job-<hex> handle —
+    models kept passing name=/description= to the tool and TypeError'd
+    (13 concflation errors in the week to 2026-09-22)."""
+    tmp, calls = ws
+    result = await start_bg_job(ctx, SESSION, "bash -c 'echo hi'",
+                                name="fig-mesh", description="Hunyuan mesh job")
+    assert result["ok"] is True
+    assert result["name"] == "fig-mesh"
+    row = await BgJobsRepository(ctx.db).get_running_by_name("fig-mesh")
+    assert row["description"] == "Hunyuan mesh job"
+    assert row["source"] == "run_bg_process"
+
+
+@pytest.mark.asyncio
+async def test_run_bg_process_tool_accepts_name_kwargs(ctx, ws):
+    """The LLM-facing tool handler itself must take name=/description=
+    (the prod failure was handler(**tool_args) → TypeError)."""
+    from server.services.subagent_tools import make_subagent_tools
+
+    tools = {t.name: t for t in make_subagent_tools(ctx, SESSION)}
+    assert "name" in tools["run_bg_process"].parameters  # schema published
+    out = await tools["run_bg_process"].handler(
+        "bash -c 'echo hi'", name="named-job", description="label")
+    result = json.loads(out)
+    assert result["ok"] is True and result["name"] == "named-job"
+
+
+@pytest.mark.asyncio
 async def test_untrusted_start_gets_ttl(ctx, ws, monkeypatch):
     tmp, calls = ws
     monkeypatch.setattr(ctx.settings.harness, "bg_untrusted_ttl_seconds", 3600)

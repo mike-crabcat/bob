@@ -411,14 +411,17 @@ async def _start_core(
 
 async def start_bg_job(
     ctx: AppContext, session_key: str, command: str, *, is_trusted: bool = True,
+    name: str = "", description: str = "",
 ) -> dict:
     """The engine behind run_bg_process: a uniquely-named wake job with no
     wall-clock cap for trusted sessions (mandatory RuntimeMaxSec TTL for
-    untrusted ones)."""
+    untrusted ones). An explicit name replaces the random job-<hex> handle —
+    models kept passing name=/description= to the tool (13 concflation
+    TypeErrors in the week to 2026-09-22), so the tool accepts them."""
     ttl = 0 if is_trusted else int(ctx.settings.harness.bg_untrusted_ttl_seconds)
-    name = f"job-{secrets.token_hex(4)}"
+    name = name.strip() or f"job-{secrets.token_hex(4)}"
     job_id, message = await _start_core(
-        ctx, name=name, command=command, description="",
+        ctx, name=name, command=command, description=description,
         wake=True, ttl_seconds=ttl, parent_session_key=session_key,
         source="run_bg_process",
     )

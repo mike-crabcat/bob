@@ -112,9 +112,12 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         return json.dumps(result)
 
     @tool
-    async def run_bg_process(command: str) -> str:
+    async def run_bg_process(command: str, name: str = "", description: str = "") -> str:
         """Run a shell COMMAND as a supervised background process and return
-        its handle immediately. NOT a subagent — no model, no judgment, no
+        its handle immediately. Optional name= gives the job a stable
+        lowercase handle (letters/digits/dash/underscore; default job-<id>)
+        and description= labels it in the jobs list — same options as
+        bg_start. NOT a subagent — no model, no judgment, no
         briefs: `command` is literal bash in the workspace sandbox (same env
         as your bash tool) that outlives this turn with NO wall-clock cap
         and SURVIVES bob-server restarts. THE tool for any script expected
@@ -135,7 +138,8 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         from server.services.process_tools import start_bg_job
 
         result = await start_bg_job(
-            ctx, session_key, command, is_trusted=is_trusted)
+            ctx, session_key, command, is_trusted=is_trusted,
+            name=name, description=description)
         return json.dumps(result)
 
     @tool
