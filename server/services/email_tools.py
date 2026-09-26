@@ -42,7 +42,12 @@ def _register_email_executors() -> None:
 
 _register_email_executors()
 
-MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25 MB
+# AgentMail's send API rejects request bodies over ~10 MB (413) and base64
+# inflates files ~33% — observed live 2026-09-22: a ~9 MB PNG and a 25 MB
+# STL both sailed past the old 25 MB guard and dead-lettered after 5
+# retries each. Files over these limits go out as share-files links.
+MAX_ATTACHMENT_SIZE = 8 * 1024 * 1024   # per file
+MAX_ATTACHMENT_TOTAL = 11 * 1024 * 1024  # combined base64 across files
 
 # Attachments we never persist to disk — executables and code files. Bob can
 # bash to anything in his workspace, so downloaded code could be run; block at
@@ -96,7 +101,12 @@ def _read_file_as_attachment(
 
     size = path.stat().st_size
     if size > MAX_ATTACHMENT_SIZE:
-        raise ValueError(f"File too large ({size} bytes, max {MAX_ATTACHMENT_SIZE}): {file_path}")
+        raise ValueError(
+            f"File too large for email ({size / 1e6:.1f} MB — email "
+            f"attachments cap at 8 MB; larger sends fail at the provider). "
+            f"Upload it with the share-files skill "
+            f"(python skills/share-files/share.py <path>) and send the "
+            f"download link instead: {file_path}")
 
     content = base64.b64encode(path.read_bytes()).decode("ascii")
     return {
@@ -124,7 +134,7 @@ def make_email_tools(
 
     @tool
     async def email_reply(body: str, attachments: list[str] | None = None) -> str:
-        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Optionally attach files by providing their paths as a list (workspace-relative or absolute)."""
+        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
         from server.services.email_delivery_service import EmailDeliveryService
 
         if isinstance(attachments, str):
@@ -145,6 +155,12 @@ def make_email_tools(
                     attachment_dicts.append(_read_file_as_attachment(fp, workspace_dir))
                 except (FileNotFoundError, ValueError) as e:
                     errors.append(str(e))
+            total = sum(len(a["content"]) for a in attachment_dicts)
+            if total > MAX_ATTACHMENT_TOTAL:
+                errors.append(
+                    f"combined attachments are {total / 1e6:.1f} MB base64 — "
+                    f"over the ~10 MB provider limit; send the big one(s) as "
+                    f"a share-files link instead")
             if errors:
                 return f"Error with attachments: {'; '.join(errors)}"
 
@@ -342,7 +358,7 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
         agenda: str,
         attachments: list[str] | None = None,
     ) -> str:
-        """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. Optionally attach files by providing their paths as a list (workspace-relative or absolute)."""
+        """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
         from server.services.email_delivery_service import EmailDeliveryService
 
         if isinstance(attachments, str):
@@ -363,6 +379,12 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
                     attachment_dicts.append(_read_file_as_attachment(fp, workspace_dir))
                 except (FileNotFoundError, ValueError) as e:
                     errors.append(str(e))
+            total = sum(len(a["content"]) for a in attachment_dicts)
+            if total > MAX_ATTACHMENT_TOTAL:
+                errors.append(
+                    f"combined attachments are {total / 1e6:.1f} MB base64 — "
+                    f"over the ~10 MB provider limit; send the big one(s) as "
+                    f"a share-files link instead")
             if errors:
                 return f"Error with attachments: {'; '.join(errors)}"
 

@@ -110,6 +110,19 @@ async def wake_conversation(
         logger.warning("wake: no WhatsApp bridge; %s stored undispatched", session_key)
         return False
 
+    if channel == "email":
+        # Steered/woken email threads run with the thread's REAL toolset
+        # (email_reply etc.) — the generic fallback is workspace-only and
+        # could never answer in-thread (2026-09-23: email steering).
+        from server.services.email_polling_service import EmailPollingService
+
+        try:
+            return await EmailPollingService(ctx).wake_thread(
+                session_key, content, call_category)
+        except Exception:
+            logger.exception("wake: email dispatch failed for %s", session_key)
+            return False
+
     return await _generic_wake_dispatch(ctx, session_key, content, call_category)
 
 

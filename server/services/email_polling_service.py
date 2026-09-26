@@ -697,45 +697,10 @@ class EmailPollingService(BaseService):
         # Email-specific tools (reply/skip) + common tool set
         reply_sent = [False]
         reply_bodies: list[str] = []
-        tools = make_email_tools(
-            self.ctx, thread["agentmail_thread_id"], inbox["id"],
-            reply_tracker=reply_sent,
-            reply_body_tracker=reply_bodies,
-            inbox_agentmail_id=inbox["agentmail_inbox_id"],
-        )
-        tools.extend(build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=contact_id))
-        # Bob Events §1.5: goal tools for trusted email threads (parity with
-        # the WhatsApp inbound path).
-        if is_trusted:
-            from server.services.goal_tools import make_goal_tools
-            tools.extend(make_goal_tools(self.ctx, session_key))
-            from server.services.approval_tools import make_approval_tools
-            tools.extend(make_approval_tools(self.ctx, session_key))
-            # MCP administration: email threads are human-initiated by
-            # nature, so trusted threads get the register/attach tools.
-            from server.services.mcp_admin_tools import make_mcp_admin_tools
-            tools.extend(await make_mcp_admin_tools(
-                self.ctx, session_key=session_key, is_trusted=is_trusted,
-                contact_id=contact_id, human_initiated=True))
-
-        # If this thread was initiated from another session, inject the finish_email_thread tool
-        if origin_session_key:
-            from server.services.email_tools import make_email_thread_result_tools
-            wa_service = getattr(self.ctx, "whatsapp_bridge", None)
-            tools.extend(make_email_thread_result_tools(
-                self.ctx,
-                thread_id=thread["agentmail_thread_id"],
-                origin_session_key=origin_session_key,
-                agenda=thread.get("agenda") or "",
-                wa_service=wa_service,
-            ))
-
-        # MCP tools last: global + this conversation's attached servers,
-        # namespaced mcp_<server>_<tool> (services/mcp_service.py).
-        from server.services.mcp_service import make_mcp_tools
-        tools.extend(await make_mcp_tools(
-            self.ctx, session_key=session_key, is_trusted=is_trusted,
-            reserved={t.name for t in tools}))
+        tools = await self._email_turn_tools(
+            session_key=session_key, thread=thread, inbox=inbox,
+            is_trusted=is_trusted, contact_id=contact_id,
+            reply_sent=reply_sent, reply_bodies=reply_bodies)
 
         dispatch_id = str(uuid4())
 
@@ -762,6 +727,154 @@ class EmailPollingService(BaseService):
         )
 
         asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))
+
+    async def _email_turn_tools(
+        self, *, session_key: str, thread: dict[str, Any],
+        inbox: dict[str, Any], is_trusted: bool,
+        contact_id: str | None, reply_sent: list,
+        reply_bodies: list[str],
+    ) -> list:
+        """The email conversation's toolset — shared verbatim by inbound
+        dispatch (_dispatch_to_llm) and steered/woken turns (wake_thread)
+        so the two paths can't drift."""
+        from server.services.email_tools import make_email_tools
+        from server.services.tool_registry import build_common_tools
+
+        tools = make_email_tools(
+            self.ctx, thread["agentmail_thread_id"], inbox["id"],
+            reply_tracker=reply_sent,
+            reply_body_tracker=reply_bodies,
+            inbox_agentmail_id=inbox["agentmail_inbox_id"],
+        )
+        tools.extend(build_common_tools(
+            self.ctx, session_key=session_key, is_trusted=is_trusted,
+            contact_id=contact_id))
+        # Bob Events §1.5: goal tools for trusted email threads (parity with
+        # the WhatsApp inbound path).
+        if is_trusted:
+            from server.services.goal_tools import make_goal_tools
+            tools.extend(make_goal_tools(self.ctx, session_key))
+            from server.services.approval_tools import make_approval_tools
+            tools.extend(make_approval_tools(self.ctx, session_key))
+            # MCP administration: email threads are human-initiated by
+            # nature, so trusted threads get the register/attach tools.
+            from server.services.mcp_admin_tools import make_mcp_admin_tools
+            tools.extend(await make_mcp_admin_tools(
+                self.ctx, session_key=session_key, is_trusted=is_trusted,
+                contact_id=contact_id, human_initiated=True))
+
+        # If this thread was initiated from another session, inject the
+        # finish_email_thread tool
+        origin_session_key = thread.get("origin_session_key")
+        if origin_session_key:
+            from server.services.email_tools import make_email_thread_result_tools
+            wa_service = getattr(self.ctx, "whatsapp_bridge", None)
+            tools.extend(make_email_thread_result_tools(
+                self.ctx,
+                thread_id=thread["agentmail_thread_id"],
+                origin_session_key=origin_session_key,
+                agenda=thread.get("agenda") or "",
+                wa_service=wa_service,
+            ))
+
+        # MCP tools last: global + this conversation's attached servers,
+        # namespaced mcp_<server>_<tool> (services/mcp_service.py).
+        from server.services.mcp_service import make_mcp_tools, mcp_transparency_note
+        tools.extend(await make_mcp_tools(
+            self.ctx, session_key=session_key, is_trusted=is_trusted,
+            reserved={t.name for t in tools}))
+        mcp_note = await mcp_transparency_note(
+            self.ctx, session_key=session_key, is_trusted=is_trusted)
+        if mcp_note:
+            system_content += "\n\n" + mcp_note
+        return tools
+
+    async def wake_thread(
+        self, session_key: str, content: str,
+        call_category: str = "wakeup",
+    ) -> bool:
+        """Run a turn in an email thread with its REAL toolset (email_reply
+        etc.) — the steer/wake counterpart of _dispatch_to_llm. The wake
+        content row is already stored (undispatched) by wake_conversation;
+        the runner claims it like any inbound. Returns False when the thread
+        or its inbox can't be resolved (the wake row stays for recovery)."""
+        import asyncio
+        from uuid import uuid4
+
+        settings = self._get_settings()
+        if not settings.openai.enabled:
+            return False
+
+        agentmail_thread_id = session_key.rsplit(":", 1)[-1]
+        from server.services.email_store import EmailStore
+
+        store = EmailStore(self.db)
+        thread = await store.thread_by_agentmail_any(agentmail_thread_id)
+        if thread is None:
+            logger.warning("wake: no email thread for %s", session_key)
+            return False
+        inbox = await store.get_inbox(thread["inbox_id"])
+        if inbox is None:
+            logger.warning("wake: no inbox for email thread %s", session_key)
+            return False
+
+        contact_id = thread.get("contact_id")
+        is_trusted = False
+        if contact_id:
+            from server.repositories.contacts import ContactRepository
+
+            is_trusted = bool(await ContactRepository(self.db).is_trusted(contact_id))
+
+        from server.services.session_agenda_service import SessionAgendaService
+
+        agenda_text = await SessionAgendaService(self.ctx).get_effective_agenda(
+            session_key, "email", contact_id=contact_id, is_trusted=is_trusted)
+
+        from server.services.context_assembler import ContextAssembler
+        from server.services.prompt_assembler import load_workspace_prompt
+
+        workspace_prompt = await load_workspace_prompt(
+            settings.harness.workspace_dir, db=self.db)
+        participants_prompt = await ContextAssembler(self.ctx).participants_prompt(
+            session_key, include_identifier=True)
+        memory_prompt = ""
+        if is_trusted:
+            from server.services.memory import MemoryService
+
+            memory_prompt = await MemoryService(self.ctx).build_memory_index(
+                settings.harness.workspace_dir)
+        goals_prompt = await ContextAssembler(self.ctx).goals_block(session_key)
+
+        system_content = "\n\n".join(p for p in (
+            workspace_prompt, agenda_text, participants_prompt,
+            "You are managing an email conversation. Use the available "
+            "tools to respond.", memory_prompt, goals_prompt) if p)
+
+        reply_sent = [False]
+        reply_bodies: list[str] = []
+        tools = await self._email_turn_tools(
+            session_key=session_key, thread=thread, inbox=inbox,
+            is_trusted=is_trusted, contact_id=contact_id,
+            reply_sent=reply_sent, reply_bodies=reply_bodies)
+
+        from server.services.dispatch_runner import DispatchRunner, DispatchSpec
+
+        dispatch_spec = DispatchSpec(
+            session_key=session_key,
+            system_content=system_content,
+            tools=tools,
+            call_category=call_category,
+            send_tool_name="email_reply",
+            dispatch_id=str(uuid4()),
+            contact_id=contact_id,
+            channel="email",
+            max_history=20,
+            history_policy="merged_always",
+            message_was_sent=reply_sent,
+            sent_texts=reply_bodies,
+        )
+        asyncio.create_task(DispatchRunner(self.ctx).run(dispatch_spec))
+        return True
 
     async def _upsert_email_participants(self, session_key: str, message: dict[str, Any]) -> None:
         """Upsert sender and to/cc addresses as session participants."""
