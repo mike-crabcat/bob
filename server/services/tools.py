@@ -115,11 +115,18 @@ def tool(func: Callable[..., Any]) -> Tool:
     """
     name = func.__name__
 
-    # Extract description from docstring
+    # Description = the FULL docstring, dedented. The first-line-only
+    # truncation (until 2026-09-28) silently ate every tool's operational
+    # guidance — agent_type semantics, never-run-slow-commands-with-bash,
+    # session_key='all' — the delegation-routing baseline (docs/
+    # response-discipline-baseline-2026-09.md §3.1/§7.2) showed models
+    # never saw the rules they were being judged against. Cost, accepted
+    # with eyes open (Mike, 2026-09-28): ~+4k tokens/turn across the
+    # ~45-tool surface, cache-offset in money but not in attention.
     description = ""
     doc = inspect.getdoc(func)
     if doc:
-        description = doc.split("\n")[0].strip()
+        description = doc.strip()
 
     # Build parameter schema from type hints
     hints = get_type_hints(func)
