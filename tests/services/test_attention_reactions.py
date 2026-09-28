@@ -297,4 +297,6 @@ def test_registry_matches_manifest_names():
         "bob-typing-desk-fire-closeup", "bob-fail", "bob-coffee-shower",
         "bob-thumbs-up", "bob-typing-furiously", "bob-gatsby-toast",
         "bob-smug-clap", "bob-do-it",
+        "bob-rasta", "bob-friday-beers", "bob-report-window-jump",
+        "bob-koolaid-break",
     }

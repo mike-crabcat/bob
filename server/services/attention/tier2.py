@@ -65,6 +65,19 @@ REACTION_CLIPS: dict[str, str] = {
                      "spectacular win or someone else's glorious failure",
     "bob-do-it": "green-suit, finger-pointing menace — someone's deliberating "
                  "and the answer is obvious: stop stalling, just DO IT",
+    # 2026-09-28: three manifest+asset clips that never made it into the
+    # registry (added below the probe's offer list since 2026-09-09/11) —
+    # cues mirror identity.md — plus the new Kool-Aid clip commissioned in
+    # Bob-management 2026-09-25 (plain wall → break-through → smug
+    # "was I mentioned?" nod).
+    "bob-rasta": "one love; irie acceptance of things beyond control",
+    "bob-friday-beers": "Friday arvo with the crew; one cold amber pint, "
+                        "no worries",
+    "bob-report-window-jump": "report reviewed, report disagreed with, "
+                              "career decision made",
+    "bob-koolaid-break": "Kool-Aid wall-break, OH YEAH — chatter brushed "
+                         "right past something Bob-shaped without addressing "
+                         "him; the urge to burst in and ask 'was I mentioned?'",
 }
 
 
