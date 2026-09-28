@@ -159,3 +159,18 @@ Model fingerprints on the pairing:
 Universal across all three models ever tested: delegation routing (D1/D4/D5) — the only category no model passes; wording candidate (agents.md routing rule) or acceptance.
 
 This matrix is the comparison base for every future gate.
+
+## 13. Phase 2, part 2 — the "Who Runs What" routing rule (2026-09-28 night)
+
+`agents.md` gained a Who Runs What section (substantial coding → claude subagent with a complete work order, END THE TURN; multi-step judgment work → subagent; minutes-long mechanical → run_bg_process bare command; small one-offs stay inline; the handful-of-tool-calls/edit-test-loop test). Gate on the new pairing:
+
+| Category | flash | deepseek | pre-rule |
+|---|---|---|---|
+| delegation | 3/7 | **4/7 (D1 flipped 0.9)** | 3/7 · 2/7 |
+| memory | 4/5 | **5/5 (M4 0.1→1.0)** | 3/5 · 4/5 |
+| fact | 4/4 | **4/4 (F3 flipped)** | 4/4 · 3/4 |
+| propose | 4/5 | 3/5 (P3 0.2→0.9) | 4/5 · 2/5 |
+| record | 4/4 | 4/4 | — |
+| **Totals** | **19/25** | **20/25** | 18 · 14 |
+
+D1 — the only case no model had ever passed — flipped on deepseek. D2 guard green both. Flash: unmoved on delegation-coding (same resistance shape as astra-on-figures), no losses; its record category is run-to-run flaky (2/4 and 4/4 same evening — cross-session scope and quote-lookup are unstable, not regression). Deepseek remaining: D4/D5 (task-work routing + brief quality), P2/P4. Deployed via restart 2026-09-28 ~21:20.
