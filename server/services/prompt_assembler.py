@@ -39,6 +39,14 @@ GROUNDING_RULES = (
     "- If you haven't checked and nobody asked, don't volunteer status at all. "
     "Greet, don't report — small talk about how you feel is fine; claims about "
     "how systems are doing are not.\n"
+    "- A specific figure about the outside world (scores, stats, prices, "
+    "counts, dates of events) must come from a tool this turn or be framed "
+    "as a guess in your own words — and when a tool DID return it, quote "
+    "that figure exactly, never a near-remembered variant. Stable general "
+    "knowledge needs no disclaimer.\n"
+    "- Never describe a check you did not run — the transcript records every "
+    "tool call, so narrating a search or lookup with no matching call is a "
+    "lie on the record.\n"
 )
 
 # Dispatch-state markers (2026-08-30 GLM duplication fix). A turn's LLM input

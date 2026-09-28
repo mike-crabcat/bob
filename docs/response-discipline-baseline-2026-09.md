@@ -126,3 +126,11 @@ The §7.2 finding was fixed hours after the baseline: tool descriptions now carr
 - Persisting regardless of visibility (the true Phase-2 list): **D4** inline triage-grind (both), **M4** query-then-ignore + confabulated elaboration (both — flash invented "Broken Hill Hotel" blacklists), **astra F2** citing 24 against a searched 34, **astra F4** narrated checks, **astra P3** permission theater on explicit orders.
 
 Deployed via `systemctl --user restart bob.service` 2026-09-28 11:37 after the guard check (no guard regressions; P4-flash's 0.6 is fixture-driven — it correctly identified the planted .MOVs as text stubs).
+
+## 10. Phase 2, part 1 — fact-discipline wording (2026-09-28 afternoon)
+
+**Kept:** two GROUNDING_RULES bullets — outside-world figures must be tool-sourced-this-turn or explicitly framed as a guess, quoted exactly when sourced; never narrate an unrun check. Gate: flash 4/4 held (F2 improved to 1.0), all propose/memory guards green. Shipped via restart 2026-09-28 ~15:0x.
+
+**Reverted:** a before-generation `## Figures — HARD RULE` tail (the mechanism that worked for brevity/record-discipline). Gate: astra F2/F4 STILL failed identically — and it broke the brevity-wording pin test (`test_reply_length_prompt`).
+
+**Finding — astra is prompt-resistant on the figure class.** Three placements (mid-prompt bullets, delivery context, last-instruction hard rule) produced byte-identical failures across four runs: astra doesn't call the search, cites a confidently-remembered wrong number (24 vs the available 34), and narrates verification ("checked ABC's report") with no matching call. This is not an attention/placement problem; the model's prior outweighs any instruction. Options left: a tool-layer guard (detect figure-bearing replies with no sourcing call this turn), routing fact-heavy chats away from astra, or acceptance — flash, the daily default, is 4/4 on this battery.
