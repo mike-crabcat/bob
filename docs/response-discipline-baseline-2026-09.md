@@ -138,3 +138,24 @@ Deployed via `systemctl --user restart bob.service` 2026-09-28 11:37 after the g
 ## 11. The recall resolver fix — M3/M4's real cause, closed (2026-09-28 evening)
 
 `_resolve_entity` never consulted an entity's own `display_name`: entity_id → alias → **embedding top-1** → FTS meant `recall("Marcus Bell")` resolved to an incumbent whose body contained a similar token. Fix: case-insensitive exact display-name match inserted before the embedding step (services/memory/tools.py), plus eval-fixture seeding now populates the embedding the way production claim-writes do. Gate: M3 and M4 flip to PASS 1.0 on BOTH models (were the two stuck memory cases). Regression check: real queries unchanged (`David Shedden` → correct; `The Stables` now resolves to the entity literally named that rather than an embedding-guessed lunch event — more correct, noted). With this, the "query-then-ignore" Phase-2 item is closed as a retrieval bug, not a wording gap; the memory category's only remaining red is M1-flash (find-by-date filter shape).
+
+## 12. New pairing baseline — flash + deepseek-v4.1-flash (2026-09-28 evening, Mike's directive)
+
+astra is judge-only now. First full deepseek rows (astra judging; flash column = current post-fix state):
+
+| Category | flash | deepseek |
+|---|---|---|
+| record_discipline | 4/4 | 3/4 (R4 no-reasking fails on phrasing, judge 1.0) |
+| delegation_routing | 3/7 | 2/7 (same D-hole as every model) |
+| memory_recall | 3/5 | 4/5 |
+| fact_discipline | 4/4 | 3/4 (F3 fails INVERSE: searched stable general knowledge — over-diligence) |
+| propose_first | 4/5 | 2/5 (P3 0.2, P4 0.6) |
+| **Totals** | **18/25** | **14/25** |
+
+Model fingerprints on the pairing:
+- **flash** — retrieval-sloppy (M1 unfiltered glance), delivery-solid, fact-clean, inline-coder.
+- **deepseek** — retrieval-strong (passes M1 that flash can't; R3 clean), but **over-suspicious**: M4's failure is remarkable — it retrieved "The Rusty Anchor, 12:30, corner table" repeatedly and *then rejected the evidence, speculating the record was test data* (it smelled the fixture and discounted the right answer). Also over-diligent (F3: web-searched how many players run on an AFL field, violating the no-pointless-search guard's inverse). Delegation hole identical to the other models.
+
+Universal across all three models ever tested: delegation routing (D1/D4/D5) — the only category no model passes; wording candidate (agents.md routing rule) or acceptance.
+
+This matrix is the comparison base for every future gate.
