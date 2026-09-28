@@ -312,7 +312,10 @@ class LLMJudge:
                 [{"role": "user", "content": prompt}],
                 call_category="eval_judge",
                 temperature=0.3,
-                model=judge_model or "gpt-5.4-nano",
+                # Default astra since 2026-09-28: the previous gpt-5.4-nano
+                # default false-negatived verbatim-correct quotes against
+                # the evidence (baseline §7.1) — correctness over pennies.
+                model=judge_model or "gpt-6-astra",
             )
             data = json.loads(judge_response)
             overall = float(data.get("overall", 0))

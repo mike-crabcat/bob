@@ -9,6 +9,7 @@ language and branch shape; the judge scores scope and termination."""
 
 from server.evals.case import JudgeCriteria, StructuralCheck
 from server.evals.registry import eval_case
+from server.evals.util import pinned_model
 
 
 @eval_case(
@@ -46,8 +47,11 @@ async def goal_craft_research_vague_ask(ctx):
             "Mike says: 'the court website thing is doing my head in, can "
             "you see if there's any way to look up cases properly?'")},
     ]
-    return await LLMDispatchService(ctx).chat_with_tools(
-        messages, [], call_category="eval", session_key="eval:goal-craft")
+    response = await LLMDispatchService(ctx).chat_with_tools(
+        messages, [], model=pinned_model(), call_category="eval",
+        session_key="eval:goal-craft")
+    return {"response": response, "context": {},
+            "input_messages": messages}
 
 
 @eval_case(
@@ -85,5 +89,8 @@ async def goal_craft_negotiate_confirmation_shape(ctx):
             "Mike says: 'can you sort out that dinner thing with Thomas — "
             "he was keen on the 27th if the venue works out'")},
     ]
-    return await LLMDispatchService(ctx).chat_with_tools(
-        messages, [], call_category="eval", session_key="eval:goal-craft")
+    response = await LLMDispatchService(ctx).chat_with_tools(
+        messages, [], model=pinned_model(), call_category="eval",
+        session_key="eval:goal-craft")
+    return {"response": response, "context": {},
+            "input_messages": messages}

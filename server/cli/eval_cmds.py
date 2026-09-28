@@ -42,8 +42,8 @@ def eval_run(
         "row's category).")] = None,
     judge_model: Annotated[Optional[str], typer.Option(
         "--judge-model", help="Override the judge model (default "
-        "gpt-5.4-nano, which false-negatives on evidence-comparison "
-        "cases; pass a stronger slug for baselines).")] = None,
+        "gpt-6-astra since 2026-09-28 — nano false-negatived evidence "
+        "comparisons).")] = None,
 ) -> None:
     """Run eval cases against live LLM APIs."""
     import asyncio
