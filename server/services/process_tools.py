@@ -534,7 +534,19 @@ async def poll_bg_jobs(ctx: AppContext) -> None:
 
     for row in await repo.running_rows():
         if row.get("mechanism") == "systemd" and row.get("unit"):
-            props = await _unit_state(row["unit"])
+            try:
+                props = await _unit_state(row["unit"])
+            except Exception:
+                # A single hung/failed systemctl read must not abort the
+                # whole pass (live since 2026-09-22: TimeoutError at the
+                # 30s _run_cmd limit, ~4-5/day, user-session stalls) —
+                # skip this row; the next pass retries it. Rows after it
+                # still settle, and wakes owed by them still deliver.
+                logger.warning(
+                    "bg poll: unit read failed for %s (unit=%s); "
+                    "retrying next pass",
+                    row["name"], row["unit"], exc_info=True)
+                continue
             if row["wake_on_exit"]:
                 # jobs use RemainAfterExit: 'active(exited)' means finished
                 running = _job_still_running(props)

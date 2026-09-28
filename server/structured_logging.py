@@ -61,7 +61,7 @@ class StructuredFormatter(logging.Formatter):
                 "name", "msg", "args", "levelname", "levelno", "pathname",
                 "filename", "module", "lineno", "funcName", "created", "msecs",
                 "relativeCreated", "thread", "threadName", "processName",
-                "exc_info", "stack_info",
+                "exc_info", "exc_text", "stack_info", "color_message",
             } and not key.startswith("_"):
                 log_entry[key] = value
 

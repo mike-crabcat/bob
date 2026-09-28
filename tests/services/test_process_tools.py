@@ -272,3 +272,37 @@ async def test_unknown_name_errors(bg_ctx):
     assert "was not running" in await tools["bg_stop"].handler(name="ghost")
     logs = await tools["bg_logs"].handler(name="ghost", lines=5)
     assert "no log at" in logs, logs  # logs are name-derived files
+
+
+async def test_poll_isolates_unit_read_failures(bg_ctx, monkeypatch):
+    """2026-09-27: a single hung systemctl read (live TimeoutError at the
+    30s _run_cmd limit, ~4-5/day) must only skip ITS row — rows after it
+    still settle in the same pass instead of waiting a tick."""
+    from datetime import datetime, timezone
+    repo = BgJobsRepository(bg_ctx.db)
+    now = datetime.now(timezone.utc).isoformat()
+
+    async def _stuck(name):
+        await repo.create(
+            name=name, command="sleep 60", unit=f"bg-{name}.service",
+            mechanism="systemd", pid=None, pid_start_time=None,
+            description="", source="run_bg_process", wake_on_exit=False,
+            parent_session_key="agent:main:test:dm", log="", now_iso=now)
+
+    await _stuck("hung-daemon")      # its systemctl read raises
+    await _stuck("dead-daemon")      # its read succeeds: unit not-found
+
+    async def _fake_unit_state(unit: str) -> dict:
+        if "hung-daemon" in unit:
+            raise TimeoutError("simulated 30s systemctl hang")
+        return {"LoadState": "not-found", "ActiveState": "failed"}
+
+    monkeypatch.setattr(process_tools, "_unit_state", _fake_unit_state)
+    await poll_bg_jobs(bg_ctx)
+
+    rows = {r["name"]: r for r in await repo.list(limit=20)}
+    # The hung row is untouched — retried next pass.
+    assert rows["hung-daemon"]["status"] == "running"
+    # The dead row AFTER it still settled in the same pass.
+    assert rows["dead-daemon"]["status"] == "exited"
+    assert rows["dead-daemon"]["systemd_result"] == "collected (exit status unavailable)"
