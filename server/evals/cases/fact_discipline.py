@@ -22,24 +22,18 @@ _BREVITY = StructuralCheck(kind="max_length", params={"max_length": 900})
 
 
 async def _system(ctx, extra: str = "") -> str:
+    """Full production workspace prompt + clock (fidelity upgrade
+    2026-09-29, report §14 — the trimmed stack measured the best case;
+    grounding bullets compete with all 41k chars of real context now)."""
     from pathlib import Path
 
-    from server.services.memory.self_brief import self_brief_block
-    from server.services.persona import get_persona
     from server.services.prompt_assembler import (
-        GROUNDING_RULES, local_now_prompt_line,
+        load_workspace_prompt, local_now_prompt_line,
     )
-    persona = await get_persona(
-        workspace_dir=Path(ctx.settings.harness.workspace_dir))
-    brief = await self_brief_block(ctx.db)
-    delivery = (
-        "## CRITICAL: How to Respond\n"
-        "Your text output is NOT delivered to the user. Only tool calls have effect.\n"
-        "ALWAYS call send_whatsapp_message as your final action — even for short replies,\n"
-        "even for acknowledgments. Without that call, nothing is sent.")
-    return "\n\n".join(p for p in (
-        persona, GROUNDING_RULES, brief, delivery, local_now_prompt_line(),
-        extra) if p)
+    base = await load_workspace_prompt(
+        Path(ctx.settings.harness.workspace_dir), db=ctx.db)
+    return "\n\n".join(p for p in (base, local_now_prompt_line(), extra)
+                      if p)
 
 
 def _mock_tools(*, search_result: str | None = None):

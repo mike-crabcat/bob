@@ -144,22 +144,20 @@ def _make_mock_tools(*, seeded_subagents: list[dict] | None = None,
 
 
 async def _persona_system(ctx, extra: str = "") -> str:
-    """Real persona + the workspace prompt's delivery block. Routing
-    guidance must come from the production surface (persona + tool
-    descriptions), never from this fixture."""
+    """Full production workspace prompt + clock (fidelity upgrade
+    2026-09-29, report §14): the trimmed persona-only stack measured
+    routing compliance at 37% of production prompt size — the best
+    case. Guidance must come from the production surface, which the
+    full prompt carries verbatim."""
     from pathlib import Path
 
-    from server.services.persona import get_persona
-    persona = await get_persona(
-        workspace_dir=Path(ctx.settings.harness.workspace_dir))
-    return "\n\n".join(p for p in (
-        persona,
-        "## CRITICAL: How to Respond\n"
-        "Your text output is NOT delivered to the user. Only tool calls have effect.\n"
-        "ALWAYS call send_whatsapp_message as your final action — even for short replies,\n"
-        "even for acknowledgments. Without that call, nothing is sent.\n"
-        "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.",
-        extra) if p)
+    from server.services.prompt_assembler import (
+        load_workspace_prompt, local_now_prompt_line,
+    )
+    base = await load_workspace_prompt(
+        Path(ctx.settings.harness.workspace_dir), db=ctx.db)
+    return "\n\n".join(p for p in (base, local_now_prompt_line(), extra)
+                      if p)
 
 
 _DM = "You are Bob in a WhatsApp DM with Mike (trusted)."
@@ -203,13 +201,26 @@ _TRANSCRIPT_TREE = {
 }
 
 
+# Functional mocks replace their real twins by name; everything else
+# from the production surface rides as an inert shadow.
+_SHADOW_EXCLUDE = {"bash", "create_subagent", "run_bg_process",
+                   "check_subagent", "list_subagents", "message_subagent",
+                   "kill_subagent"}
+
+
 async def _run(ctx, session_key: str, messages: list,
                *, seeded_subagents: list[dict] | None = None,
                files: dict | None = None) -> dict:
+    from server.evals.util import make_shadow_surface
     from server.services.llm_dispatch import LLMDispatchService
+    from server.services.tool_registry import build_common_tools
 
     tools, state, cleanup_tree = _make_mock_tools(
         seeded_subagents=seeded_subagents, files=files)
+    real_crowd = build_common_tools(
+        ctx, session_key=session_key, is_trusted=True, contact_id=None)
+    tools = tools + make_shadow_surface(real_crowd,
+                                        exclude=_SHADOW_EXCLUDE)
     try:
         response = await LLMDispatchService(ctx).chat_with_tools(
             messages, tools,

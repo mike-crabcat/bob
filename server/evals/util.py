@@ -105,3 +105,37 @@ def make_planted_bash(files: dict, *, cwd_subdir: str = ""):
             None, shutil.rmtree, root, True)
 
     return bash, cleanup
+
+
+def make_shadow_surface(real_tools: list, exclude: set[str] = frozenset()):
+    """Real tool names/descriptions/schemas with INERT handlers — the
+    production-sized tool crowd without execution.
+
+    Fixture fidelity (2026-09-29, report §14): the delegation cases ran
+    with 7 visible tools against production's ~46, making the routing
+    tools far more salient than in a real turn — measured compliance was
+    the best case. Shadows restore the crowd; functional mocks (bash,
+    create_subagent, run_bg_process, the send) ride alongside, replacing
+    their real twins by name via ``exclude``."""
+    import json as _json
+
+    from server.services.tools import Tool
+
+    shadows: list = []
+    for t in real_tools:
+        if t.name in exclude:
+            continue
+
+        async def _inert(_name=t.name, **kwargs):
+            # Reads that shape replies get a realistic empty; everything
+            # else a plain success. Never "(mock)"-flavoured — deepseek
+            # already smells fixtures and discounts answers over them.
+            if _name in ("recall", "find", "search_session_messages",
+                         "find_session", "get_session_messages"):
+                return _json.dumps({"results": [], "matches": []})
+            return _json.dumps({"ok": True})
+
+        shadows.append(Tool(name=t.name, description=t.description,
+                            parameters=t.parameters, required=t.required,
+                            handler=_inert))
+    return shadows

@@ -174,3 +174,25 @@ This matrix is the comparison base for every future gate.
 | **Totals** | **19/25** | **20/25** | 18 · 14 |
 
 D1 — the only case no model had ever passed — flipped on deepseek. D2 guard green both. Flash: unmoved on delegation-coding (same resistance shape as astra-on-figures), no losses; its record category is run-to-run flaky (2/4 and 4/4 same evening — cross-session scope and quote-lookup are unstable, not regression). Deepseek remaining: D4/D5 (task-work routing + brief quality), P2/P4. Deployed via restart 2026-09-28 ~21:20.
+
+## 14. Fidelity upgrade — production-size prompts + tool crowd (2026-09-29)
+
+All fixtures now run at 100% of the production workspace prompt (fact was 50%, delegation 37%, record 1% — a 157-token synthetic); delegation carries the full 46-tool crowd (39 inert shadows + 7 functional mocks, matching production's common-tools count exactly). Previous numbers measured the BEST case; these are the honest reference. Re-measure:
+
+| Category | flash (was) | deepseek (was) |
+|---|---|---|
+| record | **4/4** (4/4) — full prompt stabilised the flakiness | 3/4 (4/4) — R3 cross-session red again |
+| delegation | **1/7** (3/7) — D2 broke on a shadow-crowd artifact | **3/7** (4/7) — **D1 regressed 0.9→0.2** |
+| fact | 3/4 (4/4) — F1 0.7 borderline | 4/4 (4/4) |
+| memory* | 4/5 | 5/5 |
+| propose* | 4/5 | 3/5 |
+| **Totals** | **16/25** (19) | **18/25** (20) |
+
+*unchanged fixtures, carried from §13's run.
+
+Findings:
+- **The routing rule's D1-deepseek flip did NOT survive dilution.** With the 41k-char prompt and the 46-tool crowd, deepseek stops delegating substantial coding again (0.2). The rule works when salient, drowns when diluted — same physics as the self-brief dilution finding. Wording alone is not a production-strength fix for delegation routing.
+- **Record got MORE stable at full fidelity** (flash 4/4, first clean run all evening) — the tiny synthetic prompt was amplifying variance, not the model.
+- **New artifact to know about:** shadow write-shaped tools fake-succeed, so a model can "write a file" via a shadow and satisfy itself without touching the functional bash (flash D2's struct miss, judge 1.0 — substantively it did route inline). Shadow realism for ACTING tools is a known limit; reads return realistic empties.
+
+This is the comparison base for all future gates. Absolute numbers dropped ~3/25 per model — that gap was the best-case bias.

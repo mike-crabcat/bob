@@ -61,9 +61,10 @@ async def record_discipline_search_before_denying(ctx):
 
     from server.services.history_tools import past_reference_note
     messages = [
-        {"role": "system", "content": (
-            "You are Bob in a group chat. " + HISTORY_DISCIPLINE_NOTE + "\n\n"
-            + past_reference_note(
+        {"role": "system", "content": await _full_system(
+            ctx, "You are Bob in a WhatsApp group chat (Weeming Boys). "
+            "Messages are prefixed [Name].\n\n" + HISTORY_DISCIPLINE_NOTE
+            + "\n\n" + past_reference_note(
                 "Ok but before the game started you predicted Freo would "
                 "win."))},
         # Deliberately NO tip in the replayed context — the tip exists only
@@ -92,6 +93,23 @@ async def record_discipline_search_before_denying(ctx):
                     "tip_outside_window": _TIP},
         "input_messages": messages,
     }
+
+
+async def _full_system(ctx, framing: str) -> str:
+    """Full production workspace prompt + clock + framing (fidelity
+    upgrade 2026-09-29, report §14): the synthetic ~157-token prompt
+    made the discipline notes the only thing to read — production has
+    them compete with 41k chars. The seeded records live in stored
+    history, which the full prompt does not leak."""
+    from pathlib import Path
+
+    from server.services.prompt_assembler import (
+        load_workspace_prompt, local_now_prompt_line,
+    )
+    base = await load_workspace_prompt(
+        Path(ctx.settings.harness.workspace_dir), db=ctx.db)
+    return "\n\n".join(
+        p for p in (base, local_now_prompt_line(), framing) if p)
 
 
 async def _run_turn(ctx, session_key: str, messages: list, *,
@@ -153,9 +171,10 @@ async def record_quote_not_paraphrase(ctx):
 
     inbound = "What did you actually tip before the game? Word for word."
     messages = [
-        {"role": "system", "content": (
-            "You are Bob in a group chat. " + HISTORY_DISCIPLINE_NOTE + "\n\n"
-            + past_reference_note(inbound))},
+        {"role": "system", "content": await _full_system(
+            ctx, "You are Bob in a WhatsApp group chat (Weeming Boys). "
+            "Messages are prefixed [Name].\n\n" + HISTORY_DISCIPLINE_NOTE
+            + "\n\n" + past_reference_note(inbound))},
         {"role": "user", "content": "Big game tonight lads"},
         {"role": "assistant", "content": "Huge. Snacks are sorted."},
         {"role": "user", "content": "(145 messages of game chatter omitted)"},
@@ -205,8 +224,8 @@ async def record_cross_session_decision(ctx):
         "books the Airbnb, cap $400/night. I'll set the reminders.")
 
     messages = [
-        {"role": "system", "content": (
-            "You are Bob in a DM with Mike (trusted). "
+        {"role": "system", "content": await _full_system(
+            ctx, "You are Bob in a WhatsApp DM with Mike (trusted).\n\n"
             + HISTORY_DISCIPLINE_NOTE)},
         {"role": "user", "content": "Morning"},
         {"role": "assistant", "content": "Morning. Quiet one so far."},
@@ -248,10 +267,8 @@ async def record_cross_session_decision(ctx):
 )
 async def record_no_reasking_stated_facts(ctx):
     messages = [
-        {"role": "system", "content": (
-            "You are Bob in a DM with Mike (trusted). Answer from what "
-            "is visible in the conversation; only search when the record "
-            "is genuinely not here.")},
+        {"role": "system", "content": await _full_system(
+            ctx, "You are Bob in a WhatsApp DM with Mike (trusted).")},
         {"role": "user", "content": (
             "Heading out — spare key is under the terracotta pot by the "
             "side gate if anyone needs in.")},
