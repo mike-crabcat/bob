@@ -30,7 +30,12 @@ class EvalRunner:
         case_id: str | None = None,
         judge_threshold: float = 0.7,
         skip_judge: bool = False,
+        model: str | None = None,
+        judge_model: str | None = None,
     ) -> list[EvalCaseResult]:
+        from server.evals.util import set_pinned_model
+        set_pinned_model(model)
+
         if case_id:
             cases = [c for c in get_all_cases() if c.id == case_id]
         elif category:
@@ -43,12 +48,20 @@ class EvalRunner:
             return []
 
         run_id = str(uuid4())
-        await self._record_run_start(run_id, category)
+        # The pinned model rides the run row's category (eval_runs has no
+        # model column and Phase 1 adds no migration) — display-only, but
+        # `bob eval history` groups runs per model, which is the point.
+        run_category = f"{category}@{model}" if (category and model) else (
+            f"all@{model}" if model else category)
+        await self._record_run_start(run_id, run_category)
+        if model:
+            print(f"Model pinned: {model}")
 
         results: list[EvalCaseResult] = []
         for case in cases:
             print(f"  Running: {case.id} ({case.category})...", end=" ", flush=True)
-            result = await self._run_case(case, judge_threshold, skip_judge)
+            result = await self._run_case(case, judge_threshold, skip_judge,
+                                      judge_model)
             results.append(result)
             status = "PASS" if result.passed else "FAIL"
             print(status)
@@ -63,6 +76,7 @@ class EvalRunner:
         case: EvalCase,
         judge_threshold: float,
         skip_judge: bool,
+        judge_model: str | None = None,
     ) -> EvalCaseResult:
         t0 = time.monotonic()
         try:
@@ -79,7 +93,9 @@ class EvalRunner:
             # LLM judge
             judge_result = None
             if not skip_judge and case.judge_criteria.extra_instructions:
-                judge_result = await self.llm_judge.judge(case, response, judge_threshold, input_messages)
+                judge_result = await self.llm_judge.judge(
+                    case, response, judge_threshold, input_messages,
+                    judge_model=judge_model)
 
             passed = all_structural_pass and (judge_result is None or judge_result.passed)
 

@@ -14,14 +14,21 @@ class StructuralCheck:
     """A single structural assertion on an LLM response.
 
     Supported kinds and their params:
-      json_valid         — no params
-      json_schema        — {"required_fields": [...], "array_field": "steps", "min_items": 3}
-      field_present      — {"fields": ["action", "reasoning"]}
-      field_values       — {"field": "action", "allowed": ["create_task", "close_project"]}
-      min_length         — {"min_length": 10}
-      max_length         — {"max_length": 5000}
-      response_contains  — {"terms": ["meeting", "schedule"]}
-      tool_call_made     — {"tool_name": "create_task"}
+      json_valid            — no params
+      json_schema           — {"required_fields": [...], "array_field": "steps", "min_items": 3}
+      field_present         — {"fields": ["action", "reasoning"]}
+      field_values          — {"field": "action", "allowed": ["create_task", "close_project"]}
+      min_length            — {"min_length": 10}
+      max_length            — {"max_length": 5000}
+      response_contains     — {"terms": ["meeting", "schedule"]}
+      response_not_contains — {"terms": ["shall i", "do you want me to"]}
+      tool_call_made        — {"tool_name": "create_task"}
+      any_tool_call         — {"tool_names": ["recall", "find"]}
+      no_tool_call          — {"tool_names": ["create_task", "register_task"]}
+      tool_call_args        — {"tool_name": "create_subagent", "arg_contains": ["claude"]}
+
+    The tool_call* kinds read ctx["tool_calls"] — the case's run() returns
+    it via extract_tool_calls(messages) (server/evals/util.py).
     """
 
     kind: str

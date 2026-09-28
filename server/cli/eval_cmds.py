@@ -36,10 +36,19 @@ def eval_run(
     case_id: Annotated[Optional[str], typer.Option("--case")] = None,
     threshold: Annotated[float, typer.Option("--threshold", "-t")] = 0.7,
     skip_judge: Annotated[bool, typer.Option("--skip-judge")] = False,
+    model: Annotated[Optional[str], typer.Option(
+        "--model", help="Pin the serving model for every case "
+        "(pre/post comparisons must be same-model; recorded on the run "
+        "row's category).")] = None,
+    judge_model: Annotated[Optional[str], typer.Option(
+        "--judge-model", help="Override the judge model (default "
+        "gpt-5.4-nano, which false-negatives on evidence-comparison "
+        "cases; pass a stronger slug for baselines).")] = None,
 ) -> None:
     """Run eval cases against live LLM APIs."""
     import asyncio
-    asyncio.run(_eval_run(category, case_id, threshold, skip_judge))
+    asyncio.run(_eval_run(category, case_id, threshold, skip_judge, model,
+                          judge_model))
 
 
 async def _eval_run(
@@ -47,6 +56,8 @@ async def _eval_run(
     case_id: str | None,
     threshold: float,
     skip_judge: bool,
+    model: str | None,
+    judge_model: str | None,
 ) -> None:
     from server.config import Settings
     from server.context import AppContext
@@ -67,6 +78,8 @@ async def _eval_run(
             case_id=case_id,
             judge_threshold=threshold,
             skip_judge=skip_judge,
+            model=model,
+            judge_model=judge_model,
         )
 
         if not results:

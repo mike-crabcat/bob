@@ -147,6 +147,85 @@ class StructuralJudge:
             )
         return StructuralCheckResult(check=check, passed=True)
 
+    def _check_any_tool_call(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
+        """OR-semantics twin: passes when AT LEAST ONE of the named tools
+        fired (recall-OR-find shapes — the memory mandate names both)."""
+        tool_calls = ctx.get("tool_calls", [])
+        names = check.params.get("tool_names", [])
+        if not names:
+            return StructuralCheckResult(
+                check=check, passed=False,
+                detail="any_tool_call requires tool_names",
+            )
+        if not any(tc.get("name") in names for tc in tool_calls):
+            return StructuralCheckResult(
+                check=check, passed=False,
+                detail=f"none of {names} called (all calls: "
+                       f"{[tc.get('name', '?') for tc in tool_calls]})",
+            )
+        return StructuralCheckResult(check=check, passed=True)
+
+    def _check_no_tool_call(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
+        """Negative twin of tool_call_made — the guard-rail check for
+        unintended-outcome cases (permission theater must not act; banter
+        must not recall-spam). Passes when NONE of the named tools fired."""
+        tool_calls = ctx.get("tool_calls", [])
+        names = check.params.get("tool_names", [])
+        if not names:
+            return StructuralCheckResult(
+                check=check, passed=False,
+                detail="no_tool_call requires tool_names",
+            )
+        fired = sorted({tc.get("name", "?") for tc in tool_calls
+                        if tc.get("name") in names})
+        if fired:
+            return StructuralCheckResult(
+                check=check, passed=False,
+                detail=f"forbidden call(s): {fired} (all calls: "
+                       f"{[tc.get('name', '?') for tc in tool_calls]})",
+            )
+        return StructuralCheckResult(check=check, passed=True)
+
+    def _check_tool_call_args(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
+        """Routing hinge: not WHETHER a tool fired but with WHAT. Passes
+        when at least one call to tool_name has every arg substring in its
+        arguments string (e.g. create_subagent with agent_type='claude').
+        Substrings, not JSON paths — arguments arrive as a string and the
+        exact quoting varies by provider."""
+        tool_calls = ctx.get("tool_calls", [])
+        target = check.params.get("tool_name", "")
+        need = check.params.get("arg_contains", [])
+        candidates = [tc for tc in tool_calls if tc.get("name") == target]
+        if not candidates:
+            names = [tc.get("name", "?") for tc in tool_calls]
+            return StructuralCheckResult(
+                check=check, passed=False,
+                detail=f"{target} not called (calls: {names})",
+            )
+        for tc in candidates:
+            args = str(tc.get("arguments", ""))
+            if all(str(sub) in args for sub in need):
+                return StructuralCheckResult(check=check, passed=True)
+        return StructuralCheckResult(
+            check=check, passed=False,
+            detail=f"{target} called but no call's arguments contain all of "
+                   f"{need} (args seen: {[str(tc.get('arguments', ''))[:120] for tc in candidates]})",
+        )
+
+    def _check_response_not_contains(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
+        """Negative twin of response_contains — permission-theater phrases
+        ("shall I", "do you want me to") and asserted stats the case must
+        not produce. Case-insensitive, like its twin."""
+        terms = check.params.get("terms", [])
+        lower = response.lower()
+        found = [t for t in terms if t.lower() in lower]
+        if found:
+            return StructuralCheckResult(
+                check=check, passed=False,
+                detail=f"Forbidden term(s) in response: {found}",
+            )
+        return StructuralCheckResult(check=check, passed=True)
+
 
 class LLMJudge:
     """Uses an LLM call to evaluate response quality."""
@@ -160,6 +239,7 @@ class LLMJudge:
         response: str,
         threshold: float = 0.7,
         input_messages: list[dict[str, Any]] | None = None,
+        judge_model: str | None = None,
     ) -> JudgeResult:
         from server.services.llm_dispatch import LLMDispatchService
 
@@ -186,11 +266,11 @@ class LLMJudge:
                 if msg.get("type") == "function_call":
                     formatted.append(
                         f"[assistant called tool]: {msg.get('name', '?')}"
-                        f"({str(msg.get('arguments', ''))[:200]})")
+                        f"({str(msg.get('arguments', ''))[:400]})")
                     continue
                 if msg.get("type") == "function_call_output":
                     formatted.append(
-                        f"[tool result]: {str(msg.get('output', ''))[:200]}")
+                        f"[tool result]: {str(msg.get('output', ''))[:600]}")
                     continue
                 role = msg.get("role", "unknown")
                 content = msg.get("content", "")
@@ -232,7 +312,7 @@ class LLMJudge:
                 [{"role": "user", "content": prompt}],
                 call_category="eval_judge",
                 temperature=0.3,
-                model="gpt-5.4-nano",
+                model=judge_model or "gpt-5.4-nano",
             )
             data = json.loads(judge_response)
             overall = float(data.get("overall", 0))
