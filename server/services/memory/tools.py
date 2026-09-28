@@ -193,6 +193,20 @@ async def _resolve_entity(db: Any, query: str) -> dict | None:
         if row:
             return dict(row)
 
+    # Display-name exact match (case-insensitive): an entity literally
+    # named the query is what the caller asked for, and must outrank the
+    # embedding step below — fuzzy similarity happily resolved
+    # "Marcus Bell" to an incumbent whose body merely contained a similar
+    # token (2026-09-28 recall resolver bug; the eval memory battery
+    # measured its shadow for two categories).
+    row = await db.fetch_one(
+        "SELECT entity_id, entity_type, display_name FROM memory_entities "
+        "WHERE status = 'active' AND display_name = ? COLLATE NOCASE",
+        (query.strip(),),
+    )
+    if row:
+        return dict(row)
+
     # Embedding similarity search
     try:
         from server.services.memory.embedding import search_similar
