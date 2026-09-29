@@ -92,6 +92,17 @@ class GoalRepository:
             (goal_id, conversation_id, role, _now_iso()),
         )
 
+    async def delete_eval_goals(self, prefix: str = "eval-goal") -> None:
+        """Eval-fixture removal (goal_behavior cases): the goals, their
+        holder links, and transition rows. Eval-owned IDs carry the
+        prefix; production goals never do."""
+        await self.db.execute(
+            "DELETE FROM goal_transitions WHERE goal_id LIKE ?", (f"{prefix}%",))
+        await self.db.execute(
+            "DELETE FROM goal_conversations WHERE goal_id LIKE ?", (f"{prefix}%",))
+        await self.db.execute(
+            "DELETE FROM goals WHERE id LIKE ?", (f"{prefix}%",))
+
     async def holders_of(self, goal_id: str) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
             "SELECT goal_id, conversation_id, role, created_at "

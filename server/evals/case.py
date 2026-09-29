@@ -26,6 +26,7 @@ class StructuralCheck:
       any_tool_call         — {"tool_names": ["recall", "find"]}
       no_tool_call          — {"tool_names": ["create_task", "register_task"]}
       tool_call_args        — {"tool_name": "create_subagent", "arg_contains": ["claude"]}
+      context_flag          — {"key": "goal_fact_written"}
 
     The tool_call* kinds read ctx["tool_calls"] — the case's run() returns
     it via extract_tool_calls(messages) (server/evals/util.py).

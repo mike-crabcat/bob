@@ -196,3 +196,14 @@ Findings:
 - **New artifact to know about:** shadow write-shaped tools fake-succeed, so a model can "write a file" via a shadow and satisfy itself without touching the functional bash (flash D2's struct miss, judge 1.0 — substantively it did route inline). Shadow realism for ACTING tools is a known limit; reads return realistic empties.
 
 This is the comparison base for all future gates. Absolute numbers dropped ~3/25 per model — that gap was the best-case bias.
+
+## 15. goal_behavior category (2026-09-29) — the goal seam finally has behavioural pins
+
+Two cases at full production fidelity (real workspace prompt + real goals_block MUST clause + real goal tools writing the real DB + shadow crowd):
+
+- **G1 write-back** (figurine-doc standard): Mike relays David's confirmation → the decision must reach the goal record. **PASS 2/2 at 1.0 on BOTH models** — the Active Goals MUST clause works at production salience.
+- **G2 room-keeping** (artefact practice): bg completion in the goal's room → artefact paths + delivery status folded into the record. **flash PASS 1.0; deepseek FAIL 0.6** — deepseek writes the record correctly but narrates a false "the directory is empty, the claim is fiction" against files its own tools could see (the M4/F2 evidence-mistrust family again).
+
+Fixture lessons banked (three rounds to honest): effects idempotency keys on goal_id+version — re-used ids silently skip writes with ok:true (also a live observation: re-created goals with a collided key no-op writes); room keys embed goal_id[:8] so longer prefixed ids break the room↔goal mapping; models stat artefact files — 16-byte "mp4s" get correctly called placeholders. Battery: 44 cases.
+
+Remaining: deepseek G2 (evidence-mistrust), creation hygiene case (G3) unbuilt.

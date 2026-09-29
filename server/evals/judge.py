@@ -212,6 +212,20 @@ class StructuralJudge:
                    f"{need} (args seen: {[str(tc.get('arguments', ''))[:120] for tc in candidates]})",
         )
 
+    def _check_context_flag(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
+        """Post-dispatch DB asserts: the case computes a boolean (did the
+        goal row actually change?) and this check passes on it. Lets
+        structural checks verify STATE, not just transcript text."""
+        key = check.params.get("key", "")
+        if not key:
+            return StructuralCheckResult(
+                check=check, passed=False, detail="context_flag requires key")
+        val = ctx.get(key)
+        return StructuralCheckResult(
+            check=check, passed=bool(val),
+            detail="" if val else f"context[{key!r}] is falsy — "
+            f"the expected state change did not happen")
+
     def _check_response_not_contains(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
         """Negative twin of response_contains — permission-theater phrases
         ("shall I", "do you want me to") and asserted stats the case must

@@ -132,3 +132,25 @@ def test_any_tool_call_passes_when_one_fired():
 def test_any_tool_call_requires_names():
     r = _sj().check("", StructuralCheck(kind="any_tool_call", params={}), _CTX)
     assert not r.passed
+
+
+# --- context_flag -------------------------------------------------------------
+
+def test_context_flag_passes_on_truthy():
+    r = _sj().check("", StructuralCheck(
+        kind="context_flag", params={"key": "goal_fact_written"}),
+        {"goal_fact_written": True})
+    assert r.passed
+
+
+def test_context_flag_fails_on_falsy_with_detail():
+    r = _sj().check("", StructuralCheck(
+        kind="context_flag", params={"key": "goal_fact_written"}),
+        {"goal_fact_written": False})
+    assert not r.passed
+    assert "did not happen" in r.detail
+
+
+def test_context_flag_requires_key():
+    r = _sj().check("", StructuralCheck(kind="context_flag", params={}), {})
+    assert not r.passed

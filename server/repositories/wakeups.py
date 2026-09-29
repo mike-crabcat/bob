@@ -77,6 +77,13 @@ class WakeupRepository:
         )
         return bool(count)
 
+    async def delete_eval_wakeups(self) -> None:
+        """Eval-fixture removal (goal_behavior cases): wakeups aimed at
+        eval sessions or eval-goal rooms. Production rows never match."""
+        await self.db.execute(
+            "DELETE FROM wakeups WHERE conversation_id LIKE 'eval:%' "
+            "OR conversation_id LIKE 'agent:goal-eval-%'")
+
     async def cancel_for_goal(self, goal_id: str) -> int:
         return await self.db.execute(
             "UPDATE wakeups SET status = 'cancelled' "

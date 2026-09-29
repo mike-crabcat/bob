@@ -27,6 +27,14 @@ def is_utility_session(session_key: str) -> bool:
     return session_key.startswith("agent:") and session_key.endswith(":utility")
 
 
+async def _delete_eval_utilities(db) -> None:
+    """Eval-fixture removal (goal_behavior cases): goal rooms created for
+    eval-prefixed goals. Production rooms never match the prefix."""
+    await db.execute(
+        "DELETE FROM utility_conversations WHERE session_key LIKE "
+        "'agent:goal-eval-%'")
+
+
 class UtilityConversationRepository:
     def __init__(self, db: Database):
         self.db = db
