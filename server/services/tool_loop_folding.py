@@ -38,6 +38,35 @@ def _foldable(m: dict[str, Any]) -> bool:
             and isinstance(m.get("output"), str))
 
 
+IMAGE_ELISION = "[image elided — it is from an earlier tool round in this " \
+                "turn; re-read it with read_image if you need to see it again]"
+
+
+def fold_aged_image_outputs(
+    messages: list[dict[str, Any]], *, keep_last: int = 3,
+) -> int:
+    """Replace input_image parts in AGED function_call_outputs with a text
+    stub, keeping the newest ``keep_last`` inline (Mike 2026-09-30: the
+    '3 turns' rule, matching MAX_INLINE_MEDIA). The text part survives
+    (it names the file), so provenance stays and the model can re-read on
+    demand. Idempotent: elided rows carry no input_image part. Returns
+    image parts elided."""
+    idxs = [i for i, m in enumerate(messages)
+            if m.get("type") == "function_call_output"
+            and isinstance(m.get("output"), list)
+            and any(p.get("type") == "input_image"
+                    for p in m["output"] if isinstance(p, dict))]
+    aged = idxs[:-keep_last] if keep_last > 0 else idxs
+    n = 0
+    for i in aged:
+        m = messages[i]
+        m["output"] = [
+            IMAGE_ELISION if isinstance(p, dict) and p.get("type") == "input_image" else p
+            for p in m["output"]]
+        n += 1
+    return n
+
+
 def fold_aged_tool_outputs(
     messages: list[dict[str, Any]],
     *,

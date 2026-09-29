@@ -931,6 +931,8 @@ class OpenAIService(BaseService):
                 )
 
                 if tl is not None and tl.folding_enabled:
+                    tool_loop_folding.fold_aged_image_outputs(
+                        messages, keep_last=3)
                     dropped = tool_loop_folding.fold_aged_tool_outputs(
                         messages,
                         keep_last=tl.fold_keep_last,
@@ -1235,19 +1237,19 @@ def _tool_result_messages(
     elif result.data_url:
         part = {"type": "input_image", "image_url": result.data_url}
 
+    # Images ride the tool output itself (2026-09-30, probe-verified on
+    # OpenAI-direct AND OpenRouter/GLM: function_call_output.output accepts
+    # typed parts). The old synthetic user block persisted ~800KB data URLs
+    # that no mechanism folded — goal-room inspection turns ballooned to
+    # 1.2M tokens. On this rail, tool-loop folding owns the aging.
+    output: Any = text
+    if part is not None:
+        output = [{"type": "input_text", "text": text}, part]
     rows: list[dict[str, Any]] = [{
         "type": "function_call_output",
         "call_id": call_id,
-        "output": text,
+        "output": output,
     }]
-    if part is not None:
-        rows.append({
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": text},
-                part,
-            ],
-        })
     return rows
 
 

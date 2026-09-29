@@ -25,13 +25,17 @@ def test_plain_string_result_is_output_row_only():
     assert rows == [{"type": "function_call_output", "call_id": "c1", "output": "just text"}]
 
 
-def test_image_injection_appends_input_image_block():
+def test_image_injection_rides_the_tool_output():
+    """2026-09-30 rail change (probe-verified OpenAI + OpenRouter/GLM):
+    images ride function_call_output.output as typed parts — foldable by
+    the tool-loop, instead of a synthetic user block nothing folded."""
     rows = _tool_result_messages(
         ImageInjection(text="img", data_url="data:image/jpeg;base64,AAA"),
         "c2", video_supported=False)
-    assert rows[0] == {"type": "function_call_output", "call_id": "c2", "output": "img"}
-    assert rows[1]["role"] == "user"
-    assert rows[1]["content"] == [
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["type"] == "function_call_output" and r["call_id"] == "c2"
+    assert r["output"] == [
         {"type": "input_text", "text": "img"},
         {"type": "input_image", "image_url": "data:image/jpeg;base64,AAA"},
     ]
@@ -51,7 +55,8 @@ def test_video_injection_supported_uses_input_video_part():
     rows = _tool_result_messages(
         VideoInjection(text="vid", data_url="data:video/mp4;base64,AAA", path="/w/x.mp4"),
         "c4", video_supported=True)
-    assert rows[1]["content"][1] == {"type": "input_video", "video_url": "data:video/mp4;base64,AAA"}
+    part = [p for p in rows[0]["output"] if p.get("type") == "input_video"][0]
+    assert part == {"type": "input_video", "video_url": "data:video/mp4;base64,AAA"}
 
 
 def test_video_injection_unsupported_without_path_degrades_to_note():
@@ -79,10 +84,11 @@ def test_video_injection_unsupported_with_path_shows_first_frame():
         rows = _tool_result_messages(
             VideoInjection(text="vid", data_url="data:video/mp4;base64,AAA", path=str(clip)),
             "c6", video_supported=False)
-        assert len(rows) == 2
-        assert "first frame" in rows[0]["output"]
-        part = rows[1]["content"][1]
-        assert part["type"] == "input_image"
+        assert len(rows) == 1
+        out = rows[0]["output"]
+        assert any("first frame" in p.get("text", "") for p in out
+                   if isinstance(p, dict))
+        part = [p for p in out if p.get("type") == "input_image"][0]
         assert part["image_url"].startswith("data:image/jpeg;base64,")
         # frame cache lands beside the clip (prompt_assembler convention)
         assert Path(str(clip) + ".frame.jpg").exists()
