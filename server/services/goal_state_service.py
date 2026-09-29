@@ -62,6 +62,18 @@ class StrategyBranch(BaseModel):
     first_step: str = ""
 
 
+class Artefact(BaseModel):
+    """One file this goal produced (goal-execution-plan artefact registry):
+    render, montage, doc, script. Lives in the state block so the goal's
+    record alone makes its deliverables findable — the 2026-09-26 figurine
+    montage closed citing one output path while its seven input tiles were
+    linkable only by filename folklore."""
+    model_config = ConfigDict(extra="allow")
+    path: str            # workspace-relative, conventionally goals/<id8>/…
+    what: str = ""
+    at: str = ""
+
+
 class GoalStrategy(BaseModel):
     """v2 strategy envelope. Unknown keys are preserved (``extra="allow"``) so
     later revisions (decision rules, pending_order, …) round-trip."""
@@ -72,6 +84,7 @@ class GoalStrategy(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
     next_actions: list[NextAction] = Field(default_factory=list)
     strategies: list[StrategyBranch] = Field(default_factory=list)
+    artefacts: list[Artefact] = Field(default_factory=list)
     refs: StrategyRefs = Field(default_factory=StrategyRefs)
     legacy_outreach: dict[str, Any] | None = None
 
@@ -117,6 +130,11 @@ def render_strategy(state: GoalStrategy, *, max_items: int = 5) -> str:
         line = f"Strategy {mark} {s.id}: {s.hypothesis[:160]} [{s.status}]"
         if s.verdict:
             line += f" — {s.verdict[:160]}"
+        lines.append(line)
+    for a in state.artefacts[:8]:
+        line = f"Artefact: {a.path}"
+        if a.what:
+            line += f" — {a.what}"
         lines.append(line)
     if state.refs.entities:
         lines.append(f"Entities: {', '.join(state.refs.entities[:8])}")

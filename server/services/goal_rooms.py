@@ -135,6 +135,12 @@ Standing rules:
   agreement is authoritative — record it and branch on it immediately
   (2026-09-25 figurine doc: the owner's and a relayed member's agreements
   never entered the goal, so no mockups were made for them).
+- Artefacts: every file this goal produces is written to the goal
+  directory above AND recorded in the state block with
+  goal_artefact(path, what) the moment it lands — the goal's record alone
+  must make its deliverables findable. Closure evidence enumerates ALL
+  artefacts (inputs and final) and cites the effects receipt for any
+  delivery; a result describing files nobody can find is not evidence.
 - Deliberate here; act through the platform's tools. Humans read your
   send_report, not this conversation."""
 
@@ -150,6 +156,8 @@ def build_charter(*, goal_id: str, objective: str, kind: str,
                   deadline: str | None, origin: str,
                   loop_block: str = "", subscriptions: bool = False) -> str:
     dl = f"\nDeadline: {deadline}" if deadline else "\nDeadline: none set"
+    gdir = (f"\nGoal directory (write EVERY file this goal produces here — "
+            f"renders, montages, scripts, docs): goals/{goal_id[:8]}/")
     loop = f"\n\n{loop_block}" if loop_block else ""
     rules = (_SUBSCRIPTION_RULES + _STANDING_RULES) if subscriptions \
         else _STANDING_RULES
@@ -157,7 +165,7 @@ def build_charter(*, goal_id: str, objective: str, kind: str,
         f"[Goal {goal_id}]\n"
         f"You are the goal room working exactly one goal:\n"
         f"Objective: {objective}\n"
-        f"Kind: {kind}{dl}\n"
+        f"Kind: {kind}{dl}{gdir}\n"
         f"Origin conversation (where the goal was asked, and where your "
         f"reports go): {origin}\n\n"
         f"{rules}{loop}"
@@ -176,6 +184,16 @@ async def ensure_room(
     )
 
     session_key = room_session_key(goal_id)
+    # Goal workspace directory (Mike 2026-09-28): every file the goal
+    # produces lives in goals/<id8>/ — created here so the convention has
+    # a target before the room's first round. Best-effort: room creation
+    # never fails on filesystem trouble.
+    try:
+        (ctx.settings.harness.workspace_dir.expanduser() / "goals"
+         / goal_id[:8]).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        logger.warning("goal %s: workspace dir create failed", goal_id[:8],
+                       exc_info=True)
     await ConversationRepository(ctx.db).ensure(
         session_key, title=f"goal: {objective[:60]}")
     repo = UtilityConversationRepository(ctx.db)

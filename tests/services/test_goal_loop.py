@@ -580,3 +580,145 @@ async def test_room_to_group_delegation_refused(ctx, loop_on):
         ctx, waiter_session=ORIGIN, title="group thing",
         expected_completer="agent:main:whatsapp:group:120363422982048691")
     assert out.get("ok", True)
+
+
+async def test_goal_directory_created_at_room_birth(ctx, loop_on, tmp_path):
+    """The goal directory (goals/<id8>/) exists before round one — created
+    service-side so the convention has a target without model compliance."""
+    import pathlib
+    old = ctx.settings.harness.workspace_dir
+    ctx.settings.harness.workspace_dir = tmp_path
+    try:
+        goal = await _make_goal(ctx, kind="task")
+        d = tmp_path / "goals" / goal["id"][:8]
+        assert d.is_dir(), "ensure_room creates the goal directory"
+        from server.services.goal_rooms import build_charter
+        charter = build_charter(goal_id=goal["id"], objective="o", kind="task",
+                                deadline=None, origin="x")
+        assert f"goals/{goal['id'][:8]}/" in charter
+        assert "goal_artefact" in charter
+    finally:
+        ctx.settings.harness.workspace_dir = old
+
+
+async def test_goal_artefact_tool_registers_idempotently(ctx, loop_on):
+    """The artefact registry: append-once per path, updates the description
+    on re-record, renders into every brief so the room can't lose its files."""
+    goal = await _make_goal(ctx, kind="task")
+    tools = {t.name: t for t in goal_loop.make_loop_tools(
+        ctx, goal["conversation_id"])}
+    r = json.loads(await tools["goal_artefact"].handler(
+        path="goals/x/david-sax-v1.png", what="David Sax Machine v1"))
+    assert r["ok"]
+    r = json.loads(await tools["goal_artefact"].handler(
+        path="goals/x/david-sax-v1.png", what="David Sax Machine v1 FINAL"))
+    assert r["ok"]
+    row = await GoalRepository(ctx.db).get(goal["id"])
+    arts = json.loads(row["strategy_json"])["artefacts"]
+    assert len(arts) == 1 and arts[0]["what"].endswith("FINAL"), \
+        "re-recording updates, never duplicates"
+    # convention nudge for stray paths
+    r = json.loads(await tools["goal_artefact"].handler(
+        path="generated-images/y.png", what="stray"))
+    assert r["ok"] and "goals/" in r.get("note", "")
+    from server.services.goal_state_service import parse_strategy, render_strategy
+    text = render_strategy(parse_strategy(await GoalRepository(ctx.db).get(goal["id"])))
+    assert "Artefact: goals/x/david-sax-v1.png" in text
+    # non-room sessions get a toolset that resolves no goal
+    stray = {t.name: t for t in goal_loop.make_loop_tools(ctx, ORIGIN)}
+    r = json.loads(await stray["goal_artefact"].handler(path="a.png"))
+    assert not r["ok"]
+
+
+async def test_sleep_honeypot_short_ok_long_refused_with_doctrine(ctx):
+    """2026-09-29 honeypot: the wait impulse gets a front door. Short sleeps
+    run; long sleeps are refused with the full pattern (register the
+    follow-through, run_bg_process wakes on completion, NO timer, end
+    turn); goal rooms get the goal_wait pointer."""
+    import asyncio as _aio
+    from server.services.workspace_tools import make_workspace_tools, _inline_sleep_seconds
+    tools = {t.name: t for t in make_workspace_tools(ctx, session_key="agent:main:whatsapp:dm:1")}
+    r = await tools["sleep"].handler(seconds=2, reason="pacing")
+    assert "slept 2s" in r
+    r = await tools["sleep"].handler(seconds=540)
+    assert "not slept" in r and "run_bg_process WAKES YOU" in r
+    assert "do NOT" in r and "task_register" in r, "the register-follow-through step is taught"
+    room_tools = {t.name: t for t in make_workspace_tools(
+        ctx, session_key="agent:goal-x:utility")}
+    r = await room_tools["sleep"].handler(seconds=60)
+    assert "goal_wait" in r, "rooms are pointed at the declarative wait"
+
+
+async def test_bash_funnel_redirects_long_sleeps(ctx):
+    """The bash side is the funnel, not the wall: plain `sleep N>10` is
+    refused with the pointer to the sleep tool / run_bg_process pattern."""
+    from server.services.workspace_tools import make_workspace_tools, _inline_sleep_seconds
+    assert _inline_sleep_seconds("sleep 540; echo done") == 540
+    assert _inline_sleep_seconds("sleep 5 && curl x") == 5
+    assert _inline_sleep_seconds("echo sleep 999") is None
+    assert _inline_sleep_seconds("curl x; sleep 65") == 65
+    tools = {t.name: t for t in make_workspace_tools(ctx)}
+    r = await tools["bash"].handler("sleep 600; echo hi")
+    assert "not run" in r and "run_bg_process" in r
+    r = await tools["bash"].handler("sleep 5 && echo hi")
+    assert "not run" not in r  # short sleeps pass through
+
+
+async def test_goals_block_hands_goal_work_to_the_room(ctx, loop_on):
+    """2026-09-29 drift: a group turn ran the goal's Blender pipeline
+    in-conversation while the room sat idle. The goals block must teach the
+    handoff — goal-scoped WORK goes to the room via a task, results and
+    reveals stay in the conversation."""
+    from server.services.context_assembler import ContextAssembler
+    await _make_goal(ctx, kind="task")
+    block = await ContextAssembler(ctx).goals_block(ORIGIN)
+    assert "HANDED to the goal's room" in block
+    assert "task_register" in block and "completer_session" in block
+    assert "does not run the goal's pipelines" in block
+
+
+def test_image_outputs_ride_tool_result_not_user_block():
+    """2026-09-30: probe-verified on OpenAI-direct AND OpenRouter/GLM —
+    function_call_output.output accepts input_image parts. The injection
+    must ride the tool result (foldable) instead of a synthetic user block
+    (which nothing folded: goal turns hit 1.2M tokens, 89% base64)."""
+    from server.services.openai_service import _tool_result_messages
+    from server.services.tools import ImageInjection
+    rows = _tool_result_messages(
+        ImageInjection(text="Image loaded from x.png",
+                       data_url="data:image/png;base64,AAA"),
+        "call_1", video_supported=True)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["type"] == "function_call_output" and r["call_id"] == "call_1"
+    assert isinstance(r["output"], list)
+    kinds = [p["type"] for p in r["output"]]
+    assert kinds == ["input_text", "input_image"], kinds
+
+
+def test_aged_image_outputs_fold_keep_three():
+    """The '3 turns' rule: newest 3 image tool outputs stay inline, older
+    ones elide to a byte-stable stub; idempotent; text part survives."""
+    from server.services import tool_loop_folding as tlf
+    def img_row(i):
+        return {"type": "function_call_output", "call_id": f"c{i}",
+                "output": [{"type": "input_text",
+                            "text": f"Image loaded from figurine-{i}.png"},
+                           {"type": "input_image",
+                            "image_url": "data:image/png;base64," + "A"*100}]}
+    msgs = [{"role": "user", "content": "go"}] + [img_row(i) for i in range(6)]
+    n = tlf.fold_aged_image_outputs(msgs, keep_last=3)
+    assert n == 3
+    outs = [m for m in msgs if m.get("type") == "function_call_output"]
+    def parts(m):
+        return [p for p in m["output"] if isinstance(p, dict)]
+    for m in outs[:3]:   # OLDEST three — elided
+        assert not any(p["type"] == "input_image" for p in parts(m))
+        assert any("elided" in p for p in m["output"] if isinstance(p, str)), \
+            "stub + provenance text both survive"
+    for m in outs[3:]:   # newest three — kept inline
+        assert any(p["type"] == "input_image" for p in parts(m)), "newest kept"
+        assert any("figurine" in p.get("text", "") for p in parts(m))
+    assert tlf.fold_aged_image_outputs(msgs, keep_last=3) == 0  # idempotent
+    # text-fold must not choke on list outputs
+    assert tlf.fold_aged_tool_outputs(msgs) == 0

@@ -201,4 +201,11 @@ class ContextAssembler:
             "goal's room only knows what is written to the goal, and a "
             "decision recorded only as memory never reaches it (the 2026-09-25 "
             "figurine doc: two agreements known to this conversation were "
-            "absent from the goal's final artefact).")
+            "absent from the goal's final artefact).\n\n"
+            "WORK that belongs to one of these goals (renders, models, "
+            "pipelines, anything toward its objective) is HANDED to the goal's "
+            "room, not executed here: task_register(completer_session=<the "
+            "room's session key from the goal above>). This conversation "
+            "delivers results and reveals — it does not run the goal's "
+            "pipelines (2026-09-29: Blender turntable jobs relived a "
+            "fail-loop in this chat while the room sat idle).")

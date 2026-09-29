@@ -595,8 +595,41 @@ def make_loop_tools(ctx: AppContext, session_key: str) -> list:
 
         return json.dumps(await _mutate_strategy(goal["id"], mutate))
 
+    @tool
+    async def goal_artefact(path: str, what: str = "") -> str:
+        """Record a file this goal produced (render, montage, doc, script)
+        in the state block's artefact registry, the moment it lands.
+        Conventionally the file lives in this goal's directory
+        (goals/<id8>/). Idempotent per path: recording again updates the
+        description."""
+        goal = await _goal()
+        if goal is None:
+            return json.dumps({"ok": False, "error": "not a goal room"})
+        path = path.strip().lstrip("/")
+        if not path:
+            return json.dumps({"ok": False, "error": "path required"})
+
+        def mutate(state):
+            from datetime import date
+            entries = [a.model_dump() if hasattr(a, "model_dump") else dict(a)
+                       for a in (state.artefacts or [])]
+            for e in entries:
+                if e.get("path") == path:
+                    e["what"] = what[:200]
+                    e["at"] = date.today().isoformat()
+                    break
+            else:
+                entries.append({"path": path, "what": what[:200],
+                                "at": date.today().isoformat()})
+            state.artefacts = entries
+        result = await _mutate_strategy(goal["id"], mutate)
+        if result.get("ok") and not path.startswith("goals/"):
+            result["note"] = ("recorded — convention is the goal directory "
+                              "goals/<id8>/; put future files there")
+        return json.dumps(result)
+
     return [goal_continue_now, goal_wait, goal_evidence,
-            strategy_open, strategy_result, strategy_prune]
+            strategy_open, strategy_result, strategy_prune, goal_artefact]
 
 
 # ---------------------------------------------------------------------------

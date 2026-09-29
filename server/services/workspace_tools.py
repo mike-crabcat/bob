@@ -160,12 +160,65 @@ def _resolve_path(ctx: AppContext, path: str) -> Path:
     return workspace / path
 
 
+import re as _re
+
+# Inline-sleep guard (2026-09-29): models wait with `sleep N` in bash —
+# in-turn it holds the dispatch and burns the wall-clock budget (a turn
+# died mid-sleep 2026-09-28); in a bg process it adds a redundant timer on
+# top of the completion wake that already exists (final renders posted an
+# hour late for no reason). The sleep tool is the front door; bash sleeps
+# over 10s get redirected to it.
+_INLINE_SLEEP_RE = _re.compile(
+    r"(?:^|&&|;|\|\|)\s*sleep\s+([0-9]+(?:\.[0-9]+)?)", _re.MULTILINE)
+
+
+def _inline_sleep_seconds(command: str) -> float | None:
+    """Longest top-level `sleep N` in a command, or None. Best-effort:
+    sleeps inside subshells/scripts are the sleep tool's job to catch,
+    this catches the habitual plain form."""
+    hits = _INLINE_SLEEP_RE.findall(command or "")
+    if not hits:
+        return None
+    try:
+        return max(float(h) for h in hits)
+    except ValueError:
+        return None
+
+
 def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
     """Create workspace tools bound to the given context.
 
     If session_key is provided, also includes an update_agenda tool.
     """
 
+    @tool
+    async def sleep(seconds: float, reason: str = "") -> str:
+        """Wait before your next action. Sleeps of 10 seconds or less run
+        inline (pacing, retry backoff). Anything longer is REFUSED — long
+        waits must never hold the turn or add timers on top of wakes that
+        already exist."""
+        if seconds <= 0:
+            return "Error: seconds must be positive."
+        if seconds <= 10:
+            await asyncio.sleep(seconds)
+            return f"slept {seconds:g}s"
+        room_note = (
+            " This is a goal room: declare the wait with goal_wait(...) "
+            "instead — it schedules the next round without holding "
+            "anything." if (session_key or "").startswith("agent:goal-")
+            else "")
+        return (
+            f"Error: not slept — {seconds:g}s is too long to wait inline "
+            "(it would hold this conversation and burn the turn's "
+            "wall-clock budget). Long waits already have a mechanism: "
+            "run_bg_process WAKES YOU when its command finishes — do NOT "
+            "add a sleep timer on top of it (a finished job once sat an "
+            "extra hour because of exactly that). Pattern: (1) register "
+            "what you'll do on wake (task_register, or write it to the "
+            "goal state) so the follow-through survives intervening "
+            "messages; (2) run_bg_process(command='<the actual work>') "
+            "and put the follow-up INSIDE the command or the task; "
+            "(3) END YOUR TURN." + room_note)
     @tool
     async def bash(
         command: str,
@@ -198,6 +251,16 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         if violation:
             logger.warning("bash blocked by sandbox: %r — %s", command, violation)
             return f"Error: {violation}"
+        long_sleep = _inline_sleep_seconds(command)
+        if long_sleep and long_sleep > 10:
+            logger.warning("bash sleep redirected to sleep tool: %rs", command[:120])
+            return (
+                f"Error: not run — this command sleeps {long_sleep:g}s inline. "
+                "Use the sleep tool for short waits; for anything longer, "
+                "run_bg_process(command='<the work>') already WAKES you on "
+                "completion — no sleep timer needed. Register the "
+                "follow-through first (task_register / goal state), then "
+                "END YOUR TURN.")
         syntax_error = await bash_syntax_check(command)
         if syntax_error:
             logger.warning("bash blocked by syntax check: %r — %s", command, syntax_error)
@@ -340,7 +403,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
             path=str(resolved),
         )
 
-    tools = [bash, get_time, read_image, use_skill, read_video]
+    tools = [bash, sleep, get_time, read_image, use_skill, read_video]
 
     if session_key:
         @tool

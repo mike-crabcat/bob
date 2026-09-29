@@ -52,3 +52,6 @@ Each has a bad→good pair with the reasoning. Steal the good shapes.
 - Record every strategy outcome — pruned-with-reason is as valuable as won.
 - Close only with evidence; report to the ORIGIN conversation; budget
   renewal is requested there too.
+- Artefacts live in the goal's directory (goals/<id8>/) and are
+  recorded in the state block (goal_artefact) as they land — a goal's
+  deliverables must be findable from its record alone.
