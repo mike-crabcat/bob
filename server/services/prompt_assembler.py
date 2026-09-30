@@ -535,8 +535,17 @@ async def build_chat_messages(
                         mention_names[digits] = p["display_name"]
 
         from server.repositories.history import HistoryRepository
-        rows = await HistoryRepository(db).recent_dialogue(
-            session_key, limit=max_history)
+        # Bookkeeping budget (2026-09-30): placeholder/relay rows (bg
+        # flights, task notifications, wakes) are labelled and useful, but
+        # they must not consume the conversational window — a morning's
+        # chat read ~8 scrolls up to the human while sitting 60+ rows deep
+        # to the model because interleaved bookkeeping diluted recency
+        # (the "Re: OpenAI dot agents" miss). Over-fetch, keep the newest
+        # ``max_history`` CONVERSATIONAL rows, and collapse runs of
+        # bookkeeping rows (beyond each run's newest) into one count
+        # marker so the audit trail stays visible at ~zero depth cost.
+        rows = await _conversational_window(
+            session_key, db, max_history)
 
         # Indices of the last N assistant rows — these get full tool-block
         # replay. Older rows fall back to the short summary prefix.
@@ -814,3 +823,101 @@ def _ends_with_assistant_side(messages: list[dict[str, Any]]) -> bool:
     if last.get("role") == "assistant":
         return True
     return last.get("type") in ("function_call", "function_call_output", "reasoning")
+
+
+_BOOKKEEPING_PROVENANCES = {
+    "bg_placeholder", "task_relay", "wake_nudge", "steer",
+    "bg_send", "probe_reaction", "collapsed_bookkeeping",
+}
+
+
+def _is_bookkeeping(r: dict) -> bool:
+    """Placeholder/relay rows: labelled and useful, but not conversation —
+    they must not consume the conversational window's budget."""
+    return ((r.get("provenance") or "") in _BOOKKEEPING_PROVENANCES
+            or (r.get("role") == "user"
+                and str(r.get("content") or "").startswith(
+                    ("## Task ", "[Task ", "[Report from ",
+                     "## Goal ", "## Scheduled wakeup"))))
+
+
+async def _conversational_window(
+    session_key: str, db: Any, max_history: int,
+) -> list[dict]:
+    """The newest ``max_history`` CONVERSATIONAL rows plus collapsed
+    bookkeeping (2026-09-30). Bookkeeping rows interleaved within the kept
+    span survive as markers: each run collapses to its newest member plus a
+    count line, preserving attribution and the audit trail without letting
+    placeholders eat the window. One over-fetch (3x) absorbs bookkeeping
+    density; conversations that sparse still end at their true start."""
+    from server.repositories.history import HistoryRepository
+    repo = HistoryRepository(db)
+    # Adaptive over-fetch: 3x absorbs real-world bookkeeping density
+    # (~7-15%); pathological sessions double until enough conversational
+    # rows exist or the conversation truly ends.
+    factor = 3
+    rows: list[dict] = []
+    while True:
+        rows = await repo.recent_dialogue(session_key, limit=max_history * factor)
+        if (len([r for r in rows if not _is_bookkeeping(r)]) >= max_history
+                or len(rows) < max_history * factor  # conversation exhausted
+                or factor >= 24):
+            break
+        factor *= 2
+    conversational = [r for r in rows if not _is_bookkeeping(r)]
+    if len(conversational) < max_history:
+        max_history = len(conversational)  # short conversation: keep all
+
+    # Lower bound = the oldest kept CONVERSATIONAL row; upper bound = the
+    # NEWEST row of any kind — trailing bookkeeping (a bg result after the
+    # last human line) is recent and must never silently vanish (the
+    # attribution rule; a bg_send-only history still replays).
+    kept_ts: str | None = None
+    seen = 0
+    for r in reversed(rows):
+        if not _is_bookkeeping(r):
+            seen += 1
+            if seen >= max_history:
+                kept_ts = r["created_at"]
+                break
+    if seen < max_history and rows:
+        oldest_conv = [r for r in rows if not _is_bookkeeping(r)]
+        kept_ts = oldest_conv[0]["created_at"] if oldest_conv else None
+
+    out: list[dict] = []
+    run: list[dict] = []
+    for r in rows:
+        in_span = kept_ts is None or r["created_at"] >= kept_ts
+        if not in_span:
+            continue
+        if not _is_bookkeeping(r):
+            if run:
+                out.extend(_collapse_run(run))
+                run = []
+            out.append(r)
+        else:
+            run.append(r)
+    if run:
+        out.extend(_collapse_run(run))
+    return out
+
+
+def _collapse_run(run: list[dict]) -> list[dict]:
+    """Newest bookkeeping row kept verbatim; the rest of the run becomes a
+    single count marker (id-less synthetic row)."""
+    if len(run) <= 2:
+        return run
+    head = run[-1:]
+    kinds = ", ".join(sorted({
+        (r.get("provenance") or "notice") for r in run[:-1]}))
+    marker = {
+        "id": f"collapsed-{run[0]['id'][:8]}",
+        "role": "user",
+        "content": (f"[{len(run) - 1} earlier bookkeeping event(s) collapsed: "
+                    f"{kinds} — full rows remain in the record]"),
+        "created_at": run[0]["created_at"],
+        "provenance": "collapsed_bookkeeping",
+        "metadata": None, "dispatched": 1, "synthetic": 1,
+    }
+    return [marker] + head
+

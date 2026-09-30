@@ -722,3 +722,41 @@ def test_aged_image_outputs_fold_keep_three():
     assert tlf.fold_aged_image_outputs(msgs, keep_last=3) == 0  # idempotent
     # text-fold must not choke on list outputs
     assert tlf.fold_aged_tool_outputs(msgs) == 0
+
+
+async def test_conversational_window_budget(ctx):
+    """2026-09-30 bookkeeping budget: placeholders/relays must not consume
+    the conversational window — the 'Re: OpenAI dot agents' miss had the
+    morning's chat ~8 scrolls up for the human but 60+ rows deep for the
+    model. Newest N CONVERSATIONAL rows kept; bookkeeping runs inside the
+    span collapse to newest + a count marker."""
+    from server.services.session_service import SessionService
+    from server.services.prompt_assembler import (
+        _conversational_window, _is_bookkeeping)
+    key = "agent:main:whatsapp:dm:999"
+    svc = SessionService(ctx)
+    # 6 conversational; bookkeeping in realistic runs (the figurine-burst
+    # shape: placeholder + relay + report back-to-back)
+    for i in range(6):
+        await svc.add_message(key, "user", f"human says {i}")
+        await svc.add_message(key, "user", f"[bg turn x{i} detached: job]",
+                              provenance="bg_placeholder")
+        await svc.add_message(key, "user", f"## Task COMPLETED — thing {i}",
+                              provenance="task_relay")
+        await svc.add_message(key, "user", f"[Report from agent:goal-x] s{i}",
+                              provenance="steer")
+    out = await _conversational_window(key, ctx.db, max_history=6)
+    conv = [r for r in out if not _is_bookkeeping(r)]
+    assert len(conv) == 6, "all six conversational rows kept"
+    texts = " || ".join(str(r.get("content")) for r in out)
+    assert "human says 5" in texts and "human says 0" in texts
+    assert texts.count("collapsed") >= 1, "bookkeeping runs collapsed"
+    assert "[Report from agent:goal-x] s5" in texts, \
+        "each run's newest member kept verbatim"
+    # classifier spot-checks
+    assert _is_bookkeeping({"provenance": "bg_placeholder", "role": "user",
+                            "content": "x"})
+    assert not _is_bookkeeping({"provenance": None, "role": "user",
+                                "content": "hello"})
+    assert not _is_bookkeeping({"provenance": None, "role": "assistant",
+                                "content": "hi"})
