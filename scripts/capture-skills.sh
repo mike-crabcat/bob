@@ -24,6 +24,7 @@ SHIP=(
   openai-image
   google-places
   videogen
+  bambu-x2d-prep
 )
 
 # Per-skill excludes beyond the universal ones (samples, scratch, secrets).
