@@ -135,6 +135,30 @@ def _channel_of(session_key: str) -> str:
     return "internal"
 
 
+
+async def _session_tool_principal(
+    ctx: AppContext, session_key: str,
+) -> tuple[bool, str | None]:
+    """(is_trusted, contact_id) for the wake path's session tools. Goal
+    rooms inherit their creator's principal (2026-10-01 census gap: the
+    un-parameterised call scoped every room to its own history); other
+    utilities resolve their binding's contact; anything else is untrusted
+    with no contact — own-session reads only."""
+    if session_key.startswith("agent:goal-"):
+        from server.services.goal_rooms import room_creator_principal
+        return await room_creator_principal(ctx, session_key)
+    if session_key.startswith("agent:") and session_key.endswith(":utility"):
+        from server.repositories.conversations import ConversationRepository
+        binding = await ConversationRepository(ctx.db).active_binding(
+            session_key)
+        contact_id = (binding or {}).get("contact_id")
+        if contact_id:
+            from server.repositories.contacts import ContactRepository
+            c = await ContactRepository(ctx.db).get(contact_id)
+            return bool(c and c.get("is_trusted")), contact_id
+    return False, None
+
+
 async def _generic_wake_dispatch(
     ctx: AppContext,
     session_key: str,
@@ -213,7 +237,18 @@ async def _generic_wake_dispatch(
     # the chat path carries, 2026-09-18 consolidation: one tool, one name,
     # one habit) + the record-discipline note below.
     from server.services.session_tools import make_session_tools
-    tools.extend(make_session_tools(ctx, session_key=session_key))
+    # Creator-scoped history reads (2026-10-01 census gap): rooms inherit
+    # their creator's principal — same rule as make_group_lookup_tools
+    # below — so a trusted creator's room can page foreign groups' history
+    # with get_session_messages. The un-parameterised call scoped EVERY
+    # utility session to its own history only, which sent the census goal
+    # routing through Mike's DM as a workaround (its completer had the
+    # tool; the room didn't).
+    _st_trusted, _st_contact = await _session_tool_principal(
+        ctx, session_key)
+    tools.extend(make_session_tools(
+        ctx, session_key=session_key,
+        is_trusted=_st_trusted, contact_id=_st_contact))
     # Task registry tools on the generic wake path (rooms, utilities, wakes).
     from server.services.tasks import make_task_tools, tasks_enabled
     if tasks_enabled():

@@ -760,3 +760,100 @@ async def test_conversational_window_budget(ctx):
                                 "content": "hello"})
     assert not _is_bookkeeping({"provenance": None, "role": "assistant",
                                 "content": "hi"})
+
+
+async def test_conversational_window_group_no_keyerror(ctx):
+    """2026-10-01 outage regression: the collapsed-bookkeeping marker is a
+    role-"user" synthetic row without sender_id; on GROUP sessions the
+    sender-name lookup read row["sender_id"] on it and every dispatch with a
+    collapsed run crashed (Bob stopped replying in the pirate-radio group).
+    The DM-keyed budget test above can't catch this — is_group never
+    evaluates the lookup."""
+    from server.services.session_service import SessionService
+    from server.services.prompt_assembler import build_chat_messages
+    key = "agent:main:whatsapp:group:999"
+    svc = SessionService(ctx)
+    for i in range(6):
+        await svc.add_message(key, "user", f"human says {i}",
+                              sender_id="contact-a")
+        await svc.add_message(key, "user", f"[bg turn x{i} detached: job]",
+                              provenance="bg_placeholder")
+        await svc.add_message(key, "user", f"## Task COMPLETED — thing {i}",
+                              provenance="task_relay")
+        await svc.add_message(key, "user", f"[Report from agent:goal-x] s{i}",
+                              provenance="steer")
+    # must not raise
+    messages = await build_chat_messages(
+        "hello?", session_key=key, db=ctx.db, max_history=6)
+    rendered = " || ".join(str(m.get("content")) for m in messages)
+    assert "collapsed" in rendered, "bookkeeping runs still collapsed"
+
+
+async def test_room_session_tools_scope_by_creator_principal(ctx, loop_on):
+    """2026-10-01 census gap: the wake path passed make_session_tools with
+    NO trust params, scoping every room to its own history — the census
+    goal had to route group-history reads through Mike's DM because its own
+    get_session_messages refused the group. Rooms now inherit their
+    creator's principal (same rule as group-lookup): trusted creator reads
+    foreign groups; untrusted/NULL creator stays own-session-only."""
+    from server.services.session_tools import make_session_tools
+    from server.services.wake_service import _session_tool_principal
+
+    # trusted-creator room: unrestricted
+    tools = {t.name: t.handler for t in make_session_tools(
+        ctx, session_key="agent:goal-x:utility",
+        is_trusted=True, contact_id="c1")}
+    out = json.loads(await tools["get_session_messages"](
+        session_key="agent:main:whatsapp:group:120363422982048691",
+        limit=5))
+    assert "error" not in out or "not accessible" not in str(out.get("error", ""))
+
+    # untrusted room: only its own session
+    tools2 = {t.name: t.handler for t in make_session_tools(
+        ctx, session_key="agent:goal-y:utility",
+        is_trusted=False, contact_id=None)}
+    out2 = json.loads(await tools2["get_session_messages"](
+        session_key="agent:main:whatsapp:group:120363422982048691",
+        limit=5))
+    assert "not accessible" in str(out2.get("error", "")), \
+        "untrusted rooms still cannot read foreign groups"
+
+
+async def test_goal_room_principal_helper(ctx, loop_on):
+    """The wake-path helper resolves a goal room's creator principal —
+    trusted Mike -> (True, mike_id); NULL creator -> (False, None).
+    Group origins don't auto-derive a creator (DM-only rule), so the
+    creator is pinned explicitly here as the group flow does."""
+    from server.services.wake_service import _session_tool_principal
+    from server.repositories.contacts import ContactRepository
+    from server.repositories.goals import GoalRepository
+    import uuid as _uuid
+    from server.repositories.contacts import ContactRepository as _CR
+    mike = await _CR(ctx.db).get_default()
+    if mike is None:  # test DB has no seeded owner — make one
+        await _CR(ctx.db).create(
+            name="Mike Test", phone_number="+61456224867",
+            is_trusted=1)
+        await ctx.db.execute(
+            "UPDATE contacts SET is_default=1 "
+            "WHERE phone_number='+61456224867'")
+        mike = await _CR(ctx.db).get_default()
+    goal = await goal_service.create_goal(
+        ctx, conversation_id=ORIGIN, objective="pinned owner",
+        kind="task", creator_contact_id=mike["id"],
+        strategy={"v": 2, "refs": {"entities": [], "claims": []}})
+    trusted, contact = await _session_tool_principal(
+        ctx, goal["conversation_id"])
+    assert trusted and contact == mike["id"]
+    # NULL creator (system/dream goal) -> untrusted defaults
+    sys_goal = await GoalRepository(ctx.db).create(
+        conversation_id=goal["conversation_id"],
+        objective="system thing", goal_id=str(_uuid.uuid4()))
+    await ctx.db.execute(
+        "UPDATE goals SET creator_contact_id=NULL WHERE id=?",
+        (sys_goal["id"],))
+    await ctx.db.execute(
+        "UPDATE goals SET status='active' WHERE id=?", (sys_goal["id"],))
+    t2, c2 = await _session_tool_principal(
+        ctx, f"agent:goal-{sys_goal['id']}:utility")
+    assert (t2, c2) == (False, None)
