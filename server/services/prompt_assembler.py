@@ -325,31 +325,19 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         if location_section:
             parts.append(location_section)
 
-    # Append grounding rules to reduce hallucinated tool claims
+    # Append grounding rules to reduce hallucinated tool claims. The
+    # WhatsApp end-of-turn rules (final-text delivery, NO_REPLY,
+    # registration) moved to _TERMINAL_CONTRACT_TAIL — the
+    # last-instruction slot (2026-10-03); this block keeps the
+    # channel-neutral and email contracts.
     parts.append(
         "## CRITICAL: How to Respond\n"
-        "On WhatsApp: your FINAL text output is your reply — it is delivered automatically. "
-        "Call send_whatsapp_message only to speak BEFORE you finish: a brief progress update while "
-        "working, or a reply with media attached (media needs the tool; plain text does not). "
-        "Do not use the tool to repeat your final reply. To stay silent, finish with the exact "
-        "text NO_REPLY and nothing else.\n"
         "On email: call email_reply to send your reply, email_skip to stay silent.\n"
-        "When you commit to doing something later — fixing, rebuilding, checking, following up — "
-        "call task_register with a title for it before the turn ends. An unregistered promise "
-        "doesn't exist: no later turn will remember it. Registering is not doing: for work that "
-        "needs a go-ahead, register the task and propose.\n"
         "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
     )
     parts.append(GROUNDING_RULES)
     parts.append(
         "## Modifying Skills and Code — Propose First\n"
-        "- PROMISED WORK MUST BE REGISTERED: when your reply commits to "
-        "fixing, rebuilding, checking, or following up on anything — even "
-        "if you're only reporting a bug you're expected to fix — call "
-        "task_register with a title for it before the turn ends. Later "
-        "turns only know what is registered; an unregistered promise "
-        "doesn't exist. Registering is not doing: for work that needs a "
-        "go-ahead, register the task and propose.\n"
         "Changes to anything under `skills/` or to any code or config file are easy to get "
         "wrong from a half-described idea, so propose before you edit:\n"
         "- When a request would create or modify a skill, script, or any code file — with "
@@ -450,10 +438,35 @@ _REPLY_LENGTH_HEAD = (
     "## Reply length\nThis is a WhatsApp {kind}. Default reply: 1-2 short "
     "sentences, under 40 words. Only go longer when someone explicitly "
     "asks for detail or a list.")
-_REPLY_LENGTH_TAIL = (
-    "## Reply length — HARD RULE\nMaximum 2 sentences and 40 words unless "
-    "the user explicitly asks for detail. No meta-commentary, no asides "
-    "about your own consistency or limitations.")
+# Terminal contract (v1, 2026-10-03 — docs/final-text-delivery-plan.md
+# §restructure): everything the model must do AT THE MOMENT IT STOPS,
+# consolidated in the last-instruction slot. Reasoning-trace evidence:
+# flash's thinking references the scattered end-of-turn rules in 2% of
+# turns (registration in 0 of 6 failed G3 runs) — position, not wording,
+# was the missing lever. The reply-length item keeps the 2026-09-05
+# A/B-validated wording verbatim inside the consolidated block.
+_TERMINAL_CONTRACT_TAIL = (
+    "## Before you finish — HARD RULES\n"
+    "1. Reply length: Maximum 2 sentences and 40 words unless the user "
+    "explicitly asks for detail. No meta-commentary, no asides about your "
+    "own consistency or limitations.\n"
+    "2. Your final text IS your reply — it is delivered automatically. "
+    "Call send_whatsapp_message only for a progress update or a reply "
+    "with media attached. To stay silent, finish with the exact text "
+    "NO_REPLY.\n"
+    "3. Promised work must be registered: if this reply commits to "
+    "fixing, rebuilding, checking, or following up on anything, call "
+    "task_register with a title for it before finishing. An unregistered "
+    "promise doesn't exist — later turns only know what is registered.\n"
+    "4. Code, skill, or config changes: propose the plan and wait for a "
+    "go-ahead (see Modifying Skills and Code). Registering the task is "
+    "not permission to build.")
+
+
+def terminal_contract_tail() -> str:
+    """The last-instruction block (WhatsApp turns). Exported so eval
+    fixtures ride the same text production does."""
+    return _TERMINAL_CONTRACT_TAIL
 
 
 async def build_chat_messages(
@@ -518,7 +531,7 @@ async def build_chat_messages(
             "## Reply length" in p for p in system_parts):
         kind = "group chat" if ":group:" in session_key else "chat"
         system_parts.insert(0, _REPLY_LENGTH_HEAD.format(kind=kind))
-        system_parts.append(_REPLY_LENGTH_TAIL)
+        system_parts.append(_TERMINAL_CONTRACT_TAIL)
 
     messages: list[dict[str, Any]] = []
     if system_parts:

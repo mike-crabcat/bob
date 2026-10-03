@@ -300,10 +300,10 @@ _SELF_WRAP_FINAL = (
 # message the runner/rescue will deliver on the model's behalf.
 _SELF_WRAP_NUDGE_SEND = (
     "You are close to this turn's budget (time or tool calls). Stop starting "
-    "new work and DELIVER NOW by calling your send tool with what you have — "
-    "plain text output is NOT delivered to the user. Note anything left "
-    "unfinished inside the sent message. If silence is correct, send "
-    "NO_REPLY instead.")
+    "new work and finish now: write your final reply as your closing text — "
+    "it is delivered automatically. Note anything left unfinished inside it, "
+    "and register genuinely-promised work with task_register first. If "
+    "silence is correct, finish with the exact text NO_REPLY.")
 _SELF_WRAP_FINAL_SEND = (
     "This turn's budget is exhausted and tools are now disabled. Write the "
     "final message for the user as your reply — it will be delivered for "

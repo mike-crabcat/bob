@@ -60,11 +60,15 @@ async def _system(ctx, framing: str) -> str:
 
     from server.services.prompt_assembler import (
         load_workspace_prompt, local_now_prompt_line,
+        terminal_contract_tail,
     )
     base = await load_workspace_prompt(
         Path(ctx.settings.harness.workspace_dir), db=ctx.db)
+    # WhatsApp-shaped turns end with the terminal contract in production
+    # (build_chat_messages); fixtures ride the same block.
     return "\n\n".join(
-        p for p in (base, local_now_prompt_line(), framing) if p)
+        p for p in (base, local_now_prompt_line(), framing,
+                    terminal_contract_tail()) if p)
 
 
 def _make_send_tool(state: dict):

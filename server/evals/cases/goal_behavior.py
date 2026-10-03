@@ -47,12 +47,20 @@ async def _workspace_system(ctx, session_key: str, framing: str) -> str:
     from server.services.context_assembler import ContextAssembler
     from server.services.prompt_assembler import (
         load_workspace_prompt, local_now_prompt_line,
+        terminal_contract_tail,
     )
     base = await load_workspace_prompt(
         Path(ctx.settings.harness.workspace_dir), db=ctx.db)
     goals = await ContextAssembler(ctx).goals_block(session_key)
+    # G1 (DM) and G3 (group) are WhatsApp-shaped: production ends those
+    # system messages with the terminal contract block; G2's room is not
+    # a WhatsApp session and doesn't get it.
+    tail = (terminal_contract_tail()
+            if session_key in ("eval:goal:g1-dm", "eval:goal:g3-group")
+            else "")
     return "\n\n".join(
-        p for p in (base, goals, local_now_prompt_line(), framing) if p)
+        p for p in (base, goals, local_now_prompt_line(), framing, tail)
+        if p)
 
 
 async def _cleanup(ctx, goal_ids: list[str],

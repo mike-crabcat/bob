@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from server.services.prompt_assembler import (
-    _REPLY_LENGTH_HEAD, _REPLY_LENGTH_TAIL, build_chat_messages)
+    _REPLY_LENGTH_HEAD, terminal_contract_tail, build_chat_messages)
 
 
 def _system(msgs):
@@ -35,9 +35,15 @@ async def test_whatsapp_group_turn_gets_head_and_tail():
     body = _system(msgs)
     assert body.startswith("## Reply length")
     assert "WhatsApp group chat" in body
-    assert _REPLY_LENGTH_TAIL in body
+    # The tail is now the consolidated terminal contract (v1 2026-10-03):
+    # it carries the A/B-validated reply-length wording verbatim inside
+    # item 1, plus delivery / NO_REPLY / registration / propose-first.
+    tail = terminal_contract_tail()
+    assert tail in body
+    assert "Maximum 2 sentences and 40 words" in tail
+    assert "task_register" in tail and "NO_REPLY" in tail
     # tail is the LAST block — after the persona, at/after the clock slot
-    assert body.rstrip().endswith(_REPLY_LENGTH_TAIL)
+    assert body.rstrip().endswith(tail)
 
 
 @pytest.mark.asyncio
@@ -67,4 +73,4 @@ async def test_idempotent_when_caller_carries_block():
         session_key="agent:main:whatsapp:group:120363060000000000",
         system_content="## Reply length\nalready here")
     assert _system(msgs).count("## Reply length") == 1
-    assert _REPLY_LENGTH_TAIL not in _system(msgs)
+    assert terminal_contract_tail() not in _system(msgs)
