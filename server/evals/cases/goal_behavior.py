@@ -412,9 +412,12 @@ async def goal_promised_work_gets_registered(ctx):
         if not __import__("os").environ.get("BOB_EVAL_NO_CROWD"):
             crowd = build_common_tools(ctx, session_key=session_key,
                                        is_trusted=True, contact_id=None)
+            # task tools now ride build_common_tools (chat wiring fix
+            # 2026-10-03); the REAL ones above win, shadows are excluded.
             tools += make_shadow_surface(
                 crowd, exclude={"bash", "send_whatsapp_message",
-                                "task_register", "task_complete", "task_fail"})
+                                "task_register", "task_complete", "task_fail",
+                                "task_cancel", "list_tasks"})
 
         response = await LLMDispatchService(ctx).chat_with_tools(
             messages, tools, model=pinned_model(),

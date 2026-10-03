@@ -80,6 +80,17 @@ def build_common_tools(
     if include_routines:
         _extend(make_routine_tools(ctx, session_key=session_key))
 
+    # Task registry — promised-work registration. The docstring contract
+    # says "wherever conversation turns run (chat, wakes, rooms)", but the
+    # wiring only ever attached them on the utility path: ordinary WhatsApp
+    # turns had no task_register, so the terminal contract's registration
+    # rule pointed at a tool the model couldn't call (found 2026-10-03 via
+    # the AI-doom mug incident — the flight couldn't have registered its
+    # "rebuilding the geometry properly" promise even if it had attended
+    # to the rule). make_task_tools self-gates on tasks_enabled().
+    from server.services.tasks import make_task_tools
+    _extend(make_task_tools(ctx, session_key=session_key))
+
     # Dream plan tools — participants adjust plans conversationally (session-bound)
     if ctx.settings.dream.enabled:
         from server.services.dream.tools import make_dream_tools
