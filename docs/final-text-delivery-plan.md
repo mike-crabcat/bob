@@ -66,8 +66,8 @@ handler (idempotency keys, send records, bg bookkeeping all preserved):
 | flight ending | terminal action |
 |---|---|
 | spoke | nothing (its attributed messages were the output) |
-| text, ran tools, not NO_REPLY | deliver `(background result)\n<text>` |
-| text, **zero** tools, not NO_REPLY | deliver with unverified header — the `_narration_only_content` wording becomes a delivery prefix, not a relay instruction (2026-09-17 phantom-build: the harm was the system vouching; the header un-vouches) |
+| text, ran tools, not NO_REPLY | deliver the text **verbatim** — no header (Mike 2026-10-03: a detached turn is still a reply to whoever asked) |
+| text, **zero** tools, not NO_REPLY | deliver with the UNVERIFIED marker — the `_narration_only_content` wording becomes a delivery prefix, not a relay instruction (2026-09-17 phantom-build: the harm was the system vouching; the marker un-vouches; the only framing that survives the verbatim ruling) |
 | failed | deliver `(bg turn failed…)` framing |
 | NO_REPLY / empty | settle quietly |
 | steer-born | silent on every terminal state (nobody asked) |

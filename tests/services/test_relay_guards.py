@@ -155,7 +155,6 @@ async def test_relay_no_reply_dead_man_delivers_payload(
     await DispatchRunner(ctx).run(spec)
 
     assert send_tool.delivered == [
-        "(auto-delivered background result)\n"
         "Reply sent to Andrew with the deep-dive sources: METR report et al."]
 
 

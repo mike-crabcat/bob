@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,22 @@ from server.services.memory.claim_types import (
 from server.services.memory.claim_service import write_claim
 
 logger = logging.getLogger(__name__)
+
+# How far back the undigested-only extraction window overlaps the previous
+# extraction. The boundary is the previous turn's ran_at, but messages that
+# arrived DURING that turn's LLM loop (render → marker write) predate ran_at
+# and would otherwise never be extracted.
+EXTRACT_OVERLAP_MINUTES = 5.0
+
+
+def _undigested_boundary(last_turn_at: str) -> str:
+    """Previous extraction ran_at minus the overlap, ISO. Falls back to the
+    raw timestamp when unparseable (tighter window, never looser)."""
+    try:
+        t = datetime.fromisoformat(last_turn_at.replace("Z", "+00:00"))
+        return (t - timedelta(minutes=EXTRACT_OVERLAP_MINUTES)).isoformat()
+    except ValueError:
+        return last_turn_at
 
 # Outstanding remember-tool-deferred extraction tasks. Holding references prevents
 # the asyncio scheduler from garbage-collecting them before they complete.
@@ -212,7 +228,8 @@ class MemoryService(BaseService):
         return bool(await history.count_dialogue(session_key, active_from))
 
     async def _render_silent_turn_history(
-        self, session_key: str, *, max_history: int = 30, since_hours: float | None = None
+        self, session_key: str, *, max_history: int = 30,
+        since_hours: float | None = None, after_iso: str | None = None,
     ) -> list[dict[str, Any]]:
         """Render recent session history as native role-structured messages.
 
@@ -223,6 +240,9 @@ class MemoryService(BaseService):
 
         ``since_hours`` optionally restricts the window to messages newer than
         now - since_hours (used for one-off backfills like "process past 48h").
+        ``after_iso`` restricts to messages newer than that timestamp — the
+        idle path's undigested-only window (everything before the previous
+        extraction was already digested by it).
         ``max_history`` always caps the count as a safety bound.
         """
         is_group = ":group:" in session_key
@@ -236,7 +256,8 @@ class MemoryService(BaseService):
 
         from server.repositories.history import HistoryRepository
         rows = await HistoryRepository(self.db).recent_dialogue(
-            session_key, limit=max_history, since_hours=since_hours)
+            session_key, limit=max_history, since_hours=since_hours,
+            since_iso=after_iso)
 
         messages: list[dict[str, Any]] = []
         for row in rows:
@@ -370,8 +391,24 @@ class MemoryService(BaseService):
             if not force and not await self._has_undigested_messages(session_key):
                 return {"status": "skipped", "reason": "race_handled"}
 
+            # Undigested-only window (2026-09-30 churn fix): start after the
+            # previous extraction instead of re-reviewing the whole
+            # max_history tail, so a topic that stays in the tail stops being
+            # re-extracted — and re-announced as "new claims" — at every idle
+            # gap. The boundary backs off EXTRACT_OVERLAP_MINUTES to cover
+            # messages that arrived while the previous turn's LLM loop ran
+            # (between its history render and its marker write). Explicit
+            # remember turns (force) and since_hours backfills keep the old
+            # review-the-tail semantics — their whole point is re-reading.
+            after_iso = None
+            if not force and since_hours is None:
+                last_at = await self._last_silent_turn_at(session_key)
+                if last_at:
+                    after_iso = _undigested_boundary(last_at)
+
             history = await self._render_silent_turn_history(
-                session_key, max_history=max_history, since_hours=since_hours
+                session_key, max_history=max_history, since_hours=since_hours,
+                after_iso=after_iso,
             )
             if not history:
                 return {"status": "skipped", "reason": "empty_history"}
@@ -425,21 +462,29 @@ class MemoryService(BaseService):
             )
 
             # Claims were written via tool calls during the loop (before this
-            # point), so count them now to store an accurate record.
+            # point), so count them now to store an accurate record. The
+            # created_at >= turn-start filter excludes dedup-MERGE rows: the
+            # merge writes this turn's id into an existing row's
+            # source_messages, which the LIKE alone would miscount as new.
             count_row = await db.fetch_one(
-                "SELECT COUNT(*) AS n FROM memory_claims WHERE source_messages LIKE ?",
-                (f'%"{turn_message_id}"%',),
+                "SELECT COUNT(*) AS n FROM memory_claims "
+                "WHERE source_messages LIKE ? "
+                "AND datetime(created_at) >= datetime(?)",
+                (f'%"{turn_message_id}"%', turn_start_ts),
             )
             claims_created = count_row["n"] if count_row else 0
 
             # Fetch the actual new-claim rows so we can surface them via the
             # verbose notice. Each row carries the typed value (or object_id
             # for entity-ref claims) so the user sees what was actually written.
+            # created_at >= turn-start keeps merge no-ops out of the notice
+            # (same reasoning as the count above).
             new_claim_rows = await db.fetch_all(
                 "SELECT claim_type_key, subject_id, value, object_id "
                 "FROM memory_claims "
-                "WHERE status = 'active' AND source_messages LIKE ?",
-                (f'%"{turn_message_id}"%',),
+                "WHERE status = 'active' AND source_messages LIKE ? "
+                "AND datetime(created_at) >= datetime(?)",
+                (f'%"{turn_message_id}"%', turn_start_ts),
             ) if claims_created else []
 
             # New entities: subjects of new claims whose entity row was created

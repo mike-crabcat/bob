@@ -1,7 +1,7 @@
 """models.yaml effort defaults reach the Responses API request: main-turn
-paths (chat, chat_stream, chat_with_tools, chat_stream_with_tools) pass no
-explicit effort, so the per-model default must be merged in — and an explicit
-caller hint must win over it.
+paths (chat, chat_stream, chat_with_tools) pass no explicit effort, so the
+per-model default must be merged in — and an explicit caller hint must win
+over it.
 """
 
 from __future__ import annotations

@@ -85,10 +85,11 @@ class SessionService(BaseService):
         await (txn or self.db).execute(
             """INSERT INTO messages
                (id, conversation_id, binding_key, role, content, sender_id, channel, metadata,
-                dispatched, synthetic, provenance, tool_summary, tool_blocks_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                dispatched, synthetic, provenance, tool_summary, tool_blocks_json, dispatch_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (msg_id, conversation_id, session_key, role, content, sender_id, channel, meta_json,
-             dispatched, 1 if synthetic else 0, provenance, tool_summary, tool_blocks_json),
+             dispatched, 1 if synthetic else 0, provenance, tool_summary, tool_blocks_json,
+             dispatch_id),
         )
         return msg_id
 

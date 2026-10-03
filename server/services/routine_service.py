@@ -22,9 +22,11 @@ logger = logging.getLogger(__name__)
 
 # Wall-clock budget for one routine dispatch (LLM iterations + tool rounds).
 # Routines are background bulletins, not work sessions — if a routine can't
-# do its job in two minutes, the fix is a better-scoped routine prompt (or a
+# do its job in five minutes, the fix is a better-scoped routine prompt (or a
 # background task it polls next run), not a longer turn.
-ROUTINE_WALL_CLOCK_SECONDS = 120.0
+# (120s → 300s 2026-09-29, Mike: the 07:00 crypto report with 10 charts
+# truncated every morning at the wall — dust sweep never reached.)
+ROUTINE_WALL_CLOCK_SECONDS = 300.0
 
 # A routine whose prompt asks for delivery to its channel ("send the charts
 # to this channel", "publish the brief to the group"). Gates the report-first

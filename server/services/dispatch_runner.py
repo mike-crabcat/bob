@@ -603,11 +603,11 @@ class DispatchRunner:
                         (t for t in spec.tools if t.name == spec.send_tool_name), None)
                     if send_tool is not None:
                         try:
-                            # Framed as auto-delivered so a terse raw result
-                            # reads as what it is — the runner speaking, not
-                            # Bob's own words (2026-09-06 security-group fix).
-                            await send_tool.handler(
-                                f"(auto-delivered background result)\n{payload}")
+                            # Verbatim (Mike 2026-10-03: a background
+                            # result is still a reply to whoever asked) —
+                            # the old '(auto-delivered…)' framing is
+                            # retired along with the bg-turn header.
+                            await send_tool.handler(payload)
                             logger.warning(
                                 "relay dead-man rescue: turn produced no reply — "
                                 "delivered the background-task payload directly "

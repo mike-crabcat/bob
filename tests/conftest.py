@@ -36,6 +36,9 @@ async def ctx(db):
     # Operator env (~/config/.env) loads into from_env() — pin feature
     # switches tests assume are OFF; loop tests opt back in explicitly.
     settings.goal_loop.enabled = False
+    # Fake-client suites return response objects, not event iterators — the
+    # streaming transport must stay off unless a test opts in.
+    settings.llm_streaming.streaming_enabled = False
     return AppContext(db=db, settings=settings)
 
 

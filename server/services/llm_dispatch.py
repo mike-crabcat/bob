@@ -27,7 +27,8 @@ from server.services.tools import Tool
 from server.services import model_registry
 from server.services import quota_gate
 from server.services.base import BaseService
-from server.services.openai_service import OpenAIService, StreamResult
+from server.services.openai_service import (
+    OpenAIService, StreamResult, _effective_reasoning_effort, _extract_reasoning)
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,9 @@ _MEMORY_TOOL_NAMES = frozenset({"recall", "find"})
 _dispatch_tool_trace: dict[str, dict[str, Any]] = {}
 
 # Item types from the Responses API output that we persist for replay.
-# Reasoning items and unknown types are dropped — they bloat rows and aren't
-# load-bearing for next-turn tool context.
+# Reasoning items are dropped here deliberately — this trace replays onto
+# FUTURE request wires, where stale reasoning items don't belong. Reasoning
+# TEXT is captured per-round in llm_trace_events instead (2026-10-03 uplift).
 _PERSISTED_ITEM_TYPES = frozenset({"function_call", "function_call_output", "message"})
 
 # Per-string cap on function_call.arguments and function_call_output.output,
@@ -174,6 +176,136 @@ def _sanitize_for_json(obj: Any) -> Any:
     return str(obj)
 
 
+# Reasoning/args/result text cap per trace row — enough to mine behaviour,
+# small enough that one verbose round can't bloat the table.
+_TRACE_CONTENT_CAP = 2000
+
+
+class _TraceWriter:
+    """Per-call llm_trace_events writer (2026-10-03 trace uplift).
+
+    Coalesces a round's rows in memory and flushes once per round, so a turn
+    with N rounds costs N batch writes. Rows carry a call-local ``seq`` so the
+    dashboard timeline and the live llm.stream.* events order identically.
+    Content rows stop at ``max_rows`` (pathological-turn bound); a turn_note
+    marks the truncation. All failures are swallowed — tracing must never
+    kill a turn.
+    """
+
+    def __init__(
+        self, db: Any, *, log_id: str | None, dispatch_id: str | None,
+        session_key: str | None, max_rows: int,
+    ) -> None:
+        self.db = db
+        self.log_id = log_id
+        self.dispatch_id = dispatch_id
+        self.session_key = session_key
+        self.max_rows = max_rows
+        self.seq = 0
+        self.written = 0
+        self.truncated = False
+        # Iteration whose tools are currently executing — set by
+        # round_complete so tool_result rows group with their round.
+        self.iteration = 0
+        self._pending: list[dict[str, Any]] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self.log_id is not None
+
+    def emit(
+        self, kind: str, *, iteration: int | None = None, content: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.enabled or self.truncated:
+            return
+        if self.written + len(self._pending) >= self.max_rows:
+            self.truncated = True
+            return
+        self.seq += 1
+        self._pending.append({
+            "dispatch_id": self.dispatch_id,
+            "session_key": self.session_key,
+            "iteration": self.iteration if iteration is None else iteration,
+            "seq": self.seq,
+            "kind": kind,
+            "content": content[:_TRACE_CONTENT_CAP],
+            "meta": meta,
+        })
+
+    async def flush(self) -> None:
+        if not self._pending or not self.enabled:
+            return
+        from server.repositories.llm_trace import LlmTraceRepository
+        try:
+            count = await LlmTraceRepository(self.db).append_many(
+                llm_call_id=self.log_id, events=self._pending)
+            self.written += count
+            self._pending.clear()
+        except Exception:
+            logger.warning(
+                "trace flush failed: log_id=%s dispatch_id=%s rows=%d",
+                self.log_id, self.dispatch_id, len(self._pending), exc_info=True)
+            self._pending.clear()
+
+    async def close(self) -> None:
+        """Final flush + truncation marker. Call at every exit path."""
+        if self.truncated:
+            # Bypasses emit() deliberately — the marker must land even though
+            # the cap is what it's marking.
+            self.seq += 1
+            self._pending.append({
+                "dispatch_id": self.dispatch_id,
+                "session_key": self.session_key,
+                "iteration": 0,
+                "seq": self.seq,
+                "kind": "turn_note",
+                "content": f"trace truncated at {self.max_rows} rows",
+                "meta": {"max_rows": self.max_rows},
+            })
+            self.truncated = False
+        await self.flush()
+
+    async def round_complete(
+        self, iteration: int, response: Any, round_latency: float, usage: Any,
+    ) -> None:
+        """on_round_complete adapter: reasoning parts + tool_call rows +
+        round_completed meta, flushed as one batch. Transport-agnostic —
+        buffered and streamed rounds feed identical rows. Also stamps the
+        writer's iteration so the tool_result rows that follow (this round's
+        executions) group correctly."""
+        if not self.enabled:
+            return
+        self.iteration = iteration
+        for part in _extract_reasoning(response):
+            self.emit(
+                "reasoning_part", iteration=iteration,
+                content=part["text"], meta={"source": part["source"]})
+        tool_calls = [
+            item for item in (getattr(response, "output", None) or [])
+            if getattr(item, "type", None) == "function_call"]
+        for fc in tool_calls:
+            self.emit(
+                "tool_call", iteration=iteration,
+                content=json.dumps(
+                    {"name": fc.name, "arguments": fc.arguments},
+                    default=str),
+                meta={"call_id": fc.call_id, "name": fc.name})
+        self.emit(
+            "round_completed", iteration=iteration,
+            content="",
+            meta={
+                "latency_seconds": round(round_latency, 3),
+                "tool_calls": len(tool_calls),
+                "prompt_tokens": getattr(usage, "input_tokens", None) if usage else None,
+                "completion_tokens": getattr(usage, "output_tokens", None) if usage else None,
+                "cached_tokens": None if not usage else (
+                    getattr(getattr(usage, "input_tokens_details", None),
+                            "cached_tokens", None)),
+            })
+        await self.flush()
+
+
 def _extract_from_messages(
     messages: list[dict[str, Any]],
 ) -> tuple[str, str]:
@@ -219,6 +351,7 @@ async def _record_log(
     contact_id: str | None = None,
     tool_blocks_json: str | None = None,
     generation_id: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Record or update an LLM call log entry. Returns the log_id.
 
@@ -239,7 +372,8 @@ async def _record_log(
             error_message=error_message, project_id=project_id,
             task_id=task_id, dispatch_id=dispatch_id, contact_id=contact_id,
             tool_blocks_json=tool_blocks_json,
-            generation_id=generation_id)
+            generation_id=generation_id,
+            reasoning_effort=reasoning_effort)
     except Exception:
         logger.warning("Failed to record LLM call log", exc_info=True)
         return log_id or str(uuid4())
@@ -267,12 +401,99 @@ class LLMDispatchService(BaseService):
     def _get_service(self) -> OpenAIService:
         return OpenAIService(self.ctx)
 
+    def _make_stream_callback(
+        self, *, session_key: str | None, call_category: str, model: str,
+        log_id: str | None, dispatch_id: str | None,
+    ) -> Any:
+        """Map OpenAIService stream kinds → live ``llm.stream.*`` bus events.
+
+        Deliberately a NEW prefix — ``__root.tsx`` invalidates three queries
+        on every ``llm.call.*`` event, so per-delta traffic must never ride
+        that prefix. Deltas (text/reasoning/tool args) are batched per
+        delta_min_interval_ms; whole reasoning parts and round boundaries
+        publish immediately. Every payload carries ``seq`` (bus-local,
+        monotonic) so the UI can detect drop-oldest gaps and refetch the
+        trace endpoint. Deltas are ephemeral — durability lives in
+        llm_trace_events via on_round_complete."""
+        ls = getattr(self._get_settings(), "llm_streaming", None)
+        interval = ((getattr(ls, "delta_min_interval_ms", 250) or 0) / 1000.0
+                    if ls is not None else 0.25)
+        state: dict[str, Any] = {"seq": 0, "last_flush": 0.0, "buf": {}}
+
+        async def _publish(kind: str, payload: dict[str, Any]) -> None:
+            if self.ctx.event_bus is None:
+                return
+            state["seq"] += 1
+            base: dict[str, Any] = {"seq": state["seq"]}
+            if log_id:
+                base["log_id"] = log_id
+            if dispatch_id:
+                base["dispatch_id"] = dispatch_id
+            if session_key:
+                base["session_key"] = session_key
+            base["call_category"] = call_category
+            base["model"] = model
+            await self.ctx.event_bus.publish(f"llm.stream.{kind}", {**base, **payload})
+
+        async def _flush(force: bool) -> None:
+            if not state["buf"]:
+                return
+            now = time.monotonic()
+            if not force and now - state["last_flush"] < interval:
+                return
+            for kind, payload in state["buf"].items():
+                await _publish(kind, payload)
+            state["buf"].clear()
+            state["last_flush"] = now
+
+        async def _on_stream_event(kind: str, data: dict[str, Any]) -> None:
+            if kind in ("text_delta", "reasoning_delta", "tool_args"):
+                if kind == "tool_args":
+                    item_id = data.get("item_id") or "?"
+                    slot = state["buf"].setdefault(
+                        "tool", {"args": "", "item_id": item_id,
+                                 "phase": "args", "iteration": data.get("iteration")})
+                    slot["args"] += data.get("delta") or ""
+                else:
+                    slot = state["buf"].setdefault(
+                        "text" if kind == "text_delta" else "reasoning",
+                        {"text": "", "iteration": data.get("iteration")})
+                    slot["text"] += data.get("text") or ""
+                    if data.get("raw"):
+                        slot["raw"] = True
+                await _flush(force=False)
+            elif kind == "reasoning_part":
+                await _flush(force=True)  # deltas before the part that closes them
+                await _publish("reasoning", {
+                    "text": data.get("text") or "", "done": True,
+                    "raw": bool(data.get("raw")),
+                    "iteration": data.get("iteration")})
+            elif kind == "tool_started":
+                await _flush(force=True)
+                await _publish("tool", {
+                    "name": data.get("name"), "item_id": data.get("item_id"),
+                    "phase": "started", "iteration": data.get("iteration")})
+            elif kind == "round_started":
+                await _flush(force=True)
+                await _publish("round", {
+                    "phase": "started", "iteration": data.get("iteration")})
+            elif kind == "round_finished":
+                # internal: fired by the dispatch round handler so the
+                # completed tick shares this callback's seq counter
+                await _flush(force=True)
+                await _publish("round", {
+                    "phase": "completed", "iteration": data.get("iteration"),
+                    "latency_seconds": data.get("latency_seconds"),
+                    "tool_calls": data.get("tool_calls")})
+        return _on_stream_event
+
     def _make_tool_callback(
         self,
         session_key: str | None,
         call_category: str,
         log_id: str | None = None,
         dispatch_id: str | None = None,
+        trace: _TraceWriter | None = None,
     ) -> Any:
         async def _on_tool_call(name: str, args: dict, result_summary: str) -> None:
             if dispatch_id:
@@ -286,6 +507,12 @@ class LLMDispatchService(BaseService):
                     _bb.note_tool_call(dispatch_id)
                 except Exception:
                     pass
+            if trace is not None:
+                trace.emit(
+                    "tool_result",
+                    iteration=trace.iteration,
+                    content=_truncate_str(result_summary, _TRACE_CONTENT_CAP),
+                    meta={"name": name, "args": _truncate_str(args, 400)})
             if self.ctx.event_bus is None:
                 return
             payload: dict[str, Any] = {
@@ -297,6 +524,8 @@ class LLMDispatchService(BaseService):
             }
             if log_id:
                 payload["log_id"] = log_id
+            if dispatch_id:
+                payload["dispatch_id"] = dispatch_id
             await self.ctx.event_bus.publish("llm.call.tool_completed", payload)
         return _on_tool_call
 
@@ -377,7 +606,7 @@ class LLMDispatchService(BaseService):
             )
             elapsed = time.monotonic() - t0
 
-            await _record_log(
+            log_id = await _record_log(
                 self.db,
                 provider=provider,
                 model=resolved_model,
@@ -387,6 +616,7 @@ class LLMDispatchService(BaseService):
                 user_message=user_message,
                 messages_json=messages_json,
                 generation_id=call_meta.get("generation_id"),
+                reasoning_effort=call_meta.get("reasoning_effort"),
                 response_text=result or "",
                 latency_seconds=elapsed,
                 prompt_tokens=stream_result.prompt_tokens,
@@ -399,6 +629,26 @@ class LLMDispatchService(BaseService):
                 dispatch_id=dispatch_id,
                 contact_id=contact_id,
             )
+            # Single-round trace (2026-10-03): background passes (memory,
+            # dream, reflection) don't run tool loops, but their reasoning is
+            # just as mineable — one round's rows at completion.
+            ls = getattr(self._get_settings(), "llm_streaming", None)
+            if ls is None or getattr(ls, "trace_enabled", True):
+                trace = _TraceWriter(
+                    self.db, log_id=log_id, dispatch_id=dispatch_id,
+                    session_key=session_key,
+                    max_rows=getattr(ls, "trace_max_rows_per_call", 400)
+                    if ls is not None else 400)
+                for part in call_meta.get("reasoning_parts") or []:
+                    trace.emit("reasoning_part", content=part["text"],
+                               meta={"source": part["source"]})
+                trace.emit(
+                    "round_completed",
+                    meta={"latency_seconds": round(elapsed, 3), "tool_calls": 0,
+                          "prompt_tokens": stream_result.prompt_tokens,
+                          "completion_tokens": stream_result.completion_tokens,
+                          "cached_tokens": stream_result.cached_tokens})
+                await trace.close()
 
             quota_gate.record_success(provider)
             logger.info(
@@ -469,6 +719,7 @@ class LLMDispatchService(BaseService):
         messages_json = json.dumps(messages)
 
         stream_result = StreamResult()
+        call_meta: dict[str, Any] = {}
         t0 = time.monotonic()
         ttft: float | None = None
         accumulated = ""
@@ -480,6 +731,7 @@ class LLMDispatchService(BaseService):
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream_result=stream_result,
+                call_meta=call_meta,
             ):
                 if chunk:
                     if ttft is None:
@@ -489,7 +741,7 @@ class LLMDispatchService(BaseService):
 
             elapsed = time.monotonic() - t0
 
-            await _record_log(
+            log_id = await _record_log(
                 self.db,
                 provider=provider,
                 model=resolved_model,
@@ -510,7 +762,27 @@ class LLMDispatchService(BaseService):
                 task_id=task_id,
                 dispatch_id=dispatch_id,
                 contact_id=contact_id,
+                generation_id=call_meta.get("generation_id"),
+                reasoning_effort=call_meta.get("reasoning_effort"),
             )
+            ls = getattr(self._get_settings(), "llm_streaming", None)
+            if ls is None or getattr(ls, "trace_enabled", True):
+                trace = _TraceWriter(
+                    self.db, log_id=log_id, dispatch_id=dispatch_id,
+                    session_key=session_key,
+                    max_rows=getattr(ls, "trace_max_rows_per_call", 400)
+                    if ls is not None else 400)
+                for part in call_meta.get("reasoning_parts") or []:
+                    trace.emit("reasoning_part", content=part["text"],
+                               meta={"source": part["source"]})
+                trace.emit(
+                    "round_completed",
+                    meta={"latency_seconds": round(elapsed, 3), "tool_calls": 0,
+                          "prompt_tokens": stream_result.prompt_tokens,
+                          "completion_tokens": stream_result.completion_tokens,
+                          "cached_tokens": stream_result.cached_tokens,
+                          "ttft_seconds": round(ttft, 3) if ttft else None})
+                await trace.close()
 
             quota_gate.record_success(provider)
             logger.info(
@@ -595,6 +867,8 @@ class LLMDispatchService(BaseService):
 
         t0 = time.monotonic()
         original_len = len(messages)
+        effort = _effective_reasoning_effort(
+            resolved_model, reasoning_effort, self._get_settings())
         log_id = await _record_log(
             self.db,
             provider=provider, model=resolved_model,
@@ -605,6 +879,7 @@ class LLMDispatchService(BaseService):
             status="running",
             project_id=project_id, task_id=task_id,
             dispatch_id=dispatch_id, contact_id=contact_id,
+            reasoning_effort=effort,
         )
         await self._publish_call(
             status="running", session_key=session_key,
@@ -612,6 +887,13 @@ class LLMDispatchService(BaseService):
             latency_seconds=None, total_tokens=None,
             log_id=log_id,
         )
+        ls = getattr(self._get_settings(), "llm_streaming", None)
+        trace_writer = _TraceWriter(
+            self.db, log_id=log_id, dispatch_id=dispatch_id,
+            session_key=session_key,
+            max_rows=getattr(ls, "trace_max_rows_per_call", 400)
+            if ls is not None else 400,
+        ) if (ls is None or getattr(ls, "trace_enabled", True)) and log_id else None
         try:
             stream_result = StreamResult()
             call_meta: dict[str, Any] = {}
@@ -622,6 +904,24 @@ class LLMDispatchService(BaseService):
                     status="running",
                 )
 
+            stream_cb = self._make_stream_callback(
+                session_key=session_key, call_category=call_category,
+                model=resolved_model, log_id=log_id, dispatch_id=dispatch_id)
+
+            async def _on_round(
+                iteration: int, response: Any, round_latency: float, usage: Any,
+            ) -> None:
+                if trace_writer:
+                    await trace_writer.round_complete(
+                        iteration, response, round_latency, usage)
+                n_calls = sum(
+                    1 for item in (getattr(response, "output", None) or [])
+                    if getattr(item, "type", None) == "function_call")
+                await stream_cb("round_finished", {
+                    "iteration": iteration,
+                    "latency_seconds": round(round_latency, 3),
+                    "tool_calls": n_calls})
+
             result = await service.chat_with_tools(
                 messages=messages,
                 tools=openai_tools,
@@ -630,7 +930,8 @@ class LLMDispatchService(BaseService):
                 max_iterations=max_iterations,
                 time_limit_seconds=time_limit_seconds,
                 stream_result=stream_result,
-                on_tool_call=self._make_tool_callback(session_key, call_category, log_id, dispatch_id),
+                on_tool_call=self._make_tool_callback(
+                    session_key, call_category, log_id, dispatch_id, trace_writer),
                 on_iteration_complete=_on_iteration,
                 dispatch_id=dispatch_id,
                 session_key=session_key,
@@ -639,8 +940,12 @@ class LLMDispatchService(BaseService):
                 call_meta=call_meta,
                 force_first_tool_choice=force_first_tool_choice,
                 reasoning_effort=reasoning_effort,
+                on_round_complete=_on_round,
+                on_stream_event=stream_cb,
             )
             elapsed = time.monotonic() - t0
+            if trace_writer:
+                await trace_writer.close()
 
             trace: dict[str, Any] | None = None
             if dispatch_id:
@@ -651,6 +956,7 @@ class LLMDispatchService(BaseService):
             await _record_log(self.db, log_id=log_id,
                 response_text=result,
                 latency_seconds=elapsed,
+                ttft_seconds=stream_result.ttft_seconds,
                 prompt_tokens=stream_result.prompt_tokens,
                 completion_tokens=stream_result.completion_tokens,
                 total_tokens=stream_result.total_tokens,
@@ -684,6 +990,11 @@ class LLMDispatchService(BaseService):
                 logger.error("LLM dispatch tools failed: model=%s error=%s", resolved_model, exc)
             if dispatch_id:
                 _dispatch_tool_trace.pop(dispatch_id, None)
+            if trace_writer:
+                trace_writer.emit(
+                    "turn_note", content=f"turn failed: {str(exc)[:400]}",
+                    meta={"cancelled": is_cancel})
+                await trace_writer.close()
             cancel_reason = "server restart"
             if is_cancel and dispatch_id:
                 try:
@@ -701,140 +1012,6 @@ class LLMDispatchService(BaseService):
                 status="failed", session_key=session_key,
                 call_category=call_category, model=resolved_model,
                 latency_seconds=elapsed, total_tokens=None,
-                error_message=str(exc),
-            )
-            raise
-
-    async def chat_stream_with_tools(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[Tool],
-        *,
-        model: str | None = None,
-        max_iterations: int = 100,
-        call_category: str = "voice_chat",
-        session_key: str | None = None,
-        project_id: str | None = None,
-        task_id: str | None = None,
-        dispatch_id: str | None = None,
-        contact_id: str | None = None,
-    ) -> AsyncIterator[str]:
-        """Stream chat with tool calling support.
-
-        Handles the tool loop non-streamingly (tool calls need full responses),
-        then streams the final text response for real-time TTS/consumption.
-        """
-        resolved_model = self._resolve_model(model)
-        provider = model_registry.provider_for(resolved_model)
-        quota_gate.check(provider)
-        service = self._get_service()
-
-        system_prompt, user_message = _extract_from_messages(messages)
-
-        openai_tools = [t.to_openai_format() for t in tools]
-        tool_handlers = {t.name: t.handler for t in tools}
-        tools_json = json.dumps(openai_tools) if openai_tools else None
-
-        t0 = time.monotonic()
-        original_len = len(messages)
-        log_id = await _record_log(
-            self.db,
-            provider=provider, model=resolved_model,
-            call_category=call_category, session_key=session_key,
-            system_prompt=system_prompt, user_message=user_message,
-            messages_json=json.dumps(_sanitize_for_json(messages)),
-            tools_json=tools_json,
-            status="running",
-            project_id=project_id, task_id=task_id,
-            dispatch_id=dispatch_id, contact_id=contact_id,
-        )
-        await self._publish_call(
-            status="running", session_key=session_key,
-            call_category=call_category, model=resolved_model,
-            latency_seconds=None, total_tokens=None,
-            log_id=log_id,
-        )
-        accumulated = ""
-        ttft: float | None = None
-        stream_result = StreamResult()
-
-        async def _on_iteration(msgs: list[dict[str, Any]]) -> None:
-            await _record_log(self.db, log_id=log_id,
-                messages_json=json.dumps(_sanitize_for_json(msgs)),
-                status="running",
-            )
-
-        try:
-            async for chunk in service.chat_stream_with_tools(
-                messages=messages,
-                tools=openai_tools,
-                tool_handlers=tool_handlers,
-                model=resolved_model,
-                max_iterations=max_iterations,
-                on_tool_call=self._make_tool_callback(session_key, call_category, log_id, dispatch_id),
-                on_iteration_complete=_on_iteration,
-                dispatch_id=dispatch_id,
-                session_key=session_key,
-                log_id=log_id,
-                stream_result=stream_result,
-            ):
-                if chunk:
-                    if ttft is None:
-                        ttft = time.monotonic() - t0
-                    accumulated += chunk
-                    yield chunk
-
-            trace: dict[str, Any] | None = None
-            if dispatch_id:
-                trace = _build_tool_trace(messages[original_len:])
-                if trace is not None:
-                    _dispatch_tool_trace[dispatch_id] = trace
-
-            await _record_log(self.db, log_id=log_id,
-                response_text=accumulated,
-                latency_seconds=time.monotonic() - t0,
-                ttft_seconds=ttft,
-                messages_json=json.dumps(_sanitize_for_json(messages)),
-                prompt_tokens=stream_result.prompt_tokens,
-                completion_tokens=stream_result.completion_tokens,
-                total_tokens=stream_result.total_tokens,
-                cached_tokens=stream_result.cached_tokens,
-                status="completed",
-                tool_blocks_json=_serialize_trace_items(trace),
-            )
-            quota_gate.record_success(provider)
-            await self._publish_call(
-                status="completed", session_key=session_key,
-                call_category=call_category, model=resolved_model,
-                latency_seconds=time.monotonic() - t0,
-                total_tokens=stream_result.total_tokens,
-                ttft_seconds=ttft,
-            )
-
-        except BaseException as exc:
-            is_cancel = isinstance(exc, asyncio.CancelledError)
-            if not is_cancel:
-                quota_gate.record_failure(exc, provider)
-                logger.error("LLM dispatch stream+tools failed: model=%s error=%s", resolved_model, exc)
-            if dispatch_id:
-                _dispatch_tool_trace.pop(dispatch_id, None)
-            await _record_log(self.db, log_id=log_id,
-                response_text=accumulated,
-                latency_seconds=time.monotonic() - t0,
-                ttft_seconds=ttft,
-                messages_json=json.dumps(_sanitize_for_json(messages)),
-                prompt_tokens=stream_result.prompt_tokens,
-                completion_tokens=stream_result.completion_tokens,
-                total_tokens=stream_result.total_tokens,
-                cached_tokens=stream_result.cached_tokens,
-                status="failed",
-                error_message=f"Cancelled — server restart" if is_cancel else str(exc),
-            )
-            await self._publish_call(
-                status="failed", session_key=session_key,
-                call_category=call_category, model=resolved_model,
-                latency_seconds=time.monotonic() - t0,
-                total_tokens=stream_result.total_tokens,
                 error_message=str(exc),
             )
             raise

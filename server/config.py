@@ -408,6 +408,26 @@ class ToolLoopSettings:
 
 
 @dataclass(slots=True)
+class LlmStreamingSettings:
+    """LLM streaming + reasoning-trace uplift (2026-10-03, plan: trace uplift).
+
+    Three independent levers: the transport (streamed tool-loop rounds), the
+    reasoning-summary request (paid output tokens — skipped under small
+    max_output_tokens caps so background passes keep their budget), and the
+    durable llm_trace_events timeline (payloads redacted at 30d with
+    llm_call_log, rows cascade-deleted at 90d). Kill switches restore the
+    pre-uplift behaviour exactly. streaming_enabled ships OFF and flips
+    default after the eval battery + burn-in (careful-rollouts doctrine)."""
+
+    streaming_enabled: bool = False    # BOB_LLM_STREAMING (probe-verified both rails)
+    summary_enabled: bool = True       # BOB_LLM_REASONING_SUMMARY
+    summary_min_output_tokens: int = 3000  # below this cap, skip summary
+    delta_min_interval_ms: int = 250   # llm.stream.text throttle/batch window
+    trace_enabled: bool = True         # BOB_LLM_TRACE
+    trace_max_rows_per_call: int = 400 # pathological-turn bound (~5 rows/round)
+
+
+@dataclass(slots=True)
 class McpSettings:
     """MCP client subsystem: external tool servers (stdio subprocess or
     streamable HTTP) exposed to the LLM as native tools namespaced
@@ -623,6 +643,7 @@ class Settings:
     utility_conversations: UtilityConversationSettings = field(
         default_factory=UtilityConversationSettings)
     tool_loop: ToolLoopSettings = field(default_factory=ToolLoopSettings)
+    llm_streaming: LlmStreamingSettings = field(default_factory=LlmStreamingSettings)
     mcp: McpSettings = field(default_factory=McpSettings)
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
@@ -988,6 +1009,17 @@ class Settings:
                 history_view_keep=int(os.getenv("BOB_TOOL_LOOP_HISTORY_KEEP", "20")),
                 history_view_trigger_chars=int(
                     os.getenv("BOB_TOOL_LOOP_HISTORY_TRIGGER", "40000")),
+            ),
+            llm_streaming=LlmStreamingSettings(
+                streaming_enabled=_env_bool("BOB_LLM_STREAMING", False),
+                summary_enabled=_env_bool("BOB_LLM_REASONING_SUMMARY", True),
+                summary_min_output_tokens=int(
+                    os.getenv("BOB_LLM_SUMMARY_MIN_OUTPUT_TOKENS", "3000")),
+                delta_min_interval_ms=int(
+                    os.getenv("BOB_LLM_DELTA_INTERVAL_MS", "250")),
+                trace_enabled=_env_bool("BOB_LLM_TRACE", True),
+                trace_max_rows_per_call=int(
+                    os.getenv("BOB_LLM_TRACE_MAX_ROWS", "400")),
             ),
             mcp=McpSettings(
                 enabled=_env_bool("BOB_MCP_ENABLED", True),

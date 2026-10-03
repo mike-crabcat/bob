@@ -51,12 +51,65 @@ def test_image_injection_with_empty_data_url_appends_no_media_block():
     assert "Error" in rows[0]["output"]
 
 
-def test_video_injection_supported_uses_input_video_part():
+def test_video_injection_supported_rides_user_message():
+    """Video must NOT ride function_call_output — OpenRouter's validator
+    rejects input_video parts there and 400s the whole request (2026-10-02
+    incident: six invalid_prompt errors, every one an input_video FCO, and
+    the stored row then poisoned every later turn in the session). Native
+    video rides a synthetic user message: video_url in user content is the
+    rail-verified shape (2026-09-05)."""
     rows = _tool_result_messages(
         VideoInjection(text="vid", data_url="data:video/mp4;base64,AAA", path="/w/x.mp4"),
         "c4", video_supported=True)
-    part = [p for p in rows[0]["output"] if p.get("type") == "input_video"][0]
-    assert part == {"type": "input_video", "video_url": "data:video/mp4;base64,AAA"}
+    assert len(rows) == 2
+    fco, media = rows
+    assert fco == {"type": "function_call_output", "call_id": "c4",
+                   "output": "vid (video attached in the following message)"}
+    assert media["role"] == "user"
+    parts = media["content"]
+    assert parts[0]["type"] == "input_text" and "c4" in parts[0]["text"]
+    assert parts[1] == {"type": "input_video",
+                        "video_url": "data:video/mp4;base64,AAA"}
+
+
+def test_strip_unsupported_fco_video_depoisons_legacy_rows():
+    """Wire guard for history stored before 2026-10-03: input_video parts
+    inside function_call_output arrays are replaced by a text note, while
+    input_image parts and user-message input_video pass through."""
+    from server.services.openai_service import strip_unsupported_fco_video
+    poisoned = [
+        {"role": "user", "content": "hi"},
+        {"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": [
+            {"type": "input_text", "text": "clip frames"},
+            {"type": "input_video", "video_url": "data:video/mp4;base64,AAA"},
+        ]},
+        {"type": "function_call_output", "call_id": "c2", "output": [
+            {"type": "input_text", "text": "img"},
+            {"type": "input_image", "image_url": "data:image/jpeg;base64,BBB"},
+        ]},
+        {"role": "user", "content": [
+            {"type": "input_text", "text": "[video tool output]"},
+            {"type": "input_video", "video_url": "data:video/mp4;base64,CCC"},
+        ]},
+    ]
+    clean, stripped = strip_unsupported_fco_video(poisoned)
+    assert stripped == 1
+    assert isinstance(clean[2]["output"], str)
+    assert "clip frames" in clean[2]["output"]
+    assert "input_video" in clean[2]["output"]          # the note says what happened
+    assert "AAA" not in clean[2]["output"]              # and the payload is gone
+    assert clean[3]["output"][1]["type"] == "input_image"   # image FCO untouched
+    assert clean[4]["content"][1]["type"] == "input_video"  # user-message video untouched
+    assert clean[0] == poisoned[0] and clean[1] == poisoned[1]
+
+
+def test_strip_unsupported_fco_video_idempotent_and_cheap():
+    from server.services.openai_service import strip_unsupported_fco_video
+    plain = [{"role": "user", "content": "plain"},
+             {"type": "function_call_output", "call_id": "c", "output": "text"}]
+    clean, stripped = strip_unsupported_fco_video(plain)
+    assert stripped == 0 and clean == plain
 
 
 def test_video_injection_unsupported_without_path_degrades_to_note():

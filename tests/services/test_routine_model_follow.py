@@ -128,7 +128,7 @@ async def test_routine_carries_wall_clock_budget(db, tmp_path, monkeypatch):
     captured: dict = {}
     await _fire(db, tmp_path, monkeypatch, captured)
     assert captured.get("time_limit_seconds") == ROUTINE_WALL_CLOCK_SECONDS
-    assert ROUTINE_WALL_CLOCK_SECONDS == 120.0
+    assert ROUTINE_WALL_CLOCK_SECONDS == 300.0  # 2026-09-29 Mike: 2min → 5min
 
 
 @pytest.mark.asyncio

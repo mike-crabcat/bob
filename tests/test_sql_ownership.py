@@ -54,6 +54,7 @@ OWNERS: dict[str, list[str]] = {
     "utility_conversations": ["repositories/utility_conversations.py"],
     "attention_shadow": ["services/attention/"],
     "llm_call_log": ["repositories/llm_call_log.py"],
+    "llm_trace_events": ["repositories/llm_trace.py"],
     "phone_calls": ["repositories/phone_calls.py"],
     "whatsappgroups": ["repositories/groups.py"],
     "whatsappgroup_members": ["repositories/groups.py"],

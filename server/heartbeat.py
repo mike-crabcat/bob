@@ -222,6 +222,9 @@ class LlmLogRetentionTask:
     prompts, messages, responses, and tool blocks are stripped. This keeps
     telemetry from dominating database size (it once reached 2.4GB of a
     2.5GB file) without losing usage history. Bob3 plan Phase 0, decision 7.
+
+    llm_trace_events content is stripped on the same 30-day cadence (2026-10
+    trace uplift); rows hard-delete at 90d via the llm_call_log cascade.
     """
 
     name = "llm_log_retention"
@@ -236,9 +239,13 @@ class LlmLogRetentionTask:
 
         cutoff = (now - timedelta(days=self.payload_max_age_days)).isoformat()
         from server.repositories.llm_call_log import LlmCallLogRepository
+        from server.repositories.llm_trace import LlmTraceRepository
         redacted = await LlmCallLogRepository(ctx.db).redact_payloads_before(cutoff)
-        if redacted:
-            logger.info("Redacted payloads from %d llm_call_log row(s)", redacted)
+        trace_redacted = await LlmTraceRepository(ctx.db).redact_content_before(cutoff)
+        if redacted or trace_redacted:
+            logger.info(
+                "Redacted payloads from %d llm_call_log row(s), %d trace row(s)",
+                redacted, trace_redacted)
 
 
 _last_event_log_reconcile: datetime | None = None

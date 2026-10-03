@@ -644,12 +644,13 @@ class BackburnerService(BaseService):
     # ------------------------------------------------------ terminal content
     # The v2 fallback/narration-only relay builders were RETIRED with
     # final-text delivery (2026-10-01, docs/final-text-delivery-plan.md):
-    # silent-flight results are delivered directly by the supervisor
-    # under a '(background result…)' header (unverified variant for
-    # zero-tool flights — the 2026-09-17 phantom-build withdrawal lives
-    # in that header now). relay_payload still parses the historical
-    # wake shapes from pre-retirement rows. _failed_content survives for
-    # the one path that still wakes instead of delivering: boot recovery
+    # silent-flight results are delivered directly by the supervisor,
+    # verbatim (Mike 2026-10-03: a detached turn is still a reply to the
+    # person who asked). The only framing left is the UNVERIFIED marker
+    # for zero-tool flights — the 2026-09-17 phantom-build withdrawal
+    # lives there now. relay_payload still parses the historical wake
+    # shapes from pre-retirement rows. _failed_content survives for the
+    # one path that still wakes instead of delivering: boot recovery
     # (recover_orphaned_goals has no live spec to deliver through) and
     # the runtime terminal's delivery-failure fallback.
 
@@ -716,14 +717,16 @@ class BackburnerService(BaseService):
             _dispatch_ids.pop(subagent_id, None)
             _flight_by_dispatch.pop(spec.dispatch_id, None)
 
-    async def _deliver_result(self, spec: Any, framed: str) -> bool:
+    async def _deliver_result(self, spec: Any, text: str) -> bool:
         """Final-text delivery for a silent flight (docs/
         final-text-delivery-plan.md): deliver the result directly through
         the flight's own send tool handler — idempotency keys, send
         records and the effects outbox all apply, exactly like the
-        dispatch runner's in-turn delivery. Framed as the runner speaking
-        (the '(background result…)' header), never as Bob's own composed
-        words — the dead-man switch's 2026-09-06 framing rule. Returns
+        dispatch runner's in-turn delivery. Verbatim: the flight's final
+        text IS its reply to whoever asked (Mike 2026-10-03; the old
+        '(background result…)' header and the dead-man 2026-09-06 framing
+        rule are retired for completed flights — only the zero-tool
+        UNVERIFIED marker survives, applied by the caller). Returns
         False when delivery was impossible (no send tool / handler
         error) — callers then settle with the result stored on the goal."""
         if not getattr(spec, "send_tool_name", ""):
@@ -734,7 +737,7 @@ class BackburnerService(BaseService):
         if send_tool is None:
             return False
         try:
-            await send_tool.handler(framed)
+            await send_tool.handler(text)
             # Record the delivery in history: run() returned at detach, so
             # no _record_history will ever run for this send — without this
             # the message exists on WhatsApp but not in the transcript,
@@ -742,7 +745,7 @@ class BackburnerService(BaseService):
             # first live firing (2026-10-02 aus-legal announcement).
             from server.services.session_service import SessionService
             await SessionService(self.ctx).add_message(
-                spec.session_key, "assistant", framed,
+                spec.session_key, "assistant", text,
                 channel=getattr(spec, "channel", None) or "whatsapp")
             return True
         except Exception:
@@ -800,18 +803,21 @@ class BackburnerService(BaseService):
                     # the flight's stimulus was a human question and the
                     # holding ack promised an answer, so this is the same
                     # final-text delivery the runner applies to any
-                    # human-stimulus turn. Framing depends on whether the
-                    # flight actually ran anything.
-                    header = (
-                        f"(background result from bg turn {short})"
-                        if made_tool_calls
-                        else f"(background result from bg turn {short} — "
-                        "UNVERIFIED: this turn ran no tools, so claims "
-                        "below that work was started, sent, or finished "
-                        "may not have happened; if it matters, it still "
-                        "needs doing)")
-                    delivered = await self._deliver_result(
-                        spec, f"{header}\n\n{_delivery_cap(combined)}")
+                    # human-stimulus turn: VERBATIM, no header (Mike
+                    # 2026-10-03: a detached turn is still a reply to the
+                    # person who asked). One framing rule survives: a
+                    # flight that ran ZERO tools keeps the UNVERIFIED
+                    # marker — the 2026-09-17 phantom-build guard; narrated
+                    # work that never happened must not land as Bob's own
+                    # verified words.
+                    body = _delivery_cap(combined)
+                    if not made_tool_calls:
+                        body = (
+                            "(UNVERIFIED: this turn ran no tools, so claims "
+                            "below that work was started, sent, or finished "
+                            "may not have happened; if it matters, it still "
+                            "needs doing)\n\n" + body)
+                    delivered = await self._deliver_result(spec, body)
                     if not delivered:
                         logger.error(
                             "backburner: silent-flight result undeliverable "

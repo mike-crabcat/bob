@@ -42,6 +42,7 @@ class LlmCallLogRepository:
         contact_id: str | None = None,
         tool_blocks_json: str | None = None,
         generation_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Record or update a call log entry; returns the log id.
 
@@ -57,12 +58,13 @@ class LlmCallLogRepository:
                        prompt_tokens=?, completion_tokens=?, total_tokens=?, cached_tokens=?,
                        status=?, error_message=?, messages_json=COALESCE(?, messages_json),
                        tool_blocks_json=COALESCE(?, tool_blocks_json),
-                       generation_id=COALESCE(?, generation_id)
+                       generation_id=COALESCE(?, generation_id),
+                       reasoning_effort=COALESCE(?, reasoning_effort)
                        WHERE id = ?""",
                     (response_text, latency_seconds, ttft_seconds,
                      prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                      status, error_message, messages_json, tool_blocks_json,
-                     generation_id, log_id))
+                     generation_id, reasoning_effort, log_id))
                 return log_id
 
         row_id = log_id or str(uuid4())
@@ -73,14 +75,14 @@ class LlmCallLogRepository:
                 response_text, latency_seconds, ttft_seconds,
                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                 status, error_message, project_id, task_id, dispatch_id, contact_id,
-                tool_blocks_json, generation_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tool_blocks_json, generation_id, reasoning_effort)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (row_id, provider, model, call_category, session_key,
              system_prompt, user_message, messages_json, tools_json,
              response_text, latency_seconds, ttft_seconds,
              prompt_tokens, completion_tokens, total_tokens, cached_tokens,
              status, error_message, project_id, task_id, dispatch_id, contact_id,
-             tool_blocks_json, generation_id))
+             tool_blocks_json, generation_id, reasoning_effort))
         return row_id
 
     async def unattributed_generations(
@@ -148,7 +150,7 @@ class LlmCallLogRepository:
                       response_text, latency_seconds, ttft_seconds,
                       prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                       status, error_message, tool_blocks_json,
-                      generation_id, served_by, served_quant
+                      generation_id, served_by, served_quant, reasoning_effort
                FROM llm_call_log WHERE id = ?""",
             (call_id,))
         return dict(row) if row else None

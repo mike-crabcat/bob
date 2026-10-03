@@ -44,7 +44,15 @@ def _content_length(content: Any) -> int:
 
 
 def _output_items_to_dicts(items: list[Any]) -> list[dict[str, Any]]:
-    """Convert Responses API output items to plain dicts for JSON serialization."""
+    """Convert Responses API output items to plain dicts for JSON serialization.
+
+    Reasoning items serialize to id (+encrypted_content on OpenAI-direct)
+    ONLY — deliberately NOT their summary/content text. These dicts ride the
+    next round's request wire, where reasoning continuity needs the id/blob,
+    while replaying GLM's raw thinking would bloat every subsequent round
+    with ~1k-token content. Reasoning TEXT is captured for the trace table
+    via ``_extract_reasoning`` on the raw response instead.
+    """
     result: list[dict[str, Any]] = []
     for item in items:
         item_type = getattr(item, "type", None)
@@ -70,6 +78,28 @@ def _output_items_to_dicts(items: list[Any]) -> list[dict[str, Any]]:
                 "role": item.role,
                 "content": content,
             })
+        elif item_type == "reasoning":
+            d: dict[str, Any] = {"type": "reasoning"}
+            item_id = getattr(item, "id", None)
+            if item_id:
+                d["id"] = item_id
+            # summary MUST stay present (even []) when the item is replayed
+            # in input — OpenAI 400s "Missing required parameter:
+            # 'input[N].summary'" otherwise (live 2026-10-03). Serialized to
+            # plain dicts; raw SDK objects only rode the wire by luck of the
+            # old fallback serializer.
+            d["summary"] = [
+                {"type": getattr(s, "type", "summary_text"),
+                 "text": getattr(s, "text", "") or ""}
+                for s in (getattr(item, "summary", None) or [])
+            ]
+            # OpenAI-direct returns this unrequested (probe 2026-10-03);
+            # passing it back is what preserves reasoning state across tool
+            # rounds. OpenRouter/GLM items carry null.
+            enc = getattr(item, "encrypted_content", None)
+            if isinstance(enc, str) and enc:
+                d["encrypted_content"] = enc
+            result.append(d)
         else:
             # Fallback: try to serialize, skip if not possible
             try:
@@ -446,6 +476,73 @@ def _effective_reasoning_effort(model: str, explicit: str | None, settings: Any)
     return model_registry.effort_defaults(config_dir).get(model)
 
 
+def _request_reasoning(
+    model: str, explicit_effort: str | None, settings: Any,
+    *, max_output_tokens: int | None = None,
+) -> dict[str, Any] | None:
+    """Build the ``reasoning`` request param (2026-10-03 trace uplift).
+
+    Effort rides whenever the model accepts the hint (unchanged). The
+    ``summary: "auto"`` key asks for readable reasoning digests — accepted by
+    both rails (probe 2026-10-03: OpenAI-direct fills item.summary when the
+    model thinks hard enough; OpenRouter/GLM ignores it and streams raw
+    reasoning_text instead — both shapes are extracted downstream). Summary
+    tokens are billed as output, so capped background passes
+    (max_output_tokens below the floor) keep their whole budget for content.
+    """
+    effort = _effective_reasoning_effort(model, explicit_effort, settings)
+    if not _accepts_reasoning_effort(model):
+        return None
+    reasoning: dict[str, Any] = {}
+    if effort is not None:
+        reasoning["effort"] = effort
+    # Summary rides on its own when no effort is pinned: flagship models with
+    # no models.yaml entry still get summaries at their default effort.
+    ls = getattr(settings, "llm_streaming", None)
+    summary_on = getattr(ls, "summary_enabled", False) if ls is not None else False
+    floor = getattr(ls, "summary_min_output_tokens", 3000) if ls is not None else 3000
+    if summary_on and (max_output_tokens is None or max_output_tokens >= floor):
+        reasoning["summary"] = "auto"
+    return reasoning or None
+
+
+def _extract_reasoning(response: Any) -> list[dict[str, Any]]:
+    """Pull reasoning text out of a completed Responses API response.
+
+    Two dialects (probe 2026-10-03, docs/llm-streaming-probe.md): OpenAI-direct
+    fills ``item.summary`` (summary_text parts); OpenRouter/GLM maps native
+    reasoning into ``item.content`` (reasoning_text parts). Returns a list of
+    ``{"source": "summary"|"raw", "text": str}`` in output order.
+
+    Streamed rounds may carry the text ONLY in the event stream — some
+    OpenRouter hosts return ``content: null`` on the reasoning item inside
+    ``response.completed`` (live 2026-10-03: routine turn streamed 2587 chars
+    of reasoning events, completed item empty, trace got 0 rows). ``_round``
+    therefore accumulates the ``reasoning_*`` done-events and exposes them as
+    ``response.stream_reasoning``; used as a fallback ONLY when the completed
+    response itself carries nothing (never merged — hosts that do fill
+    content would double-count).
+    """
+    parts: list[dict[str, Any]] = []
+
+    def _add(source: str, obj: Any) -> None:
+        text = (getattr(obj, "text", None) or "").strip()
+        if text:
+            parts.append({"source": source, "text": text})
+
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "reasoning":
+            continue
+        for s in (getattr(item, "summary", None) or []):
+            _add("summary", s)
+        for c in (getattr(item, "content", None) or []):
+            if getattr(c, "type", None) == "reasoning_text":
+                _add("raw", c)
+    if parts:
+        return parts
+    return list(getattr(response, "stream_reasoning", None) or [])
+
+
 class OpenAIService(BaseService):
     """LLM reasoning through OpenAI Responses API."""
 
@@ -493,6 +590,29 @@ class OpenAIService(BaseService):
             merged.extend(tools)
         return merged
 
+    def _common_request_kwargs(
+        self, model: str, *, temperature: float | None = None,
+        max_tokens: int | None = None, reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        """The request-kwargs core every Responses call shares (2026-10-03
+        cleanup — was duplicated across chat/chat_stream/chat_with_tools):
+        model, temperature (when the model accepts it), max_output_tokens,
+        the reasoning param (effort + summary, see _request_reasoning), and
+        the OpenRouter routing constraint. Tools/stream/tool_choice stay at
+        the call sites — they genuinely differ per shape."""
+        kwargs: dict[str, Any] = {"model": model}
+        if temperature is not None and not _model_skips_temperature(model):
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_output_tokens"] = max_tokens
+        reasoning = _request_reasoning(
+            model, reasoning_effort, self._get_settings(),
+            max_output_tokens=max_tokens)
+        if reasoning is not None:
+            kwargs["reasoning"] = reasoning
+        kwargs.update(_routing_extra(self._get_settings(), model))
+        return kwargs
+
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -507,17 +627,14 @@ class OpenAIService(BaseService):
         """Non-streaming chat completion via Responses API."""
         resolved_model = model or self._get_settings().openai.default_model
         kwargs: dict[str, Any] = {
-            "model": resolved_model,
             "input": messages,
+            **self._common_request_kwargs(
+                resolved_model, temperature=temperature, max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort),
         }
-        if not _model_skips_temperature(resolved_model):
-            kwargs["temperature"] = temperature
-        if max_tokens is not None:
-            kwargs["max_output_tokens"] = max_tokens
-        effort = _effective_reasoning_effort(
-            resolved_model, reasoning_effort, self._get_settings())
-        if effort is not None:
-            kwargs["reasoning"] = {"effort": effort}
+        if "reasoning" in kwargs and call_meta is not None:
+            call_meta.setdefault(
+                "reasoning_effort", kwargs["reasoning"].get("effort"))
 
         tools = self._merge_tools(model=resolved_model)
         if tools:
@@ -531,6 +648,8 @@ class OpenAIService(BaseService):
             content = _response_text_with_citations(response)
             usage = getattr(response, "usage", None)
             _note_generation(call_meta, response)
+            if call_meta is not None:
+                call_meta["reasoning_parts"] = _extract_reasoning(response)
 
             cached_tokens = self._extract_cached_tokens(usage)
 
@@ -572,18 +691,14 @@ class OpenAIService(BaseService):
         """Streaming chat completion via Responses API, yielding text deltas."""
         resolved_model = model or self._get_settings().openai.default_model
         kwargs: dict[str, Any] = {
-            "model": resolved_model,
             "input": messages,
             "stream": True,
+            **self._common_request_kwargs(
+                resolved_model, temperature=temperature, max_tokens=max_tokens),
         }
-        if not _model_skips_temperature(resolved_model):
-            kwargs["temperature"] = temperature
-        if max_tokens is not None:
-            kwargs["max_output_tokens"] = max_tokens
-        effort = _effective_reasoning_effort(
-            resolved_model, None, self._get_settings())
-        if effort is not None:
-            kwargs["reasoning"] = {"effort": effort}
+        if "reasoning" in kwargs and call_meta is not None:
+            call_meta.setdefault(
+                "reasoning_effort", kwargs["reasoning"].get("effort"))
 
         tools = self._merge_tools(model=resolved_model)
         if tools:
@@ -612,6 +727,8 @@ class OpenAIService(BaseService):
                     final_usage = getattr(event.response, "usage", None)
                     response_id = getattr(event.response, "id", None)
                     _note_generation(call_meta, event.response)
+                    if call_meta is not None:
+                        call_meta["reasoning_parts"] = _extract_reasoning(event.response)
         except Exception as exc:
             logger.error("OpenAI streaming error: %s", exc)
             _raise_openai_error(exc)
@@ -659,6 +776,8 @@ class OpenAIService(BaseService):
         call_meta: dict | None = None,
         force_first_tool_choice: bool = False,
         reasoning_effort: str | None = None,
+        on_round_complete: Callable[[int, Any, float, Any], Awaitable[None]] | None = None,
+        on_stream_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -681,12 +800,22 @@ class OpenAIService(BaseService):
         ``budget_stats`` (optional out-param) gets ``hit_wall_clock`` /
         ``hit_iteration_cap`` set when the respective budget ended the loop —
         callers use it to decide cutoff rescues.
+
+        ``on_round_complete`` (2026-10-03 trace uplift) fires after EVERY
+        round's response arrives — tool rounds and the final text round alike
+        — with ``(iteration, response, round_latency_seconds, usage)``. It is
+        the transport-agnostic seam the trace writer hangs off: reasoning
+        extraction reads the raw response (summary and raw-thinking dialects
+        both), per-round latency/tokens ride the call. Exceptions inside the
+        callback are swallowed like the other callbacks — tracing must never
+        kill a turn.
         """
         resolved_model = model or self._get_settings().openai.default_model
         merged_tools = self._merge_tools(tools, model=resolved_model)
         request_kwargs: dict[str, Any] = {
-            "model": resolved_model,
             "tools": merged_tools,
+            **self._common_request_kwargs(
+                resolved_model, reasoning_effort=reasoning_effort),
         }
         # Eval verification aid (Phase 0, 2026-09-19): GLM narrates tool use
         # instead of calling it on short minimal-context prompts ("The agenda
@@ -696,11 +825,9 @@ class OpenAIService(BaseService):
         # loop converges instead of calling tools forever.
         if force_first_tool_choice and merged_tools:
             request_kwargs["tool_choice"] = "required"
-        effort = _effective_reasoning_effort(
-            resolved_model, reasoning_effort, self._get_settings())
-        if effort is not None:
-            request_kwargs["reasoning"] = {"effort": effort}
-        request_kwargs.update(_routing_extra(self._get_settings(), resolved_model))
+        if "reasoning" in request_kwargs and call_meta is not None:
+            call_meta.setdefault(
+                "reasoning_effort", request_kwargs["reasoning"].get("effort"))
         t0 = time.monotonic()
         deadline = t0 + time_limit_seconds if time_limit_seconds is not None else None
 
@@ -726,6 +853,16 @@ class OpenAIService(BaseService):
 
         total_input = total_output = total_total = 0
         total_cached = 0
+        first_delta_at: float | None = None
+
+        async def _round_events(kind: str, data: dict[str, Any]) -> None:
+            """Stamp TTFT on the first delta, then hand off to the caller's
+            stream callback (no-op when the caller passed none)."""
+            nonlocal first_delta_at
+            if first_delta_at is None and kind in ("text_delta", "reasoning_delta"):
+                first_delta_at = time.monotonic()
+            if on_stream_event is not None:
+                await on_stream_event(kind, data)
 
         try:
             for iteration in range(max_iterations):
@@ -766,18 +903,25 @@ class OpenAIService(BaseService):
                         fallback=_LEGACY_TIME_STOP,
                         base_len=base_len if use_view else None,
                         history_keep=tl.history_view_keep if tl is not None else 20,
-                        send_tool_turn=send_tool_turn)
+                        send_tool_turn=send_tool_turn,
+                        on_stream_event=_round_events)
 
-                response = await self._client_for(resolved_model).responses.create(
-                    input=_video_safe_wire(
+                round_t0 = time.monotonic()
+                await _round_events("round_started", {"iteration": iteration})
+                response = await self._round(
+                    _video_safe_wire(
                         tool_loop_folding.iteration_view(
                             messages, base_len,
                             history_keep=(tl.history_view_keep
                                           if tl is not None else 20))
                         if use_view else messages,
                         dispatch_id=dispatch_id, model=resolved_model),
-                    **request_kwargs,
+                    request_kwargs,
+                    on_stream_event=_round_events,
+                    iteration=iteration,
+                    dispatch_id=dispatch_id,
                 )
+                round_latency = time.monotonic() - round_t0
                 _note_generation(call_meta, response)
 
                 usage = getattr(response, "usage", None)
@@ -786,6 +930,15 @@ class OpenAIService(BaseService):
                     total_output += usage.output_tokens or 0
                     total_total  += usage.total_tokens or 0
                     total_cached += self._extract_cached_tokens(usage) or 0
+
+                if on_round_complete is not None:
+                    try:
+                        await on_round_complete(iteration, response, round_latency, usage)
+                    except Exception:
+                        logger.warning(
+                            "on_round_complete callback failed: dispatch_id=%s "
+                            "session_key=%s iteration=%d",
+                            dispatch_id, session_key, iteration, exc_info=True)
 
                 # Check for function calls in output
                 function_calls = [
@@ -881,6 +1034,8 @@ class OpenAIService(BaseService):
                         stream_result.total_tokens = total_total
                         stream_result.cached_tokens = total_cached
                         stream_result.latency_seconds = elapsed
+                        if first_delta_at is not None:
+                            stream_result.ttft_seconds = first_delta_at - t0
                     return content
 
                 # Append output items (including reasoning) to messages for context
@@ -965,11 +1120,114 @@ class OpenAIService(BaseService):
                 fallback=_LEGACY_ITER_STOP,
                 base_len=base_len if use_view else None,
                 history_keep=tl.history_view_keep if tl is not None else 20,
-                send_tool_turn=send_tool_turn)
+                send_tool_turn=send_tool_turn,
+                on_stream_event=_round_events)
         finally:
             # Budget nudges are turn-scoped guidance — never persist them
             # into the conversation history the caller keeps.
             _strip_wrap_nudges(messages)
+
+    class _StreamedRound:
+        """Transparent proxy over a streamed round's completed response,
+        exposing the reasoning text accumulated from ``reasoning_*`` done
+        events (``stream_reasoning``) — some OpenRouter hosts leave the
+        completed item's content null, so the events are the durable source.
+        Every other attribute delegates to the real response."""
+
+        def __init__(self, response: Any, stream_reasoning: list[dict[str, Any]]):
+            object.__setattr__(self, "_response", response)
+            object.__setattr__(self, "stream_reasoning", stream_reasoning)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._response, name)
+
+    async def _round(
+        self, wire: list[Any], request_kwargs: dict[str, Any], *,
+        on_stream_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        iteration: int = 0, dispatch_id: str | None = None,
+    ) -> Any:
+        """One LLM round of the tool loop (2026-10-03 trace uplift, Phase 2).
+
+        Buffered by default (BOB_LLM_STREAMING gates the transport); when
+        streaming is on, events are consumed and the round RETURNS
+        ``event.response`` from ``response.completed``/``response.incomplete``
+        — probe-verified on both rails (docs/llm-streaming-probe.md) to carry
+        the full output items + usage, so every downstream consumer
+        (function_call scan, citation rendering, item serialization, trace
+        extraction) is identical between transports.
+
+        Deltas are forwarded via ``on_stream_event(kind, data)`` — both
+        reasoning dialects: OpenAI's ``reasoning_summary_*`` events and
+        OpenRouter/GLM's raw ``reasoning_text`` events. Exceptions in the
+        callback are swallowed (observability must never kill a turn)."""
+        client = self._client_for(request_kwargs["model"])
+        ls = getattr(self._get_settings(), "llm_streaming", None)
+        streaming = bool(getattr(ls, "streaming_enabled", False)) if ls is not None else False
+
+        if not streaming:
+            return await client.responses.create(input=wire, **request_kwargs)
+
+        async def _forward(kind: str, data: dict[str, Any]) -> None:
+            if on_stream_event is None:
+                return
+            try:
+                await on_stream_event(kind, {"iteration": iteration, **data})
+            except Exception:
+                logger.warning(
+                    "on_stream_event callback failed: kind=%s dispatch_id=%s "
+                    "iteration=%d", kind, dispatch_id, iteration, exc_info=True)
+
+        # Reasoning ground truth from the event stream — some OpenRouter
+        # hosts leave the completed response's reasoning item content null,
+        # so the done-events are the fallback capture path (see
+        # _extract_reasoning).
+        stream_reasoning: list[dict[str, Any]] = []
+
+        def _note_reasoning(text: str, raw: bool) -> None:
+            text = (text or "").strip()
+            if text:
+                stream_reasoning.append(
+                    {"source": "raw" if raw else "summary", "text": text})
+
+        stream = await client.responses.create(
+            input=wire, stream=True, **request_kwargs)
+        async for event in stream:
+            et = getattr(event, "type", "")
+            if et == "response.output_text.delta":
+                if event.delta:
+                    await _forward("text_delta", {"text": event.delta})
+            elif et == "response.reasoning_summary_text.delta":
+                if event.delta:
+                    await _forward("reasoning_delta", {"text": event.delta})
+            elif et == "response.reasoning_summary_part.done":
+                part = getattr(event, "part", None)
+                part_text = getattr(part, "text", "") or ""
+                _note_reasoning(part_text, raw=False)
+                await _forward("reasoning_part", {"text": part_text, "raw": False})
+            elif et == "response.reasoning_text.delta":
+                if event.delta:
+                    await _forward("reasoning_delta", {"text": event.delta, "raw": True})
+            elif et == "response.reasoning_text.done":
+                done_text = getattr(event, "text", "") or ""
+                _note_reasoning(done_text, raw=True)
+                await _forward("reasoning_part", {"text": done_text, "raw": True})
+            elif et == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    await _forward("tool_started", {
+                        "name": getattr(item, "name", None),
+                        "item_id": getattr(item, "id", None),
+                        "call_id": getattr(item, "call_id", None)})
+            elif et == "response.function_call_arguments.delta":
+                if event.delta:
+                    await _forward("tool_args", {
+                        "item_id": event.item_id, "delta": event.delta})
+            elif et in ("response.completed", "response.incomplete"):
+                return self._StreamedRound(event.response, stream_reasoning)
+            elif et in ("response.failed", "response.error", "error"):
+                err = getattr(getattr(event, "response", None), "error", None)
+                raise RuntimeError(f"LLM stream failed: {err or et}")
+        raise RuntimeError("LLM stream ended without a terminal event")
 
     async def _forced_wrapup(
         self, messages: list[dict[str, Any]], resolved_model: str,
@@ -977,6 +1235,7 @@ class OpenAIService(BaseService):
         session_key: str | None, fallback: str,
         base_len: int | None = None, history_keep: int = 20,
         send_tool_turn: bool = False,
+        on_stream_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
         """Exhaustion path: one final LLM round with tools stripped, so the
         model writes its own closing reply instead of hitting a canned stop.
@@ -994,8 +1253,14 @@ class OpenAIService(BaseService):
                 if base_len is not None else messages
             wire = _video_safe_wire(
                 wire, dispatch_id=dispatch_id, model=resolved_model)
-            response = await self._client_for(resolved_model).responses.create(
-                input=wire, **kwargs)
+            if on_stream_event is not None:
+                try:
+                    await on_stream_event("round_started", {"iteration": -1})
+                except Exception:
+                    pass
+            response = await self._round(
+                wire, kwargs, on_stream_event=on_stream_event,
+                iteration=-1, dispatch_id=dispatch_id)
         except Exception:
             logger.error(
                 "OpenAI forced wrap-up round failed: model=%s dispatch_id=%s "
@@ -1008,171 +1273,6 @@ class OpenAIService(BaseService):
                 "OpenAI forced wrap-up round empty: model=%s dispatch_id=%s "
                 "session_key=%s", resolved_model, dispatch_id, session_key)
         return content or fallback
-
-    async def chat_stream_with_tools(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        tool_handlers: dict[str, Callable[..., Awaitable[str | ImageInjection | VideoInjection]]],
-        *,
-        model: str | None = None,
-        max_iterations: int = 100,
-        on_tool_call: Callable[[str, dict, str], Awaitable[None]] | None = None,
-        on_iteration_complete: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
-        dispatch_id: str | None = None,
-        session_key: str | None = None,
-        log_id: str | None = None,
-        stream_result: StreamResult | None = None,
-    ) -> AsyncIterator[str]:
-        """Stream chat with tool calling. Runs tool calls non-streamingly,
-        then streams the final text response for real-time consumption."""
-        resolved_model = model or self._get_settings().openai.default_model
-        merged_tools = self._merge_tools(tools, model=resolved_model)
-        request_kwargs: dict[str, Any] = {
-            "model": resolved_model,
-            "tools": merged_tools,
-        }
-        effort = _effective_reasoning_effort(
-            resolved_model, None, self._get_settings())
-        if effort is not None:
-            request_kwargs["reasoning"] = {"effort": effort}
-        request_kwargs.update(_routing_extra(self._get_settings(), resolved_model))
-        t0 = time.monotonic()
-
-        total_input = total_output = total_total = 0
-        total_cached = 0
-
-        def _flush_stream_result() -> None:
-            if stream_result is None:
-                return
-            stream_result.prompt_tokens = total_input
-            stream_result.completion_tokens = total_output
-            stream_result.total_tokens = total_total
-            stream_result.cached_tokens = total_cached
-            stream_result.latency_seconds = time.monotonic() - t0
-
-        # Tool loop: non-streaming rounds until LLM gives a text response
-        for iteration in range(max_iterations):
-            response = await self._client_for(resolved_model).responses.create(
-                input=_video_safe_wire(
-                    messages, dispatch_id=dispatch_id,
-                    model=resolved_model),
-                **request_kwargs,
-            )
-
-            usage = getattr(response, "usage", None)
-            if usage:
-                total_input  += usage.input_tokens or 0
-                total_output += usage.output_tokens or 0
-                total_total  += usage.total_tokens or 0
-                total_cached += self._extract_cached_tokens(usage) or 0
-
-            function_calls = [
-                item for item in response.output
-                if getattr(item, "type", None) == "function_call"
-            ]
-
-            if not function_calls:
-                # No tool calls — stream the final text response
-                content = response.output_text or ""
-                # Recover Hermes-style <tool_call> XML before streaming out.
-                hermes_calls = _parse_hermes_tool_calls(content)
-                if hermes_calls:
-                    for hc_name, hc_args in hermes_calls:
-                        handler = tool_handlers.get(hc_name)
-                        if handler is None:
-                            logger.warning(
-                                "Hermes tool call (stream) referenced unknown tool: "
-                                "tool=%s dispatch_id=%s session_key=%s",
-                                hc_name, dispatch_id, session_key,
-                            )
-                            continue
-                        try:
-                            await handler(**hc_args)
-                        except Exception as hc_exc:
-                            logger.error(
-                                "Hermes tool call (stream) failed: tool=%s "
-                                "dispatch_id=%s session_key=%s error=%s",
-                                hc_name, dispatch_id, session_key, hc_exc,
-                                exc_info=True,
-                            )
-                    content = _strip_hermes_tool_calls(content)
-                if content:
-                    yield content
-                _flush_stream_result()
-                return
-
-            # Append output items and execute tool calls
-            messages.extend(_output_items_to_dicts(response.output))
-            for fc in function_calls:
-                handler = tool_handlers.get(fc.name)
-                tool_args: dict = {}
-                if handler is None:
-                    result = f"Error: unknown tool '{fc.name}'"
-                    logger.error(
-                        "Unknown tool requested: tool=%s call_id=%s dispatch_id=%s "
-                        "session_key=%s log_id=%s iteration=%d",
-                        fc.name, fc.call_id, dispatch_id, session_key, log_id, iteration,
-                    )
-                else:
-                    try:
-                        tool_args = json.loads(fc.arguments)
-                        result = await handler(**tool_args)
-                    except Exception as e:
-                        result = f"Error: {e}"
-                        logger.error(
-                            "Tool call failed: tool=%s call_id=%s dispatch_id=%s "
-                            "session_key=%s log_id=%s iteration=%d args=%s error=%s",
-                            fc.name, fc.call_id, dispatch_id, session_key, log_id,
-                            iteration, json.dumps(tool_args, default=str)[:500], e,
-                            exc_info=True,
-                        )
-
-                messages.extend(_tool_result_messages(
-                    result, fc.call_id,
-                    video_supported=model_registry.supports_video(
-                        self._get_settings().config_dir, resolved_model),
-                ))
-
-                if on_tool_call:
-                    try:
-                        summary = (
-                            result.text[:200]
-                            if isinstance(result, (ImageInjection, VideoInjection))
-                            else result[:200]
-                        )
-                        await on_tool_call(fc.name, tool_args, summary)
-                    except Exception:
-                        pass
-
-            logger.info(
-                "chat_stream_with_tools: iteration=%d function_calls=%d",
-                iteration + 1, len(function_calls),
-            )
-
-            if on_iteration_complete:
-                try:
-                    await on_iteration_complete(messages)
-                except Exception:
-                    pass
-
-        # Hit max iterations — make one final streaming call.
-        # Pass a child StreamResult so we can merge its usage into the running totals
-        # rather than overwriting the intermediate iterations.
-        logger.warning("chat_stream_with_tools hit max iterations: %d", max_iterations)
-        fallback_result = StreamResult()
-        async for chunk in self.chat_stream(
-            messages=messages,
-            model=resolved_model,
-            stream_result=fallback_result,
-        ):
-            if chunk:
-                yield chunk
-        total_input  += fallback_result.prompt_tokens or 0
-        total_output += fallback_result.completion_tokens or 0
-        total_total  += fallback_result.total_tokens or 0
-        total_cached += fallback_result.cached_tokens or 0
-        _flush_stream_result()
 
     async def quick_prompt(self, prompt: str) -> str:
         """Send a bare prompt string and return the response."""

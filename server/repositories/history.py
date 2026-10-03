@@ -81,6 +81,7 @@ class HistoryRepository:
         *,
         limit: int,
         since_hours: float | None = None,
+        since_iso: str | None = None,
         dispatched_only: bool = False,
         pending_only: bool = False,
         include_internal: bool = False,
@@ -91,6 +92,8 @@ class HistoryRepository:
         memory extraction: LIMIT applies to the newest end, output is ASC.
         Internal bookkeeping rows (extraction markers, dream announcements)
         are excluded unless ``include_internal`` is set.
+        ``since_iso`` restricts to messages newer than that timestamp
+        (memory extraction's undigested-only window).
         """
         internal = "" if include_internal else _INTERNAL_FILTER
         cid = await self._cid(session_key)
@@ -99,6 +102,9 @@ class HistoryRepository:
         if since_hours is not None:
             since_clause += " AND datetime(created_at) > datetime('now', ?) "
             params.append(f"-{since_hours} hours")
+        if since_iso is not None:
+            since_clause += " AND datetime(created_at) > datetime(?) "
+            params.append(since_iso)
         if dispatched_only:
             since_clause += " AND dispatched = 1 "
         if pending_only:

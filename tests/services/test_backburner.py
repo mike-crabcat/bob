@@ -325,8 +325,11 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     assert "The Grand has rooms" in final["result"]
 
     assert sends, "silent flight's result must be delivered at terminal"
-    assert sends[0].startswith("(background result from bg turn")
     assert "The Grand has rooms" in sends[0]
+    assert not sends[0].startswith("(background result"), (
+        "no bg-turn header — verbatim delivery (Mike 2026-10-03). The "
+        "UNVERIFIED marker may still lead (this fixture records no tool "
+        "calls, so the honesty ledger fires)")
     msgs = await _messages(ctx)
     assert not [m for m in msgs if m["provenance"] == "task_relay"], (
         "terminal delivery replaces the relay wake (2026-10-01)")
@@ -601,10 +604,11 @@ async def test_terminal_flight_that_spoke_settles_quietly(ctx, bb):
 
 async def test_terminal_silent_flight_result_delivered(ctx, bb):
     """Final-text delivery (2026-10-01): a silent completion with a result
-    is delivered DIRECTLY by the supervisor through the send tool, under a
-    runner-voice '(background result…)' header — no relay turn (the
-    2026-09-29 send-skip class cost a full relay + dead-man rescue per
-    incident). Flight ran tools, so the result is vouched as real work."""
+    is delivered DIRECTLY by the supervisor through the send tool — no
+    relay turn (the 2026-09-29 send-skip class cost a full relay + dead-man
+    rescue per incident). Verbatim, no header (Mike 2026-10-03: a detached
+    turn is still a reply to whoever asked). Flight ran tools, so the
+    result is vouched as real work."""
     sends: list[str] = []
     goal = await _settled_detached_task(
         ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
@@ -615,8 +619,7 @@ async def test_terminal_silent_flight_result_delivered(ctx, bb):
     row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
     assert row["status"] == "completed"
     assert sends, "silent flight with a result must deliver it at terminal"
-    assert sends[0].startswith("(background result from bg turn aaaabbbb)")
-    assert "21 distinct hosts" in sends[0]
+    assert sends[0] == "Scanned it. The profile's history holds about 21 distinct hosts."
     msgs = await _messages(ctx)
     assert not [m for m in msgs if m["provenance"] == "task_relay"], (
         "terminal delivery replaces the relay wake")
@@ -629,9 +632,10 @@ async def test_terminal_silent_flight_result_delivered(ctx, bb):
 async def test_terminal_zero_tool_flight_delivers_unverified(ctx, bb):
     """The 2026-09-17 phantom build: a silent flight with ZERO tool calls
     claiming 'Build is running'. Still delivered at terminal (rare, and
-    usually answer-shaped) but under an UNVERIFIED header that withdraws
-    the vouch — the harm was the system asserting work happened; the
-    header says it may not have, and that it still needs doing."""
+    usually answer-shaped) but prefixed with the UNVERIFIED marker that
+    withdraws the vouch — the harm was the system asserting work happened;
+    the marker says it may not have, and that it still needs doing. (The
+    only framing that survives the 2026-10-03 verbatim ruling.)"""
     sends: list[str] = []
     goal = await _settled_detached_task(
         ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
