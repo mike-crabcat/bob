@@ -92,6 +92,24 @@ class GoalRepository:
             (goal_id, conversation_id, role, _now_iso()),
         )
 
+    async def delete_for_conversation(self, conversation_id: str) -> list[str]:
+        """Eval cleanup for model-created goals (G3's create_goal path):
+        auto-generated ids carry no eval prefix, so delete by conversation.
+        Cancels each goal's wakeups first; returns the removed goal ids."""
+        rows = await self.db.fetch_all(
+            "SELECT id FROM goals WHERE conversation_id = ?", (conversation_id,))
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return ids
+        marks = ",".join("?" for _ in ids)
+        await self.db.execute(
+            f"DELETE FROM goal_transitions WHERE goal_id IN ({marks})", tuple(ids))
+        await self.db.execute(
+            f"DELETE FROM goal_conversations WHERE goal_id IN ({marks})", tuple(ids))
+        await self.db.execute(
+            f"DELETE FROM goals WHERE id IN ({marks})", tuple(ids))
+        return ids
+
     async def delete_eval_goals(self, prefix: str = "eval-goal") -> None:
         """Eval-fixture removal (goal_behavior cases): the goals, their
         holder links, and transition rows. Eval-owned IDs carry the

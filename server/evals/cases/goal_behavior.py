@@ -332,8 +332,10 @@ _MUG_LOG = {
     structural_checks=[
         StructuralCheck(kind="tool_call_made",
                         params={"tool_name": "bash"}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "task_register"}),
+        StructuralCheck(kind="any_tool_call", params={
+            "tool_names": ["task_register", "create_subagent",
+                           "create_goal", "update_goal",
+                           "update_goal_state"]}),
         StructuralCheck(kind="context_flag",
                         params={"key": "work_registered"}),
         StructuralCheck(kind="min_length", params={"min_length": 5}),
@@ -345,17 +347,19 @@ _MUG_LOG = {
             "the handle is a torus flush against the body instead of "
             "protruding, so it orbits as the body spins). CORRECT: the "
             "model checks the logs (bash visible in INPUT MESSAGES), "
-            "answers the question in its reply, AND registers the promised "
-            "rework by calling task_register (visible in INPUT MESSAGES, "
-            "title naming the fix — e.g. rebuilding the handle geometry / "
-            "re-rendering the turntable) so the commitment survives the "
-            "turn. A brief progress send via send_whatsapp_message is fine "
-            "but optional. WRONG: diagnosing and promising in PROSE only "
-            "('I'll rebuild it properly') with no task_register call — the "
-            "exact live failure, where nothing in the system owned the "
-            "promise after the turn ended; silently attempting the full "
-            "rebuild inline in this chat turn; claiming work already "
-            "started when no tool ran."
+            "answers the question in its reply, AND makes the promised "
+            "rework SYSTEM STATE — any of: task_register (title naming "
+            "the fix), create_subagent spawning the fix work, or "
+            "create_goal / update_goal recording it on a goal — visible "
+            "in INPUT MESSAGES. The invariant is the commitment existing "
+            "outside the turn's prose. A brief progress send via "
+            "send_whatsapp_message is fine but optional. WRONG: "
+            "diagnosing and promising in PROSE only ('I'll rebuild it "
+            "properly') with no registration/spawn/goal call — the exact "
+            "live failure, where nothing in the system owned the promise "
+            "after the turn ended; silently attempting the full rebuild "
+            "inline in this chat turn; claiming work already started "
+            "when no tool ran."
         ),
     ),
 )
@@ -404,8 +408,12 @@ async def goal_promised_work_gets_registered(ctx):
             required=[],
             handler=_send)
 
+        from server.services.goal_tools import make_goal_tools
         bash, tree_cleanup = make_planted_bash(_MUG_LOG)
-        tools = (make_task_tools(ctx, session_key) + [send_tool, bash])
+        # The three commitment surfaces must all be genuinely available:
+        # task registry, subagent spawn, goal create/write.
+        tools = (make_task_tools(ctx, session_key)
+                 + make_goal_tools(ctx, session_key) + [send_tool, bash])
         # BOB_EVAL_NO_CROWD=1 drops the shadow surface — the tool-count
         # experiment knob (does flash comply when the crowd isn't
         # diluting salience?).
@@ -426,16 +434,30 @@ async def goal_promised_work_gets_registered(ctx):
 
         from server.repositories.tasks import TaskRepository
         row = await TaskRepository(ctx.db).latest_for_waiter(session_key)
+        calls = extract_tool_calls(messages)
+        called = {c.get("name", "") for c in calls}
+        other_surfaces = {"create_subagent", "create_goal",
+                          "update_goal", "update_goal_state"} & called
         if not (response or "").strip() and state["sends"]:
             response = state["sends"][-1]
         return {
             "response": response,
-            "context": {"tool_calls": extract_tool_calls(messages),
-                        "work_registered": bool(row),
-                        "registered_title": (row or {}).get("title", "")},
+            "context": {"tool_calls": calls,
+                        "work_registered": bool(row) or bool(other_surfaces),
+                        "registered_title": (row or {}).get("title", ""),
+                        "surface_used": ("task_register" if row
+                                         else sorted(other_surfaces))},
             "input_messages": messages,
         }
     finally:
         if tree_cleanup is not None:
             await tree_cleanup()
+        # Model-created goals (create_goal path) carry auto ids with no
+        # eval prefix — remove them by conversation, wakeups first.
+        # (conversations.id IS the session key.)
+        from server.repositories.goals import GoalRepository
+        from server.repositories.wakeups import WakeupRepository
+        for gid in await GoalRepository(ctx.db).delete_for_conversation(
+                session_key):
+            await WakeupRepository(ctx.db).cancel_for_goal(gid)
         await _cleanup(ctx, [], task_sessions=[session_key])
