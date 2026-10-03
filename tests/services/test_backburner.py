@@ -264,14 +264,24 @@ async def _messages(ctx, key=DM_KEY):
 
 
 async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
+    from server.services.tools import Tool
+
     await _pending_message(ctx)
     acks: list[str] = []
     flight: dict = {}
+    sends: list[str] = []
 
     async def _hold(text: str) -> None:
         acks.append(text)
 
-    spec = _spec(flight=flight, hold=_hold, dispatch_id="disp-detach")
+    async def _send(text: str = "", media_path: str = "") -> str:
+        sends.append(text)
+        return "Message sent (request_id=test)"
+
+    send_tool = Tool(name="send_whatsapp_message", description="send",
+                     parameters={}, required=[], handler=_send)
+    spec = _spec(flight=flight, hold=_hold, send_tool=send_tool,
+                 dispatch_id="disp-detach")
     result = await DispatchRunner(ctx).run(spec)
 
     # run() returned early — the supervisor owns the task now
@@ -297,7 +307,8 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     assert "hotel" in goal["objective"]
 
     # supervisor: task finished (0.3s) -> goal settled. The stub never
-    # calls the send tool (silent flight) -> the v2 fallback wake.
+    # calls the send tool (silent flight) -> final-text delivery: the
+    # supervisor delivers the result through the send tool itself.
     for _ in range(50):
         if goal is None or goal["status"] == "completed":
             row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
@@ -313,12 +324,12 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     assert final["status"] == "completed"
     assert "The Grand has rooms" in final["result"]
 
+    assert sends, "silent flight's result must be delivered at terminal"
+    assert sends[0].startswith("(background result from bg turn")
+    assert "The Grand has rooms" in sends[0]
     msgs = await _messages(ctx)
-    wake = [m for m in msgs if "finished without posting" in m["content"]]
-    assert wake, "silent flight should have stored the fallback wake"
-    assert wake[0]["provenance"] == "task_relay", (
-        "fallback wakes must be speak-expected so the send-tool rescue covers "
-        "them (2026-08-30 silent-drop incident)")
+    assert not [m for m in msgs if m["provenance"] == "task_relay"], (
+        "terminal delivery replaces the relay wake (2026-10-01)")
 
 
 async def test_fast_turn_never_detaches(ctx, bb, stub_history, monkeypatch):
@@ -529,11 +540,16 @@ def test_spec_detached_predicate():
 # ------------------------------------------------- _terminal (v2)
 
 async def _settled_detached_task(ctx, *, flight: dict, result_text: str,
-                                 status: str = "completed"):
+                                 status: str = "completed",
+                                 sends: list | None = None):
     """Register a detached_turn + goal the way detach() does, run _terminal
-    on it, and return the goal row."""
+    on it, and return the goal row. Pass ``sends`` (a list) to arm a
+    recording send tool so terminal delivery has somewhere to go; without
+    it the spec carries no send tool and terminal paths fall back to
+    stored-only."""
     from server.repositories.subagents import SubagentRepository
     from server.services.goal_service import create_goal
+    from server.services.tools import Tool
 
     subagent_id = "aaaabbbb"
     await SubagentRepository(ctx.db).insert(
@@ -548,7 +564,17 @@ async def _settled_detached_task(ctx, *, flight: dict, result_text: str,
         origin_conversation_id=DM_KEY, kind="subagent",
         external_ref=subagent_id)
 
-    spec = _spec(flight=flight)
+    send_tool = None
+    if sends is not None:
+        async def _send(text: str = "", media_path: str = "") -> str:
+            sends.append(text)
+            return "Message sent (request_id=test)"
+
+        send_tool = Tool(name="send_whatsapp_message",
+                         description="send", parameters={}, required=[],
+                         handler=_send)
+
+    spec = _spec(flight=flight, send_tool=send_tool)
     await BackburnerService(ctx)._terminal(
         subagent_id, str(goal["id"]), spec,
         status=status, result_text=result_text)
@@ -573,51 +599,56 @@ async def test_terminal_flight_that_spoke_settles_quietly(ctx, bb):
         " — that instruction was the v1 duplicate mechanism")
 
 
-async def test_terminal_silent_flight_gets_non_imperative_fallback(ctx, bb):
-    """A silent completion with a result still surfaces (the 2026-09-03
-    lost-result shape) — but the wake is context, never an instruction to
-    deliver or redo. Wording pinned by test. Flight ran tools (the scan it
-    narrates really happened), so the vouch is earned."""
+async def test_terminal_silent_flight_result_delivered(ctx, bb):
+    """Final-text delivery (2026-10-01): a silent completion with a result
+    is delivered DIRECTLY by the supervisor through the send tool, under a
+    runner-voice '(background result…)' header — no relay turn (the
+    2026-09-29 send-skip class cost a full relay + dead-man rescue per
+    incident). Flight ran tools, so the result is vouched as real work."""
+    sends: list[str] = []
     goal = await _settled_detached_task(
         ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
                      "tool_calls": 3},
-        result_text="Scanned it. The profile's history holds about 21 distinct hosts.")
+        result_text="Scanned it. The profile's history holds about 21 distinct hosts.",
+        sends=sends)
 
     row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
     assert row["status"] == "completed"
+    assert sends, "silent flight with a result must deliver it at terminal"
+    assert sends[0].startswith("(background result from bg turn aaaabbbb)")
+    assert "21 distinct hosts" in sends[0]
     msgs = await _messages(ctx)
-    wake = [m for m in msgs if m["provenance"] == "task_relay"]
-    assert wake, "silent flights with a result must still surface it"
-    content = wake[0]["content"]
-    assert "finished without posting" in content
-    assert "do NOT" in content, "must forbid redoing the flight's real work"
-    # The v1 lie and its imperative are gone for good:
-    assert "nothing in it has been delivered" not in content
-    assert "call your send tool" not in content.lower()
+    assert not [m for m in msgs if m["provenance"] == "task_relay"], (
+        "terminal delivery replaces the relay wake")
+    rows = [m for m in msgs if m["role"] == "assistant"
+            and "21 distinct hosts" in (m["content"] or "")]
+    assert rows, "terminal delivery must record an assistant history row"
+    assert sends[0] in rows[0]["content"]
 
 
-async def test_terminal_zero_tool_flight_flagged_as_narration(ctx, bb):
-    """The 2026-09-17 phantom build: a silent flight that made ZERO tool
-    calls returned 'Build is running — I'll post the file when it's done'.
-    The relay must withdraw the vouch (no 'already happened for real / do
-    NOT redo') and say the work still needs doing."""
+async def test_terminal_zero_tool_flight_delivers_unverified(ctx, bb):
+    """The 2026-09-17 phantom build: a silent flight with ZERO tool calls
+    claiming 'Build is running'. Still delivered at terminal (rare, and
+    usually answer-shaped) but under an UNVERIFIED header that withdraws
+    the vouch — the harm was the system asserting work happened; the
+    header says it may not have, and that it still needs doing."""
+    sends: list[str] = []
     goal = await _settled_detached_task(
         ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
                      "tool_calls": 0},
         result_text="Build is running — mixed when it lands. "
-                    "I'll post the file when it's done.")
+                    "I'll post the file when it's done.",
+        sends=sends)
 
+    assert sends, "zero-call flights still surface — loudly framed, never silently"
+    assert "UNVERIFIED" in sends[0]
+    assert "ran no tools" in sends[0]
+    assert "still needs doing" in sends[0]
+    assert "Build is running" in sends[0]
     msgs = await _messages(ctx)
-    wake = [m for m in msgs if m["provenance"] == "task_relay"]
-    assert wake, "zero-call flights must still surface — loudly, not silently"
-    content = wake[0]["content"]
-    assert "made no tool calls" in content
-    assert "needs doing for real" in content
-    assert "unfounded" in content
-    assert "already happened for real" not in content
-    assert "do NOT" not in content, (
-        "the anti-redo vouch is for flights that ran tools; "
-        "narration-only flights have nothing to protect")
+    assert [m for m in msgs if m["role"] == "assistant"
+            and "Build is running" in (m["content"] or "")], (
+        "unverified terminal delivery must record a history row too")
 
 
 def test_note_tool_call_counts_only_armed_flights():
@@ -796,14 +827,90 @@ async def test_steer_racing_human_message_keeps_the_ack(ctx, bb, stub_llm, stub_
     assert acks, "human+steer turn keeps the holding ack"
 
 
-def test_fallback_content_wording_pinned():
-    """v2 (docs/detach-v2.md risk #5): the fallback notice stays
-    non-imperative BY TEST — one wording drift toward 'deliver it' and the
-    v1 duplicate-work mechanism is back through the back door."""
-    content = BackburnerService._fallback_content("abc12345", "result body")
-    assert "finished without posting" in content
-    assert "do NOT" in content
-    # The v1 lie and its imperative are banned:
-    assert "nothing in it has been delivered" not in content
-    assert "call your send tool" not in content.lower()
-    assert "relay the result" not in content.lower()
+def test_delivery_note_states_the_new_contract():
+    """The detach-time note tells the flight the delivery contract for a
+    detached turn (final-text delivery, 2026-10-01): final text is
+    delivered by the supervisor, the send tool is for progress/media,
+    NO_REPLY is silence. It must never suggest work — redo pressure here
+    would reach a flight whose tool calls already executed for real."""
+    from server.services.backburner import delivery_note
+    note = delivery_note("abc12345", "send_whatsapp_message")
+    assert note.startswith("[System note]")
+    assert "bg turn abc12345" in note
+    assert "delivered" in note and "automatically" in note
+    assert "send_whatsapp_message" in note
+    assert "NO_REPLY" in note
+    # The old lie is gone — the note never says text is invisible:
+    assert "NOT delivered" not in note
+    assert "do not restate" in note.lower()
+
+
+async def test_terminal_failed_flight_delivers_or_wakes(ctx, bb):
+    """A failed flight delivers the failure directly when a send tool is
+    available (with the honest real-effects header); the legacy wake only
+    survives as the delivery-failure fallback (and boot recovery)."""
+    sends: list[str] = []
+    goal = await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": []},
+        result_text="the upstream API 500'd twice", status="failed",
+        sends=sends)
+
+    assert sends, "failed flight delivers directly when it can"
+    assert "failed" in sends[0]
+    assert "may have had real effects" in sends[0]
+    assert "500'd" in sends[0]
+    msgs = await _messages(ctx)
+    assert not [m for m in msgs if m["provenance"] == "task_relay"], (
+        "direct delivery replaces the failed-flight wake")
+
+
+async def test_terminal_failed_flight_never_delivers_raw_error_payloads(ctx, bb):
+    """The 2026-10-02 AI-doom incident: an upstream 400 str()-ed to 56,471
+    chars of raw provider Zod JSON and the failure notice delivered it
+    wholesale into a group chat. Delivered failure text = the exception
+    headline (one bounded line) + a pointer; the full error stays on the
+    subagent row where it belongs."""
+    zod = "[" + ", ".join(
+        '{"code": "invalid_union", "errors": [["expected": "string", '
+        '"received": "array"]]}' for _ in range(4000)) + "]"
+    giant = (
+        "Error code: 400 - {'error': {'code': 'invalid_prompt'}, "
+        f"'metadata': {{'raw': '{zod}'}}}}")
+    assert len(giant) > 50_000  # guard the guard: the incident class only
+    sends: list[str] = []
+    goal = await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": []},
+        result_text=f"the background work failed: {giant}", status="failed",
+        sends=sends)
+
+    assert sends
+    delivered = sends[0]
+    assert len(delivered) < 600, (
+        f"failure deliveries must be bounded, got {len(delivered)} chars")
+    assert "invalid_prompt" in delivered          # the headline survives
+    assert "invalid_union" not in delivered       # the payload never ships
+    assert "full error on the task record" in delivered
+    # the FULL error is still stored for forensics
+    row = await ctx.db.fetch_one(
+        "SELECT result FROM subagents WHERE id = ?", ("aaaabbbb",))
+    assert row and len(row["result"]) > 50_000
+    assert "invalid_union" in row["result"]
+
+
+async def test_terminal_completed_result_capped_for_delivery(ctx, bb):
+    """A runaway 100k-char completion is delivered capped with a pointer;
+    the goal keeps the full text."""
+    sends: list[str] = []
+    huge = "The frames were inspected. " * 4000
+    assert len(huge) > 90_000
+    goal = await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": False, "texts": [],
+                     "tool_calls": 5},
+        result_text=huge, sends=sends)
+
+    assert sends
+    assert len(sends[0]) < 5000
+    assert "truncated" in sends[0]
+    grow = await ctx.db.fetch_one(
+        "SELECT result FROM goals WHERE id = ?", (goal["id"],))
+    assert grow and len(grow["result"]) > 90_000

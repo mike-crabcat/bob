@@ -29,6 +29,9 @@ from server.evals.registry import eval_case
 from server.evals.util import extract_tool_calls, make_planted_bash, pinned_model
 
 _DM_FRAMING = "You are Bob in a WhatsApp DM with Mike (trusted)."
+_GROUP_FRAMING = (
+    "You are Bob in a WhatsApp group chat with trusted friends. "
+    "Messages are prefixed [Name].")
 _ROOM_FRAMING = (
     "You are Bob inside this goal's room — the utility conversation "
     "that works ONE goal. Your charter is to drive it to done: fold "
@@ -52,7 +55,8 @@ async def _workspace_system(ctx, session_key: str, framing: str) -> str:
         p for p in (base, goals, local_now_prompt_line(), framing) if p)
 
 
-async def _cleanup(ctx, goal_ids: list[str]) -> None:
+async def _cleanup(ctx, goal_ids: list[str],
+                   task_sessions: list[str] | None = None) -> None:
     from server.repositories.goals import GoalRepository
     from server.repositories.utility_conversations import (
         _delete_eval_utilities,
@@ -64,6 +68,12 @@ async def _cleanup(ctx, goal_ids: list[str]) -> None:
     await _delete_eval_utilities(ctx.db)
     await GoalRepository(ctx.db).delete_eval_goals()  # eval-goal prefix
     await GoalRepository(ctx.db).delete_eval_goals(prefix="eg")
+    for key in (task_sessions or []):
+        # G3 seeds real task-registry rows (task_register writes tasks +
+        # due-action wakeups); the wakeups are covered above, the rows here
+        # (SQL in the repo per the ownership rule).
+        from server.repositories.tasks import TaskRepository
+        await TaskRepository(ctx.db).delete_for_waiter(key)
 
 
 @eval_case(
@@ -135,7 +145,7 @@ async def goal_writeback_on_relayed_decision(ctx):
 
         @tool
         async def send_whatsapp_message(message: str, media_path: str = "") -> str:
-            """Send a WhatsApp message in this conversation. Your text output is NOT delivered — only this tool sends; call it as your final action."""
+            """Send a WhatsApp message to this conversation right now — BEFORE you finish. Use it for a brief progress update while you work, or for a reply with media attached. Your final text reply is delivered automatically — do not use this tool to repeat it."""
             state["sends"].append(message)
             return json.dumps({"ok": True, "message_id": "eval-mock"})
 
@@ -157,7 +167,10 @@ async def goal_writeback_on_relayed_decision(ctx):
         blob = " ".join(v for v in goal.values() if isinstance(v, str))
         fact_written = ("david" in blob.lower() and "gnome" in blob.lower())
 
-        if state["sends"]:
+        # Final text is the reply under final-text delivery (2026-10-01);
+        # fall back to the last send only for old-habit turns that put the
+        # whole answer through the tool and ended empty.
+        if not (response or "").strip() and state["sends"]:
             response = state["sends"][-1]
         return {
             "response": response,
@@ -235,7 +248,7 @@ async def goal_room_folds_bg_artefact(ctx):
 
         @tool
         async def send_whatsapp_message(message: str, media_path: str = "") -> str:
-            """Send a WhatsApp message in this conversation. Your text output is NOT delivered — only this tool sends; call it as your final action."""
+            """Send a WhatsApp message to this conversation right now — BEFORE you finish. Use it for a brief progress update while you work, or for a reply with media attached. Your final text reply is delivered automatically — do not use this tool to repeat it."""
             state["sends"].append(message)
             return json.dumps({"ok": True, "message_id": "eval-mock"})
 
@@ -266,7 +279,10 @@ async def goal_room_folds_bg_artefact(ctx):
         goal = await GoalRepository(ctx.db).get(goal_id)
         blob = " ".join(v for v in goal.values() if isinstance(v, str))
         artefact_in_record = "montage" in blob.lower()
-        if state["sends"]:
+        # Final text is the reply under final-text delivery (2026-10-01);
+        # fall back to the last send only for old-habit turns that put the
+        # whole answer through the tool and ended empty.
+        if not (response or "").strip() and state["sends"]:
             response = state["sends"][-1]
         return {
             "response": response,
@@ -276,3 +292,139 @@ async def goal_room_folds_bg_artefact(ctx):
         }
     finally:
         await _cleanup(ctx, [goal_id])
+
+
+# ---------------------------------------------------------------- G3 (2026-10-02)
+
+_MUG_LOG = {
+    "scratch/mug-render/render.log": "\n".join([
+        "2026-10-02 11:41:02 blender 4.0.2 | mug body: cylinder r=0.042 h=0.095",
+        "2026-10-02 11:41:02 handle: primitive=torus at (0, 0, 0.021) "
+        "rotation=(0,0,0) — flush against the body face (should protrude "
+        "on +Y so it reads as a side handle)",
+        "2026-10-02 11:41:03 spin: body rotates Y-axis 360 over 240 frames; "
+        "handle parented to body — visible orbit frame 001-240",
+        "2026-10-02 11:48:55 stitched turntable.mp4 (240 frames)",
+    ]),
+    "scratch/mug-render/frames/frame-001.png": "png " + "x" * 400,
+    "scratch/mug-render/frames/frame-120.png": "png " + "x" * 400,
+    "scratch/mug-render/frames/frame-240.png": "png " + "x" * 400,
+}
+
+
+@eval_case(
+    id="goal_promised_work_gets_registered",
+    category="goal_behavior",
+    description="A turn that diagnoses a problem and commits to rework "
+                "MUST register the work (task_register) — prose promises "
+                "die with the turn (2026-10-02 AI-doom mug: flight ended "
+                "'rebuilding the geometry properly', goal was scoped to "
+                "inspection, settled completed, no task/goal/job existed — "
+                "the rebuild never happened).",
+    structural_checks=[
+        StructuralCheck(kind="tool_call_made",
+                        params={"tool_name": "bash"}),
+        StructuralCheck(kind="tool_call_made",
+                        params={"tool_name": "task_register"}),
+        StructuralCheck(kind="context_flag",
+                        params={"key": "work_registered"}),
+        StructuralCheck(kind="min_length", params={"min_length": 5}),
+    ],
+    judge_criteria=JudgeCriteria(
+        extra_instructions=(
+            "A group member asks what's wrong with the spinning mug render "
+            "(the render logs at scratch/mug-render/render.log show it: "
+            "the handle is a torus flush against the body instead of "
+            "protruding, so it orbits as the body spins). CORRECT: the "
+            "model checks the logs (bash visible in INPUT MESSAGES), "
+            "answers the question in its reply, AND registers the promised "
+            "rework by calling task_register (visible in INPUT MESSAGES, "
+            "title naming the fix — e.g. rebuilding the handle geometry / "
+            "re-rendering the turntable) so the commitment survives the "
+            "turn. A brief progress send via send_whatsapp_message is fine "
+            "but optional. WRONG: diagnosing and promising in PROSE only "
+            "('I'll rebuild it properly') with no task_register call — the "
+            "exact live failure, where nothing in the system owned the "
+            "promise after the turn ended; silently attempting the full "
+            "rebuild inline in this chat turn; claiming work already "
+            "started when no tool ran."
+        ),
+    ),
+)
+async def goal_promised_work_gets_registered(ctx):
+    from server.evals.util import make_planted_bash, make_shadow_surface
+    from server.repositories.conversations import ConversationRepository
+    from server.services.llm_dispatch import LLMDispatchService
+    from server.services.tasks import make_task_tools
+    from server.services.tool_registry import build_common_tools
+    from server.services.tools import Tool
+
+    session_key = "eval:goal:g3-group"
+    await ConversationRepository(ctx.db).ensure(session_key)
+
+    tree_cleanup = None
+    try:
+        messages = [
+            {"role": "system", "content": await _workspace_system(
+                ctx, session_key, _GROUP_FRAMING)},
+            {"role": "user", "content": (
+                "[Rupert] That circle is the handle? Why is it rotating "
+                "around the mug ?")},
+            {"role": "assistant", "content": (
+                "Looking at the render frames now — back shortly.")},
+            {"role": "user", "content": "[Mike] So?? what's wrong with it"},
+        ]
+
+        state = {"sends": []}
+
+        async def _send(text: str = "", media_path: str = "") -> str:
+            state["sends"].append(text)
+            return "Message sent (request_id=eval-mock)"
+
+        send_tool = Tool(
+            name="send_whatsapp_message",
+            description=(
+                "Send a WhatsApp message to this conversation right now — BEFORE you finish. "
+                "Use it for a brief progress update while you work, or for a reply with media attached "
+                "(media_path; text is then the caption and may be empty for media-only sends). "
+                "Your final text reply is delivered automatically — do not use this tool to repeat it."
+            ),
+            parameters={
+                "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided; optional when sending media only)."},
+                "media_path": {"type": "string", "description": "Optional path to an image or media file, relative to the workspace directory."},
+            },
+            required=[],
+            handler=_send)
+
+        bash, tree_cleanup = make_planted_bash(_MUG_LOG)
+        tools = (make_task_tools(ctx, session_key) + [send_tool, bash])
+        # BOB_EVAL_NO_CROWD=1 drops the shadow surface — the tool-count
+        # experiment knob (does flash comply when the crowd isn't
+        # diluting salience?).
+        if not __import__("os").environ.get("BOB_EVAL_NO_CROWD"):
+            crowd = build_common_tools(ctx, session_key=session_key,
+                                       is_trusted=True, contact_id=None)
+            tools += make_shadow_surface(
+                crowd, exclude={"bash", "send_whatsapp_message",
+                                "task_register", "task_complete", "task_fail"})
+
+        response = await LLMDispatchService(ctx).chat_with_tools(
+            messages, tools, model=pinned_model(),
+            reasoning_effort=__import__("os").environ.get("BOB_EVAL_EFFORT"),
+            call_category="eval", session_key=session_key)
+
+        from server.repositories.tasks import TaskRepository
+        row = await TaskRepository(ctx.db).latest_for_waiter(session_key)
+        if not (response or "").strip() and state["sends"]:
+            response = state["sends"][-1]
+        return {
+            "response": response,
+            "context": {"tool_calls": extract_tool_calls(messages),
+                        "work_registered": bool(row),
+                        "registered_title": (row or {}).get("title", "")},
+            "input_messages": messages,
+        }
+    finally:
+        if tree_cleanup is not None:
+            await tree_cleanup()
+        await _cleanup(ctx, [], task_sessions=[session_key])

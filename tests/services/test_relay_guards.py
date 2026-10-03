@@ -94,23 +94,16 @@ def test_hermes_strip_handles_unknown_dialects():
 
 # ------------------------------------------------------------ fallback content
 
-def test_fallback_content_is_context_not_instruction():
-    """v2 (docs/detach-v2.md): the silent-flight fallback carries the result
-    as CONTEXT and forbids redo — the v1 'nothing was delivered, deliver it'
-    preamble is the documented duplicate-work mechanism (2026-09-10
-    double-sell, 2026-09-11 double-gif) and must never return."""
-    content = BackburnerService._fallback_content(
-        "abcd1234", "Reply sent to Andrew with the sources.")
-    assert "finished without posting" in content
-    assert "do NOT" in content
-    assert "nothing in it has been delivered" not in content
-    # The boilerplate tails relay_payload splits on, verbatim
-    # (2026-09-18: audience-relative — "Tell Mike" echoed into the wrong
-    # chat once, and it aimed untrusted chats at the owner):
-    assert "\n\nReport here briefly" in content
-    assert "Tell Mike" not in content
-    assert content.index("finished without posting") < content.index(
-        "Reply sent to Andrew"), "context leads, payload follows"
+def test_relay_payload_still_strips_historical_fallback_shapes():
+    """The v2 fallback/narration builders were retired with final-text
+    delivery (2026-10-01) — silent flights deliver at terminal instead of
+    waking relays. relay_payload keeps parsing the historical wake shapes
+    (pre-retirement rows can still sit pending across a restart), which is
+    what the dead-man switch delivers; that stripping is pinned by the
+    relay_payload tests above ('Report here briefly' / 'Tell the person'
+    tails). This stub marks the retirement so a future reader doesn't
+    reinstate the builders for the dead-man path."""
+
 
 
 def test_failed_content_names_real_effects():

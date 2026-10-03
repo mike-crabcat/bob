@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -124,6 +125,71 @@ def probe_model(settings: Any) -> str:
     return (settings.backburner.probe_model
             or settings.patience.model
             or settings.openai.get_memory_model())
+
+
+def delivery_note(short: str, send_tool: str) -> str:
+    """The between-rounds note appended to a flight's live messages at
+    detach. The flight's system prompt was assembled before the detach,
+    so nothing in-context states the delivery contract for a detached
+    turn (final-text delivery, 2026-10-01): its final text is delivered
+    by the supervisor, the send tool is for progress/media only, NO_REPLY
+    is silence. Mechanism-only instruction: it says HOW speech works,
+    never WHAT work to do. Import target for the bg_delivery eval so the
+    pin tracks production wording."""
+    return (
+        f"[System note] This turn has been detached to the background as "
+        f"bg turn {short}; it keeps running. When you finish, your final "
+        "text is delivered to this conversation automatically — no send "
+        f"call needed for it. Call {send_tool} only for a progress update "
+        "along the way, or a reply with media attached. If you finish by "
+        "promising more work, register it with task_register before "
+        "ending — an unregistered promise doesn't exist. To stay silent at "
+        "the end, finish with the exact text NO_REPLY. Do not restate "
+        "this note.")
+
+
+# Delivery caps (2026-10-03, after the AI-doom 56KB dump): what crosses
+# into a human chat is bounded. Full results AND full errors stay on the
+# subagent row + goal (store_terminal/settle_goal keep the untruncated
+# `combined`); only the delivered frame is shortened. The incident: an
+# upstream 400 str()-ed to 56,471 chars of raw provider Zod JSON and the
+# failure notice delivered it wholesale into a group chat.
+_DELIVERY_RESULT_LIMIT = 4000
+_DELIVERY_ERROR_LIMIT = 300
+
+
+def _delivery_error_short(text: str) -> str:
+    """One bounded line for a failure delivery: the exception headline only,
+    never the payload that follows it. Provider errors are ONE line — an
+    SDK error prefix, the outer error dict, then tens of KB of raw
+    validation JSON — so line-splitting is useless; extract the headline
+    structurally (status code + outer code/message, stopping at the
+    metadata payload) and fall back to a word-boundary cut."""
+    t = " ".join((text or "").split())
+    if not t:
+        return "unknown error — full error on the task record"
+    m = re.search(r"Error code: (\d+)", t[:2000])
+    if m:
+        # the outer dict only — everything after 'metadata' is payload
+        head_zone = re.split(r"'metadata'|\"metadata\"", t[:4000])[0]
+        bits = re.findall(r"'(?:code|message)':\s*'([^']{0,200})'", head_zone)
+        headline = f"Error code: {m.group(1)}"
+        uniq = [b for b in dict.fromkeys(bits) if b][:2]
+        if uniq:
+            headline += " - " + ": ".join(uniq)
+        return headline[:_DELIVERY_ERROR_LIMIT] + " — full error on the task record"
+    cut = t[:_DELIVERY_ERROR_LIMIT]
+    if len(t) > _DELIVERY_ERROR_LIMIT:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut + " — full error on the task record"
+
+
+def _delivery_cap(text: str, limit: int = _DELIVERY_RESULT_LIMIT) -> str:
+    if len(text or "") <= limit:
+        return text or ""
+    return (text or "")[:limit] + (
+        f" …[truncated at {limit} of {len(text)} chars — "
+        "full result on the task record]")
 
 
 # -------------------------------------------------- attribution (detach v2)
@@ -382,7 +448,8 @@ class BackburnerService(BaseService):
         return info
 
     async def detach(self, *, spec: Any, turn: Any, session_svc: Any,
-                     llm_task: asyncio.Task, quiet: bool = False) -> bool:
+                     llm_task: asyncio.Task, quiet: bool = False,
+                     messages: list | None = None) -> bool:
         """Full detach sequence (plan §Detach sequence, steps a–g).
 
         Returns True when the turn was detached (caller returns from run()
@@ -395,6 +462,13 @@ class BackburnerService(BaseService):
         still runs (its summary labels the goal); only step f's announcement
         is dropped, and a silent steer-born flight settles quietly at
         terminal (silence is the designed outcome for stimulus work).
+
+        ``messages`` (2026-09-30): the flight's live message list. At the
+        point of no return the delivery note is appended so the flight
+        learns it now owns delivery — its system prompt was assembled
+        BEFORE detach, so nothing in-context says so, and the flight
+        ending in plain text is the 2026-09-29 send-skip class (work done,
+        answer invisible, relay + dead-man rescue one turn late).
         """
         if spec.flight is None or spec.hold_sender is None:
             return False
@@ -495,6 +569,27 @@ class BackburnerService(BaseService):
 
         _tasks[subagent_id] = llm_task
         _dispatch_ids[subagent_id] = spec.dispatch_id
+
+        # e3. Delivery note (final-text delivery, 2026-10-01): the flight's
+        #     prompt predates the detach, so nothing in-context states the
+        #     detached delivery contract — final text delivered by the
+        #     supervisor, send tool for progress/media only, NO_REPLY for
+        #     silence. Appended between rounds — the in-flight generation is
+        #     untouched and the note rides into the next round's input
+        #     (flights typically have many tool rounds left; a flight whose
+        #     current generation is its last simply misses the note, and
+        #     terminal delivery delivers whatever it wrote anyway).
+        #     Best-effort like every probe-side write.
+        if messages is not None:
+            try:
+                messages.append({"role": "user", "content": delivery_note(
+                    subagent_id[:8], spec.send_tool_name
+                    or "send_whatsapp_message")})
+            except Exception:
+                logger.warning(
+                    "backburner: delivery-note append failed for %s",
+                    subagent_id[:8], exc_info=True)
+
         self._spawn_supervisor(subagent_id, goal_id, spec, llm_task)
         logger.info(
             "backburner: detached turn %s (session=%s, dispatch=%s, probe=%s)",
@@ -547,47 +642,21 @@ class BackburnerService(BaseService):
         return subagent_id, str(goal["id"])
 
     # ------------------------------------------------------ terminal content
-
-    @staticmethod
-    def _fallback_content(short: str, combined: str) -> str:
-        """v2 (docs/detach-v2.md): used ONLY when a flight finishes without
-        ever sending — its computed result would otherwise vanish (the
-        2026-09-03 lost-result shape). Deliberately NON-IMPERATIVE: the
-        flight's tool calls all executed for real, so nothing here may
-        suggest delivering or redoing work — that instruction was the v1
-        relay bug (2026-09-10 double-sell, 2026-09-11 double-gif). Wording
-        is pinned by test. Only for flights that made at least one tool
-        call — a zero-call flight gets _narration_only_content instead."""
-        return (
-            f"[bg turn {short}] finished without posting anything. "
-            "Everything it did via tools already happened for real — do NOT "
-            f"redo it. Its result, for context:\n\n{combined}\n\n"
-            "Report here briefly what came of it if anything is worth "
-            "saying; silence is fine for routine work.")
-
-    @staticmethod
-    def _narration_only_content(short: str, combined: str) -> str:
-        """Zero-tool-call silent completion: no tool executed, nothing was
-        sent. The 2026-09-17 phantom build: a bg task returned 'Build is
-        running — I'll post the file when it's done' having called no tools,
-        the fallback vouched for it ('already happened for real — do NOT
-        redo'), and the group waited on work that never existed. The relay
-        must withdraw the vouch: claims of running/done work are unfounded,
-        conclusions are unverified, and the work is still to do."""
-        return (
-            f"[bg turn {short}] finished without posting anything AND made "
-            "no tool calls — no tool ran, so treat any claim below that "
-            "work is running, queued, or already done as unfounded, and its "
-            "conclusions as unverified. If the work matters, it still needs "
-            f"doing for real.\n\n{combined}\n\n"
-            "Tell the person in THIS chat plainly what came of it — never "
-            "carry reports to Mike or anyone else from here; a message "
-            "reaches only this conversation.")
+    # The v2 fallback/narration-only relay builders were RETIRED with
+    # final-text delivery (2026-10-01, docs/final-text-delivery-plan.md):
+    # silent-flight results are delivered directly by the supervisor
+    # under a '(background result…)' header (unverified variant for
+    # zero-tool flights — the 2026-09-17 phantom-build withdrawal lives
+    # in that header now). relay_payload still parses the historical
+    # wake shapes from pre-retirement rows. _failed_content survives for
+    # the one path that still wakes instead of delivering: boot recovery
+    # (recover_orphaned_goals has no live spec to deliver through) and
+    # the runtime terminal's delivery-failure fallback.
 
     @staticmethod
     def _failed_content(short: str, combined: str) -> str:
         return (
-            f"[bg turn {short}] failed. {combined}\n\n"
+            f"[bg turn {short}] failed. {_delivery_error_short(combined)}\n\n"
             "Its tool calls before failing may have had real effects — "
             "check the current state before retrying anything. Tell the "
             "person in THIS chat plainly what happened — never carry "
@@ -647,17 +716,54 @@ class BackburnerService(BaseService):
             _dispatch_ids.pop(subagent_id, None)
             _flight_by_dispatch.pop(spec.dispatch_id, None)
 
+    async def _deliver_result(self, spec: Any, framed: str) -> bool:
+        """Final-text delivery for a silent flight (docs/
+        final-text-delivery-plan.md): deliver the result directly through
+        the flight's own send tool handler — idempotency keys, send
+        records and the effects outbox all apply, exactly like the
+        dispatch runner's in-turn delivery. Framed as the runner speaking
+        (the '(background result…)' header), never as Bob's own composed
+        words — the dead-man switch's 2026-09-06 framing rule. Returns
+        False when delivery was impossible (no send tool / handler
+        error) — callers then settle with the result stored on the goal."""
+        if not getattr(spec, "send_tool_name", ""):
+            return False
+        send_tool = next(
+            (t for t in (spec.tools or [])
+             if getattr(t, "name", "") == spec.send_tool_name), None)
+        if send_tool is None:
+            return False
+        try:
+            await send_tool.handler(framed)
+            # Record the delivery in history: run() returned at detach, so
+            # no _record_history will ever run for this send — without this
+            # the message exists on WhatsApp but not in the transcript,
+            # future-turn context (delivered_only), or search. Found on the
+            # first live firing (2026-10-02 aus-legal announcement).
+            from server.services.session_service import SessionService
+            await SessionService(self.ctx).add_message(
+                spec.session_key, "assistant", framed,
+                channel=getattr(spec, "channel", None) or "whatsapp")
+            return True
+        except Exception:
+            logger.exception(
+                "backburner: terminal delivery failed via %s",
+                spec.send_tool_name)
+            return False
+
     async def _terminal(self, subagent_id: str, goal_id: str,
                         spec: Any, *, status: str,
                         result_text: str) -> None:
-        """Terminal transition (v2, docs/detach-v2.md): subagent row + goal
-        settle. There is no relay turn for flights that spoke — their
-        attributed messages WERE the output. Only silent completions get the
-        non-imperative fallback wake (provenance task_relay, so the
-        send-tool rescue still covers it — the 2026-08-30 dropped-relay
-        lesson). Steer-born flights settle quietly on every silent terminal
-        state: nobody asked for the work, silence is the designed outcome.
-        Never raises."""
+        """Terminal transition (detach v2 + final-text delivery 2026-10-01):
+        subagent row + goal settle. Flights that spoke are done — their
+        attributed messages WERE the output. A silent completion with a
+        substantive result is DELIVERED directly by the supervisor through
+        the send tool (no relay turn: the 2026-09-29 send-skip class cost
+        a full relay + dead-man rescue per incident). Zero-tool flights
+        deliver under an unverified header — the 2026-09-17 phantom-build
+        harm was the system vouching; the header un-vouches. Steer-born
+        flights settle quietly on every silent terminal state: nobody
+        asked for the work. Never raises."""
         from server.services.dispatch_runner import is_no_reply
         from server.repositories.subagents import SubagentRepository
         from server.services.goal_service import settle_goal
@@ -690,18 +796,29 @@ class BackburnerService(BaseService):
                                       "completed with no user-facing output",
                                       wake_origin=False)
                 else:
-                    # Silent completion with a result: the one v2 fallback.
-                    # Vouched only when the flight ran tools — a zero-call
-                    # flight narrated, it didn't work (2026-09-17 phantom
-                    # build), and its relay must withdraw the do-not-redo
-                    # vouch instead of repeating it.
-                    content = (
-                        self._fallback_content(short, combined)
+                    # Silent completion with a result: deliver it here —
+                    # the flight's stimulus was a human question and the
+                    # holding ack promised an answer, so this is the same
+                    # final-text delivery the runner applies to any
+                    # human-stimulus turn. Framing depends on whether the
+                    # flight actually ran anything.
+                    header = (
+                        f"(background result from bg turn {short})"
                         if made_tool_calls
-                        else self._narration_only_content(short, combined))
+                        else f"(background result from bg turn {short} — "
+                        "UNVERIFIED: this turn ran no tools, so claims "
+                        "below that work was started, sent, or finished "
+                        "may not have happened; if it matters, it still "
+                        "needs doing)")
+                    delivered = await self._deliver_result(
+                        spec, f"{header}\n\n{_delivery_cap(combined)}")
+                    if not delivered:
+                        logger.error(
+                            "backburner: silent-flight result undeliverable "
+                            "for %s — stored on the goal only", short)
                     await settle_goal(self.ctx, goal_id, status="completed",
-                                      result=content, wake_content=content,
-                                      wake_provenance="task_relay")
+                                      result=combined,
+                                      wake_origin=False)
             elif status == "killed":
                 await SubagentRepository(self.db).store_terminal(
                     subagent_id, status="killed",
@@ -719,10 +836,20 @@ class BackburnerService(BaseService):
                                       result="steer-born background turn failed",
                                       wake_origin=False)
                 else:
-                    content = self._failed_content(short, combined)
-                    await settle_goal(self.ctx, goal_id, status="failed",
-                                      result=content, wake_content=content,
-                                      wake_provenance="task_relay")
+                    framed = (
+                        f"(bg turn {short} failed — its earlier tool calls "
+                        "may have had real effects; check the current state "
+                        f"before retrying anything)\n\n"
+                        + _delivery_error_short(combined))
+                    delivered = await self._deliver_result(spec, framed)
+                    if not delivered:
+                        content = self._failed_content(short, combined)
+                        await settle_goal(self.ctx, goal_id, status="failed",
+                                          result=content, wake_content=content,
+                                          wake_provenance="task_relay")
+                    else:
+                        await settle_goal(self.ctx, goal_id, status="failed",
+                                          result=combined, wake_origin=False)
             logger.info("backburner: task %s -> %s%s", short, status,
                         " (spoke; no wake)" if status == "completed" and spoke
                         else "")

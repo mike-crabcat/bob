@@ -575,6 +575,7 @@ class LLMDispatchService(BaseService):
         contact_id: str | None = None,
         budget_stats: dict[str, bool] | None = None,
         force_first_tool_choice: bool = False,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Chat with tool calling. Loops until LLM finishes or max iterations.
 
@@ -637,6 +638,7 @@ class LLMDispatchService(BaseService):
                 budget_stats=budget_stats,
                 call_meta=call_meta,
                 force_first_tool_choice=force_first_tool_choice,
+                reasoning_effort=reasoning_effort,
             )
             elapsed = time.monotonic() - t0
 

@@ -77,7 +77,7 @@ _NUDGE_ONLY_DIRECTIVE = (
     "[system notification] above — not by a message from the human. Process "
     "it silently: fold the information into your state or tools. Do not send "
     "a user-visible reply unless a human message above still needs one — if "
-    "none does, call {send_tool} with the text NO_REPLY."
+    "none does, finish with the exact text NO_REPLY and nothing else."
 )
 
 logger = logging.getLogger(__name__)
@@ -328,14 +328,28 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     # Append grounding rules to reduce hallucinated tool claims
     parts.append(
         "## CRITICAL: How to Respond\n"
-        "Your text output is NOT delivered to the user. Only tool calls have effect.\n"
-        "ALWAYS call send_whatsapp_message (or email_reply) as your final action — even for short replies, "
-        "even for acknowledgments, even for jokes. Without that call, nothing is sent.\n"
+        "On WhatsApp: your FINAL text output is your reply — it is delivered automatically. "
+        "Call send_whatsapp_message only to speak BEFORE you finish: a brief progress update while "
+        "working, or a reply with media attached (media needs the tool; plain text does not). "
+        "Do not use the tool to repeat your final reply. To stay silent, finish with the exact "
+        "text NO_REPLY and nothing else.\n"
+        "On email: call email_reply to send your reply, email_skip to stay silent.\n"
+        "When you commit to doing something later — fixing, rebuilding, checking, following up — "
+        "call task_register with a title for it before the turn ends. An unregistered promise "
+        "doesn't exist: no later turn will remember it. Registering is not doing: for work that "
+        "needs a go-ahead, register the task and propose.\n"
         "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
     )
     parts.append(GROUNDING_RULES)
     parts.append(
         "## Modifying Skills and Code — Propose First\n"
+        "- PROMISED WORK MUST BE REGISTERED: when your reply commits to "
+        "fixing, rebuilding, checking, or following up on anything — even "
+        "if you're only reporting a bug you're expected to fix — call "
+        "task_register with a title for it before the turn ends. Later "
+        "turns only know what is registered; an unregistered promise "
+        "doesn't exist. Registering is not doing: for work that needs a "
+        "go-ahead, register the task and propose.\n"
         "Changes to anything under `skills/` or to any code or config file are easy to get "
         "wrong from a half-described idea, so propose before you edit:\n"
         "- When a request would create or modify a skill, script, or any code file — with "
@@ -737,7 +751,7 @@ async def build_chat_messages(
                 })
                 continue
 
-            if is_group and row["role"] == "user" and row["sender_id"]:
+            if is_group and row["role"] == "user" and row.get("sender_id"):
                 name = sender_names.get(row["sender_id"])
                 if name:
                     messages.append({"role": "user", "content": f"[{name}] {content}"})
@@ -778,8 +792,9 @@ async def build_chat_messages(
     # with the new stimulus buried unmarked mid-replay.
     if claimed_ids is not None:
         no_reply_ref = (
-            f"call {send_tool_name} with the text NO_REPLY"
-            if send_tool_name else "reply NO_REPLY via your send tool"
+            f"finish with the exact text NO_REPLY and nothing else "
+            f"(or call {send_tool_name} with it, if you are mid-tool)"
+            if send_tool_name else "finish with the exact text NO_REPLY"
         )
         if lifted and _ends_with_assistant_side(messages):
             lines = "\n".join(f"- {t}" for t in lifted)
@@ -918,6 +933,10 @@ def _collapse_run(run: list[dict]) -> list[dict]:
         "created_at": run[0]["created_at"],
         "provenance": "collapsed_bookkeeping",
         "metadata": None, "dispatched": 1, "synthetic": 1,
+        # Shape parity with real rows: the marker has role "user", so the
+        # group path reads sender_id on it (2026-10-01 KeyError outage —
+        # every group dispatch with a collapsed run crashed).
+        "sender_id": None, "tool_blocks_json": None,
     }
     return [marker] + head
 

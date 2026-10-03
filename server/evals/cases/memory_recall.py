@@ -65,7 +65,7 @@ async def _run(ctx, session_key: str, messages: list,
 
         @tool
         async def send_whatsapp_message(message: str, media_path: str = "") -> str:
-            """Send a WhatsApp message in this conversation. Your text output is NOT delivered — only this tool sends; call it as your final action."""
+            """Send a WhatsApp message to this conversation right now — BEFORE you finish. Use it for a brief progress update while you work, or for a reply with media attached. Your final text reply is delivered automatically — do not use this tool to repeat it."""
             state["sends"].append(message)
             return json.dumps({"ok": True, "message_id": "eval-mock"})
 
@@ -82,8 +82,10 @@ async def _run(ctx, session_key: str, messages: list,
             call_category="eval",
             session_key=session_key,
         )
-        # Judge sees the SENT text (production replies ride the send tool).
-        if state["sends"]:
+        # Final text is the reply under final-text delivery (2026-10-01);
+        # fall back to the last send only for old-habit turns that put the
+        # whole answer through the tool and ended empty.
+        if not (response or "").strip() and state["sends"]:
             response = state["sends"][-1]
         return {
             "response": response,
@@ -109,8 +111,6 @@ _RECALL_OR_FIND = StructuralCheck(
                 "must reflect the seeded plan.",
     structural_checks=[
         _RECALL_OR_FIND,
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(
@@ -251,8 +251,6 @@ async def memory_answer_matches_record(ctx):
     structural_checks=[
         StructuralCheck(kind="no_tool_call",
                         params={"tool_names": ["recall", "find", "remember"]}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(

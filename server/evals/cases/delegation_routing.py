@@ -46,7 +46,7 @@ def _make_mock_tools(*, seeded_subagents: list[dict] | None = None,
 
     @tool
     async def send_whatsapp_message(message: str, media_path: str = "") -> str:
-        """Send a WhatsApp message in this conversation. Your text output is NOT delivered — only this tool sends; call it as your final action."""
+        """Send a WhatsApp message to this conversation right now — BEFORE you finish. Use it for a brief progress update while you work, or for a reply with media attached. Your final text reply is delivered automatically — do not use this tool to repeat it."""
         state["sends"].append(message)
         return json.dumps(
             {"ok": True, "message_id": f"eval-mock-{uuid.uuid4().hex[:8]}"})
@@ -230,10 +230,13 @@ async def _run(ctx, session_key: str, messages: list,
         )
     finally:
         await cleanup_tree()
-    # The judge sees the SENT text (production replies ride the send
+    # The judge sees the reply (final text, or a progress send if one
     # tool; the final assistant text is often empty and starved judges
     # on the first baseline — 2026-09-28).
-    if state["sends"]:
+    # Final text is the reply under final-text delivery (2026-10-01);
+    # fall back to the last send only for old-habit turns that put the
+    # whole answer through the tool and ended empty.
+    if not (response or "").strip() and state["sends"]:
         response = state["sends"][-1]
     created = [s for s in state["subagents"].values() if not s.get("seeded")]
     return {
@@ -256,8 +259,6 @@ async def _run(ctx, session_key: str, messages: list,
     structural_checks=[
         StructuralCheck(kind="tool_call_made",
                         params={"tool_name": "create_subagent"}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(
@@ -296,8 +297,6 @@ async def route_substantial_coding_to_claude(ctx):
         StructuralCheck(kind="no_tool_call", params={
             "tool_names": ["create_subagent", "run_bg_process"]}),
         StructuralCheck(kind="tool_call_made", params={"tool_name": "bash"}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(

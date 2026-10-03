@@ -30,6 +30,18 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+def _norm_repeat(final_norm: str, sent: str) -> bool:
+    """Transition duplicate guard (2026-10-01): True when the turn's final
+    text is a verbatim repeat of a text it already sent through the tool —
+    containment either way, long texts only (short strings match
+    everything). Paraphrased repeats deliberately pass; the battery and
+    the watch list own those."""
+    sent_norm = " ".join((sent or "").split())
+    if len(sent_norm) < 40 or len(final_norm) < 40:
+        return False
+    return final_norm in sent_norm or sent_norm in final_norm
+
+
 def is_no_reply(text: str | None) -> bool:
     """True when the text IS a silence marker, not merely mentions one.
 
@@ -403,7 +415,8 @@ class DispatchRunner:
                         if bb_mode == "full":
                             detached = await bb_svc.detach(
                                 spec=spec, turn=turn, session_svc=session_svc,
-                                llm_task=llm_task, quiet=steer_only)
+                                llm_task=llm_task, quiet=steer_only,
+                                messages=messages)
                             if detached:
                                 return ""
                             result = await llm_task
@@ -451,22 +464,35 @@ class DispatchRunner:
                         logger.warning("turn-settled hook failed (session=%s)",
                                        session_key, exc_info=True)
 
-            # Rescue: the turn wrote a reply but never called its send tool.
-            # By the prompt contract ("your text output will NOT be sent…
-            # you MUST call this tool"), final-round text with no call is a
-            # model-compliance failure, never an intent — patience-gated
-            # silence goes through the tool as NO_REPLY, which sets the sent
-            # flag. EXCEPTION: turns claimed by system nudges only
-            # (expect_send=False) may legitimately end with un-sent text —
-            # e.g. a goal-state fold summary — so they are not rescued.
-            # Deliver through the send tool itself, reusing its NO_REPLY
-            # semantics, citation stripping, and effects-outbox idempotency.
-            # (The old tap — a reminder retry — managed 0/20 and was removed.)
-            # Echo guard (2026-09-14): never rescue a parrot of the inbound
+            # Final-text delivery (docs/final-text-delivery-plan.md,
+            # 2026-10-01): a human-stimulus turn's final text IS the reply —
+            # delivered through the send tool handler so idempotency keys,
+            # send records, citation stripping and the effects outbox all
+            # apply. Inverts the old contract (text invisible, tool
+            # mandatory): the send tool is now for progress updates and
+            # media answers, NO_REPLY is the silence primitive, and a
+            # mid-turn progress send must NOT suppress the final answer —
+            # which is why the old rescue's `not message_was_sent` gate is
+            # gone. Turns claimed by system nudges only (expect_send=False)
+            # still never deliver: their un-sent text is the decline or the
+            # fold summary working (steer/wake incidents 2026-09-07).
+            # Echo guard (2026-09-14): never deliver a parrot of the inbound
             # stimulus or anything carrying the new-message marker — the
             # deferred guard from the 2026-08-30 duplicate-reply work; silence
             # beats mailing Mike his own question back.
             is_echo = await _is_stimulus_echo(result, claimed_ids, history_repo)
+            already_spoke = spec.message_was_sent[0]
+            final_norm = " ".join(result.split())
+            # Transition guards (2026-10-01): the send tool still exists for
+            # progress updates and media, and old habits (or old
+            # conversations in context) put the ANSWER through it. A turn
+            # that already spoke must not re-deliver a trivial tail
+            # ("Sent.", "Done.") or a verbatim repeat of what it just sent —
+            # that is the duplicate-reply class of 2026-08-30/09-12, not a
+            # new answer.
+            trivial_tail = already_spoke and len(final_norm) <= 20
+            repeated = already_spoke and any(
+                _norm_repeat(final_norm, t) for t in spec.sent_texts)
             # Narration guard (2026-09-19): a reply that CLAIMS tool calls it
             # never made must not be delivered as-is — the fabricated
             # "[tools used: …]" prefix leaks into chat and the promised work
@@ -483,13 +509,14 @@ class DispatchRunner:
                         {"role": "assistant", "content": result[:2000]},
                         {"role": "user", "content":
                          "[System correction] Your previous reply NARRATED "
-                         "tool calls (send/create_subagent) without actually "
-                         "calling them — the transcript shows zero tool "
-                         "calls, so nothing was sent and nothing was "
-                         "started. Reply again and ACTUALLY CALL the tools "
-                         "you intend (send_whatsapp_message to deliver your "
-                         "reply; create_subagent to start work). Never write "
-                         "tool-call transcripts as text."},
+                         "tool calls without actually calling them — the "
+                         "transcript shows zero tool calls, so nothing was "
+                         "sent and nothing was started. Reply again and "
+                         "ACTUALLY CALL the tools you intend "
+                         "(send_whatsapp_message only for a progress update "
+                         "or a media answer — your final text reply is "
+                         "delivered automatically; create_subagent to start "
+                         "work). Never write tool-call transcripts as text."},
                     ]
                     from server.services.llm_dispatch import LLMDispatchService
                     result = await LLMDispatchService(self.ctx).chat_with_tools(
@@ -504,30 +531,30 @@ class DispatchRunner:
                     logger.exception(
                         "narration retry failed (session=%s, dispatch=%s)",
                         session_key, spec.dispatch_id)
-            if (not spec.message_was_sent[0]
-                    and spec.send_tool_name
+            if (spec.send_tool_name
                     and spec.call_category in _SEND_RESCUE_CATEGORIES
                     and expect_send
                     and result.strip()
                     and not is_no_reply(result)
-                    and not is_echo):
+                    and not is_echo
+                    and not trivial_tail
+                    and not repeated):
                 send_tool = next(
                     (t for t in spec.tools if t.name == spec.send_tool_name), None)
                 if send_tool is not None:
                     try:
                         deliverable = _strip_narration(result) if narrated else result
                         await send_tool.handler(deliverable)
-                        logger.warning(
-                            "send-tool rescue: %s turn wrote a reply without "
-                            "calling %s; delivered by the runner "
-                            "(session=%s, dispatch=%s)%s",
-                            spec.call_category, spec.send_tool_name,
+                        logger.info(
+                            "final-text delivery: %s turn delivered via the "
+                            "runner (session=%s, dispatch=%s)%s",
+                            spec.call_category,
                             session_key, spec.dispatch_id,
                             " [narration stripped after failed retry]"
                             if narrated else "")
                     except Exception:
                         logger.exception(
-                            "send-tool rescue failed (session=%s, dispatch=%s)",
+                            "final-text delivery failed (session=%s, dispatch=%s)",
                             session_key, spec.dispatch_id)
             elif (is_echo
                     and not spec.message_was_sent[0]
@@ -535,7 +562,7 @@ class DispatchRunner:
                     and result.strip()
                     and not is_no_reply(result)):
                 logger.warning(
-                    "send-tool rescue suppressed echo/marker-leak reply "
+                    "final-text delivery suppressed echo/marker-leak reply "
                     "(session=%s, dispatch=%s, head=%r)",
                     session_key, spec.dispatch_id, result.strip()[:120])
             elif (spec.call_category in _SEND_RESCUE_CATEGORIES

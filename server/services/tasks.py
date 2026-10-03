@@ -440,7 +440,10 @@ def make_task_tools(ctx: AppContext, session_key: str) -> list:
         title: str, instruction: str = "", completer_session: str = "",
         due_minutes: float = 0, refs: str = "[]",
     ) -> str:
-        """Register a task THIS conversation waits on. The completer (another
+        """Register a task THIS conversation waits on — including work you
+        just promised to do ('I'll fix X', 'rebuilding it properly'):
+        registering is how the promise survives the turn, because later
+        turns only know what is registered. The completer (another
         conversation, a script, a subagent) settles it via task_complete /
         task_fail — or the script endpoint — and you are woken with the
         result. Pass completer_session to ALSO wake that conversation now

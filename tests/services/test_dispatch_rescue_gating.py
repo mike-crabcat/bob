@@ -1,18 +1,26 @@
-"""Send-tool rescue gating: the rescue exists to recover replies the model
-wrote but forgot to send (GLM-5.3 skips the final send call on ~20% of
-turns). But a turn claimed by system nudges alone isn't expected to speak —
-its un-sent final text is internal bookkeeping, and rescuing it mails
-internal monologue to the chat (the "Folded: …" goal-state summaries leaked
-to the AI doom group, 2026-08-29).
+"""Send-tool rescue gating → final-text delivery gating (2026-10-01,
+docs/final-text-delivery-plan.md): a human-stimulus turn's final text IS
+the reply and is delivered automatically; the send tool is for progress
+updates and media. Turns claimed by system nudges alone still never
+deliver — their un-sent text is internal bookkeeping, and delivering it
+mails internal monologue to the chat (the "Folded: …" goal-state
+summaries leaked to the AI doom group, 2026-08-29).
 
 Pinned here, at the DispatchRunner seam:
 - wake_nudge-only turn + un-sent text → NOT delivered, NOT recorded
-- real inbound message + un-sent text → rescued (existing behaviour kept)
-- mixed pending (nudge + real inbound) → rescued (a human is owed a reply)
-- task_relay-only turn (background-task result) + un-sent text → rescued:
+- real inbound message + un-sent text → delivered (existing behaviour kept)
+- mixed pending (nudge + real inbound) → delivered (a human is owed a reply)
+- task_relay-only turn (background-task result) + un-sent text → delivered:
   relay turns exist to speak, so the send-skip quirk must not swallow the
   result (live 2026-08-30: a detached AFL turn's finished relay — holding
   ack sent, outcome never delivered — was silently dropped this way)
+- a mid-turn PROGRESS send must not suppress the final answer (the old
+  rescue's message_was_sent gate is gone — progress-then-answer is the
+  intended shape)
+- routine-category turns never deliver final text (Mike's scoping:
+  silence is expected; routines speak only through explicit sends)
+- a turn that already spoke must not re-deliver a trivial tail or a
+  verbatim repeat (the duplicate-reply class of 2026-08-30/09-12)
 """
 
 from __future__ import annotations
@@ -262,3 +270,113 @@ async def test_is_no_reply_prose_does_not_silence():
     assert is_no_reply("no reply.")
     assert is_no_reply("[NO REPLY]")
     assert is_no_reply("Nothing to say.")
+
+
+# ---------------------------------------------------------------------------
+# Final-text delivery (2026-10-01): the flip and its transition guards
+# ---------------------------------------------------------------------------
+
+async def test_progress_send_does_not_suppress_final_text(
+        ctx, db, stub_llm, stub_history):
+    """The load-bearing flip: a mid-turn progress update must not eat the
+    final answer. The old rescue required `not message_was_sent` — under
+    the progress-update contract that gate would swallow every
+    progress-then-answer turn."""
+    key = "test:final:progress-then-answer"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "how'd the render go?",
+                          dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    # Emulate a mid-turn progress send (the real handler flips the flag
+    # and appends to sent_texts when the model calls it).
+    spec.message_was_sent[0] = True
+    spec.sent_texts.append("still rendering — 6 of 8 frames done")
+    stub_llm["reply"] = ("Done — the montage is at goals/1234/montage.mp4, "
+                         "all 8 frames stitched cleanly.")
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == [stub_llm["reply"]], (
+        "the final answer delivers even though the turn already sent "
+        "a progress update")
+
+
+async def test_routine_turn_final_text_never_delivered(
+        ctx, db, stub_llm, stub_history):
+    """Mike's scoping (2026-10-01): routines and wake-type calls expect
+    silence — they speak only through explicit sends. A routine turn's
+    final text must never auto-deliver (the 2026-09-17 routine
+    confabulation class stays silent by default)."""
+    key = "test:final:routine"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "morning brief payload",
+                          dispatched=0, provenance="routine")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    spec.call_category = "routine"
+    stub_llm["reply"] = "Brief composed internally, nothing to narrate."
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == [], (
+        "routine-category turns never auto-deliver final text")
+
+
+async def test_trivial_tail_after_send_not_delivered(
+        ctx, db, stub_llm, stub_history):
+    key = "test:final:trivial-tail"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "send me the file", dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    spec.message_was_sent[0] = True
+    spec.sent_texts.append("Here's the rendered file, validated and ready.")
+    stub_llm["reply"] = "Sent."
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == [], (
+        "a ≤20-char tail after a real send is bookkeeping, not a reply")
+
+
+async def test_verbatim_repeat_after_send_not_delivered(
+        ctx, db, stub_llm, stub_history):
+    """Transition guard: a model that still puts its ANSWER through the
+    send tool (old habit, old conversations in context) and then repeats
+    it as final text must not double-deliver (the duplicate-reply class
+    of 2026-08-30/09-12). Paraphrases deliberately pass — the battery
+    owns those."""
+    key = "test:final:verbatim-repeat"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "what's the status?", dispatched=0)
+    answer = ("All seven figurines are print-ready: meshes repaired, "
+              "sliced at 0.4 nozzle, and the inspection renders passed "
+              "for every one of them.")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    spec.message_was_sent[0] = True
+    spec.sent_texts.append(answer)
+    stub_llm["reply"] = answer  # verbatim repeat as final text
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == [], (
+        "a verbatim repeat of an already-sent answer is not a new reply"
+)
+
+
+async def test_no_reply_final_text_stays_silent(
+        ctx, db, stub_llm, stub_history):
+    """The new silence primitive: an inbound turn finishing with the exact
+    NO_REPLY marker delivers nothing."""
+    key = "test:final:no-reply"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "group chatter not for Bob",
+                          dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "NO_REPLY"
+
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+
+    assert send_tool.delivered == []

@@ -311,23 +311,28 @@ async def test_no_reply_sends_nothing_and_records_no_assistant_history(
 
 async def test_assistant_history_is_delivered_only(
         ctx, tmp_path, immediate_patience, stub_memory, monkeypatch):
-    """History records exactly the texts passed to the send tool, not the
-    model's raw text output."""
+    """Final-text delivery (2026-10-01): history records exactly the
+    DELIVERED texts — a mid-turn send (progress update) AND the final
+    text both deliver; nothing else is recorded. Under the old contract
+    the final text would have been suppressed once the tool was called."""
     _stub_workspace(monkeypatch)
 
     async def behaviour(messages, tools):
         tool = await _get_tool(tools, "send_whatsapp_message")
-        await tool.handler(text="delivered reply")
-        return "raw model text that was never sent"
+        await tool.handler(text="progress: still working")
+        return "the actual answer, delivered as final text"
     _stub_llm(monkeypatch, behaviour)
 
     await _seed_contact(ctx.db, TRUSTED_PHONE)
     svc = _make_service(ctx, tmp_path)
     await svc._handle_incoming_message(_dm_payload(TRUSTED_PHONE, "question"))
 
-    svc.send_message.assert_awaited_once()
+    assert svc.send_message.await_count == 2
     rows = await _assistant_messages(ctx.db, "agent:main:whatsapp:dm:%")
-    assert [r["content"] for r in rows] == ["delivered reply"]
+    # History joins a turn's delivered texts into one assistant row
+    # (the multi-send join predates final-text delivery).
+    assert [r["content"] for r in rows] == [
+        "progress: still working\n\nthe actual answer, delivered as final text"]
 
 
 async def test_text_output_without_send_tool_is_rescued(

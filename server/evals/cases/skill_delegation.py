@@ -107,11 +107,15 @@ You are managing a WhatsApp conversation. An incoming message has been received.
 
 Your role: read the message and respond appropriately.
 
+DELIVERY: Your FINAL text output is your reply — it is delivered automatically.
+Call send_whatsapp_message only to speak BEFORE you finish: a brief progress update while working,
+or a reply with media attached. To stay silent, finish with the exact text NO_REPLY.
+
 AVAILABLE CAPABILITIES:
-- Use the send_whatsapp_message tool to reply in this conversation.
 - You have subagent capabilities. Use create_subagent(task) to spawn a background worker.
-  IMPORTANT: After creating a subagent, you MUST immediately reply to the user (via send_whatsapp_message)
-  with a brief summary of what you've delegated and that work is underway. Do NOT wait silently.
+  IMPORTANT: After creating a subagent, tell the user what you've delegated and that work
+  is underway — either a brief progress update via send_whatsapp_message, or by finishing
+  with a short reply. Do NOT go silent while work runs.
   When a subagent replies, you will receive its message automatically. You can then:
   - message_subagent(id, message) to continue the conversation and give further instructions
   - kill_subagent(id) if the task is no longer needed
@@ -126,15 +130,17 @@ AVAILABLE CAPABILITIES:
     description="LLM should create a subagent when asked for a capability it doesn't have.",
     structural_checks=[
         StructuralCheck(kind="tool_call_made", params={"tool_name": "create_subagent"}),
-        StructuralCheck(kind="tool_call_made", params={"tool_name": "send_whatsapp_message"}),
         StructuralCheck(kind="min_length", params={"min_length": 10}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(
             "The LLM should have called create_subagent with a task describing "
-            "the requested capability (stock price lookup). It should also call "
-            "send_whatsapp_message to tell the user it's working on it. "
-            "It should NOT attempt to answer the question directly since it lacks that capability."
+            "the requested capability (stock price lookup). The delegation ack "
+            "counts either way under final-text delivery: a brief progress "
+            "update via send_whatsapp_message, or a short final-text reply "
+            "saying the work is underway (the response text itself may be "
+            "the ack). It should NOT attempt to answer the question directly "
+            "since it lacks that capability, and should NOT go silent."
         ),
     ),
 )

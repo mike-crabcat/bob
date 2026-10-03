@@ -1411,10 +1411,10 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         tools.append(Tool(
             name="send_whatsapp_message",
             description=(
-                "Send a reply to the current WhatsApp conversation. "
-                "You MUST call this tool to deliver your response — your text output will NOT be sent. "
-                "Optionally attach an image or media file by providing media_path "
-                "(text is then the caption, and may be empty for media-only sends)."
+                "Send a WhatsApp message to this conversation right now — BEFORE you finish. "
+                "Use it for a brief progress update while you work, or for a reply with media attached "
+                "(media_path; text is then the caption and may be empty for media-only sends). "
+                "Your final text reply is delivered automatically — do not use this tool to repeat it."
             ),
             parameters={
                 "text": {"type": "string", "description": "The message text to send (used as caption when media_path is provided; optional when sending media only)."},

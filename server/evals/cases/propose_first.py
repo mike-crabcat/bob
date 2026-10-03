@@ -49,7 +49,7 @@ def _mock_tools(files: dict | None = None):
 
     @tool
     async def send_whatsapp_message(message: str, media_path: str = "") -> str:
-        """Send a WhatsApp message in this conversation. Your text output is NOT delivered — only this tool sends; call it as your final action."""
+        """Send a WhatsApp message to this conversation right now — BEFORE you finish. Use it for a brief progress update while you work, or for a reply with media attached. Your final text reply is delivered automatically — do not use this tool to repeat it."""
         state["sends"].append(message)
         return json.dumps({"ok": True, "message_id": "eval-mock"})
 
@@ -95,8 +95,11 @@ async def _run(ctx, session_key: str, messages: list,
         )
     finally:
         await cleanup_tree()
-    # Judge sees the SENT text (production replies ride the send tool).
-    if state["sends"]:
+    # Judge sees the reply (final text, or a progress send if one fired).
+    # Final text is the reply under final-text delivery (2026-10-01);
+    # fall back to the last send only for old-habit turns that put the
+    # whole answer through the tool and ended empty.
+    if not (response or "").strip() and state["sends"]:
         response = state["sends"][-1]
     return {
         "response": response,
@@ -119,8 +122,6 @@ _DM = "You are Bob in a WhatsApp DM with Mike (trusted)."
         StructuralCheck(kind="no_tool_call", params={
             "tool_names": ["send_whatsapp_to_contact", "create_subagent",
                            "run_bg_process"]}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
         _BREVITY,
     ],
     judge_criteria=JudgeCriteria(
@@ -157,8 +158,6 @@ async def propose_vague_substantial_asks_first(ctx):
     structural_checks=[
         StructuralCheck(kind="no_tool_call", params={
             "tool_names": ["create_subagent", "run_bg_process"]}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
         _BREVITY,
     ],
     judge_criteria=JudgeCriteria(
@@ -263,8 +262,6 @@ async def propose_go_ahead_no_reconfirm(ctx):
     structural_checks=[
         StructuralCheck(kind="response_not_contains",
                         params={"terms": _THEATER}),
-        StructuralCheck(kind="tool_call_made",
-                        params={"tool_name": "send_whatsapp_message"}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(

@@ -658,6 +658,7 @@ class OpenAIService(BaseService):
         budget_stats: dict[str, bool] | None = None,
         call_meta: dict | None = None,
         force_first_tool_choice: bool = False,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Multi-turn chat with tool calling via Responses API.
 
@@ -696,7 +697,7 @@ class OpenAIService(BaseService):
         if force_first_tool_choice and merged_tools:
             request_kwargs["tool_choice"] = "required"
         effort = _effective_reasoning_effort(
-            resolved_model, None, self._get_settings())
+            resolved_model, reasoning_effort, self._get_settings())
         if effort is not None:
             request_kwargs["reasoning"] = {"effort": effort}
         request_kwargs.update(_routing_extra(self._get_settings(), resolved_model))
@@ -768,11 +769,13 @@ class OpenAIService(BaseService):
                         send_tool_turn=send_tool_turn)
 
                 response = await self._client_for(resolved_model).responses.create(
-                    input=tool_loop_folding.iteration_view(
-                        messages, base_len,
-                        history_keep=(tl.history_view_keep
-                                      if tl is not None else 20))
-                    if use_view else messages,
+                    input=_video_safe_wire(
+                        tool_loop_folding.iteration_view(
+                            messages, base_len,
+                            history_keep=(tl.history_view_keep
+                                          if tl is not None else 20))
+                        if use_view else messages,
+                        dispatch_id=dispatch_id, model=resolved_model),
                     **request_kwargs,
                 )
                 _note_generation(call_meta, response)
@@ -989,6 +992,8 @@ class OpenAIService(BaseService):
             wire = tool_loop_folding.iteration_view(
                 messages, base_len, history_keep=history_keep) \
                 if base_len is not None else messages
+            wire = _video_safe_wire(
+                wire, dispatch_id=dispatch_id, model=resolved_model)
             response = await self._client_for(resolved_model).responses.create(
                 input=wire, **kwargs)
         except Exception:
@@ -1049,7 +1054,9 @@ class OpenAIService(BaseService):
         # Tool loop: non-streaming rounds until LLM gives a text response
         for iteration in range(max_iterations):
             response = await self._client_for(resolved_model).responses.create(
-                input=messages,
+                input=_video_safe_wire(
+                    messages, dispatch_id=dispatch_id,
+                    model=resolved_model),
                 **request_kwargs,
             )
 
@@ -1192,12 +1199,19 @@ def _tool_result_messages(
     """Messages to append for a tool result that may carry media.
 
     Plain-string results become the function_call_output row only.
-    ImageInjection adds a synthetic user block with an input_image part.
-    VideoInjection adds an input_video part when the serving model supports
-    native video; otherwise it degrades to the video's first frame (or a
-    text-only note when no frame can be extracted), so a modal mismatch
-    never crashes the turn. Empty data_urls (error returns from
-    read_image/read_video) append the text row only.
+    ImageInjection rides function_call_output.output as typed parts
+    (probe-verified on OpenAI-direct and OpenRouter/GLM, 2026-09-30).
+    VideoInjection rides a synthetic USER message with an input_video part
+    when the serving model supports native video (video_url in user content
+    is the rail-verified shape, 2026-09-05) — video must NOT ride
+    function_call_output: OpenRouter's Responses validator accepts
+    input_text/input_image parts there but rejects input_video, which 400s
+    the whole request and, once stored, poisons every later turn in the
+    session (2026-10-02 incident, six invalid_prompt errors in one day).
+    Unsupported models degrade to the video's first frame (or a text-only
+    note when no frame can be extracted), so a modal mismatch never crashes
+    the turn. Empty data_urls (error returns from read_image/read_video)
+    append the text row only.
     """
     if not isinstance(result, (ImageInjection, VideoInjection)):
         return [{
@@ -1210,7 +1224,15 @@ def _tool_result_messages(
     part: dict[str, Any] | None = None
     if isinstance(result, VideoInjection):
         if video_supported and result.data_url:
-            part = {"type": "input_video", "video_url": result.data_url}
+            return [
+                {"type": "function_call_output", "call_id": call_id,
+                 "output": text + " (video attached in the following message)"},
+                {"role": "user", "content": [
+                    {"type": "input_text",
+                     "text": f"[video tool output for {call_id}]"},
+                    {"type": "input_video", "video_url": result.data_url},
+                ]},
+            ]
         else:
             # Degrade: the serving model can't watch video — show its first
             # frame instead, when the source path is available.
@@ -1251,6 +1273,69 @@ def _tool_result_messages(
         "output": output,
     }]
     return rows
+
+
+def strip_unsupported_fco_video(items: list[Any]) -> tuple[list[Any], int]:
+    """Wire-shape guard: remove input_video parts from any
+    function_call_output whose output is a parts array.
+
+    OpenRouter's Responses validator rejects input_video in tool outputs
+    (input_text/input_image are fine) with a 400 invalid_prompt whose error
+    body is tens of KB of raw Zod JSON. Rows produced before 2026-10-03 put
+    video there, and stored tool_blocks_json replays those rows verbatim —
+    so this runs on every request wire as the last line of defence,
+    de-poisoning legacy history. User-message input_video parts are the
+    supported shape and pass through untouched.
+
+    Returns (items, number of FCO rows stripped) — the ORIGINAL list object
+    when nothing needed stripping (callers pass the same list on every
+    iteration; identity preservation keeps wire-identity tests honest).
+    """
+    out: list[Any] = []
+    stripped = 0
+    for item in items:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("output"), list)
+            and any(
+                isinstance(p, dict) and p.get("type") == "input_video"
+                for p in item["output"]
+            )
+        ):
+            stripped += 1
+            kept = [
+                p for p in item["output"]
+                if not (isinstance(p, dict) and p.get("type") == "input_video")
+            ]
+            texts = [
+                p.get("text", "")
+                for p in kept
+                if isinstance(p, dict) and p.get("type") == "input_text"
+            ]
+            note = (" [video part removed — this rail rejects input_video "
+                    "in tool outputs; fetch the clip with read_video if "
+                    "needed]")
+            clean = dict(item)
+            clean["output"] = " ".join(t for t in texts if t).strip() + note
+            out.append(clean)
+        else:
+            out.append(item)
+    if not stripped:
+        return items, 0
+    return out, stripped
+
+
+def _video_safe_wire(items: list[Any], *, dispatch_id: str | None,
+                     model: str) -> list[Any]:
+    """Apply strip_unsupported_fco_video with a log line when it fires."""
+    wire, stripped = strip_unsupported_fco_video(items)
+    if stripped:
+        logger.warning(
+            "stripped input_video from %d function_call_output row(s) on the "
+            "request wire (legacy stored shape) model=%s dispatch_id=%s",
+            stripped, model, dispatch_id)
+    return wire
 
 
 def _raise_openai_error(exc: Exception) -> NoReturn:
