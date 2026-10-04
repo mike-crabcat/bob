@@ -1275,11 +1275,24 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 self.ctx, session_key=session_key, is_trusted=is_trusted,
                 contact_id=contact_id, human_initiated=human_initiated))
 
-        # Goal tools (Bob3 Phase V): trusted sessions can create/track goals.
+        # Goal tools (Bob3 Phase V, widened 2026-10-04): goal CREATION is
+        # open to every session — structuring an ask is not exercising
+        # reach, and untrusted-origin goals are exactly what creator
+        # pinning + room-principal scoping exist to handle safely (the
+        # 2026-10-01 census needed an operator workaround because the
+        # group turn had no create_goal; the AI-doom group is where most
+        # goals are born). create_goal refuses to settle for an unpinned
+        # owner in a GROUP (its docstring: ask who owns it first), and
+        # the room's capabilities scope to that creator. TRACKING tools
+        # (update/complete others' goals) stay trusted-only.
+        from server.services.goal_tools import make_goal_tools
         if is_trusted:
-            from server.services.goal_tools import make_goal_tools
             tools.extend(make_goal_tools(self.ctx, session_key))
-            # Bob Events §3.4: the payment gate's human side.
+        elif chat_kind == "group":
+            tools.extend(make_goal_tools(self.ctx, session_key,
+                                         create_only=True))
+        # Bob Events §3.4: the payment gate's human side (trusted only).
+        if is_trusted:
             from server.services.approval_tools import make_approval_tools
             tools.extend(make_approval_tools(self.ctx, session_key))
 

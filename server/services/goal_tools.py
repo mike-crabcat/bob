@@ -135,9 +135,16 @@ def _register_goal_executors() -> None:
 _register_goal_executors()
 
 
-def make_goal_tools(ctx: AppContext, session_key: str) -> list:
+def make_goal_tools(ctx: AppContext, session_key: str,
+                    *, create_only: bool = False) -> list:
     """Goal tools for a conversation: create, update, update state,
-    schedule wakeup, complete, list."""
+    schedule wakeup, complete, list.
+
+    ``create_only=True`` (2026-10-04 creation-gate widening): untrusted
+    GROUP turns get create/list ONLY — structuring an ask is not
+    exercising reach. Mutating tools (update/complete on goals, wakeup
+    scheduling) stay trusted-only; a group-created goal carries the
+    pinned owner, and the room's capabilities scope to that creator."""
 
     @tool
     async def create_goal(
@@ -211,6 +218,13 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
 
         goal_id = str(uuid4())
         creator_contact_id: str | None = None
+        if create_only and not owner.strip():
+            return json.dumps({"ok": False, "error":
+                               "a goal created from a group needs an owner: "
+                               "ask who this goal is for (unless they just "
+                               "said), then pass their name or phone as "
+                               "`owner` — the goal room's reach scopes to "
+                               "that person."})
         if owner.strip():
             from server.repositories.contacts import ContactRepository
             contacts = ContactRepository(ctx.db)
@@ -436,6 +450,8 @@ def make_goal_tools(ctx: AppContext, session_key: str) -> list:
             })
         return json.dumps({"ok": True, "goals": goals})
 
+    if create_only:
+        return [create_goal, list_goals]
     return [create_goal, update_goal, update_goal_state,
             schedule_goal_wakeup, list_goal_templates,
             instantiate_goal_template, complete_goal, list_goals]

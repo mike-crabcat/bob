@@ -857,3 +857,24 @@ async def test_goal_room_principal_helper(ctx, loop_on):
     t2, c2 = await _session_tool_principal(
         ctx, f"agent:goal-{sys_goal['id']}:utility")
     assert (t2, c2) == (False, None)
+
+
+async def test_group_create_only_tools_pin_owner(ctx):
+    """2026-10-04 creation-gate widening: untrusted GROUP turns get
+    create_goal + list_goals ONLY (structuring an ask ≠ exercising reach),
+    creation refuses without a named owner (the room scopes to that
+    creator), and mutating tools stay absent. The 2026-10-01 census
+    needed an operator workaround for exactly this door."""
+    from server.services.goal_tools import make_goal_tools
+    tools = {t.name: t for t in make_goal_tools(
+        ctx, "agent:main:whatsapp:group:120363422982048691",
+        create_only=True)}
+    assert set(tools) == {"create_goal", "list_goals"}
+    # no owner -> refused with the ask-who guidance
+    r = json.loads(await tools["create_goal"].handler(
+        objective="census v2", kind="build"))
+    assert not r["ok"] and "needs an owner" in r["error"]
+    # trusted surface unchanged: full set
+    full = {t.name for t in make_goal_tools(
+        ctx, "agent:main:whatsapp:dm:61456224867")}
+    assert {"update_goal", "complete_goal"} <= full
