@@ -81,7 +81,7 @@ async def record_discipline_search_before_denying(ctx):
     ]
 
     tools = make_session_tools(ctx, session_key=session_key)
-    response = await LLMDispatchService(ctx).chat_with_tools(
+    response = await LLMDispatchService(ctx).run_turn(
         messages, tools,
         model=pinned_model(),
         call_category="eval",
@@ -121,7 +121,7 @@ async def _run_turn(ctx, session_key: str, messages: list, *,
 
     tools = make_session_tools(ctx, session_key=session_key,
                                is_trusted=is_trusted)
-    response = await LLMDispatchService(ctx).chat_with_tools(
+    response = await LLMDispatchService(ctx).run_turn(
         messages, tools,
         model=pinned_model(),
         call_category="eval",

@@ -1,4 +1,4 @@
-"""Tests for the self-wrap budget nudges in OpenAIService.chat_with_tools.
+"""Tests for the self-wrap budget nudges in OpenAIService.run_turn.
 
 Budget exhaustion is a two-stage wrap-up (settings.self_wrap): a soft one-shot
 system nudge near the time/iteration budget, then a forced final LLM round
@@ -100,7 +100,7 @@ async def _run(svc, messages, **kwargs):
     async def handler(**kw):
         return "tool result"
 
-    return await svc.chat_with_tools(
+    return await svc.run_turn(
         messages,
         [],
         {"probe_tool": handler},

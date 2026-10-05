@@ -392,7 +392,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
 
         dispatch_id = str(uuid4())
         budget: dict[str, bool] = {}
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools,
             model=model_arg,
             time_limit_seconds=ROUTINE_WALL_CLOCK_SECONDS,

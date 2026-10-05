@@ -46,7 +46,7 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
 
         agent_type:
         - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
-        - 'local': runs in-process via chat_with_tools (faster, no subprocess).
+        - 'local': runs in-process via run_turn (faster, no subprocess).
         (For background shell commands use run_bg_process — that is process
         supervision, not a subagent: no model, no judgment, just a command
         whose completion wakes this conversation.)

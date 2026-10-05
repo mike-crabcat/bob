@@ -327,7 +327,7 @@ def make_whatsapp_outreach_tools(
             not in ("off", "0", "false", "no")
         if via_tasks:
             try:
-                from server.services.tasks import register_task, tasks_enabled
+                from server.services.tasks import register_task
                 phone_digits_g = re.sub(r"\D", "", phone)
                 target = f"agent:main:whatsapp:dm:{phone_digits_g}"
                 refs = []

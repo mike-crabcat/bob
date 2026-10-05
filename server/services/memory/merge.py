@@ -112,7 +112,7 @@ async def _confirm_merge(
         render_b=render_b[:2000],
         overlap_section=overlap_section,
     )
-    response = await llm.chat(
+    response = await llm.prompt(
         messages=[{"role": "user", "content": prompt}],
         model=llm.memory_model,
         call_category="memory_merge_confirmation",

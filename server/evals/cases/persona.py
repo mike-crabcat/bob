@@ -68,7 +68,7 @@ def _extract_tool_calls(messages: list) -> list[dict]:
 
 def _judge_view(messages: list) -> list[dict]:
     """JSON-safe view of the mutated message list for the judge and the
-    results table: chat_with_tools appends Responses-style items whose
+    results table: run_turn appends Responses-style items whose
     content fields can hold non-serialisable Content objects."""
     import json
 
@@ -151,7 +151,7 @@ async def persona_no_phantom_refusal(ctx):
 
     tools = _make_mock_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     return {
         "response": response,

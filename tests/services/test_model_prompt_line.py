@@ -101,7 +101,7 @@ async def test_dispatch_runner_threads_resolved_model(ctx, db, monkeypatch, tmp_
         seen["messages"] = messages
         return ""
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _chat)
 
     async def _run():
         spec = DispatchSpec(

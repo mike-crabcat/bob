@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 from server.services import goal_service
-from server.services.goal_tools import make_goal_tools
+from server.services.goal_tools import goal_tool_handlers
 
 DM = "agent:main:whatsapp:dm:61411112222"
 GROUP = "agent:main:whatsapp:group:777"
@@ -44,7 +44,7 @@ async def test_dm_sees_goal_originated_in_shared_group(ctx):
         ctx, conversation_id=GROUP, objective="merch 500",
         kind="task", strategy={"v": 2, "refs": {"entities": [], "claims": []}})
 
-    tools = {t.name: t.handler for t in make_goal_tools(ctx, DM)}
+    tools = {t.name: t.handler for t in goal_tool_handlers(ctx, DM)}
     out = json.loads(await tools["list_goals"]())
     ids = {g["goal_id"]: g for g in out["goals"]}
     assert goal["id"] in ids
@@ -60,7 +60,7 @@ async def test_room_session_not_widened(ctx):
         kind="task", strategy={"v": 2, "refs": {"entities": [], "claims": []}})
     room = goal["conversation_id"]
 
-    tools = {t.name: t.handler for t in make_goal_tools(ctx, room)}
+    tools = {t.name: t.handler for t in goal_tool_handlers(ctx, room)}
     out = json.loads(await tools["list_goals"]())
     for g in out["goals"]:
         assert g["relation"] == "held"
@@ -72,6 +72,6 @@ async def test_unrelated_dm_sees_nothing(ctx):
         ctx, conversation_id=GROUP, objective="merch 500",
         kind="task", strategy={"v": 2, "refs": {"entities": [], "claims": []}})
     tools = {t.name: t.handler
-             for t in make_goal_tools(ctx, "agent:main:whatsapp:dm:6499999")}
+             for t in goal_tool_handlers(ctx, "agent:main:whatsapp:dm:6499999")}
     out = json.loads(await tools["list_goals"]())
     assert out["goals"] == []

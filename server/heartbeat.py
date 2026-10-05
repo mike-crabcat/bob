@@ -576,9 +576,7 @@ class TaskReconcileTask:
                 (now - TaskReconcileTask._last) < self._THROTTLE:
             return
         TaskReconcileTask._last = now
-        from server.services.tasks import reconcile_orphans, tasks_enabled
-        if not tasks_enabled():
-            return
+        from server.services.tasks import reconcile_orphans
         try:
             await reconcile_orphans(ctx)
         except Exception:

@@ -183,29 +183,3 @@ async def test_retract_claim_refuses_norms_and_corrections(db):
     assert "SKIPPED" in out_sup
     row = await db.fetch_one("SELECT status FROM memory_claims WHERE id = 'n1'")
     assert row["status"] == "active"
-
-
-# ------------------------------------------------------------- plan dedupe
-
-async def test_session_plans_prompt_dedupes_link_rows(ctx):
-    from server.services.dream.injection import build_session_plans_prompt
-
-    now = "2026-09-13T00:00:00Z"
-    sk = "agent:main:whatsapp:group:g999"
-    # dream_plans.source_run_id has an FK → dream_runs
-    await ctx.db.execute(
-        "INSERT OR IGNORE INTO dream_runs (id, started_at, finished_at, window_start, window_end, status, trigger, model) "
-        "VALUES ('dream-x', '2026-08-16T00:00:00Z', '2026-08-16T00:05:00Z', '2026-08-15T00:00:00Z', '2026-08-16T00:00:00Z', 'complete', 'cli', 'test')")
-    await ctx.db.execute(
-        """INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, assistance_method,
-             status, evidence_json, source_run_id, created_at, updated_at)
-           VALUES ('plan-dup1', 'Dentist lift', 'd', 'a', 'm', 'approved', ?, 'dream-x', ?, ?)""",
-        (json.dumps([{"kind": "observed", "session_key": sk}]), now, now))
-    # the same plan linked three times (observed 2026-09-13 in AI doom prompt)
-    for _ in range(3):
-        await ctx.db.execute(
-            "INSERT INTO dream_item_links (item_type, item_id, session_key) VALUES ('plan', 'plan-dup1', ?)",
-            (sk,))
-
-    prompt = await build_session_plans_prompt(ctx.db, sk, dream_enabled=True)
-    assert prompt.count("plan-dup1 [approved]") == 1

@@ -91,7 +91,7 @@ async def tool_loop_folding_long_loop(ctx):
         ]
 
         dispatch = LLMDispatchService(ctx)
-        response = await dispatch.chat_with_tools(
+        response = await dispatch.run_turn(
             messages, [read_ledger, step],
             call_category="eval",
             session_key=session_key,

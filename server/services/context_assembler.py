@@ -10,6 +10,7 @@ built.
 
 from __future__ import annotations
 
+
 import logging
 from typing import Any
 
@@ -156,28 +157,27 @@ class ContextAssembler:
         from server.services.memory.service import build_conversation_roster
         return await build_conversation_roster(self.db, session_key)
 
-    async def dream_plans_prompt(self, session_key: str) -> str:
-        from server.services.dream.injection import build_session_plans_prompt
-        return await build_session_plans_prompt(
-            self.db, session_key, dream_enabled=self.ctx.settings.dream.enabled)
-
     async def goals_block(self, session_key: str) -> str:
-        """Active-goal context block (bob-events-plan.md §1.4): every goal a
-        conversation holds, newest activity first, top 5, each rendered
-        within a budget. Replaces the special-cased outreach prompt — the
-        outreach requestor/message ride in the goal's legacy_outreach state.
-        """
+        """The conversation's work context (commitments plan Phase 3): ONE
+        "Work" block — goals held, promises owed TO this conversation,
+        suggestions offered here, promises asked OF it, and work running in
+        the background."""
         from server.repositories.conversations import ConversationRepository
         from server.repositories.goals import GoalRepository
+
+        cid = await ConversationRepository(self.db).resolve_cid(session_key)
+        # kind='subagent' goals are executor bookkeeping, not intent — their
+        # live state renders in the background section instead (Phase 0).
+        goals = await GoalRepository(self.db).goals_held_by(
+            cid, limit=5, exclude_kinds=("subagent",))
+        background = await self._background_block(session_key)
+        return await self._work_block(session_key, goals, background)
+
+    @staticmethod
+    def _goals_section(goals: list[dict]) -> str:
         from server.services.goal_state_service import (
             GoalStrategy, parse_strategy, render_strategy,
         )
-
-        cid = await ConversationRepository(self.db).resolve_cid(session_key)
-        goals = await GoalRepository(self.db).goals_held_by(cid, limit=5)
-        if not goals:
-            return ""
-
         blocks: list[str] = []
         for goal in goals:
             state: GoalStrategy = parse_strategy(goal)
@@ -191,9 +191,8 @@ class ContextAssembler:
                     "objective through this conversation; when you have the "
                     "information needed, call finish_outreach to relay the result back.")
             blocks.append("\n".join(lines))
-
         return (
-            "## Active Goals\n\n" + "\n\n".join(blocks) +
+            "\n\n".join(blocks) +
             "\n\nIf this conversation decides, agrees, or learns anything about "
             "one of these goals — including on behalf of the owner or a third "
             "party (e.g. someone relaying another person's confirmation) — you "
@@ -204,8 +203,100 @@ class ContextAssembler:
             "absent from the goal's final artefact).\n\n"
             "WORK that belongs to one of these goals (renders, models, "
             "pipelines, anything toward its objective) is HANDED to the goal's "
-            "room, not executed here: task_register(completer_session=<the "
-            "room's session key from the goal above>). This conversation "
+            f"room, not executed here: delegate_goal(to=<session key>), with the "
+            "room's session key from the goal above. This conversation "
             "delivers results and reveals — it does not run the goal's "
             "pipelines (2026-09-29: Blender turntable jobs relived a "
             "fail-loop in this chat while the room sat idle).")
+
+    async def _work_block(self, session_key: str, goals: list[dict],
+                          background: str) -> str:
+        from server.repositories.tasks import TaskRepository
+        from server.services.base import local_minute
+        from server.services.tasks import tasks_block_lines
+
+        sections: list[str] = []
+        if goals:
+            sections.append("### Goals this conversation holds\n\n"
+                            + self._goals_section(goals).replace("\n### ", "\n#### ")
+                            .replace("### ", "#### ", 1))
+        try:
+            owed = await TaskRepository(self.db).list_for_waiter(session_key, limit=10)
+        except Exception:
+            logger.warning("work block: waiter promises failed", exc_info=True)
+            owed = []
+        if owed:
+            lines = [f"- {t['id']} (due {local_minute(t['due']) if t['due'] else '—'}) "
+                     f"[{t.get('expected_completer') or 'you'}] {t['title']}"
+                     for t in owed]
+            sections.append(
+                "### Owed to this conversation (already recorded)\n\n"
+                + "\n".join(lines) +
+                "\n\nThese promises are already recorded — do NOT add them "
+                "again. Close one with close_goal when it's done or no longer "
+                "needed; its result wakes this conversation when someone else "
+                "closes it.")
+        try:
+            from server.repositories.goals import GoalRepository
+            suggested = await GoalRepository(self.db).suggestions_for(session_key)
+        except Exception:
+            logger.warning("work block: suggestions failed", exc_info=True)
+            suggested = []
+        if suggested:
+            lines = [f"- {g['id']}: {g['objective']}" for g in suggested]
+            sections.append(
+                "### Suggested (offered here, awaiting their answer)\n\n"
+                + "\n".join(lines) +
+                "\n\nYou offered these. If someone here clearly says yes, call "
+                "accept_suggestion(goal_id) — in a group pass owner= (who it's "
+                "for). If they decline or it's moot, close_goal(goal_id, "
+                "outcome='cancelled', result=<why>). Never accept on your own; "
+                "you may gently re-raise one when the conversation invites it.")
+        asked = await tasks_block_lines(session_key, self.db)
+        if asked:
+            sections.append("### Asked of this conversation\n\n" + asked)
+        if background:
+            sections.append(background.replace("## Running in the background",
+                                               "### Running in the background", 1))
+        if not sections:
+            return ""
+        return "## Work\n\n" + "\n\n".join(sections)
+
+    async def _background_block(self, session_key: str) -> str:
+        """Work running in the background FOR this conversation right now:
+        detached flights (runs) and live subagents. Replaces their old
+        bookkeeping goals in the block above."""
+        from datetime import datetime, timezone
+        from server.repositories.runs import RunRepository
+        from server.repositories.subagents import SubagentRepository
+
+        lines: list[str] = []
+        now = datetime.now(timezone.utc)
+
+        def _age(started: str | None) -> str:
+            try:
+                dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return f"{max(int((now - dt).total_seconds() // 60), 0)}m"
+            except (TypeError, ValueError):
+                return "?"
+
+        try:
+            for run in await RunRepository(self.db).running_for_session(
+                    session_key, kind="flight"):
+                lines.append(f"- bg turn {run['id'][:8]} (running {_age(run['started_at'])}): "
+                             f"{run['summary']}")
+            for sub in await SubagentRepository(self.db).list_for_parent(
+                    session_key, status="running", limit=5):
+                lines.append(f"- subagent {sub['id'][:8]} (running {_age(sub['created_at'])}): "
+                             f"{sub['task_preview']}")
+        except Exception:
+            logger.warning("background block failed for %s", session_key, exc_info=True)
+            return ""
+        if not lines:
+            return ""
+        return ("## Running in the background\n\n" + "\n".join(lines) +
+                "\n\nThese speak for themselves when done — don't redo their "
+                "work or report them finished. check_subagent / kill_subagent "
+                "take the id shown.")

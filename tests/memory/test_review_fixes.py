@@ -116,7 +116,7 @@ class _ScriptedLLM:
 
     _calls = 0
 
-    async def chat_with_tools(self, *, tools, **kwargs):
+    async def run_turn(self, *, tools, **kwargs):
         if self._calls == 0:
             for step in self._script:
                 await step(tools)

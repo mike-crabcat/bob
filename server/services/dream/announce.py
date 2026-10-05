@@ -11,6 +11,7 @@ Guards (all enforced here, not by prompts):
 
 from __future__ import annotations
 
+
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -102,38 +103,23 @@ class AnnounceService(BaseService):
                 )
                 # Reply-commissioned work (Mike 2026-09-20): the dream
                 # PROPOSES, the announcement ASKS, and only the people's
-                # REPLY raises a goal. The announcement registers an open
-                # question as a task whose completer is this conversation —
-                # every later turn here sees the offer pending, and the
-                # reply turn creates the goal and settles the task. Silence
-                # resolves via the due backstop + reconcile sweep, aligned
-                # with the plan's engagement-expiry. Approval (auto or
-                # operator) no longer spawns machinery by itself.
+                # REPLY raises a goal. The offer IS a suggested goal
+                # (commitments plan Phase 4) — visible under "Suggested" in
+                # this chat's Work block; a reply calls accept_suggestion
+                # (creates the real goal) or close_goal (declines).
                 try:
-                    from server.services.tasks import register_task, tasks_enabled
-                    if tasks_enabled():
-                        await register_task(
-                            self.ctx,
-                            waiter_session=session_key,
-                            title=f"[plan {plan['id']}] offered help — awaiting their answer",
-                            instruction=(
-                                f"You (Bob) offered help in this "
-                                f"conversation: {plan['title']}. Proposed "
-                                f"assistance: {str(plan.get('assistance_method') or '')[:300]} "
-                                f"When someone REPLIES expressing interest, "
-                                f"create the goal (create_goal with "
-                                f"parent_goal_id empty — this conversation "
-                                f"works it) and settle this task with "
-                                f"task_complete(result=the goal id and what "
-                                f"they want). If they decline or the "
-                                f"question is moot, task_fail with the "
-                                f"reason. Do not create the goal before a "
-                                f"human asks for it."),
-                            expected_completer=session_key,
-                            due_minutes=48 * 60,
-                            extra_payload={"dream_plan_id": plan["id"]})
+                    from server.repositories.goals import GoalRepository
+                    await GoalRepository(self.db).create_suggestion(
+                        session_key=session_key, plan_id=plan["id"],
+                        text=plan["title"] + (
+                            f" — {plan['proposed_action']}"
+                            if plan.get("proposed_action") else ""),
+                        details={
+                            "what_was_discussed": plan.get("what_was_discussed"),
+                            "assistance_method": plan.get("assistance_method"),
+                            "due_hint": plan.get("due_hint")})
                 except Exception:
-                    logger.exception("dream announce: offer-task registration failed for %s",
+                    logger.exception("dream announce: suggestion write failed for %s",
                                      plan["id"])
             result["sessions"] += 1
             result["plans_announced"] += len(plans)
@@ -208,7 +194,7 @@ class AnnounceService(BaseService):
                 f"Timeframe hint: {plan.get('due_hint') or '(none)'}"
             )
             try:
-                verdict = await llm.chat(
+                verdict = await llm.prompt(
                     messages=[
                         {"role": "system", "content": FACTCHECK_SYSTEM},
                         {"role": "user", "content": (
@@ -257,7 +243,7 @@ class AnnounceService(BaseService):
             else "This is the first time raising it."
         )
         llm = LLMDispatchService(self.ctx)
-        response = await llm.chat(
+        response = await llm.prompt(
             messages=[
                 {"role": "system", "content": ANNOUNCE_SYSTEM},
                 {"role": "user", "content": f"Session: {session_key}\n{stance}\nPlan summaries:\n" + "\n".join(summaries)},

@@ -1,4 +1,4 @@
-"""Streaming transport in chat_with_tools (2026-10-03 trace uplift, Phase 2).
+"""Streaming transport in run_turn (2026-10-03 trace uplift, Phase 2).
 
 The contract: with BOB_LLM_STREAMING on, each tool-loop round rides a
 streamed ``responses.create``; deltas are forwarded via on_stream_event
@@ -134,7 +134,7 @@ async def test_streamed_rounds_forward_deltas_and_drive_tools(monkeypatch, tmp_p
         seen.append((kind, dict(data)))
 
     stream_result = StreamResult()
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "weather?"}],
         tools=[], tool_handlers={"get_weather": handler},
         stream_result=stream_result,
@@ -166,7 +166,7 @@ async def test_incomplete_terminal_returns_response(monkeypatch, tmp_path):
          _ev("response.incomplete",
              response=_completed_response([_msg("partial")], text="partial"))],
     ])
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "hi"}], tools=[], tool_handlers={})
     assert result == "partial"
 
@@ -196,7 +196,7 @@ async def test_reasoning_survives_empty_completed_item(monkeypatch, tmp_path):
                                  content=None, encrypted_content=None),
                  _msg("sunny")], text="sunny", usage=_usage()))],
     ])
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "weather?"}], tools=[], tool_handlers={},
         on_round_complete=on_round_complete)
     assert result  # ran to completion shape
@@ -226,7 +226,7 @@ async def test_reasoning_prefers_completed_item_no_double_count(monkeypatch, tmp
                                      type="summary_text", text="summary text")],
                                  content=[], encrypted_content=None)]))],
     ])
-    await svc.chat_with_tools(
+    await svc.run_turn(
         [{"role": "user", "content": "hi"}], tools=[], tool_handlers={},
         on_round_complete=on_round_complete)
     assert rounds[0] == [{"source": "summary", "text": "summary text"}]
@@ -239,7 +239,7 @@ async def test_failed_event_raises(monkeypatch, tmp_path):
              response=SimpleNamespace(error=SimpleNamespace(message="boom")))],
     ])
     with pytest.raises(RuntimeError, match="stream failed"):
-        await svc.chat_with_tools(
+        await svc.run_turn(
             [{"role": "user", "content": "hi"}], tools=[], tool_handlers={})
 
 
@@ -249,7 +249,7 @@ async def test_stream_without_terminal_raises(monkeypatch, tmp_path):
         [_ev("response.output_text.delta", delta="orphan")],
     ])
     with pytest.raises(RuntimeError, match="without a terminal event"):
-        await svc.chat_with_tools(
+        await svc.run_turn(
             [{"role": "user", "content": "hi"}], tools=[], tool_handlers={})
 
 
@@ -268,7 +268,7 @@ async def test_flag_off_is_byte_identical_buffered(monkeypatch, tmp_path):
     async def on_stream_event(kind, data):
         seen.append(kind)
 
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "hi"}], tools=[], tool_handlers={},
         on_stream_event=on_stream_event)
     assert result == "buffered reply"
@@ -293,7 +293,7 @@ async def test_forced_wrapup_round_streams(monkeypatch, tmp_path):
     async def on_stream_event(kind, data):
         seen.append((kind, dict(data)))
 
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "bulletin"}],
         tools=[], tool_handlers={},
         time_limit_seconds=0.0,

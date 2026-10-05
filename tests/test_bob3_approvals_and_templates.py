@@ -177,9 +177,9 @@ async def test_instantiate_missing_params_lists_them(ctx, db, mock_wake):
 
 
 async def test_template_tools_roundtrip(ctx, db, mock_wake):
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, "work")}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, "work")}
     listed = json.loads(await tools["list_goal_templates"].handler())
     assert any(t["name"] == "team-event" for t in listed["templates"])
 

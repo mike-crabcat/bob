@@ -108,13 +108,13 @@ def stub_memory(monkeypatch):
 
 
 def _stub_llm(monkeypatch, behaviour):
-    """Replace chat_with_tools; `behaviour(messages, tools)` returns text."""
+    """Replace run_turn; `behaviour(messages, tools)` returns text."""
     from server.services.llm_dispatch import LLMDispatchService
 
-    async def _chat_with_tools(self, messages, tools, **kwargs):
+    async def _run_turn(self, messages, tools, **kwargs):
         return await behaviour(messages, tools)
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat_with_tools)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _run_turn)
 
 
 def _stub_workspace(monkeypatch):

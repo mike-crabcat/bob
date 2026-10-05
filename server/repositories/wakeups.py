@@ -82,7 +82,14 @@ class WakeupRepository:
         eval sessions or eval-goal rooms. Production rows never match."""
         await self.db.execute(
             "DELETE FROM wakeups WHERE conversation_id LIKE 'eval:%' "
-            "OR conversation_id LIKE 'agent:goal-eval-%'")
+            "OR conversation_id LIKE 'agent:goal-eval-%' "
+            "OR conversation_id LIKE 'agent:goal-eg%'")
+        # Promise backstops key on payload.task_id, not goal_id — once the
+        # eval promise row is gone its task_due wake is an orphan.
+        await self.db.execute(
+            "UPDATE wakeups SET status = 'cancelled' WHERE status = 'scheduled' "
+            "AND kind = 'task_due' AND json_extract(payload_json, '$.task_id') "
+            "NOT IN (SELECT id FROM goals)")
 
     async def cancel_for_goal(self, goal_id: str) -> int:
         return await self.db.execute(
@@ -221,6 +228,18 @@ class WakeupRepository:
             "SELECT id, kind, not_before, status, created_at FROM wakeups "
             "WHERE goal_id = ? ORDER BY not_before DESC LIMIT ?",
             (goal_id, limit))
+
+    async def next_for_goals(self, goal_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Earliest scheduled wakeup per goal (any kind) — the Work page's
+        'next wake' column."""
+        if not goal_ids:
+            return {}
+        marks = ",".join("?" for _ in goal_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT goal_id, kind, MIN(not_before) AS not_before FROM wakeups "
+            f"WHERE status = 'scheduled' AND goal_id IN ({marks}) "
+            f"GROUP BY goal_id", tuple(goal_ids))
+        return {r["goal_id"]: dict(r) for r in rows or []}
 
     async def pending_kind_rows(self, goal_ids: list[str], kind: str) -> list[dict[str, Any]]:
         """Bulk pending-slot lookup for the dashboard goal list."""

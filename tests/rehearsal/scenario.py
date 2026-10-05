@@ -184,12 +184,12 @@ class RehearsalScenario:
 
     # ------------------------------------------------------------------
     async def kickoff(self) -> None:
-        from server.services.goal_tools import make_goal_tools
+        from server.services.goal_tools import goal_tool_handlers
         from server.services.whatsapp_outreach_tools import (
             make_whatsapp_outreach_tools,
         )
 
-        tools = {t.name: t.handler for t in make_goal_tools(self.ctx, WORK_KEY)}
+        tools = {t.name: t.handler for t in goal_tool_handlers(self.ctx, WORK_KEY)}
         decide_by = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
         out = json.loads(await tools["instantiate_goal_template"](
             template="team-event",

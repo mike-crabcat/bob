@@ -228,7 +228,7 @@ async def test_dispatch_voice_link_from_own_dm_no_report_back(ctx):
     )
 
     await VoiceDispatchService(ctx).dispatch_contact_call(
-        "sub-vl2", "chat", "contact-2", "voice_link",
+        "sub-vl2", "prompt", "contact-2", "voice_link",
         "agent:main:whatsapp:dm:61401589328",
     )
     row = await ctx.db.fetch_one(

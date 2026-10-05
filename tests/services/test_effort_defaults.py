@@ -1,7 +1,6 @@
 """models.yaml effort defaults reach the Responses API request: main-turn
-paths (chat, chat_stream, chat_with_tools) pass no explicit effort, so the
-per-model default must be merged in — and an explicit caller hint must win
-over it.
+paths (prompt, run_turn) pass no explicit effort, so the per-model default
+must be merged in — and an explicit caller hint must win over it.
 """
 
 from __future__ import annotations
@@ -63,7 +62,7 @@ def _reset_registry_cache():
 async def test_yaml_default_reaches_chat(tmp_path):
     captured: list[dict] = []
     svc = _service(tmp_path, captured)
-    await svc.chat([{"role": "user", "content": "hi"}], model="z-ai/glm-5.3-flash")
+    await svc.prompt([{"role": "user", "content": "hi"}], model="z-ai/glm-5.3-flash")
     assert captured[0].get("reasoning") == {"effort": "medium"}
 
 
@@ -71,7 +70,7 @@ async def test_yaml_default_reaches_chat(tmp_path):
 async def test_explicit_effort_wins(tmp_path):
     captured: list[dict] = []
     svc = _service(tmp_path, captured)
-    await svc.chat([{"role": "user", "content": "hi"}],
+    await svc.prompt([{"role": "user", "content": "hi"}],
                    model="z-ai/glm-5.3-flash", reasoning_effort="low")
     assert captured[0].get("reasoning") == {"effort": "low"}
 
@@ -80,25 +79,15 @@ async def test_explicit_effort_wins(tmp_path):
 async def test_unconfigured_model_gets_no_reasoning_kwarg(tmp_path):
     captured: list[dict] = []
     svc = _service(tmp_path, captured)
-    await svc.chat([{"role": "user", "content": "hi"}], model="z-ai/other-model")
+    await svc.prompt([{"role": "user", "content": "hi"}], model="z-ai/other-model")
     assert "reasoning" not in captured[0]
 
 
 @pytest.mark.asyncio
-async def test_yaml_default_reaches_chat_with_tools(tmp_path):
+async def test_yaml_default_reaches_run_turn(tmp_path):
     captured: list[dict] = []
     svc = _service(tmp_path, captured)
-    await svc.chat_with_tools(
+    await svc.run_turn(
         [{"role": "user", "content": "hi"}], tools=[], tool_handlers={},
         model="z-ai/glm-5.3-flash")
     assert captured and all(c.get("reasoning") == {"effort": "medium"} for c in captured)
-
-
-@pytest.mark.asyncio
-async def test_yaml_default_reaches_chat_stream(tmp_path):
-    captured: list[dict] = []
-    svc = _service(tmp_path, captured)
-    async for _ in svc.chat_stream([{"role": "user", "content": "hi"}],
-                                   model="z-ai/glm-5.3-flash"):
-        pass
-    assert captured[0].get("reasoning") == {"effort": "medium"}

@@ -24,11 +24,11 @@ def _make_mock_workspace_tools():
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:
-    """Pull tool calls from the message list chat_with_tools mutated.
+    """Pull tool calls from the message list run_turn mutated.
 
     Handles both shapes: legacy chat-completions
     {role: assistant, tool_calls: [...]} and the Responses-style
-    {type: function_call} items chat_with_tools appends to ``messages``.
+    {type: function_call} items run_turn appends to ``messages``.
     """
     calls = []
     for msg in messages:
@@ -71,7 +71,7 @@ async def workspace_bash(ctx):
 
     tools = _make_mock_workspace_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     tool_calls = _extract_tool_calls(messages)
     return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
@@ -142,12 +142,12 @@ async def media_stub_fetch_on_reference(ctx):
 
     tools = _make_mock_media_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     tool_calls = _extract_tool_calls(messages)
 
     def _json_safe(obj):
-        # chat_with_tools appends SDK-typed items (e.g. reasoning Content
+        # run_turn appends SDK-typed items (e.g. reasoning Content
         # blocks) that the eval recorder's json.dumps chokes on.
         if isinstance(obj, dict):
             return {k: _json_safe(v) for k, v in obj.items()}

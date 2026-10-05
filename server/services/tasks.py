@@ -17,19 +17,17 @@ Key invariants:
   dispatch for the expected completer (plan D6 — the outreach goal's real
   trick, so the reply three hours later still knows it owes something).
 
-Kill switch: BOB_TASKS=off hides tools + injection; rows persist.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from server.context import AppContext
-from server.services.base import BaseService, iso_utc
+from server.services.base import BaseService, iso_utc, local_minute
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +36,13 @@ SCRIPT_GRACE_MULTIPLE = 2         # sweep: script tasks fail at 2× due
 EFFECT_KIND = "task_settle"
 
 
-def tasks_enabled() -> bool:
-    return os.getenv("BOB_TASKS", "on").strip().lower() not in (
-        "off", "0", "false", "no")
 
+def _close_call(task_id: str, outcome: str) -> str:
+    """The exact close_goal call shape for closing a promise."""
+    if outcome == "failed":
+        return (f'close_goal(goal_id="{task_id}", outcome="failed", '
+                'result="no <capability> in this conversation")')
+    return f'close_goal(goal_id="{task_id}", result=…)'
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -142,7 +143,7 @@ async def _resolve_completer(ctx: AppContext, completer: str) -> tuple[str | Non
         conv = await repo.resolve(key) or await repo.get(key)
         if conv is None:
             return None, (f"completer conversation '{completer}' does not exist — "
-                          "task registered WITHOUT delegation; pass a real "
+                          "promise recorded WITHOUT delegation; pass a real "
                           "conversation key or complete it yourself")
         merged_into = conv.get("merged_into")
         if not merged_into:
@@ -162,21 +163,20 @@ async def _steer_completer(ctx: AppContext, task: dict[str, Any],
                        .get("instruction") or task["title"])
         refs = json.loads(task["refs_json"] or "[]")
         content = (
-            f"[Task {task['id']}] This conversation is asked to complete a "
-            f"task for another conversation.\nTitle: {task['title']}\n"
+            f"[Promise {task['id']}] Another conversation is counting on "
+            f"THIS one to deliver this.\nTitle: {task['title']}\n"
             f"Instruction: {instruction}\n"
             + (f"Context entities: {', '.join(refs)}\n" if refs else "")
             + "Work the objective through THIS conversation; when you have "
-              "the answer or the outcome, call task_complete with this task "
-              "id.\n"
-              "IF YOUR TOOLS CANNOT DO WHAT THIS TASK ASKS (e.g. it asks you "
+              f"the answer or the outcome, call {_close_call(task['id'], 'completed')}.\n"
+              "IF YOUR TOOLS CANNOT DO WHAT THIS PROMISE ASKS (e.g. it asks you "
               "to DM a person and this conversation has no DM tool), call "
-              f"task_fail(task_id=\"{task['id']}\", error=\"no <capability> "
-              "in this conversation\") IMMEDIATELY, on your FIRST attempt. "
-              "A task you cannot do does not go away by retrying or by "
+              f"{_close_call(task['id'], 'failed')} "
+              "IMMEDIATELY, on your FIRST attempt. "
+              "A promise you cannot keep does not go away by retrying or by "
               "substituting another channel — every retry risks duplicate "
-              "messages to humans. task_fail is a successful outcome: it "
-              "hands the task back to its owner to reroute.")
+              "messages to humans. Failing it is a successful outcome: it "
+              "hands it back to its owner to reroute.")
         return await wake_conversation(
             ctx, target or task["expected_completer"], content,
             call_category="task_delegation",
@@ -207,7 +207,7 @@ async def settle_task(
     if settled is None:
         existing = await repo.get(task_id)
         if existing is None:
-            return {"ok": False, "error": "task not found"}
+            return {"ok": False, "error": "promise not found"}
         return {"ok": False, "task_id": task_id,
                 "status": existing["status"],
                 "error": f"already {existing['status']}"}
@@ -256,8 +256,8 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
     body = task["result"] if task["status"] != "failed" else (
         f"{task['error'] or 'no reason recorded'}")
     content = (
-        f"## Task {outcome} — {task['title']}\n"
-        f"Task {task['id']} was {task['status']} by "
+        f"## Promise {outcome} — {task['title']}\n"
+        f"Promise {task['id']} was {task['status']} by "
         f"{task.get('completed_by') or 'unknown'} at "
         f"{(task.get('completed_at') or '')[:19]} UTC.\n\n"
         f"{body or '(no result recorded)'}\n\n"
@@ -284,7 +284,7 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
             excerpt = (task["result"] or task["error"] or "")[:400]
             await GoalRepository(ctx.db).append_known_line(
                 task["source_goal_id"],
-                f"[task {task['id']} {task['status']}] "
+                f"[promise {task['id']} {task['status']}] "
                 f"{task['title'][:120]}: {excerpt}")
         except Exception:
             logger.exception("task %s: goal evidence append failed", task_id)
@@ -305,32 +305,28 @@ async def _cancel_task_due_wakeups(ctx: AppContext, task_id: str) -> None:
 # Completer-side visibility (plan D6)
 # ---------------------------------------------------------------------------
 
-async def tasks_block(session_key: str, db) -> str:
-    """'Tasks awaiting this conversation' — injected into every dispatch for
-    the expected completer, the outreach-goal trick generalized: the reply
-    hours later still sees the promise. Empty when none pending."""
-    if not tasks_enabled():
-        return ""
+async def tasks_block_lines(session_key: str, db) -> str:
+    """The completer-side listing (instruction + pending promises), rendered
+    under "Asked of this conversation" in the Work block — the reply hours
+    later still sees the promise."""
     from server.repositories.tasks import TaskRepository
     pending = await TaskRepository(db).list_for_completer(session_key)
     if not pending:
         return ""
     lines = [
-        "## Tasks awaiting this conversation",
-        "",
         "Another conversation is waiting on these. Work them through THIS "
-        "conversation; settle each with task_complete(task_id, result) — or "
-        "task_fail(task_id, error) the MOMENT you see you cannot do it (no "
+        f"conversation; close each with {_close_call('<id>', 'completed')} — or "
+        f"{_close_call('<id>', 'failed')} the MOMENT you see you cannot do it (no "
         "such tool in this conversation, no such contact, wrong channel). "
-        "Retrying an undoable task or substituting a group message for a DM "
-        "request spams humans — task_fail it immediately and move on. Do "
+        "Retrying an undoable promise or substituting a group message for a DM "
+        "request spams humans — fail it immediately and move on. Do "
         "not narrate a settlement you didn't perform.",
         "",
     ]
     for t in pending:
         instruction = (json.loads(t["payload_json"] or "{}")
                        .get("instruction") or "")
-        lines.append(f"- {t['id']} (due {t['due'][:16]}): {t['title']}")
+        lines.append(f"- {t['id']} (due {local_minute(t['due'])}): {t['title']}")
         if instruction:
             lines.append(f"    {instruction[:220]}")
     return "\n".join(lines)
@@ -344,7 +340,7 @@ async def pending_tasks_lines(db, waiter_session: str) -> list[str]:
     from server.repositories.tasks import TaskRepository
     rows = await TaskRepository(db).list_for_waiter(waiter_session)
     return [
-        f"- {t['id']} (due {t['due'][:16]}) [{t['expected_completer'] or 'open'}]"
+        f"- {t['id']} (due {local_minute(t['due'])}) [{t['expected_completer'] or 'open'}]"
         f" {t['title']}"
         for t in rows
     ]
@@ -430,9 +426,19 @@ def _parse(ts: str) -> datetime | None:
 # Tool surface (every dispatch path)
 # ---------------------------------------------------------------------------
 
-def make_task_tools(ctx: AppContext, session_key: str) -> list:
-    """task_register / task_complete / task_fail / task_cancel / list_tasks —
-    available wherever conversation turns run (chat, wakes, rooms)."""
+def make_task_tools(ctx: AppContext, session_key: str, *,
+                    access: str = "full") -> list:
+    """The work tool set attached wherever conversation turns run (chat,
+    wakes, rooms): add_goal / close_goal / list_goals / delegate_goal /
+    schedule_goal / accept_suggestion, gated by ``access`` (full | create |
+    none — trusted / untrusted group / untrusted DM)."""
+    from server.services.goal_work_tools import make_goal_work_tools
+    return make_goal_work_tools(ctx, session_key, access=access)
+
+
+def promise_tool_handlers(ctx: AppContext, session_key: str) -> list:
+    """The promise handlers (register / complete / fail / cancel / list)
+    that the unified work tools wrap — internal, never attached directly."""
     from server.services.tools import tool
 
     @tool
@@ -450,8 +456,6 @@ def make_task_tools(ctx: AppContext, session_key: str) -> list:
         with the instruction (delegation). due_minutes defaults to 60; long
         waits pass an explicit value. refs: JSON array of entity ids the
         completer's memory extraction should offer."""
-        if not tasks_enabled():
-            return json.dumps({"ok": False, "error": "tasks disabled"})
         try:
             refs_list = json.loads(refs) if refs and refs != "[]" else []
             if not isinstance(refs_list, list):

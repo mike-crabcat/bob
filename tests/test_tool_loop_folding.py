@@ -162,7 +162,7 @@ async def _run_loop(ctx, messages, script, tool_results):
     async def _mk_result(r):
         return r
 
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         messages, tools=[], tool_handlers=handlers,
         model="test-model", max_iterations=10)
     return fake, result

@@ -29,12 +29,12 @@ templates, and a detach failure degrades to waiting for the turn inline.
 
 from __future__ import annotations
 
+
 import asyncio
 import json
 import logging
 import re
 from typing import Any
-from uuid import uuid4
 
 from server.services.base import BaseService, utcnow
 
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 MODES = ("off", "shadow", "hold", "full")
 
-# The detached chat_with_tools task per subagent — kill_subagent reaches the
+# The detached run_turn task per subagent — kill_subagent reaches the
 # in-process task through this registry (same idea as subagent_service's
 # _running_tasks, owned here so the detach lifecycle is one module).
 _tasks: dict[str, asyncio.Task] = {}
@@ -79,6 +79,11 @@ def note_tool_call(dispatch_id: str | None) -> None:
 
 TEMPLATE_SUMMARY = "working on the sender's last request"
 TEMPLATE_HOLDING = "still working on that — I'll get back to you soon"
+# Zero-tool turns have nothing observable to summarize — the ack must not
+# promise work (2026-10-03: "searching messages and memory…" ack, flight
+# finished 2s later having called nothing).
+TEMPLATE_SUMMARY_NO_ACTIVITY = (
+    "still composing its reply — no tool activity recorded")
 
 _CANCEL_REASON_KILLED = "killed by user"
 _CANCEL_REASON_DEADLINE = "detached turn exceeded its wall-clock budget"
@@ -142,7 +147,7 @@ def delivery_note(short: str, send_tool: str) -> str:
         "text is delivered to this conversation automatically — no send "
         f"call needed for it. Call {send_tool} only for a progress update "
         "along the way, or a reply with media attached. If you finish by "
-        "promising more work, register it with task_register before "
+        f"promising more work, register it with add_goal(profile='promise') before "
         "ending — an unregistered promise doesn't exist. To stay silent at "
         "the end, finish with the exact text NO_REPLY. Do not restate "
         "this note.")
@@ -150,8 +155,8 @@ def delivery_note(short: str, send_tool: str) -> str:
 
 # Delivery caps (2026-10-03, after the AI-doom 56KB dump): what crosses
 # into a human chat is bounded. Full results AND full errors stay on the
-# subagent row + goal (store_terminal/settle_goal keep the untruncated
-# `combined`); only the delivered frame is shortened. The incident: an
+# flight's run row (runs.finish keeps the untruncated `combined`); only the
+# delivered frame is shortened. The incident: an
 # upstream 400 str()-ed to 56,471 chars of raw provider Zod JSON and the
 # failure notice delivered it wholesale into a group chat.
 _DELIVERY_RESULT_LIMIT = 4000
@@ -205,7 +210,7 @@ def active_bg_id(flight: dict | None) -> str | None:
     the 2026-09-16 AI doom incident saw a live group turn's reply stamped
     as task 9e69b321. The fix: detach also records the llm_task
     (detach_task), and attribution applies only when the CURRENT asyncio
-    task is that task (tool handlers are awaited inline by chat_with_tools,
+    task is that task (tool handlers are awaited inline by run_turn,
     so a flight's sends run inside its own task). Flights without a token
     (in-flight rows from before the deploy) keep the old behaviour."""
     if not flight:
@@ -268,7 +273,7 @@ def request_kill(subagent_id: str) -> dict[str, Any]:
 
 def build_transcript(messages_json: str | None, *, max_tail: int = 20, item_cap: int = 240) -> str:
     """Compact rendering of the current turn's half of an in-flight
-    chat_with_tools messages array.
+    run_turn messages array.
 
     The probe sees the triggering user message plus this turn's own tool
     activity — never the system prompt, never earlier turns' history (plan:
@@ -355,6 +360,28 @@ def _parse_probe_output(raw: str | None) -> dict[str, str] | None:
     return {"summary": summary[:300], "holding_text": holding[:300]}
 
 
+def _transcript_tool_names(messages_json: str | None) -> list[str]:
+    """Distinct tool names this turn has actually called (boundary logic
+    mirrors build_transcript: everything after the last user message).
+    Ground truth for run_probe's evidence gate."""
+    try:
+        items = json.loads(messages_json or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(items, list):
+        return []
+    boundary = -1
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and it.get("role") == "user":
+            boundary = i
+    names: list[str] = []
+    for it in items[boundary + 1:]:
+        if (isinstance(it, dict) and it.get("type") == "function_call"
+                and isinstance(it.get("name"), str) and it["name"] not in names):
+            names.append(it["name"])
+    return names
+
+
 async def run_probe(ctx: Any, dispatch_id: str, *,
                     session_key: str | None = None, contact_id: str | None = None) -> dict[str, str]:
     """Inspect the in-flight turn and produce summary + holding ack.
@@ -363,30 +390,48 @@ async def run_probe(ctx: Any, dispatch_id: str, *,
     (D7). Timeboxed so a slow probe model can't stall the detach. The call
     is logged with the conversation's session_key/contact_id so probes are
     visible in the session's calls view (like attention_probe rows).
+
+    Evidence gate (2026-10-04, options 1+2): a turn with ZERO tool calls
+    has nothing observable to summarize — the probe model would guess
+    intent from the user's question and the ack would promise work that
+    may never run (live 2026-10-03: "searching messages and memory…" ack,
+    flight finished 2s later having called nothing). Zero activity →
+    neutral template, no probe call at all. With activity, the prompt may
+    only reference what the called tools actually show.
     """
     settings = ctx.settings
     fallback = {"summary": TEMPLATE_SUMMARY, "holding_text": TEMPLATE_HOLDING, "source": "template"}
 
     transcript = ""
+    tool_names: list[str] = []
     try:
         from server.repositories.llm_call_log import LlmCallLogRepository
         row = await LlmCallLogRepository(ctx.db).get_running_by_dispatch(dispatch_id)
         if row:
             transcript = build_transcript(row.get("messages_json"))
+            tool_names = _transcript_tool_names(row.get("messages_json"))
     except Exception:
         logger.warning("backburner: probe transcript read failed", exc_info=True)
 
+    if not tool_names:
+        return {"summary": TEMPLATE_SUMMARY_NO_ACTIVITY,
+                "holding_text": TEMPLATE_HOLDING, "source": "no_activity"}
+
     bot = settings.patience.bot_name or "Bob"
+    tools_line = ", ".join(tool_names)
     system = (
         f'You inspect an in-progress turn of "{bot}", an AI assistant on WhatsApp. '
         "The turn has been running for a while. Work out what it is doing and write "
         "a short holding message to send meanwhile.\n"
         'Reply with ONLY a JSON object: {"summary": "...", "holding_text": "..."}\n'
-        "- summary: one sentence, third person, concrete (e.g. \"checking the hotel "
-        'bookings against the calendar\").\n'
+        "- summary: one sentence, third person, concrete — and it may ONLY "
+        "reference work visible as tool calls in the transcript. The tools "
+        f"this turn has actually called so far: {tools_line}. Never infer, "
+        "predict, or invent actions beyond those calls.\n"
         f"- holding_text: at most 140 characters, in {bot}'s own voice (lowercase, "
         "casual, honest), acknowledging you're still on it — no emojis, no promises "
-        "more specific than 'soon'.\n"
+        "more specific than 'soon', and no claims about what's being done beyond "
+        "the tool activity above.\n"
         "If the transcript is thin or unclear, keep both generic."
     )
     user = ("## In-flight turn\n"
@@ -394,7 +439,7 @@ async def run_probe(ctx: Any, dispatch_id: str, *,
 
     try:
         from server.services.llm_dispatch import LLMDispatchService
-        probe_task = asyncio.create_task(LLMDispatchService(ctx).chat(
+        probe_task = asyncio.create_task(LLMDispatchService(ctx).prompt(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             model=probe_model(settings),
             call_category="detach_probe",
@@ -505,7 +550,7 @@ class BackburnerService(BaseService):
 
             # d. Register (register, never replay). Steer-origin rides on
             #    the goal strategy so terminal silence rules differ.
-            subagent_id, goal_id = await self._register(
+            subagent_id = await self._register(
                 spec, info, steer_origin=quiet)
         except Exception:
             logger.exception(
@@ -590,56 +635,27 @@ class BackburnerService(BaseService):
                     "backburner: delivery-note append failed for %s",
                     subagent_id[:8], exc_info=True)
 
-        self._spawn_supervisor(subagent_id, goal_id, spec, llm_task)
+        self._spawn_supervisor(subagent_id, spec, llm_task)
         logger.info(
             "backburner: detached turn %s (session=%s, dispatch=%s, probe=%s)",
             subagent_id[:8], spec.session_key, spec.dispatch_id, info["source"])
         return True
 
     async def _register(self, spec: Any, info: dict[str, str],
-                        *, steer_origin: bool = False) -> tuple[str, str]:
-        """subagents row (agent_type detached_turn) + goal held by the parent
-        conversation, so goals_block carries the work into later turns."""
-        from server.repositories.subagents import SubagentRepository
-        from server.services.goal_service import create_goal
+                        *, steer_origin: bool = False) -> str:
+        """A flight run (commitments plan Phase 0). Flights are execution,
+        not intent: no subagents row, no kind='subagent' goal (those were
+        ~90% of the goals table and rendered goal-room instructions that
+        made no sense for a flight). Later turns see a running flight via
+        the transcript placeholder + goals_block's background section;
+        check_subagent / kill_subagent resolve its id through runs."""
+        from server.repositories.runs import RunRepository
 
-        subagent_id = str(uuid4())
-        short = subagent_id[:8]
-        sub_key = f"subagent:{spec.session_key}:{short}"
-        now = utcnow().isoformat()
-        summary = info["summary"]
-
-        await SubagentRepository(self.db).insert(
-            subagent_id=subagent_id, parent_session_key=spec.session_key,
-            session_key=sub_key, task=f"[task {short}] {summary}",
-            agent_type="detached_turn", persona=0, model="",
-            contact_id=None, modality="", now_iso=now)
-        await SubagentRepository(self.db).set_status(subagent_id, "running", now)
-
-        strategy = {
-            "v": 2,
-            "plan": summary,
-            "known": [],
-            "open_questions": [],
-            "next_actions": [{"action": "finish the work; post the result "
-                                        "to the channel yourself (you speak "
-                                        "directly, attributed)", "due": ""}],
-            "refs": {"entities": [], "claims": []},
-        }
-        if steer_origin:
-            # The relay wake this goal eventually produces is labelled
-            # steer_relay (silence-ok, rescue-exempt) — see _terminal.
-            strategy["steer_origin"] = True
-        goal = await create_goal(
-            self.ctx,
-            conversation_id=sub_key,
-            objective=f"[task {short}] {summary}",
-            origin_conversation_id=spec.session_key,
-            kind="subagent",
-            strategy=strategy,
-            external_ref=subagent_id,
-        )
-        return subagent_id, str(goal["id"])
+        return await RunRepository(self.db).start(
+            kind="flight", session_key=spec.session_key,
+            dispatch_id=spec.dispatch_id, summary=info["summary"],
+            metadata={"steer_origin": True} if steer_origin else None,
+            now_iso=utcnow().isoformat())
 
     # ------------------------------------------------------ terminal content
     # The v2 fallback/narration-only relay builders were RETIRED with
@@ -665,15 +681,15 @@ class BackburnerService(BaseService):
 
     # ---------------------------------------------------------- supervisor
 
-    def _spawn_supervisor(self, subagent_id: str, goal_id: str, spec: Any,
+    def _spawn_supervisor(self, subagent_id: str, spec: Any,
                           llm_task: asyncio.Task) -> None:
         sup = asyncio.create_task(
-            self._supervise(subagent_id, goal_id, spec, llm_task),
+            self._supervise(subagent_id, spec, llm_task),
             name=f"backburner-supervisor:{subagent_id[:8]}")
         _supervisors.add(sup)
         sup.add_done_callback(_supervisors.discard)
 
-    async def _supervise(self, subagent_id: str, goal_id: str, spec: Any,
+    async def _supervise(self, subagent_id: str, spec: Any,
                          llm_task: asyncio.Task) -> None:
         """Own the detached task to its terminal state. All bookkeeping funnels
         through _terminal; this coroutine must never raise."""
@@ -689,25 +705,25 @@ class BackburnerService(BaseService):
             try:
                 result = await llm_task
                 await self._terminal(
-                    subagent_id, goal_id, spec,
+                    subagent_id, spec,
                     status="completed", result_text=result)
                 return
             except asyncio.CancelledError:
                 reason = _cancel_reasons.pop(spec.dispatch_id, None) or _CANCEL_REASON_KILLED
                 if "user" in reason.lower():
                     await self._terminal(
-                        subagent_id, goal_id, spec,
+                        subagent_id, spec,
                         status="killed", result_text="")
                 else:
                     await self._terminal(
-                        subagent_id, goal_id, spec,
+                        subagent_id, spec,
                         status="failed",
                         result_text="the background work was stopped: it exceeded "
                                     "its wall-clock budget")
                 return
             except Exception as exc:
                 await self._terminal(
-                    subagent_id, goal_id, spec,
+                    subagent_id, spec,
                     status="failed", result_text=f"the background work failed: {exc}")
                 return
         except Exception:
@@ -754,22 +770,20 @@ class BackburnerService(BaseService):
                 spec.send_tool_name)
             return False
 
-    async def _terminal(self, subagent_id: str, goal_id: str,
+    async def _terminal(self, subagent_id: str,
                         spec: Any, *, status: str,
                         result_text: str) -> None:
-        """Terminal transition (detach v2 + final-text delivery 2026-10-01):
-        subagent row + goal settle. Flights that spoke are done — their
+        """Terminal transition (detach v2 + final-text delivery 2026-10-01;
+        runs since 2026-10-05). Flights that spoke are done — their
         attributed messages WERE the output. A silent completion with a
-        substantive result is DELIVERED directly by the supervisor through
-        the send tool (no relay turn: the 2026-09-29 send-skip class cost
-        a full relay + dead-man rescue per incident). Zero-tool flights
-        deliver under an unverified header — the 2026-09-17 phantom-build
-        harm was the system vouching; the header un-vouches. Steer-born
-        flights settle quietly on every silent terminal state: nobody
-        asked for the work. Never raises."""
+        substantive result is DELIVERED directly through the send tool,
+        verbatim (zero-tool flights keep the UNVERIFIED marker — the
+        2026-09-17 phantom-build guard). Steer-born flights stay quiet on
+        every silent terminal state: nobody asked. The one wake left: a
+        failed flight whose failure notice can't be delivered wakes the
+        origin conversation instead. Never raises."""
         from server.services.dispatch_runner import is_no_reply
-        from server.repositories.subagents import SubagentRepository
-        from server.services.goal_service import settle_goal
+        from server.repositories.runs import RunRepository
 
         short = subagent_id[:8]
         flight = spec.flight or {}
@@ -781,35 +795,19 @@ class BackburnerService(BaseService):
             combined = (combined + "\n\n(posted directly: "
                         + "\n\n".join(teed) + ")").strip()
         now = utcnow().isoformat()
-        steer_origin = await self._goal_is_steer_born(goal_id)
+        runs = RunRepository(self.db)
+        steer_origin = await self._run_is_steer_born(subagent_id)
 
         try:
             if status == "completed":
-                await SubagentRepository(self.db).store_terminal(
-                    subagent_id, status="completed",
-                    result=combined or "(finished with no output)", now_iso=now)
+                await runs.finish(subagent_id, status="completed", now_iso=now,
+                                  result=combined or "(finished with no output)")
                 quiet = (spoke or (not combined) or is_no_reply(combined)
                          or steer_origin)
-                if quiet:
-                    # Spoke: its attributed messages were the output; waking
-                    # a fresh turn to say it again is the v1 duplicate shape.
-                    # Silent + steer-born: nobody asked; silence is designed.
-                    await settle_goal(self.ctx, goal_id, status="completed",
-                                      result=combined or
-                                      "completed with no user-facing output",
-                                      wake_origin=False)
-                else:
-                    # Silent completion with a result: deliver it here —
-                    # the flight's stimulus was a human question and the
-                    # holding ack promised an answer, so this is the same
-                    # final-text delivery the runner applies to any
-                    # human-stimulus turn: VERBATIM, no header (Mike
-                    # 2026-10-03: a detached turn is still a reply to the
-                    # person who asked). One framing rule survives: a
-                    # flight that ran ZERO tools keeps the UNVERIFIED
-                    # marker — the 2026-09-17 phantom-build guard; narrated
-                    # work that never happened must not land as Bob's own
-                    # verified words.
+                if not quiet:
+                    # Silent completion with a result: the flight's stimulus
+                    # was a human question and the holding ack promised an
+                    # answer — deliver it VERBATIM (Mike 2026-10-03).
                     body = _delivery_cap(combined)
                     if not made_tool_calls:
                         body = (
@@ -817,115 +815,83 @@ class BackburnerService(BaseService):
                             "below that work was started, sent, or finished "
                             "may not have happened; if it matters, it still "
                             "needs doing)\n\n" + body)
-                    delivered = await self._deliver_result(spec, body)
-                    if not delivered:
+                    if not await self._deliver_result(spec, body):
                         logger.error(
                             "backburner: silent-flight result undeliverable "
-                            "for %s — stored on the goal only", short)
-                    await settle_goal(self.ctx, goal_id, status="completed",
-                                      result=combined,
-                                      wake_origin=False)
+                            "for %s — stored on the run only", short)
             elif status == "killed":
-                await SubagentRepository(self.db).store_terminal(
-                    subagent_id, status="killed",
-                    result=combined or "(killed before finishing)", now_iso=now)
-                await settle_goal(self.ctx, goal_id, status="cancelled",
-                                  result="background turn killed by the user",
-                                  wake_origin=False)
+                await runs.finish(subagent_id, status="killed", now_iso=now,
+                                  result=combined or "(killed before finishing)")
             else:  # failed
-                await SubagentRepository(self.db).store_terminal(
-                    subagent_id, status="failed",
-                    result=combined or "(failed)", now_iso=now,
-                    error=combined[:500])
-                if steer_origin:
-                    await settle_goal(self.ctx, goal_id, status="failed",
-                                      result="steer-born background turn failed",
-                                      wake_origin=False)
-                else:
+                await runs.finish(subagent_id, status="failed", now_iso=now,
+                                  result=combined or "(failed)",
+                                  error=combined[:500])
+                if not steer_origin:
                     framed = (
                         f"(bg turn {short} failed — its earlier tool calls "
                         "may have had real effects; check the current state "
                         f"before retrying anything)\n\n"
                         + _delivery_error_short(combined))
-                    delivered = await self._deliver_result(spec, framed)
-                    if not delivered:
-                        content = self._failed_content(short, combined)
-                        await settle_goal(self.ctx, goal_id, status="failed",
-                                          result=content, wake_content=content,
-                                          wake_provenance="task_relay")
-                    else:
-                        await settle_goal(self.ctx, goal_id, status="failed",
-                                          result=combined, wake_origin=False)
+                    if not await self._deliver_result(spec, framed):
+                        await self._wake_origin(
+                            spec.session_key,
+                            self._failed_content(short, combined),
+                            run_id=subagent_id)
             logger.info("backburner: task %s -> %s%s", short, status,
                         " (spoke; no wake)" if status == "completed" and spoke
                         else "")
         except Exception:
             logger.exception("backburner: terminal bookkeeping failed for %s", short)
 
-    async def _goal_is_steer_born(self, goal_id: str) -> bool:
-        """True when this detached goal came from a steer-only turn (the
-        strategy flag _register sets). False on any lookup/parsing failure —
-        unknown origin keeps the speak-expected task_relay semantics."""
-        from server.repositories.goals import GoalRepository
+    async def _run_is_steer_born(self, run_id: str) -> bool:
+        """True when this flight came from a steer-only turn (the run
+        metadata _register sets). False on any lookup failure — unknown
+        origin keeps the speak-expected semantics."""
+        from server.repositories.runs import RunRepository
         try:
-            goal = await GoalRepository(self.db).get(goal_id)
-            if not goal:
-                return False
-            raw = goal.get("strategy_json") or "{}"
-            strategy = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            return bool(strategy.get("steer_origin"))
+            run = await RunRepository(self.db).get(run_id)
+            return bool(run and run["metadata"].get("steer_origin"))
         except Exception:
             return False
+
+    async def _wake_origin(self, session_key: str, content: str, *,
+                           run_id: str) -> None:
+        """Wake the conversation that owns a flight with a message it must
+        speak to (task_relay provenance: rescue-eligible, never detaches).
+        Same wake the old flight goal's settle produced."""
+        from server.services.wake_service import wake_conversation
+        try:
+            await wake_conversation(
+                self.ctx, session_key, content, call_category="goal_result",
+                metadata={"run_id": run_id}, provenance="task_relay")
+        except Exception:
+            logger.exception("backburner: origin wake failed for %s", run_id[:8])
 
     # ----------------------------------------------------------- recovery
 
     async def recover_orphaned_goals(self) -> int:
-        """Restart recovery: detached tasks died with the process (their
-        subagent rows were failed by cleanup_stale), but their goals would
-        ride every prompt forever. Settle them and wake the conversation to
-        own the loss. Idempotent — settle_goal's CAS only moves active goals,
-        so previously-settled rows are skipped."""
-        from server.repositories.goals import GoalRepository
-        from server.repositories.subagents import SubagentRepository
-        from server.services.goal_service import settle_goal
+        """Restart recovery: every running flight died with the process.
+        Fail its run and wake the conversation to own the loss (steer-born
+        flights settle quietly — nobody asked). Also settles any active
+        legacy flight goals left by pre-runs rows (one-time, harmless
+        after: settle_goal's CAS only moves active goals)."""
+        from server.repositories.runs import RunRepository
 
-        rows = await SubagentRepository(self.db).list_by_type(
-            agent_type="detached_turn", status="failed", limit=200)
         moved = 0
-        for row in rows:
-            subagent_id = row["id"]
-            try:
-                goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
-            except Exception:
-                goal = None
-            if not goal or goal.get("status") != "active":
+        lost = await RunRepository(self.db).fail_running(
+            kind="flight", now_iso=utcnow().isoformat(),
+            reason="lost on server restart")
+        for run in lost:
+            moved += 1
+            if run["metadata"].get("steer_origin"):
                 continue
-            try:
-                raw = goal.get("strategy_json") or "{}"
-                strategy = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                steer_origin = bool(strategy.get("steer_origin"))
-            except Exception:
-                steer_origin = False
-            if steer_origin:
-                # A steer-born orphan waking the session to apologise is
-                # uninvited speech — nobody asked for the work. Settle quietly.
-                if await settle_goal(self.ctx, goal["id"], status="failed",
-                                     result="steer-born background turn lost on restart",
-                                     wake_origin=False):
-                    moved += 1
-                continue
-            content = (
-                f"[bg turn {subagent_id[:8]}] I lost this background turn "
-                f"when I restarted — it was: {goal['objective']}. "
-                "Tell the user it was interrupted and ask whether to redo it.")
-            try:
-                if await settle_goal(self.ctx, goal["id"], status="failed",
-                                     result=content, wake_content=content,
-                                     wake_provenance="task_relay"):
-                    moved += 1
-            except Exception:
-                logger.warning("backburner: orphan settle failed for %s",
-                               subagent_id[:8], exc_info=True)
+            await self._wake_origin(
+                run["session_key"],
+                f"[bg turn {run['id'][:8]}] I lost this background turn when "
+                f"I restarted — it was: {run['summary']}. Tell the user it "
+                "was interrupted and ask whether to redo it.",
+                run_id=run["id"])
         if moved:
-            logger.info("backburner: restart recovery settled %d orphaned goal(s)", moved)
+            logger.info("backburner: restart recovery handled %d lost flight(s)", moved)
         return moved
+

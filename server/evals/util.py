@@ -5,7 +5,7 @@ category reads tool activity the same way; the model pin lets
 `bob eval run --model <slug>` hold the serving model constant across
 pre/post comparisons (the rotation pool behaves very differently —
 GLM-flash vs Opus — and an unpinned battery compares apples to
-oranges). Cases pass ``model=pinned_model()`` to chat_with_tools; None
+oranges). Cases pass ``model=pinned_model()`` to run_turn; None
 means "resolve as usual".
 """
 
@@ -32,7 +32,7 @@ def extract_tool_calls(messages: list[Any]) -> list[dict[str, Any]]:
     """Every tool call in a post-dispatch messages list, both API shapes.
 
     Chat-completions ``tool_calls`` on assistant messages AND Responses-API
-    ``function_call`` items (what chat_with_tools actually appends — the
+    ``function_call`` items (what run_turn actually appends — the
     chat-completions branch alone made tool_call_made fail even when calls
     fired; Phase 0 eval-harness fix 2026-09-19).
     """

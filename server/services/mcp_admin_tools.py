@@ -226,7 +226,7 @@ async def make_mcp_admin_tools(
         normalized = (scope or "").strip().lower()
         if normalized in ("global", "everywhere", "all"):
             is_global = True
-        elif normalized in ("conversation", "chat", "attached", "local"):
+        elif normalized in ("conversation", "prompt", "attached", "local"):
             is_global = False
         else:
             return ("Error: scope must be 'global' (every conversation) or "

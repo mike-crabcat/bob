@@ -40,7 +40,6 @@ def sensations_on(monkeypatch, ctx):
     monkeypatch.setattr(ctx.settings.goal_rooms, "sensation_routes", True)
 
 
-
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
@@ -182,7 +181,6 @@ async def test_room_turn_tools_add_outreach_only_when_bridge_up(ctx, sensations_
     assert "get_contact_session_messages" in names_up
     assert not any("group" in n for n in names_up - names_down)
     ctx.whatsapp_bridge = None
-
 
 
 async def test_read_group_history_is_group_scoped(ctx):
@@ -555,10 +553,8 @@ async def test_dream_approval_no_longer_seeds_room(ctx):
     assert not await GoalRepository(ctx.db).list_active()  # no goal at all
 
 
-async def test_dream_announcement_registers_offer_task(ctx):
-    """The reply-commissioned path: announcing a plan registers an offer-task
-    whose completer is the announced conversation — the reply turn creates
-    the goal and settles the task; approval never did it."""
+async def _announce_plan_2(ctx) -> dict:
+    """Seed approved plan-2 (evidence in ORIGIN) and run one announce flush."""
     from unittest.mock import MagicMock
 
     from server.services.dream.announce import AnnounceService
@@ -584,7 +580,6 @@ async def test_dream_announcement_registers_offer_task(ctx):
     await ctx.db.execute(
         "INSERT INTO dream_item_links (item_type, item_id, session_key) "
         "VALUES ('plan', 'plan-2', ?)", (ORIGIN,))
-
     ctx.settings.dream.announce_factcheck = False  # no LLM in unit tests
     bridge = MagicMock()
     bridge.connected = True
@@ -594,35 +589,20 @@ async def test_dream_announcement_registers_offer_task(ctx):
                       new=AsyncMock(return_value="checking in!")):
         result = await AnnounceService(ctx).flush()
     ctx.whatsapp_bridge = None
+    return result
 
+
+async def test_dream_announcement_creates_suggestion(ctx):
+    """v2 (commitments plan Phase 4): announcing a plan records a suggested
+    goal in the announced conversation — no offer-task, no active goal."""
+    result = await _announce_plan_2(ctx)
     assert result["plans_announced"] == 1
+    sug = await GoalRepository(ctx.db).suggestion_for_plan("plan-2")
+    assert sug and sug["status"] == "suggested"
+    assert sug["origin_conversation_id"] == ORIGIN
     from server.repositories.tasks import TaskRepository
-    repo = TaskRepository(ctx.db)
-    owed = await repo.list_for_completer(ORIGIN)
-    assert owed and owed[0]["expected_completer"] == ORIGIN
-    assert "plan-2" in owed[0]["title"] and "awaiting their answer" in owed[0]["title"]
-    import json as _json
-    assert _json.loads(owed[0]["payload_json"]).get("dream_plan_id") == "plan-2"
-    # No goal spawned by announcing.
+    assert not await TaskRepository(ctx.db).list_for_completer(ORIGIN)
     assert not await GoalRepository(ctx.db).list_active()
-
-    # The reply turn: complete the offer task + create the goal.
-    from server.services import goal_service
-    from server.services.tasks import settle_task
-    goal = await goal_service.create_goal(
-        ctx, conversation_id=ORIGIN, objective="sanrio gift follow-up",
-        kind="task",
-        strategy={"v": 2, "refs": {"entities": [], "claims": []}})
-    out = await settle_task(
-        ctx, owed[0]["id"], to_status="completed",
-        result=f"reply expressed interest — goal {goal['id']} created",
-        completed_by=f"conversation:{ORIGIN}")
-    assert out["ok"]
-    await ctx.db.execute(
-        "UPDATE dream_plans SET task_id = ?, updated_at = ? WHERE id = 'plan-2'",
-        (goal["id"], _iso(datetime.now(timezone.utc))))
-    row = await ctx.db.fetch_one("SELECT task_id FROM dream_plans WHERE id = 'plan-2'")
-    assert row["task_id"] == goal["id"]
 
 
 # ------------------------------------------------------------------ adopt

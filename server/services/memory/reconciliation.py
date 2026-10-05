@@ -936,7 +936,7 @@ async def reconcile_entity(
     if resolved_model is None:
         resolved_model = llm.memory_model
 
-    response = await llm.chat_with_tools(
+    response = await llm.run_turn(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": "Review this entity for consistency issues."},
@@ -969,7 +969,7 @@ async def reconcile_entity(
     result = parse_llm_json(response)
     if not isinstance(result, dict) and response and response.strip():
         try:
-            retry_response = await llm.chat_with_tools(
+            retry_response = await llm.run_turn(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "Review this entity for consistency issues."},

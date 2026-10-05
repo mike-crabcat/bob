@@ -11,10 +11,10 @@
 - reconciliation: dead subagent / script-past-grace → task_fail with
   reason + waiter woken (the OOM-orphaned-Meshy class)
 - task_due backstop wakes the waiter once; settle cancels it
-- kill switch: BOB_TASKS=off hides tools + block
 """
 
 from __future__ import annotations
+
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -129,10 +129,10 @@ async def test_settle_effect_replays_after_crash(ctx):
 async def test_tasks_block_scoped_to_completer(ctx):
     await _ensure_conversation(ctx, COMPLETER)
     await _register(ctx, expected_completer=COMPLETER)
-    mine = await task_svc.tasks_block(COMPLETER, ctx.db)
-    assert "meshy refine" in mine and "task_complete" in mine
-    assert await task_svc.tasks_block(WAITER, ctx.db) == ""  # waiter sees none owed
-    assert await task_svc.tasks_block(
+    mine = await task_svc.tasks_block_lines(COMPLETER, ctx.db)
+    assert "meshy refine" in mine and "close_goal" in mine
+    assert await task_svc.tasks_block_lines(WAITER, ctx.db) == ""  # waiter sees none owed
+    assert await task_svc.tasks_block_lines(
         "agent:main:whatsapp:group:999999", ctx.db) == ""
 
 
@@ -171,9 +171,14 @@ async def test_register_canonicalises_merged_completer(ctx):
 async def test_short_id_resolution(ctx):
     task = await _register(ctx, title="short id probe")
     repo = TaskRepository(ctx.db)
-    short = task["id"].removeprefix("task-")
-    assert (await repo.get_by_short_id(f"task-{short}"))["id"] == task["id"]
+    short = task["id"].removeprefix("prm-")
+    assert (await repo.get_by_short_id(f"prm-{short}"))["id"] == task["id"]
     assert (await repo.get_by_short_id(short))["id"] == task["id"]
+    # Promises minted before 2026-10-06 keep their 'task-' ids.
+    await ctx.db.execute("UPDATE goals SET id = ? WHERE id = ?",
+                         (f"task-{short}", task["id"]))
+    assert (await repo.get_by_short_id(f"task-{short}"))["id"] == f"task-{short}"
+    assert (await repo.get_by_short_id(short))["id"] == f"task-{short}"
 
 
 async def test_reconcile_fails_dead_comagent_and_stale_script(ctx):
@@ -230,16 +235,6 @@ async def test_task_due_backstop_fires_once_at_waiter(ctx):
                new=AsyncMock()) as wake:
         assert await goal_service.fire_wakeup(ctx, row2) is False
         wake.assert_not_awaited()
-
-
-
-async def test_kill_switch_hides_surface(ctx, monkeypatch):
-    monkeypatch.setenv("BOB_TASKS", "off")
-    assert not task_svc.tasks_enabled()
-    assert await task_svc.tasks_block(COMPLETER, ctx.db) == ""
-    tools = {t.name: t.handler for t in task_svc.make_task_tools(ctx, WAITER)}
-    res = json.loads(await tools["task_register"]("t", "i"))
-    assert not res["ok"] and "disabled" in res["error"]
 
 
 async def test_endpoint_token_gate_and_settle(ctx, monkeypatch):

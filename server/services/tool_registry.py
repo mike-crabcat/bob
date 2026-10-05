@@ -87,15 +87,13 @@ def build_common_tools(
     # rule pointed at a tool the model couldn't call (found 2026-10-03 via
     # the AI-doom mug incident — the flight couldn't have registered its
     # "rebuilding the geometry properly" promise even if it had attended
-    # to the rule). make_task_tools self-gates on tasks_enabled().
+    # to the rule).
+    # Goal access mirrors the old split: trusted → full; untrusted group →
+    # create (pinned owner); untrusted DM → promises only.
     from server.services.tasks import make_task_tools
-    _extend(make_task_tools(ctx, session_key=session_key))
-
-    # Dream plan tools — participants adjust plans conversationally (session-bound)
-    if ctx.settings.dream.enabled:
-        from server.services.dream.tools import make_dream_tools
-
-        _extend(make_dream_tools(ctx, session_key=session_key))
+    goal_access = ("full" if is_trusted
+                   else "create" if ":group:" in session_key else "none")
+    _extend(make_task_tools(ctx, session_key=session_key, access=goal_access))
 
     # Trust-escalated tools
     if is_trusted:

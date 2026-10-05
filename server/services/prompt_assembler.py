@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import base64
 import json
 import logging
@@ -456,7 +457,7 @@ _TERMINAL_CONTRACT_TAIL = (
     "NO_REPLY.\n"
     "3. Promised work must be registered: if this reply commits to "
     "fixing, rebuilding, checking, or following up on anything, call "
-    "task_register with a title for it before finishing. An unregistered "
+    f"add_goal(profile='promise') with a title for it before finishing. An unregistered "
     "promise doesn't exist — later turns only know what is registered.\n"
     "4. Code, skill, or config changes: propose the plan and wait for a "
     "go-ahead (see Modifying Skills and Code). Registering the task is "

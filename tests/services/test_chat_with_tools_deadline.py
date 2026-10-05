@@ -1,4 +1,4 @@
-"""chat_with_tools wall-clock budget: checked before each iteration, so a
+"""run_turn wall-clock budget: checked before each iteration, so a
 turn with a spent budget makes no further tool rounds. With self-wrap
 enabled, exhaustion makes exactly one forced wrap-up round (tools stripped);
 disabled, it returns the canned stop message with no LLM calls at all.
@@ -53,7 +53,7 @@ async def test_spent_budget_single_forced_wrapup_round(monkeypatch, tmp_path):
     """Self-wrap on: a spent budget makes no tool rounds — just one forced
     wrap-up call with tools stripped, returning the model's own closing text."""
     svc, calls = _service(monkeypatch, tmp_path)
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "bulletin"}],
         tools=[], tool_handlers={},
         time_limit_seconds=0.0,
@@ -67,7 +67,7 @@ async def test_spent_budget_single_forced_wrapup_round(monkeypatch, tmp_path):
 async def test_spent_budget_disabled_canned_stop(monkeypatch, tmp_path):
     """Self-wrap off: legacy contract — zero LLM calls, canned stop message."""
     svc, calls = _service(monkeypatch, tmp_path, wrap_enabled=False)
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "bulletin"}],
         tools=[], tool_handlers={},
         time_limit_seconds=0.0,
@@ -84,7 +84,7 @@ async def test_no_budget_keeps_existing_contract(monkeypatch, tmp_path):
     # The wrap_text fake would swallow the call, so assert the None path
     # reaches the client as a normal (tooled) call — reusing the recording
     # fake, a normal first call carries the tools kwarg.
-    await svc.chat_with_tools(
+    await svc.run_turn(
         [{"role": "user", "content": "hi"}],
         tools=[], tool_handlers={},
         time_limit_seconds=None,
@@ -112,7 +112,7 @@ async def test_send_tool_turn_gets_delivery_wrap_text(monkeypatch, tmp_path):
     from server.services.openai_service import _SELF_WRAP_FINAL_SEND
     svc, calls = _service(monkeypatch, tmp_path)
     budget: dict[str, bool] = {}
-    result = await svc.chat_with_tools(
+    result = await svc.run_turn(
         [{"role": "user", "content": "report"}],
         tools=[_send_tool_dict()], tool_handlers={},
         time_limit_seconds=0.0, budget_stats=budget,
@@ -127,7 +127,7 @@ async def test_plain_turn_keeps_original_wrap_text(monkeypatch, tmp_path):
     from server.services.openai_service import _SELF_WRAP_FINAL
     svc, calls = _service(monkeypatch, tmp_path)
     budget: dict[str, bool] = {}
-    await svc.chat_with_tools(
+    await svc.run_turn(
         [{"role": "user", "content": "hi"}],
         tools=[_send_tool_dict("bash")], tool_handlers={},
         time_limit_seconds=0.0, budget_stats=budget,

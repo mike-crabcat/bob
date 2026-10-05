@@ -79,7 +79,7 @@ class DocsService(BaseService):
         from server.services.llm_dispatch import LLMDispatchService
 
         llm = LLMDispatchService(self.ctx)
-        response = await llm.chat(
+        response = await llm.prompt(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

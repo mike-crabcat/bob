@@ -55,7 +55,7 @@ def llm_chat(monkeypatch):
     """Mock every cheap-model chat (reviser + probe); set .side_effect per test."""
     from server.services.llm_dispatch import LLMDispatchService
     mock = AsyncMock(return_value=_reviser_json({"plan": "waiting"}))
-    monkeypatch.setattr(LLMDispatchService, "chat", mock)
+    monkeypatch.setattr(LLMDispatchService, "prompt", mock)
     return mock
 
 

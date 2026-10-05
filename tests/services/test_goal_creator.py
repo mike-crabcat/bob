@@ -113,9 +113,9 @@ async def test_child_inherits_parent_creator(ctx):
 @pytest.mark.asyncio
 async def test_create_goal_tool_resolves_owner_by_name(ctx):
     await _seed_contact(ctx.db, "cid-chris", "Chris", "+61424616977")
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, GROUP_SESSION)}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, GROUP_SESSION)}
     out = json.loads(await tools["create_goal"].handler(
         "mockups approved by everyone", owner="Chris"))
     assert out["ok"] is True, out
@@ -125,9 +125,9 @@ async def test_create_goal_tool_resolves_owner_by_name(ctx):
 
 @pytest.mark.asyncio
 async def test_create_goal_tool_unknown_owner_errors(ctx):
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, GROUP_SESSION)}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, GROUP_SESSION)}
     out = json.loads(await tools["create_goal"].handler(
         "ob", owner="No Such Person"))
     assert out["ok"] is False and "no contact" in out["error"]

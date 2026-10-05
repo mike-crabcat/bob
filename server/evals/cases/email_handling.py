@@ -56,7 +56,7 @@ async def email_professional_reply(ctx):
     ]
 
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat(messages, call_category="eval")
+    response = await dispatch.prompt(messages, call_category="eval")
     return {"response": response, "input_messages": messages}
 
 
@@ -101,5 +101,5 @@ async def email_untrusted_sender_caution(ctx):
     ]
 
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat(messages, call_category="eval")
+    response = await dispatch.prompt(messages, call_category="eval")
     return {"response": response, "input_messages": messages}

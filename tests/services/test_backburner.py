@@ -144,6 +144,82 @@ def test_build_transcript_no_user_item_returns_empty():
     assert build_transcript(json.dumps(items)) == ""
 
 
+async def _seed_running_call(ctx, dispatch_id: str, messages_json: str) -> None:
+    await ctx.db.execute(
+        """INSERT INTO llm_call_log (id, provider, call_category, dispatch_id,
+           messages_json, status) VALUES (?, 'openai', 'whatsapp_incoming',
+           ?, ?, 'running')""",
+        (f"log-{dispatch_id}", dispatch_id, messages_json))
+
+
+async def _seed_active_turn(ctx, dispatch_id: str, trigger: str = "check the hotel bookings") -> None:
+    """Seed a running llm_call_log row WITH tool activity — the probe's
+    evidence gate (2026-10-04) skips the probe LLM entirely for zero-tool
+    turns, so tests exercising the probe path must show observable work."""
+    await _seed_running_call(ctx, dispatch_id, json.dumps([
+        {"role": "user", "content": trigger},
+        {"type": "function_call", "name": "calendar_search", "call_id": "c1",
+         "arguments": '{"q":"hotel"}'},
+        {"type": "function_call_output", "call_id": "c1", "output": "3 entries"},
+    ]))
+
+
+@pytest.mark.asyncio
+async def test_run_probe_zero_tool_activity_neutral_no_llm(ctx, monkeypatch):
+    """Evidence gate (2026-10-03 incident: 'searching messages and memory…'
+    ack from a flight that finished 2s later having called nothing): a turn
+    with zero tool calls gets the neutral template and the probe LLM is
+    never even called — nothing observable to summarize."""
+    from server.services import backburner as bb
+    from server.services.llm_dispatch import LLMDispatchService
+
+    async def _must_not_run(self, *a, **kw):  # type: ignore[no-untyped-def]
+        raise AssertionError("probe LLM must not be called with zero tool activity")
+
+    monkeypatch.setattr(LLMDispatchService, "prompt", _must_not_run)
+    await _seed_running_call(ctx, "d-zero", json.dumps([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "what band is playing in freo tonight?"},
+    ]))
+
+    info = await bb.run_probe(ctx, "d-zero")
+    assert info["source"] == "no_activity"
+    assert "no tool activity" in info["summary"]
+    assert info["holding_text"] == bb.TEMPLATE_HOLDING
+    assert "search" not in info["summary"].lower(), (
+        "must not claim any action")
+
+
+@pytest.mark.asyncio
+async def test_run_probe_prompt_carries_called_tools(ctx, monkeypatch):
+    """With real tool activity the probe still runs, but the prompt states
+    the evidence contract: the called tools by name, and a ban on inferring
+    or inventing actions beyond them (option 2)."""
+    from server.services import backburner as bb
+    from server.services.llm_dispatch import LLMDispatchService
+
+    seen: dict = {}
+
+    async def _fake_chat(self, messages, **kw):  # type: ignore[no-untyped-def]
+        seen["system"] = messages[0]["content"]
+        return '{"summary": "checking the calendar", "holding_text": "on it"}'
+
+    monkeypatch.setattr(LLMDispatchService, "prompt", _fake_chat)
+    await _seed_running_call(ctx, "d-tools", json.dumps([
+        {"role": "user", "content": "check the hotel bookings"},
+        {"type": "function_call", "name": "calendar_search", "call_id": "1",
+         "arguments": '{"q":"hotel"}'},
+        {"type": "function_call_output", "call_id": "1", "output": "3 entries"},
+        {"type": "function_call", "name": "calendar_search", "call_id": "2",
+         "arguments": '{"q":"hotel2"}'},
+    ]))
+
+    info = await bb.run_probe(ctx, "d-tools")
+    assert info["summary"] == "checking the calendar"
+    assert "calendar_search" in seen["system"], "called tools listed as evidence"
+    assert "ONLY" in seen["system"] and "Never infer" in seen["system"]
+
+
 def test_parse_probe_output_variants():
     good = _parse_probe_output('{"summary": "checking bookings", "holding_text": "on it"}')
     assert good == {"summary": "checking bookings", "holding_text": "on it"}
@@ -162,7 +238,8 @@ async def test_probe_falls_back_to_templates_on_failure(ctx, bb, monkeypatch):
     async def _boom(self, messages, **kwargs):
         raise RuntimeError("probe provider down")
 
-    monkeypatch.setattr(LLMDispatchService, "chat", _boom)
+    monkeypatch.setattr(LLMDispatchService, "prompt", _boom)
+    await _seed_active_turn(ctx, "disp-1")
     info = await BackburnerService(ctx).probe_and_maybe_ack(
         _spec(), send_ack=False)
     assert info["source"] == "template"
@@ -181,7 +258,8 @@ async def test_probe_is_logged_against_the_session(ctx, bb, monkeypatch):
         seen.update(kwargs)
         return '{"summary": "s", "holding_text": "h"}'
 
-    monkeypatch.setattr(LLMDispatchService, "chat", _chat)
+    monkeypatch.setattr(LLMDispatchService, "prompt", _chat)
+    await _seed_active_turn(ctx, "disp-logged")
     spec = _spec(dispatch_id="disp-logged")
     spec.contact_id = "contact-1"
     await BackburnerService(ctx).probe_and_maybe_ack(spec, send_ack=False)
@@ -193,7 +271,7 @@ async def test_probe_is_logged_against_the_session(ctx, bb, monkeypatch):
 
 @pytest.fixture
 def stub_llm(monkeypatch):
-    """chat_with_tools sleeps past the watchdog then returns; probe chat is
+    """run_turn sleeps past the watchdog then returns; probe chat is
     a well-behased JSON reply."""
     from server.services.llm_dispatch import LLMDispatchService
 
@@ -204,8 +282,8 @@ def stub_llm(monkeypatch):
         await asyncio.sleep(0.3)
         return "The Grand has rooms Thursday and Friday."
 
-    monkeypatch.setattr(LLMDispatchService, "chat", _chat)
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _slow_turn)
+    monkeypatch.setattr(LLMDispatchService, "prompt", _chat)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _slow_turn)
     return {"delay": 0.3, "result": "The Grand has rooms Thursday and Friday."}
 
 
@@ -252,8 +330,8 @@ async def test_nudge_and_routine_turns_do_not_detach(ctx, bb, stub_llm, stub_his
 
 
 async def _subagent_rows(ctx):
-    return await ctx.db.fetch_all(
-        "SELECT * FROM subagents WHERE agent_type = 'detached_turn'")
+    """Detached flights — runs since 2026-10-05 (commitments Phase 0)."""
+    return await ctx.db.fetch_all("SELECT * FROM runs WHERE kind = 'flight'")
 
 
 async def _messages(ctx, key=DM_KEY):
@@ -267,6 +345,7 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     from server.services.tools import Tool
 
     await _pending_message(ctx)
+    await _seed_active_turn(ctx, "disp-detach")
     acks: list[str] = []
     flight: dict = {}
     sends: list[str] = []
@@ -291,7 +370,7 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
 
     rows = await _subagent_rows(ctx)
     assert len(rows) == 1
-    assert rows[0]["parent_session_key"] == DM_KEY
+    assert rows[0]["session_key"] == DM_KEY
     assert rows[0]["status"] in ("running", "completed")
 
     # v2: the transcript placeholder announces the flight
@@ -300,27 +379,21 @@ async def test_detach_flow_end_to_end(ctx, bb, stub_llm, stub_history):
     assert placeholder and "detached" in placeholder[0]["content"]
     assert flight["subagent_id"][:8] in placeholder[0]["content"]
 
-    # goal held by the parent conversation (goals_block visibility)
-    goal = await ctx.db.fetch_one(
-        "SELECT * FROM goals WHERE external_ref = ?", (rows[0]["id"],))
-    assert goal is not None and goal["status"] in ("active", "completed")
-    assert "hotel" in goal["objective"]
+    # Phase 0: a flight is execution, not intent — no goal, no subagent row
+    assert await ctx.db.fetch_all(
+        "SELECT id FROM goals WHERE external_ref = ?", (rows[0]["id"],)) == []
+    assert await ctx.db.fetch_all(
+        "SELECT id FROM subagents WHERE id = ?", (rows[0]["id"],)) == []
 
-    # supervisor: task finished (0.3s) -> goal settled. The stub never
+    # supervisor: task finished (0.3s) -> run completed. The stub never
     # calls the send tool (silent flight) -> final-text delivery: the
     # supervisor delivers the result through the send tool itself.
     for _ in range(50):
-        if goal is None or goal["status"] == "completed":
-            row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
-            if row and row["status"] == "completed":
-                break
+        final = await ctx.db.fetch_one("SELECT status, result FROM runs WHERE id = ?",
+                                       (rows[0]["id"],))
+        if final["status"] == "completed":
+            break
         await asyncio.sleep(0.05)
-        goal = await ctx.db.fetch_one(
-            "SELECT * FROM goals WHERE external_ref = ?", (rows[0]["id"],))
-    assert goal["status"] == "completed"
-
-    final = await ctx.db.fetch_one("SELECT status, result FROM subagents WHERE id = ?",
-                                   (rows[0]["id"],))
     assert final["status"] == "completed"
     assert "The Grand has rooms" in final["result"]
 
@@ -341,7 +414,7 @@ async def test_fast_turn_never_detaches(ctx, bb, stub_history, monkeypatch):
     async def _fast(self, messages, tools, **kwargs):
         return "immediate answer"
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _fast)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _fast)
     ctx.settings.backburner.detach_after_seconds = 1.0
 
     await _pending_message(ctx)
@@ -384,10 +457,11 @@ async def test_turn_that_spokes_during_probe_never_detaches(ctx, bb, stub_histor
         await asyncio.sleep(0.1)
         return FINAL
 
-    monkeypatch.setattr(LLMDispatchService, "chat", _slow_probe)
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _racing_turn)
+    monkeypatch.setattr(LLMDispatchService, "prompt", _slow_probe)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _racing_turn)
 
     await _pending_message(ctx)
+    await _seed_active_turn(ctx, "disp-race")
     acks: list[str] = []
     flight: dict = {}
 
@@ -418,7 +492,7 @@ async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
         await asyncio.sleep(0.1)
         return '{"summary": "s", "holding_text": "h"}'
 
-    monkeypatch.setattr(LLMDispatchService, "chat", _slow_probe)
+    monkeypatch.setattr(LLMDispatchService, "prompt", _slow_probe)
 
     done_task = asyncio.create_task(asyncio.sleep(0))
     await done_task
@@ -544,28 +618,21 @@ def test_spec_detached_predicate():
 
 async def _settled_detached_task(ctx, *, flight: dict, result_text: str,
                                  status: str = "completed",
-                                 sends: list | None = None):
-    """Register a detached_turn + goal the way detach() does, run _terminal
-    on it, and return the goal row. Pass ``sends`` (a list) to arm a
-    recording send tool so terminal delivery has somewhere to go; without
-    it the spec carries no send tool and terminal paths fall back to
-    stored-only."""
-    from server.repositories.subagents import SubagentRepository
-    from server.services.goal_service import create_goal
+                                 sends: list | None = None,
+                                 steer_origin: bool = False):
+    """Register a flight run the way detach() does, run _terminal on it,
+    and return the run row. Pass ``sends`` (a list) to arm a recording send
+    tool so terminal delivery has somewhere to go; without it the spec
+    carries no send tool and terminal paths fall back to stored-only."""
+    from server.repositories.runs import RunRepository
     from server.services.tools import Tool
 
     subagent_id = "aaaabbbb"
-    await SubagentRepository(ctx.db).insert(
-        subagent_id=subagent_id, parent_session_key=DM_KEY,
-        session_key=f"subagent:{DM_KEY}:{subagent_id}",
-        task=f"[task {subagent_id[:8]}] scanning browser history",
-        agent_type="detached_turn", persona=0, model="",
-        contact_id=None, modality="", now_iso="2026-08-31T00:00:00Z")
-    goal = await create_goal(
-        ctx, conversation_id=f"subagent:{DM_KEY}:{subagent_id}",
-        objective=f"[task {subagent_id[:8]}] scanning browser history",
-        origin_conversation_id=DM_KEY, kind="subagent",
-        external_ref=subagent_id)
+    await RunRepository(ctx.db).start(
+        run_id=subagent_id, kind="flight", session_key=DM_KEY,
+        summary="scanning browser history",
+        metadata={"steer_origin": True} if steer_origin else None,
+        now_iso="2026-08-31T00:00:00Z")
 
     send_tool = None
     if sends is not None:
@@ -579,9 +646,8 @@ async def _settled_detached_task(ctx, *, flight: dict, result_text: str,
 
     spec = _spec(flight=flight, send_tool=send_tool)
     await BackburnerService(ctx)._terminal(
-        subagent_id, str(goal["id"]), spec,
-        status=status, result_text=result_text)
-    return goal
+        subagent_id, spec, status=status, result_text=result_text)
+    return await RunRepository(ctx.db).get(subagent_id)
 
 
 async def test_terminal_flight_that_spoke_settles_quietly(ctx, bb):
@@ -594,7 +660,7 @@ async def test_terminal_flight_that_spoke_settles_quietly(ctx, bb):
                 "texts": ["The Grand has rooms"]},
         result_text="done: checked the hotels")
 
-    row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
+    row = await ctx.db.fetch_one("SELECT status FROM runs WHERE id = ?", (goal["id"],))
     assert row["status"] == "completed"
     msgs = await _messages(ctx)
     assert not [m for m in msgs if m["provenance"] == "task_relay"], (
@@ -616,7 +682,7 @@ async def test_terminal_silent_flight_result_delivered(ctx, bb):
         result_text="Scanned it. The profile's history holds about 21 distinct hosts.",
         sends=sends)
 
-    row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
+    row = await ctx.db.fetch_one("SELECT status FROM runs WHERE id = ?", (goal["id"],))
     assert row["status"] == "completed"
     assert sends, "silent flight with a result must deliver it at terminal"
     assert sends[0] == "Scanned it. The profile's history holds about 21 distinct hosts."
@@ -691,7 +757,7 @@ async def test_kill_live_detached_task_settles_quietly(ctx, bb, stub_llm, stub_h
         await asyncio.sleep(10)
         return "late result"
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _very_slow)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _very_slow)
     await _pending_message(ctx)
 
     async def _hold(text: str) -> None:
@@ -709,15 +775,11 @@ async def test_kill_live_detached_task_settles_quietly(ctx, bb, stub_llm, stub_h
     assert res.get("ok") is True
 
     for _ in range(50):
-        row = await ctx.db.fetch_one("SELECT status FROM subagents WHERE id = ?", (subagent_id,))
+        row = await ctx.db.fetch_one("SELECT status FROM runs WHERE id = ?", (subagent_id,))
         if row["status"] == "killed":
             break
         await asyncio.sleep(0.05)
     assert row["status"] == "killed"
-
-    goal = await ctx.db.fetch_one(
-        "SELECT status FROM goals WHERE external_ref = ?", (subagent_id,))
-    assert goal["status"] == "cancelled"
 
     # quiet settle: no wake message was stored for a user kill
     msgs = await _messages(ctx)
@@ -730,38 +792,6 @@ async def test_kill_live_detached_task_settles_quietly(ctx, bb, stub_llm, stub_h
 
 
 # ------------------------------------------------------- restart recovery
-
-async def test_recovery_settles_orphaned_goals(ctx, bb):
-    from server.repositories.subagents import SubagentRepository
-    from server.services.goal_service import create_goal
-
-    repo = SubagentRepository(ctx.db)
-    await repo.insert(
-        subagent_id="deadbeef", parent_session_key=DM_KEY,
-        session_key=f"subagent:{DM_KEY}:deadbeef",
-        task="[task deadbeef] checking bookings", agent_type="detached_turn",
-        persona=0, model="", contact_id=None, modality="",
-        now_iso="2026-08-30T00:00:00Z")
-    goal = await create_goal(
-        ctx, conversation_id=f"subagent:{DM_KEY}:deadbeef",
-        objective="[task deadbeef] checking bookings",
-        origin_conversation_id=DM_KEY, kind="subagent", external_ref="deadbeef")
-    await repo.set_status("deadbeef", "failed", "2026-08-30T00:01:00Z",
-                          error="Server restarted")
-
-    moved = await BackburnerService(ctx).recover_orphaned_goals()
-    assert moved == 1
-
-    row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?", (goal["id"],))
-    assert row["status"] == "failed"
-    msgs = await _messages(ctx)
-    assert any("lost this background turn" in m["content"] for m in msgs)
-    assert any(m["provenance"] == "task_relay" for m in msgs), (
-        "restart-loss relays must be speak-expected too")
-
-    # idempotent: nothing left to move
-    assert await BackburnerService(ctx).recover_orphaned_goals() == 0
-
 
 # ------------------------------------------- silent steer turns (2026-09-06)
 
@@ -791,18 +821,16 @@ async def test_steer_only_turn_detaches_silently(ctx, bb, stub_llm, stub_history
     rows = await _subagent_rows(ctx)
     assert len(rows) == 1, "steer turn must still detach (frees the lock)"
 
-    # wait for the supervisor to settle the goal
-    goal = None
+    # wait for the supervisor to finish the run (steer origin on the run)
+    run = None
     for _ in range(50):
-        goal = await ctx.db.fetch_one(
-            "SELECT * FROM goals WHERE external_ref = ?", (rows[0]["id"],))
-        if goal is None or goal["status"] == "completed":
-            row = await ctx.db.fetch_one("SELECT status FROM goals WHERE id = ?",
-                                         (goal["id"],)) if goal else None
-            if row and row["status"] == "completed":
-                break
+        run = await ctx.db.fetch_one(
+            "SELECT status, metadata_json FROM runs WHERE id = ?", (rows[0]["id"],))
+        if run["status"] == "completed":
+            break
         await asyncio.sleep(0.05)
-    assert goal is not None and goal["status"] == "completed"
+    assert run["status"] == "completed"
+    assert "steer_origin" in (run["metadata_json"] or "")
 
     msgs = await _messages(ctx)
     assert not [m for m in msgs if m["provenance"] in ("task_relay", "steer_relay")], (
@@ -896,7 +924,7 @@ async def test_terminal_failed_flight_never_delivers_raw_error_payloads(ctx, bb)
     assert "full error on the task record" in delivered
     # the FULL error is still stored for forensics
     row = await ctx.db.fetch_one(
-        "SELECT result FROM subagents WHERE id = ?", ("aaaabbbb",))
+        "SELECT result FROM runs WHERE id = ?", ("aaaabbbb",))
     assert row and len(row["result"]) > 50_000
     assert "invalid_union" in row["result"]
 
@@ -916,5 +944,60 @@ async def test_terminal_completed_result_capped_for_delivery(ctx, bb):
     assert len(sends[0]) < 5000
     assert "truncated" in sends[0]
     grow = await ctx.db.fetch_one(
-        "SELECT result FROM goals WHERE id = ?", (goal["id"],))
+        "SELECT result FROM runs WHERE id = ?", (goal["id"],))
     assert grow and len(grow["result"]) > 90_000
+
+
+async def test_recovery_fails_running_flights_and_wakes_origin(ctx, bb):
+    """Commitments Phase 0: a flight still running at boot died with the
+    process — its run is failed and the origin conversation is woken
+    (speak-expected) to own the loss. Steer-born flights stay quiet."""
+    from server.repositories.runs import RunRepository
+
+    repo = RunRepository(ctx.db)
+    await repo.start(run_id="feedface", kind="flight", session_key=DM_KEY,
+                     summary="checking bookings", now_iso="2026-10-05T00:00:00Z")
+    await repo.start(run_id="0ddba11", kind="flight", session_key=DM_KEY,
+                     summary="steer work", metadata={"steer_origin": True},
+                     now_iso="2026-10-05T00:00:00Z")
+
+    moved = await BackburnerService(ctx).recover_orphaned_goals()
+    assert moved == 2
+
+    for rid in ("feedface", "0ddba11"):
+        assert (await repo.get(rid))["status"] == "failed"
+    msgs = await _messages(ctx)
+    lost = [m for m in msgs if "lost this background turn" in m["content"]]
+    assert len(lost) == 1 and "checking bookings" in lost[0]["content"]
+    assert lost[0]["provenance"] == "task_relay"
+
+
+async def test_background_block_shows_running_flight(ctx, bb):
+    """The goals block no longer carries flights as goals — a running
+    flight renders in the background section instead, with its id."""
+    from server.repositories.runs import RunRepository
+    from server.services.context_assembler import ContextAssembler
+
+    await RunRepository(ctx.db).start(
+        run_id="cafe1234-0000", kind="flight", session_key=DM_KEY,
+        summary="rendering the turntable", now_iso="2026-10-05T00:00:00Z")
+    block = await ContextAssembler(ctx).goals_block(DM_KEY)
+    assert "Running in the background" in block
+    assert "bg turn cafe1234" in block and "rendering the turntable" in block
+    assert "Active Goals" not in block
+
+
+async def test_check_and_kill_resolve_flight_prefix(ctx, bb):
+    from server.repositories.runs import RunRepository
+    from server.services.subagent_service import SubagentService
+
+    await RunRepository(ctx.db).start(
+        run_id="beefcafe-1111", kind="flight", session_key=DM_KEY,
+        summary="long job", now_iso="2026-10-05T00:00:00Z")
+    svc = SubagentService(ctx)
+    res = await svc.check_subagent("beefcafe", parent_session_key=DM_KEY)
+    assert res["ok"] and res["status"] == "running"
+    assert (await svc.check_subagent("beefcafe", parent_session_key="other"))["ok"] is False
+    # no live task in the registry -> honest "nothing to cancel"
+    res = await svc.kill_subagent("beefcafe", parent_session_key=DM_KEY)
+    assert res["ok"] is False

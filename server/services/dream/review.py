@@ -225,7 +225,7 @@ class ReviewService(BaseService):
         """Chat call expecting strict JSON; one retry on parse failure."""
         for attempt in range(2):
             extra = "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object." if attempt else ""
-            response = await llm.chat(
+            response = await llm.prompt(
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user + extra},

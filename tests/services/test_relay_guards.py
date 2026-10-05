@@ -119,10 +119,10 @@ def stub_llm(monkeypatch):
     from server.services.llm_dispatch import LLMDispatchService
     seen: dict = {"reply": "NO_REPLY"}
 
-    async def _chat_with_tools(self, messages, tools, **kwargs):
+    async def _run_turn(self, messages, tools, **kwargs):
         return seen["reply"]
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat_with_tools)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _run_turn)
     return seen
 
 

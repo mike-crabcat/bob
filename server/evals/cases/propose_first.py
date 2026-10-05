@@ -87,7 +87,7 @@ async def _run(ctx, session_key: str, messages: list,
 
     tools, state, cleanup_tree = _mock_tools(files)
     try:
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools,
             model=pinned_model(),
             call_category="eval",

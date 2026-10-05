@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import base64
 import json
 import logging
@@ -313,7 +314,7 @@ def strip_citation_markers(text: str) -> str:
 
 # Self-wrap budget nudges (settings.self_wrap). Soft nudge as the turn nears
 # its time or iteration budget, final instruction on the forced wrap-up round.
-# Both are stripped from the messages list before chat_with_tools returns so
+# Both are stripped from the messages list before run_turn returns so
 # they never persist into conversation history.
 _SELF_WRAP_NUDGE = (
     "You are close to this turn's budget (time or tool calls). Stop starting "
@@ -332,7 +333,7 @@ _SELF_WRAP_NUDGE_SEND = (
     "You are close to this turn's budget (time or tool calls). Stop starting "
     "new work and finish now: write your final reply as your closing text — "
     "it is delivered automatically. Note anything left unfinished inside it, "
-    "and register genuinely-promised work with task_register first. If "
+    f"and register genuinely-promised work with add_goal(profile='promise') first. If "
     "silence is correct, finish with the exact text NO_REPLY.")
 _SELF_WRAP_FINAL_SEND = (
     "This turn's budget is exhausted and tools are now disabled. Write the "
@@ -595,7 +596,7 @@ class OpenAIService(BaseService):
         max_tokens: int | None = None, reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """The request-kwargs core every Responses call shares (2026-10-03
-        cleanup — was duplicated across chat/chat_stream/chat_with_tools):
+        cleanup — was duplicated across the old chat-family methods):
         model, temperature (when the model accepts it), max_output_tokens,
         the reasoning param (effort + summary, see _request_reasoning), and
         the OpenRouter routing constraint. Tools/stream/tool_choice stay at
@@ -613,7 +614,7 @@ class OpenAIService(BaseService):
         kwargs.update(_routing_extra(self._get_settings(), model))
         return kwargs
 
-    async def chat(
+    async def prompt(
         self,
         messages: list[dict[str, str]],
         *,
@@ -624,14 +625,19 @@ class OpenAIService(BaseService):
         stream_result: StreamResult | None = None,
         call_meta: dict | None = None,
     ) -> str:
-        """Non-streaming chat completion via Responses API."""
+        """One LLM round: prompt in, complete text back.
+
+        Single-round callers (memory passes, dream, judges, probes) — the
+        degenerate case of run_turn. Rides the SAME streamed transport via
+        _round (2026-10-04 unification): buffered only under the
+        BOB_LLM_STREAMING kill switch / rail fallback, reasoning captured
+        through the same extraction, llm.stream deltas flow to the bus so
+        background passes are watchable live. Returns the final text with
+        citations rendered."""
         resolved_model = model or self._get_settings().openai.default_model
-        kwargs: dict[str, Any] = {
-            "input": messages,
-            **self._common_request_kwargs(
-                resolved_model, temperature=temperature, max_tokens=max_tokens,
-                reasoning_effort=reasoning_effort),
-        }
+        kwargs: dict[str, Any] = dict(self._common_request_kwargs(
+            resolved_model, temperature=temperature, max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort))
         if "reasoning" in kwargs and call_meta is not None:
             call_meta.setdefault(
                 "reasoning_effort", kwargs["reasoning"].get("effort"))
@@ -639,11 +645,12 @@ class OpenAIService(BaseService):
         tools = self._merge_tools(model=resolved_model)
         if tools:
             kwargs["tools"] = tools
-        kwargs.update(_routing_extra(self._get_settings(), resolved_model))
 
         t0 = time.monotonic()
         try:
-            response = await self._client_for(resolved_model).responses.create(**kwargs)
+            response = await self._round(
+                _video_safe_wire(messages, dispatch_id=None, model=resolved_model),
+                kwargs)
             elapsed = time.monotonic() - t0
             content = _response_text_with_citations(response)
             usage = getattr(response, "usage", None)
@@ -661,7 +668,7 @@ class OpenAIService(BaseService):
                 stream_result.latency_seconds = elapsed
 
             logger.info(
-                "OpenAI chat: model=%s latency=%.2fs "
+                "OpenAI prompt: model=%s latency=%.2fs "
                 "input_tokens=%s output_tokens=%s total_tokens=%s "
                 "cached_tokens=%s input_chars=%d output_chars=%d",
                 resolved_model, elapsed,
@@ -675,89 +682,10 @@ class OpenAIService(BaseService):
             return content
         except Exception as e:
             elapsed = time.monotonic() - t0
-            logger.error("OpenAI chat failed: model=%s latency=%.2fs error=%s", resolved_model, elapsed, e)
+            logger.error("OpenAI prompt failed: model=%s latency=%.2fs error=%s", resolved_model, elapsed, e)
             _raise_openai_error(e)
 
-    async def chat_stream(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        model: str | None = None,
-        temperature: float = 0.7,
-        max_tokens: int | None = None,
-        stream_result: StreamResult | None = None,
-        call_meta: dict | None = None,
-    ) -> AsyncIterator[str]:
-        """Streaming chat completion via Responses API, yielding text deltas."""
-        resolved_model = model or self._get_settings().openai.default_model
-        kwargs: dict[str, Any] = {
-            "input": messages,
-            "stream": True,
-            **self._common_request_kwargs(
-                resolved_model, temperature=temperature, max_tokens=max_tokens),
-        }
-        if "reasoning" in kwargs and call_meta is not None:
-            call_meta.setdefault(
-                "reasoning_effort", kwargs["reasoning"].get("effort"))
-
-        tools = self._merge_tools(model=resolved_model)
-        if tools:
-            kwargs["tools"] = tools
-        kwargs.update(_routing_extra(self._get_settings(), resolved_model))
-
-        t0 = time.monotonic()
-        first_token_time: float | None = None
-        chunk_count = 0
-        total_chars = 0
-        final_usage = None
-        response_id = None
-
-        try:
-            response = await self._client_for(resolved_model).responses.create(**kwargs)
-            async for event in response:
-                if event.type == "response.output_text.delta":
-                    delta = event.delta
-                    if delta:
-                        if first_token_time is None:
-                            first_token_time = time.monotonic()
-                        chunk_count += 1
-                        total_chars += len(delta)
-                        yield delta
-                elif event.type == "response.completed":
-                    final_usage = getattr(event.response, "usage", None)
-                    response_id = getattr(event.response, "id", None)
-                    _note_generation(call_meta, event.response)
-                    if call_meta is not None:
-                        call_meta["reasoning_parts"] = _extract_reasoning(event.response)
-        except Exception as exc:
-            logger.error("OpenAI streaming error: %s", exc)
-            _raise_openai_error(exc)
-
-        elapsed = time.monotonic() - t0
-        cached_tokens = self._extract_cached_tokens(final_usage)
-        logger.info(
-            "OpenAI stream: model=%s latency=%.2fs ttft=%.2fs "
-            "chunks=%d output_chars=%s response_id=%s "
-            "input_tokens=%s output_tokens=%s total_tokens=%s "
-            "cached_tokens=%s",
-            resolved_model, elapsed,
-            (first_token_time - t0) if first_token_time else elapsed,
-            chunk_count, total_chars, response_id,
-            final_usage.input_tokens if final_usage else None,
-            final_usage.output_tokens if final_usage else None,
-            final_usage.total_tokens if final_usage else None,
-            cached_tokens,
-        )
-
-        if stream_result is not None:
-            stream_result.prompt_tokens = final_usage.input_tokens if final_usage else None
-            stream_result.completion_tokens = final_usage.output_tokens if final_usage else None
-            stream_result.total_tokens = final_usage.total_tokens if final_usage else None
-            stream_result.cached_tokens = cached_tokens
-            stream_result.latency_seconds = elapsed
-            stream_result.ttft_seconds = (first_token_time - t0) if first_token_time else None
-
-    async def chat_with_tools(
+    async def run_turn(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
@@ -779,7 +707,7 @@ class OpenAIService(BaseService):
         on_round_complete: Callable[[int, Any, float, Any], Awaitable[None]] | None = None,
         on_stream_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
-        """Multi-turn chat with tool calling via Responses API.
+        """Run one agentic turn via the Responses API: the tool loop.
 
         Loops: send input → check for function_call items → execute → feed back.
         Returns the final text response. ``time_limit_seconds`` is a wall-clock
@@ -1084,7 +1012,7 @@ class OpenAIService(BaseService):
                             pass
 
                 logger.info(
-                    "chat_with_tools: iteration=%d function_calls=%d",
+                    "run_turn: iteration=%d function_calls=%d",
                     iteration + 1, len(function_calls),
                 )
 
@@ -1276,7 +1204,7 @@ class OpenAIService(BaseService):
 
     async def quick_prompt(self, prompt: str) -> str:
         """Send a bare prompt string and return the response."""
-        return await self.chat(
+        return await self.prompt(
             messages=[{"role": "user", "content": prompt}],
         )
 

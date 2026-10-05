@@ -41,6 +41,23 @@ _RECORD_WRITES = ["update_goal", "update_goal_state", "room_state",
                   "goal_artefact"]
 
 
+def _goal_surface(ctx, session_key: str) -> list:
+    """The goal tool surface: the unified work tools, full access."""
+    from server.services.tasks import make_task_tools
+    return make_task_tools(ctx, session_key)
+
+
+# Every name that counts as registering promised work, both surfaces.
+_COMMIT_SURFACES = ["task_register", "add_goal", "delegate_goal",
+                    "create_subagent", "create_goal", "update_goal",
+                    "update_goal_state"]
+_WORK_TOOL_NAMES = {"task_register", "task_complete", "task_fail",
+                    "task_cancel", "list_tasks", "add_goal", "close_goal",
+                    "list_goals", "delegate_goal", "schedule_goal",
+                    "update_goal", "update_goal_state", "list_goal_templates",
+                    "instantiate_goal_template"}
+
+
 async def _workspace_system(ctx, session_key: str, framing: str) -> str:
     from pathlib import Path
 
@@ -74,14 +91,22 @@ async def _cleanup(ctx, goal_ids: list[str],
         await WakeupRepository(ctx.db).cancel_for_goal(gid)
     await WakeupRepository(ctx.db).delete_eval_wakeups()
     await _delete_eval_utilities(ctx.db)
-    await GoalRepository(ctx.db).delete_eval_goals()  # eval-goal prefix
-    await GoalRepository(ctx.db).delete_eval_goals(prefix="eg")
+    # Tree-aware: model-created child goals (and their ROOMS' loop/dead-man
+    # wakeups) go too — orphaned room wakeups would wake empty rooms on
+    # the live pump (found 2026-10-05).
+    removed = (await GoalRepository(ctx.db).delete_eval_goals()  # eval-goal prefix
+               + await GoalRepository(ctx.db).delete_eval_goals(prefix="eg"))
+    for gid in removed:
+        await WakeupRepository(ctx.db).cancel_for_goal(gid)
     for key in (task_sessions or []):
         # G3 seeds real task-registry rows (task_register writes tasks +
         # due-action wakeups); the wakeups are covered above, the rows here
         # (SQL in the repo per the ownership rule).
         from server.repositories.tasks import TaskRepository
         await TaskRepository(ctx.db).delete_for_waiter(key)
+    # Last: promise rows are gone now, so their task_due backstops are
+    # orphans the sweep can see.
+    await WakeupRepository(ctx.db).delete_eval_wakeups()
 
 
 @eval_case(
@@ -118,7 +143,6 @@ async def goal_writeback_on_relayed_decision(ctx):
     from server.evals.util import make_shadow_surface
     from server.repositories.conversations import ConversationRepository
     from server.repositories.goals import GoalRepository
-    from server.services.goal_tools import make_goal_tools
     from server.services.llm_dispatch import LLMDispatchService
     from server.services.tools import tool
 
@@ -158,13 +182,17 @@ async def goal_writeback_on_relayed_decision(ctx):
             return json.dumps({"ok": True, "message_id": "eval-mock"})
 
         bash, _tree_cleanup = make_planted_bash({})
-        tools = (make_goal_tools(ctx, session_key) + [send_whatsapp_message, bash])
+        tools = (_goal_surface(ctx, session_key) + [send_whatsapp_message, bash])
         from server.services.tool_registry import build_common_tools
         crowd = build_common_tools(ctx, session_key=session_key,
                                    is_trusted=True, contact_id=None)
-        tools += make_shadow_surface(crowd, exclude={"bash"})
+        # The real goal surface above must win: in v2 the work tools also
+        # ride build_common_tools, and an inert shadow would swallow the
+        # write the case measures.
+        tools += make_shadow_surface(
+            crowd, exclude={"bash"} | {t.name for t in tools})
 
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools, model=pinned_model(),
             call_category="eval", session_key=session_key)
 
@@ -223,7 +251,6 @@ async def goal_room_folds_bg_artefact(ctx):
     from server.repositories.goals import GoalRepository
     from server.services.goal_rooms import ROOM_PREFIX, ROOM_SUFFIX
     from server.services.goal_service import create_goal
-    from server.services.goal_tools import make_goal_tools
     from server.services.llm_dispatch import LLMDispatchService
     from server.services.tools import tool
 
@@ -268,7 +295,7 @@ async def goal_room_folds_bg_artefact(ctx):
             f"goals/{_id8}/montage-{name}.mp4":
                 f"mp4 container bytes for {name} " + "x" * 240_000
             for name in ("david", "ryan", "blair", "seth")})
-        tools = make_goal_tools(ctx, room_key)
+        tools = _goal_surface(ctx, room_key)
         try:
             from server.services.goal_rooms import room_turn_tools
             tools += room_turn_tools(ctx, room_key)
@@ -278,9 +305,13 @@ async def goal_room_folds_bg_artefact(ctx):
         from server.services.tool_registry import build_common_tools
         crowd = build_common_tools(ctx, session_key=room_key,
                                    is_trusted=True, contact_id=None)
-        tools += make_shadow_surface(crowd, exclude={"bash"})
+        # The real goal surface above must win: in v2 the work tools also
+        # ride build_common_tools, and an inert shadow would swallow the
+        # write the case measures.
+        tools += make_shadow_surface(
+            crowd, exclude={"bash"} | {t.name for t in tools})
 
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools, model=pinned_model(),
             call_category="eval", session_key=room_key)
 
@@ -324,7 +355,7 @@ _MUG_LOG = {
     id="goal_promised_work_gets_registered",
     category="goal_behavior",
     description="A turn that diagnoses a problem and commits to rework "
-                "MUST register the work (task_register) — prose promises "
+                "MUST register the work (task_register / add_goal) — prose promises "
                 "die with the turn (2026-10-02 AI-doom mug: flight ended "
                 "'rebuilding the geometry properly', goal was scoped to "
                 "inspection, settled completed, no task/goal/job existed — "
@@ -333,9 +364,7 @@ _MUG_LOG = {
         StructuralCheck(kind="tool_call_made",
                         params={"tool_name": "bash"}),
         StructuralCheck(kind="any_tool_call", params={
-            "tool_names": ["task_register", "create_subagent",
-                           "create_goal", "update_goal",
-                           "update_goal_state"]}),
+            "tool_names": _COMMIT_SURFACES}),
         StructuralCheck(kind="context_flag",
                         params={"key": "work_registered"}),
         StructuralCheck(kind="min_length", params={"min_length": 5}),
@@ -348,9 +377,9 @@ _MUG_LOG = {
             "protruding, so it orbits as the body spins). CORRECT: the "
             "model checks the logs (bash visible in INPUT MESSAGES), "
             "answers the question in its reply, AND makes the promised "
-            "rework SYSTEM STATE — any of: task_register (title naming "
+            "rework SYSTEM STATE — any of: task_register or add_goal (title naming "
             "the fix), create_subagent spawning the fix work, or "
-            "create_goal / update_goal recording it on a goal — visible "
+            "create_goal / add_goal / update_goal recording it on a goal — visible "
             "in INPUT MESSAGES. The invariant is the commitment existing "
             "outside the turn's prose. A brief progress send via "
             "send_whatsapp_message is fine but optional. WRONG: "
@@ -408,12 +437,11 @@ async def goal_promised_work_gets_registered(ctx):
             required=[],
             handler=_send)
 
-        from server.services.goal_tools import make_goal_tools
         bash, tree_cleanup = make_planted_bash(_MUG_LOG)
-        # The three commitment surfaces must all be genuinely available:
-        # task registry, subagent spawn, goal create/write.
-        tools = (make_task_tools(ctx, session_key)
-                 + make_goal_tools(ctx, session_key) + [send_tool, bash])
+        # The commitment surfaces must be genuinely available: the work
+        # tools (promises + goals) and subagent spawn.
+        tools = make_task_tools(ctx, session_key) + [send_tool, bash]
+        real_names = {t.name for t in tools}
         # BOB_EVAL_NO_CROWD=1 drops the shadow surface — the tool-count
         # experiment knob (does flash comply when the crowd isn't
         # diluting salience?).
@@ -423,11 +451,10 @@ async def goal_promised_work_gets_registered(ctx):
             # task tools now ride build_common_tools (chat wiring fix
             # 2026-10-03); the REAL ones above win, shadows are excluded.
             tools += make_shadow_surface(
-                crowd, exclude={"bash", "send_whatsapp_message",
-                                "task_register", "task_complete", "task_fail",
-                                "task_cancel", "list_tasks"})
+                crowd, exclude={"bash", "send_whatsapp_message"}
+                | _WORK_TOOL_NAMES | real_names)
 
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools, model=pinned_model(),
             reasoning_effort=__import__("os").environ.get("BOB_EVAL_EFFORT"),
             call_category="eval", session_key=session_key)
@@ -436,8 +463,7 @@ async def goal_promised_work_gets_registered(ctx):
         row = await TaskRepository(ctx.db).latest_for_waiter(session_key)
         calls = extract_tool_calls(messages)
         called = {c.get("name", "") for c in calls}
-        other_surfaces = {"create_subagent", "create_goal",
-                          "update_goal", "update_goal_state"} & called
+        other_surfaces = (set(_COMMIT_SURFACES) - {"task_register"}) & called
         if not (response or "").strip() and state["sends"]:
             response = state["sends"][-1]
         return {

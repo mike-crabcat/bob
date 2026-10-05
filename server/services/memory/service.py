@@ -452,7 +452,7 @@ class MemoryService(BaseService):
                 {"role": "user", "content": instruction},
             ]
             llm = LLMDispatchService(self.ctx)
-            result_text = await llm.chat_with_tools(
+            result_text = await llm.run_turn(
                 messages, tools,
                 model=llm.memory_model,
                 max_iterations=25,

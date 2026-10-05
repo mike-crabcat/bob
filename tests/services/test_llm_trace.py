@@ -3,7 +3,7 @@
 Covers: _TraceWriter row emission (kinds, caps, seq), _extract_reasoning's
 two dialects (OpenAI summary + OpenRouter raw reasoning_text),
 _request_reasoning's summary gating (small-cap floor, kill switch), the
-dispatch chat_with_tools wiring (rows land via on_round_complete, disabled
+dispatch run_turn wiring (rows land via on_round_complete, disabled
 flag writes nothing), trace redaction, and the llm_call_log cascade.
 """
 
@@ -190,7 +190,7 @@ async def test_writer_disabled_without_log_id(ctx):
     assert await LlmTraceRepository(ctx.db).for_call("nope") == []
 
 
-# ------------------------------------------- dispatch wiring (chat_with_tools)
+# ------------------------------------------- dispatch wiring (run_turn)
 
 @pytest.fixture
 def fake_llm_service(monkeypatch, tmp_path):
@@ -230,7 +230,7 @@ def fake_llm_service(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_chat_with_tools_writes_trace(ctx, fake_llm_service):
+async def test_dispatch_run_turn_writes_trace(ctx, fake_llm_service):
     from server.services.tools import Tool
 
     async def _handler(path: str) -> str:
@@ -241,7 +241,7 @@ async def test_dispatch_chat_with_tools_writes_trace(ctx, fake_llm_service):
         required=["path"], handler=_handler)]
 
     dispatch = LLMDispatchService(ctx)
-    result = await dispatch.chat_with_tools(
+    result = await dispatch.run_turn(
         [{"role": "user", "content": "read it"}], tools,
         call_category="test", session_key="sk-test", dispatch_id="disp-1")
     assert result == "done"
@@ -270,7 +270,7 @@ async def test_dispatch_trace_kill_switch(ctx, fake_llm_service, monkeypatch):
             "type": "object", "properties": {"path": {"type": "string"}}},
             required=["path"], handler=_handler)]
         dispatch = LLMDispatchService(ctx)
-        await dispatch.chat_with_tools(
+        await dispatch.run_turn(
             [{"role": "user", "content": "read it"}], tools,
             call_category="test", session_key="sk-test", dispatch_id="disp-2")
         n = await ctx.db.fetch_one("SELECT COUNT(*) AS n FROM llm_trace_events")

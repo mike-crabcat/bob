@@ -75,7 +75,7 @@ async def _summarize_transcript(ctx: AppContext, agenda: str, transcript: str) -
     ]
 
     dispatch = LLMDispatchService(ctx)
-    summary = await dispatch.chat(
+    summary = await dispatch.prompt(
         messages,
         call_category="call_summary",
         session_key=None,

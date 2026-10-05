@@ -33,7 +33,7 @@ def _make_mock_tools(*, seeded_subagents: list[dict] | None = None,
     """Inert recorders + a REAL-EXEC bash in a planted /tmp tree (the
     inert mock made models report broken tooling instead of routing —
     see util.make_planted_bash). State rides the closure; calls are
-    captured via the function_call items chat_with_tools appends."""
+    captured via the function_call items run_turn appends."""
     from server.evals.util import make_planted_bash
     from server.services.tools import tool
 
@@ -61,7 +61,7 @@ def _make_mock_tools(*, seeded_subagents: list[dict] | None = None,
 
         agent_type:
         - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
-        - 'local': runs in-process via chat_with_tools (faster, no subprocess).
+        - 'local': runs in-process via run_turn (faster, no subprocess).
         (For background shell commands use run_bg_process — that is process
         supervision, not a subagent: no model, no judgment, just a command
         whose completion wakes this conversation.)
@@ -222,7 +222,7 @@ async def _run(ctx, session_key: str, messages: list,
     tools = tools + make_shadow_surface(real_crowd,
                                         exclude=_SHADOW_EXCLUDE)
     try:
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools,
             model=pinned_model(),
             call_category="eval",

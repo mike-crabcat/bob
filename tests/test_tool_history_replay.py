@@ -168,7 +168,7 @@ async def test_pop_tool_trace_falls_back_when_items_exceed_cap():
 # ─── End-to-end: capture → persist → replay ────────────────────────────
 
 async def _simulate_dispatch_wrote_assistant(ctx, session_key, dispatch_id, items, reply_text):
-    """Mimic what chat_with_tools + SessionService.add_message would do."""
+    """Mimic what run_turn + SessionService.add_message would do."""
     trace = _build_tool_trace(items)
     if trace is not None:
         _dispatch_tool_trace[dispatch_id] = trace
@@ -250,7 +250,7 @@ async def test_replay_handles_rows_without_trace(ctx, db):
 
 
 async def test_dispatch_failure_clears_trace():
-    """When chat_with_tools raises, the trace entry should be popped to avoid
+    """When run_turn raises, the trace entry should be popped to avoid
     leaking (the dispatch_id will never be consumed by add_message)."""
     from server.services.llm_dispatch import LLMDispatchService as Dispatch
     _dispatch_tool_trace["doomed"] = {"items": [], "summary": ""}

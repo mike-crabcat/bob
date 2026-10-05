@@ -369,12 +369,4 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if resolved_settings.whatsapp_bridge.enabled:
         app.include_router(whatsapp.router)
 
-    # Conditional OpenAI evaluation router
-    if resolved_settings.openai.enabled:
-        try:
-            from server.routers import openai_llm as openai_router
-            app.include_router(openai_router.router)
-        except ImportError:
-            logger.warning("OpenAI SDK not installed")
-
     return app

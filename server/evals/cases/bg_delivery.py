@@ -145,7 +145,7 @@ async def bg_silence_no_reply_marker(ctx):
                  + make_shadow_surface(
                      crowd, exclude={"send_whatsapp_message", "bash"}))
 
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools, model=pinned_model(),
             call_category="eval", session_key=session_key)
 
@@ -243,7 +243,7 @@ async def bg_flight_answers_in_final_text(ctx):
                  + make_shadow_surface(
                      crowd, exclude={"bash", "send_whatsapp_message"}))
 
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools, model=pinned_model(),
             call_category="eval", session_key=session_key)
 

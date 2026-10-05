@@ -70,7 +70,7 @@ async def tool_calling_update_agenda(ctx):
 
     tools = make_workspace_tools(ctx, session_key=session_key)
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(
+    response = await dispatch.run_turn(
         messages, tools,
         call_category="eval",
         session_key=session_key,

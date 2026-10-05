@@ -74,7 +74,7 @@ async def test_idle_window_excludes_digested_tail(ctx, monkeypatch):
         captured["messages"] = messages
         return "Nothing to record."
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", fake_chat)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", fake_chat)
 
     svc = MemoryService(ctx)
     result = await svc.run_silent_turn_extraction(key)
@@ -105,7 +105,7 @@ async def test_forced_remember_turn_keeps_full_tail(ctx, monkeypatch):
         captured["messages"] = messages
         return "Nothing to record."
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", fake_chat)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", fake_chat)
 
     result = await MemoryService(ctx).run_silent_turn_extraction(key, force=True)
     assert result["status"] == "ok"
@@ -151,7 +151,7 @@ async def test_merged_noop_claim_not_counted_or_announced(ctx, monkeypatch):
             value="evening runs")  # identical → dedup-merge, no new row
         return "Recorded."
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", fake_chat)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", fake_chat)
 
     result = await MemoryService(ctx).run_silent_turn_extraction(key, force=True)
     assert result["status"] == "ok"

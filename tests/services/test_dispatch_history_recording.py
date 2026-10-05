@@ -30,16 +30,16 @@ from server.services.session_service import SessionService
 
 @pytest.fixture
 def stub_llm(monkeypatch):
-    """chat_with_tools returns canned text (no tool calls); swap the reply
+    """run_turn returns canned text (no tool calls); swap the reply
     via ``stub_llm["reply"] = …``. Mirrors test_dispatch_rescue_gating."""
     from server.services.llm_dispatch import LLMDispatchService
     seen: dict = {"reply": "stub reply"}
 
-    async def _chat_with_tools(self, messages, tools, **kwargs):
+    async def _run_turn(self, messages, tools, **kwargs):
         seen["messages"] = messages
         return seen["reply"]
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat_with_tools)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _run_turn)
     return seen
 
 

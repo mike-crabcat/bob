@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as WorkRouteImport } from './routes/work'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as GoalsRouteImport } from './routes/goals'
 import { Route as IndexRouteImport } from './routes/index'
@@ -29,6 +30,11 @@ import { Route as PhoneCallIdIndexRouteImport } from './routes/phone/$callId/ind
 import { Route as ConversationsSessionKeyIndexRouteImport } from './routes/conversations/$sessionKey/index'
 import { Route as ConversationsSessionKeyCallsCallIdRouteImport } from './routes/conversations/$sessionKey/calls/$callId'
 
+const WorkRoute = WorkRouteImport.update({
+  id: '/work',
+  path: '/work',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsRoute = SessionsRouteImport.update({
   id: '/sessions',
   path: '/sessions',
@@ -131,6 +137,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/goals': typeof GoalsRouteWithChildren
   '/sessions': typeof SessionsRouteWithChildren
+  '/work': typeof WorkRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
   '/goals/$goalId': typeof GoalsGoalIdRoute
@@ -151,6 +158,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/sessions': typeof SessionsRouteWithChildren
+  '/work': typeof WorkRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/goals/$goalId': typeof GoalsGoalIdRoute
   '/sessions/$': typeof SessionsSplatRoute
@@ -172,6 +180,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/goals': typeof GoalsRouteWithChildren
   '/sessions': typeof SessionsRouteWithChildren
+  '/work': typeof WorkRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/conversations/$sessionKey': typeof ConversationsSessionKeyRouteWithChildren
   '/goals/$goalId': typeof GoalsGoalIdRoute
@@ -195,6 +204,7 @@ export interface FileRouteTypes {
     | '/'
     | '/goals'
     | '/sessions'
+    | '/work'
     | '/contacts/$contactId'
     | '/conversations/$sessionKey'
     | '/goals/$goalId'
@@ -215,6 +225,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/sessions'
+    | '/work'
     | '/contacts/$contactId'
     | '/goals/$goalId'
     | '/sessions/$'
@@ -235,6 +246,7 @@ export interface FileRouteTypes {
     | '/'
     | '/goals'
     | '/sessions'
+    | '/work'
     | '/contacts/$contactId'
     | '/conversations/$sessionKey'
     | '/goals/$goalId'
@@ -257,6 +269,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   GoalsRoute: typeof GoalsRouteWithChildren
   SessionsRoute: typeof SessionsRouteWithChildren
+  WorkRoute: typeof WorkRoute
   ContactsContactIdRoute: typeof ContactsContactIdRoute
   ConversationsSessionKeyRoute: typeof ConversationsSessionKeyRouteWithChildren
   SkillsDelegationIdRoute: typeof SkillsDelegationIdRoute
@@ -272,6 +285,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/work': {
+      id: '/work'
+      path: '/work'
+      fullPath: '/work'
+      preLoaderRoute: typeof WorkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions': {
       id: '/sessions'
       path: '/sessions'
@@ -453,6 +473,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   GoalsRoute: GoalsRouteWithChildren,
   SessionsRoute: SessionsRouteWithChildren,
+  WorkRoute: WorkRoute,
   ContactsContactIdRoute: ContactsContactIdRoute,
   ConversationsSessionKeyRoute: ConversationsSessionKeyRouteWithChildren,
   SkillsDelegationIdRoute: SkillsDelegationIdRoute,

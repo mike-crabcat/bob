@@ -37,7 +37,6 @@ from server.cli.context_cmds import app as context_app  # noqa: E402
 from server.cli.webhooks import app as webhook_app  # noqa: E402
 from server.cli.email_cmds import app as email_app  # noqa: E402
 from server.cli.calls import app as phone_app  # noqa: E402
-from server.cli.openai_cmds import app as openai_app  # noqa: E402
 from server.cli.eval_cmds import app as eval_app  # noqa: E402
 from server.cli.replay_cmds import app as replay_app  # noqa: E402
 from server.cli.whatsapp_cmds import app as whatsapp_app  # noqa: E402
@@ -54,7 +53,6 @@ app.add_typer(context_app, name="context")
 app.add_typer(webhook_app, name="webhook")
 app.add_typer(email_app, name="email")
 app.add_typer(phone_app, name="call")
-app.add_typer(openai_app, name="openai")
 app.add_typer(eval_app, name="eval")
 app.add_typer(replay_app, name="replay")
 app.add_typer(whatsapp_app, name="whatsapp")

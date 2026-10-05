@@ -13,7 +13,7 @@ from fastapi import APIRouter
 from server.routers.dashboard_api import (
     home, contacts, calls, workspace, memory,
     frontend_errors, skills, subagents, phone, dreams, auth, ops,
-    conversations, goals as goals_api, mcp,
+    conversations, goals as goals_api, mcp, work,
 )
 
 
@@ -23,6 +23,7 @@ router.include_router(home.router)
 router.include_router(ops.router)
 router.include_router(conversations.router)
 router.include_router(goals_api.router)
+router.include_router(work.router)
 
 router.include_router(contacts.router)
 router.include_router(calls.router)

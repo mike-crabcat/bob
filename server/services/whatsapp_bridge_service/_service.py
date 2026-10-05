@@ -1170,11 +1170,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             # switch BOB_MEMORY_ROSTER=off. Empty string when not enabled.
             memory_roster = await assembler.maybe_memory_roster(session_key)
 
-        # Dream plans — Tier 1 injection for sessions with linked plans
-        dream_plans_prompt = await assembler.dream_plans_prompt(session_key)
-
-        # Active goals held by this conversation (Bob Events §1.4) — includes
-        # the old outreach block; outreach state rides in the goal itself.
+        # The Work block (commitments plan): goals held, promises owed to and
+        # asked of this conversation, suggestions, background runs.
         goals_prompt = await assembler.goals_block(session_key)
 
         # The turn-start clock is appended by build_chat_messages (2026-09-01
@@ -1188,15 +1185,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         )
         jit_note = past_reference_note(
             inbound_text if inbound_text is not None else text_preview)
-        # Task registry completer-side visibility (docs/task-registry-plan.md
-        # D6): pending tasks this conversation owes ride in every dispatch —
-        # the outreach-goal trick generalized (the reply hours later still
-        # sees the promise).
-        from server.services.tasks import tasks_enabled, tasks_block
-        _tasks_block = (await tasks_block(session_key, self.db)
-                        if tasks_enabled() else "")
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, dream_plans_prompt, goals_prompt, HISTORY_DISCIPLINE_NOTE, _tasks_block) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, goals_prompt, HISTORY_DISCIPLINE_NOTE) if p
         )
         # Channel note appended for special wake shapes (reactions): rides
         # after the context blocks so it reads as current-turn guidance.
@@ -1275,22 +1265,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 self.ctx, session_key=session_key, is_trusted=is_trusted,
                 contact_id=contact_id, human_initiated=human_initiated))
 
-        # Goal tools (Bob3 Phase V, widened 2026-10-04): goal CREATION is
-        # open to every session — structuring an ask is not exercising
-        # reach, and untrusted-origin goals are exactly what creator
-        # pinning + room-principal scoping exist to handle safely (the
-        # 2026-10-01 census needed an operator workaround because the
-        # group turn had no create_goal; the AI-doom group is where most
-        # goals are born). create_goal refuses to settle for an unpinned
-        # owner in a GROUP (its docstring: ask who owns it first), and
-        # the room's capabilities scope to that creator. TRACKING tools
-        # (update/complete others' goals) stay trusted-only.
-        from server.services.goal_tools import make_goal_tools
-        if is_trusted:
-            tools.extend(make_goal_tools(self.ctx, session_key))
-        elif chat_kind == "group":
-            tools.extend(make_goal_tools(self.ctx, session_key,
-                                         create_only=True))
         # Bob Events §3.4: the payment gate's human side (trusted only).
         if is_trusted:
             from server.services.approval_tools import make_approval_tools
@@ -1301,10 +1275,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         # one name; the record-discipline NOTE in the system prompt is the
         # other half of the pair).
 
-        # Task registry tools (docs/task-registry-plan.md) on every chat path.
-        if tasks_enabled():
-            from server.services.tasks import make_task_tools
-            tools.extend(make_task_tools(self.ctx, session_key))
+        # Work tools (goals + promises) arrive via build_common_tools with the
+        # trust-derived access level — attaching them again here duplicated
+        # every name (pre-2026-10-05 the task tools rode in twice).
 
         # Voice outreach: attach whenever the requester is a trusted contact, in any
         # chat context (DM or group). Untrusted users don't get the tool — it costs

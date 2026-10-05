@@ -116,15 +116,15 @@ async def _run_dispatch_and_capture(ctx, db, monkeypatch, *, trusted: int, resul
     tasks = _capture_create_task(monkeypatch)
     captured: dict = {}
 
-    async def fake_chat_with_tools(self, messages, tools, **kwargs):
+    async def fake_run_turn(self, messages, tools, **kwargs):
         captured["messages"] = messages
         captured["tools"] = tools
         captured["kwargs"] = kwargs
         return result
 
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
-        fake_chat_with_tools,
+        "server.services.llm_dispatch.LLMDispatchService.run_turn",
+        fake_run_turn,
     )
 
     await svc._dispatch_to_llm(
@@ -274,7 +274,7 @@ async def test_assistant_history_is_written_after_successful_email_reply_send(ct
             await _count(db, "messages WHERE role = 'assistant'")
         )
 
-    async def fake_chat_with_tools(self, messages, tools, **kwargs):
+    async def fake_run_turn(self, messages, tools, **kwargs):
         reply_tool = next(tool for tool in tools if tool.name == "email_reply")
         tool_result = await reply_tool.handler("Delivered body")
         assert '"ok": true' in tool_result
@@ -285,8 +285,8 @@ async def test_assistant_history_is_written_after_successful_email_reply_send(ct
         fake_send_reply,
     )
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
-        fake_chat_with_tools,
+        "server.services.llm_dispatch.LLMDispatchService.run_turn",
+        fake_run_turn,
     )
 
     await svc._dispatch_to_llm(thread, _message(sender='"Sender" <sender@example.com>'), inbox)
@@ -309,7 +309,7 @@ async def test_failed_email_reply_is_not_marked_sent_but_error_text_is_recorded(
     async def fake_send_reply(self, **kwargs):
         raise RuntimeError("smtp boom")
 
-    async def fake_chat_with_tools(self, messages, tools, **kwargs):
+    async def fake_run_turn(self, messages, tools, **kwargs):
         reply_tool = next(tool for tool in tools if tool.name == "email_reply")
         return await reply_tool.handler("Body that fails")
 
@@ -318,8 +318,8 @@ async def test_failed_email_reply_is_not_marked_sent_but_error_text_is_recorded(
         fake_send_reply,
     )
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
-        fake_chat_with_tools,
+        "server.services.llm_dispatch.LLMDispatchService.run_turn",
+        fake_run_turn,
     )
 
     await svc._dispatch_to_llm(thread, _message(sender='"Sender" <sender@example.com>'), inbox)
@@ -338,12 +338,12 @@ async def test_quota_like_llm_failure_has_no_email_retry_restoration(ctx, db, mo
     svc, _ = _make_service(ctx)
     tasks = _capture_create_task(monkeypatch)
 
-    async def fake_chat_with_tools(self, messages, tools, **kwargs):
+    async def fake_run_turn(self, messages, tools, **kwargs):
         raise RuntimeError("insufficient_quota")
 
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat_with_tools",
-        fake_chat_with_tools,
+        "server.services.llm_dispatch.LLMDispatchService.run_turn",
+        fake_run_turn,
     )
 
     await svc._dispatch_to_llm(thread, _message(sender='"Sender" <sender@example.com>'), inbox)
@@ -355,3 +355,14 @@ async def test_quota_like_llm_failure_has_no_email_retry_restoration(ctx, db, mo
         (thread["session_key"],),
     )
     assert [(r["role"], r["dispatched"]) for r in rows] == [("user", 1)]
+
+
+async def test_mcp_note_rides_the_email_system_prompt(ctx, db, monkeypatch):
+    """2026-09-25: the toolset builder appended the MCP transparency note to
+    a system_content it didn't own — UnboundLocalError on every email turn
+    whose thread carried MCP tools. The caller now owns the append."""
+    monkeypatch.setattr("server.services.mcp_service.mcp_transparency_note",
+                        AsyncMock(return_value="MCP-NOTE-MARKER"))
+    result = await _run_dispatch_and_capture(ctx, db, monkeypatch, trusted=1, result="")
+    system = result["captured"]["messages"][0]["content"]
+    assert "MCP-NOTE-MARKER" in system

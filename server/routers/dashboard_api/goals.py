@@ -23,7 +23,11 @@ async def list_goals(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     db = _db(request)
 
-    rows = await GoalRepository(db).list_recent(limit=300)
+    # kind='subagent' rows are executor bookkeeping (runs since
+    # 2026-10-05); kind='promise' rows are promises (Phase 2) that
+    # show in each goal's drill-down — the goals page shows outcomes.
+    rows = await GoalRepository(db).list_recent(
+        limit=300, exclude_kinds=("subagent", "promise"))
     goals = [
         {
             "id": r["id"],
@@ -43,7 +47,7 @@ async def list_goals(request: Request) -> dict[str, Any]:
     ]
 
     # Goal-loop summaries (docs/goal-execution-plan.md D10): next run from
-    # the single continuation slot, budget burn, open branches, flags.
+    # the single continuation slot, budget burn, open promises, flags.
     import json as _json
     from server.repositories.tasks import TaskRepository
     from server.repositories.wakeups import WakeupRepository
@@ -61,7 +65,7 @@ async def list_goals(request: Request) -> dict[str, Any]:
             "at": _utc(w["not_before"]),
             "frame": payload.get("frame"),
         }
-    open_tasks = await TaskRepository(db).open_counts_by_goal(goal_ids)
+    open_promises = await TaskRepository(db).open_counts_by_goal(goal_ids)
     for g, r in zip(goals, rows):
         loop = state_of(r)
         g["loop"] = {
@@ -70,7 +74,7 @@ async def list_goals(request: Request) -> dict[str, Any]:
             "budget_spent": loop.get("budget_spent"),
             "stall_streak": loop.get("stall_streak", 0),
             "skip_streak": loop.get("skip_streak", 0),
-            "open_tasks": open_tasks.get(g["id"], 0),
+            "open_promises": open_promises.get(g["id"], 0),
             "next_run": slots.get(g["id"]),
         }
 
@@ -173,7 +177,7 @@ async def cancel_wakeup(wakeup_id: str, request: Request) -> dict[str, Any]:
 @router.get("/api/goals/{goal_id}")
 async def goal_detail(goal_id: str, request: Request) -> dict[str, Any]:
     """The follow-along surface (goal-execution-plan D10): state block with
-    the strategies tree, loop budget + next run, every branch (task) tied
+    the strategies tree, loop budget + next run, every promise tied
     to the goal, and the wake/turn timeline. Read-only."""
     import json as _json
     if not _check_auth(request):
@@ -248,7 +252,7 @@ async def goal_detail(goal_id: str, request: Request) -> dict[str, Any]:
             "last_delta": loop.get("last_delta"),
             "next_run": next_run,
         },
-        "branches": [{
+        "promises": [{
             "id": b["id"], "title": b["title"], "status": b["status"],
             "completer": b["expected_completer"], "due": _utc(b["due"]),
             "result": (b["result"] or b["error"] or "")[:300],

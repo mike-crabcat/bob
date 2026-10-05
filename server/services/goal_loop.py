@@ -24,12 +24,14 @@ BOB_GOAL_LOOP=on.
 
 from __future__ import annotations
 
+
 import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from server.context import AppContext
+from server.services.goal_service import normalise_goal_kind
 from server.services.tools import Tool, tool
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,19 @@ FRAME_REVIEW = "review"        # progress landed; evaluate/branch/spawn
 FRAME_STALL = "stall"          # zero-delta turn; prune/close/block
 FRAME_TERMINAL = "terminal"    # budget exhausted; last guaranteed round
 FRAME_DEADMAN = "deadman"      # liveness floor fired
+
+def _opening_decompose() -> str:
+    """Opening-round decomposition frame (commitments plan Phase 3): flash
+    plans poorly unprompted, so the room's FIRST round is told the shape —
+    fan-out as batch children, an approval child before paid steps."""
+    return ("DECOMPOSE FIRST: if the objective covers several people or "
+            "items, create one child per person/item in a SINGLE "
+            "add_goal(parent_goal_id=<this goal's id>, children=[…]) call — "
+            "never one call each. Before any "
+            "paid or irreversible step (3D/image generation, orders, "
+            "bookings), add a child whose completer is the owner's "
+            "conversation asking them to approve, and wait for it. Then: ")
+
 
 MAX_WAIT_MINUTES = 7 * 1440    # a declared wait never exceeds a week
 DECISION_DELAY_MINUTES = 5     # progress + nothing pending -> short review slot
@@ -86,7 +101,7 @@ def state_of(goal: dict[str, Any]) -> dict[str, Any]:
 
 def _default_state(ctx: AppContext, kind: str) -> dict[str, Any]:
     return {
-        "budget_total": ctx.settings.goal_loop.budget_for(kind),
+        "budget_total": ctx.settings.goal_loop.budget_for(normalise_goal_kind(kind)),
         "budget_spent": 0,
         "consecutive_continue": 0,
         "stall_streak": 0,
@@ -211,6 +226,7 @@ async def ensure_loop(ctx: AppContext, goal: dict[str, Any]) -> None:
         await schedule_slot(
             ctx, goal, _now() + timedelta(minutes=settings.initial_delay_minutes),
             FRAME_CARRY,
+            _opening_decompose() +
             "opening round: read the charter, write the initial state "
             "block, open your first strategies and register their tasks")
 
@@ -407,7 +423,7 @@ def frame_brief(frame: str, goal: dict[str, Any], note: str = "") -> str:
         "\nEnd EVERY round with a continuation: goal_continue_now(reason) "
         "to chain, goal_wait(minutes=…, until=…, reason=…) to pause, or "
         "nothing when branches are pending (their results wake you). "
-        "complete_goal when the objective is met WITH evidence.")
+        f"close_goal when the objective is met WITH evidence.")
     return "\n".join(p for p in lines if p is not None)
 
 
@@ -699,14 +715,14 @@ _KIND_PLAYBOOKS = {
 def charter_loop_block(kind: str) -> str:
     """The continuation contract + per-kind playbook, appended to the room
     charter while the loop is enabled."""
-    playbook = _KIND_PLAYBOOKS.get(kind)
+    playbook = _KIND_PLAYBOOKS.get(normalise_goal_kind(kind))
     lines = [
         "## Goal loop (continuation contract)",
         "This room runs itself. End EVERY round with exactly one choice:",
         "- goal_continue_now(reason) — chain the next round now (capped)",
         "- goal_wait(minutes=…, until=…, reason=…) — pause precisely",
         "- nothing — when branches (tasks) are pending, their results wake you",
-        "- complete_goal / declaring blocked ends the series.",
+        f"- close_goal / declaring blocked ends the series.",
         "Declarations are hints with a guaranteed floor: forgotten calls "
         "fall back to event wakes and a dead-man heartbeat — but rounds "
         "that end without one are counted.",

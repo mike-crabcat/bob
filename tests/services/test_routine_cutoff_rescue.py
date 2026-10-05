@@ -65,7 +65,7 @@ async def _fire(db, tmp_path, monkeypatch, *, prompt, reply, hit_cutoff,
         def __init__(self, ctx):
             pass
 
-        async def chat_with_tools(self, messages, tools, **kwargs):
+        async def run_turn(self, messages, tools, **kwargs):
             stats = kwargs.get("budget_stats")
             if stats is not None and hit_cutoff:
                 stats["hit_wall_clock"] = True
@@ -191,7 +191,7 @@ async def test_delivery_suffix_rides_delivery_prompt(db, tmp_path, monkeypatch):
         def __init__(self, ctx):
             pass
 
-        async def chat_with_tools(self, messages, tools, **kwargs):
+        async def run_turn(self, messages, tools, **kwargs):
             return "NO_REPLY"
 
     from server.repositories.conversations import ConversationRepository

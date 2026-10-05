@@ -364,7 +364,7 @@ class DispatchRunner:
             iteration_cap = 35 if is_main_turn else 100
 
             async def _llm() -> str:
-                return await LLMDispatchService(self.ctx).chat_with_tools(
+                return await LLMDispatchService(self.ctx).run_turn(
                     messages, spec.tools,
                     model=model_arg,
                     call_category=spec.call_category,
@@ -519,7 +519,7 @@ class DispatchRunner:
                          "work). Never write tool-call transcripts as text."},
                     ]
                     from server.services.llm_dispatch import LLMDispatchService
-                    result = await LLMDispatchService(self.ctx).chat_with_tools(
+                    result = await LLMDispatchService(self.ctx).run_turn(
                         retry_messages, spec.tools,
                         call_category=spec.call_category,
                         session_key=session_key,

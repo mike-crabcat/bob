@@ -17,7 +17,7 @@ class JournalService(BaseService):
 
         user_prompt = "Run facts (JSON):\n" + json.dumps(facts, indent=1, default=str)[:12000]
         llm = LLMDispatchService(self.ctx)
-        response = await llm.chat(
+        response = await llm.prompt(
             messages=[
                 {"role": "system", "content": SYNTHESIS_SYSTEM},
                 {"role": "user", "content": user_prompt},

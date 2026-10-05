@@ -273,7 +273,7 @@ class LLMJudge:
         if input_messages:
             formatted = []
             for msg in input_messages:
-                # Responses-API items (what chat_with_tools actually appends
+                # Responses-API items (what run_turn actually appends
                 # to the message list — without this branch the judge never
                 # saw tool calls and scored completeness 0 for "did not call
                 # the tool" on calls that fired; Phase 0 fix 2026-09-19).
@@ -322,7 +322,7 @@ class LLMJudge:
         dispatch = LLMDispatchService(self.ctx)
         t0 = time.monotonic()
         try:
-            judge_response = await dispatch.chat(
+            judge_response = await dispatch.prompt(
                 [{"role": "user", "content": prompt}],
                 call_category="eval_judge",
                 temperature=0.3,

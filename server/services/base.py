@@ -69,6 +69,12 @@ def iso_utc(value: str | datetime | None = None) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def local_minute(value: str | datetime) -> str:
+    """local_iso to the minute, offset kept: '2026-10-06 21:38+08:00'."""
+    full = local_iso(value)
+    return full[:16] + full[19:] if len(full) >= 19 else full
+
+
 def local_iso(value: str | datetime | None = None) -> str:
     """Render a timestamp in server-local time with an explicit offset.
 

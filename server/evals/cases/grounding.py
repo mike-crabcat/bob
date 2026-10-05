@@ -47,7 +47,7 @@ def _system_prompt() -> str:
 def _judge_view(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Render the mutated message list for the judge.
 
-    chat_with_tools appends {type: function_call} items the judge formatter
+    run_turn appends {type: function_call} items the judge formatter
     can't display; convert them to the legacy tool_calls shape it renders as
     "[assistant called tools]: name(args)" so the judge can correlate claims
     with same-turn checks.
@@ -136,7 +136,7 @@ async def greeting_no_unverified_status(ctx):
 
     tools = _make_radio_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     return {
         "response": response,
@@ -180,7 +180,7 @@ async def status_question_requires_check(ctx):
 
     tools = _make_radio_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     return {
         "response": response,
@@ -255,7 +255,7 @@ async def stimulus_steer_decision(ctx):
 
     tools = _make_steer_eval_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     return {
         "response": response,
@@ -343,7 +343,7 @@ async def send_claim_needs_same_turn_receipt(ctx):
     tools = _make_artifact_tools(
         "Error: bridge upload failed — message NOT sent")
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools,
+    response = await dispatch.run_turn(messages, tools,
                                               call_category="eval")
     return {
         "response": response,
@@ -406,7 +406,7 @@ async def artifact_contents_from_command_output(ctx):
     tools = _make_artifact_tools(
         "Message sent (request_id=eval-mock)")
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools,
+    response = await dispatch.run_turn(messages, tools,
                                               call_category="eval")
     return {
         "response": response,

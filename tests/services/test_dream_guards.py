@@ -117,7 +117,7 @@ async def test_announce_factcheck_expires_stale_plan(ctx, monkeypatch):
             return "STALE: coffee already confirmed 1 Sep at Little Stables"
         return "Hey! Quick thought about the coffee."
 
-    monkeypatch.setattr(LLMDispatchService, "chat", fake_chat)
+    monkeypatch.setattr(LLMDispatchService, "prompt", fake_chat)
 
     result = await AnnounceService(ctx).flush()
 
@@ -165,7 +165,7 @@ async def test_announce_factcheck_ok_still_announces(ctx, monkeypatch):
             return "OK"
         return "Hike proposal message"
 
-    monkeypatch.setattr(LLMDispatchService, "chat", fake_chat)
+    monkeypatch.setattr(LLMDispatchService, "prompt", fake_chat)
 
     result = await AnnounceService(ctx).flush()
 

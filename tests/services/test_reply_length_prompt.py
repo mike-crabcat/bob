@@ -14,6 +14,7 @@ than nothing. Pinned here:
 
 from __future__ import annotations
 
+
 import pytest
 
 from server.services.prompt_assembler import (
@@ -41,7 +42,7 @@ async def test_whatsapp_group_turn_gets_head_and_tail():
     tail = terminal_contract_tail()
     assert tail in body
     assert "Maximum 2 sentences and 40 words" in tail
-    assert "task_register" in tail and "NO_REPLY" in tail
+    assert "add_goal(profile='promise')" in tail and "NO_REPLY" in tail
     # tail is the LAST block — after the persona, at/after the clock slot
     assert body.rstrip().endswith(tail)
 

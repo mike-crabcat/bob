@@ -351,7 +351,7 @@ class VoiceSessionService(BaseService):
             },
         ]
         try:
-            result = await LLMDispatchService(self.ctx).chat(
+            result = await LLMDispatchService(self.ctx).prompt(
                 messages, call_category="voice_session_summary", session_key=None,
             )
             return result.strip()

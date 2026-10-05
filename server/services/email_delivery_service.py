@@ -236,7 +236,7 @@ class EmailDeliveryService(BaseService):
             email_text = text
 
             async def _run_send_dispatch() -> str:
-                result = await LLMDispatchService(ctx).chat_with_tools(
+                result = await LLMDispatchService(ctx).run_turn(
                     messages, [],
                     call_category="email_outgoing",
                     session_key=session_key,

@@ -39,7 +39,7 @@ class ReflectionService(BaseService):
         system = _REFLECTION_SYSTEM_PROMPT + f"\n\n---\nSession transcript:\n\n{transcript}"
 
         llm = LLMDispatchService(self.ctx)
-        response = await llm.chat(
+        response = await llm.prompt(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": query},

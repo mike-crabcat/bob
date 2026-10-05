@@ -1,17 +1,35 @@
-"""Task repository — SQL ownership for the task registry (docs/task-registry-plan.md).
+"""Task repository — SQL ownership for task promises (docs/task-registry-plan.md).
 
-A task is a durable promise: waiter, completer, result, one wake. All SQL
-for the ``tasks`` table lives here. Lifecycle is CAS-once per settle; the
-service layer (services/tasks.py) owns effects, wakes and sweeps.
+A task is a durable promise: waiter, completer, result, one wake. Since
+commitments plan Phase 2 (2026-10-05) a task is stored as a promise-profile
+goal (``goals`` row, kind 'promise'); this repository keeps the task-shaped
+interface and field names on top of it, so the service layer is unchanged.
+The old ``tasks`` table is a frozen archive.
+
+Promises keep the task status vocabulary (pending → completed | failed |
+cancelled); goal sweepers only scan status 'active', so they never touch a
+promise. Lifecycle is CAS-once per settle; services/tasks.py owns effects,
+wakes and sweeps.
 """
 
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import datetime, timezone
 from typing import Any
 
 from server.database import Database
+
+# goals columns under the task field names every caller uses.
+_SELECT = (
+    "SELECT id, objective AS title, origin_conversation_id AS waiter_session, "
+    "COALESCE(payload_json, '{}') AS payload_json, "
+    "completer AS expected_completer, status, result, error, completed_by, "
+    "completed_at, delivered_at, deadline AS due, source_goal_id, "
+    "COALESCE(refs_json, '[]') AS refs_json, created_at, updated_at "
+    "FROM goals")
+_PROMISE = "kind = 'promise'"
 
 
 def _now_iso() -> str:
@@ -19,7 +37,7 @@ def _now_iso() -> str:
 
 
 def new_task_id() -> str:
-    return f"task-{secrets.token_hex(4)}"
+    return f"prm-{secrets.token_hex(4)}"
 
 
 class TaskRepository:
@@ -32,32 +50,36 @@ class TaskRepository:
         refs: list[str],
     ) -> dict[str, Any]:
         tid = new_task_id()
-        import json
         now = _now_iso()
         await self.db.execute(
-            """INSERT INTO tasks
-               (id, title, waiter_session, payload_json, expected_completer,
-                status, due, source_goal_id, refs_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)""",
-            (tid, title, waiter_session, json.dumps(payload, ensure_ascii=False),
-             expected_completer, due, source_goal_id,
-             json.dumps(refs or []), now, now))
+            """INSERT INTO goals
+               (id, conversation_id, origin_conversation_id, kind, profile,
+                objective, status, deadline, payload_json, completer,
+                source_goal_id, refs_json, version, created_at, updated_at)
+               VALUES (?, ?, ?, 'promise', 'promise', ?, 'pending', ?, ?, ?,
+                       ?, ?, 1, ?, ?)""",
+            (tid, waiter_session, waiter_session, title, due,
+             json.dumps(payload, ensure_ascii=False), expected_completer,
+             source_goal_id, json.dumps(refs or []), now, now))
         return (await self.get(tid))  # type: ignore[return-value]
 
     async def get(self, task_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,))
+            f"{_SELECT} WHERE id = ? AND {_PROMISE}", (task_id,))
 
     async def get_by_short_id(self, ref: str) -> dict[str, Any] | None:
-        """Resolve 'task-a3f2' or a bare 'a3f2' suffix to its unique row —
-        the chat-facing short-id surface (Mike's Q5)."""
-        ref = ref.strip().removeprefix("task-")
+        """Resolve 'prm-a3f2' or a bare 'a3f2' suffix to its unique row —
+        the chat-facing short-id surface (Mike's Q5). Promises minted before
+        2026-10-06 carry the old 'task-' prefix; both resolve."""
+        ref = ref.strip().removeprefix("prm-").removeprefix("task-")
         if not ref:
             return None
+        pattern = f"%-{ref}%"
         return await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE id LIKE ? "
-            "AND (SELECT COUNT(*) FROM tasks t2 WHERE t2.id LIKE ?) = 1",
-            (f"task-{ref}%", f"task-{ref}%"))
+            f"{_SELECT} WHERE {_PROMISE} AND id LIKE ? "
+            f"AND (SELECT COUNT(*) FROM goals g2 WHERE g2.kind = 'promise' "
+            f"AND g2.id LIKE ?) = 1",
+            (pattern, pattern))
 
     async def settle(
         self, task_id: str, *, to_status: str, result: str | None = None,
@@ -68,9 +90,9 @@ class TaskRepository:
         replays, retries and double-confirmations)."""
         now = _now_iso()
         count = await self.db.execute(
-            "UPDATE tasks SET status = ?, result = ?, error = ?, "
+            "UPDATE goals SET status = ?, result = ?, error = ?, "
             "completed_by = ?, completed_at = ?, updated_at = ? "
-            "WHERE id = ? AND status = 'pending'",
+            f"WHERE id = ? AND {_PROMISE} AND status = 'pending'",
             (to_status, result, error, completed_by, now, now, task_id))
         if not count:
             return None
@@ -82,15 +104,17 @@ class TaskRepository:
         effect retries; the crash window the other way costs at most one
         duplicate wake, never a lost one)."""
         await self.db.execute(
-            "UPDATE tasks SET delivered_at = ?, updated_at = ? WHERE id = ?",
+            f"UPDATE goals SET delivered_at = ?, updated_at = ? "
+            f"WHERE id = ? AND {_PROMISE}",
             (_now_iso(), _now_iso(), task_id))
 
     async def list_for_waiter(
         self, waiter_session: str, *, status: str = "pending", limit: int = 20,
     ) -> list[dict[str, Any]]:
         return await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE waiter_session = ? AND status = ? "
-            "ORDER BY due LIMIT ?", (waiter_session, status, limit))
+            f"{_SELECT} WHERE {_PROMISE} AND origin_conversation_id = ? "
+            "AND status = ? ORDER BY deadline LIMIT ?",
+            (waiter_session, status, limit))
 
     async def list_for_completer(
         self, session_key: str, *, limit: int = 10,
@@ -98,18 +122,18 @@ class TaskRepository:
         """Pending tasks this conversation is expected to complete — the
         completer-side visibility block's backing query (plan D6)."""
         return await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE expected_completer = ? "
-            "AND status = 'pending' ORDER BY due LIMIT ?",
+            f"{_SELECT} WHERE {_PROMISE} AND completer = ? "
+            "AND status = 'pending' ORDER BY deadline LIMIT ?",
             (session_key, limit))
 
     async def pending_past_due(self, *, now_iso: str, limit: int = 50) -> list[dict[str, Any]]:
         return await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE status = 'pending' AND due < ? "
-            "ORDER BY due LIMIT ?", (now_iso, limit))
+            f"{_SELECT} WHERE {_PROMISE} AND status = 'pending' AND deadline < ? "
+            "ORDER BY deadline LIMIT ?", (now_iso, limit))
 
     async def pending_all(self, *, limit: int = 200) -> list[dict[str, Any]]:
         return await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE status = 'pending' "
+            f"{_SELECT} WHERE {_PROMISE} AND status = 'pending' "
             "ORDER BY created_at LIMIT ?", (limit,))
 
     # -- goal loop (docs/goal-execution-plan.md): branches per goal --------
@@ -124,28 +148,26 @@ class TaskRepository:
         waiter clause is room-shaped only (the 2026-09-25 mug-delivery
         leak onto the figurine-set goal's drill-down)."""
         base, params = self._goal_scope(goal_id, room_session)
-        if since_iso is not None:
-            open_now = await self.db.fetch_one(
-                f"SELECT COUNT(*) AS n FROM tasks WHERE {base} "
-                "AND status = 'pending'", tuple(params))
-            spawned = await self.db.fetch_one(
-                f"SELECT COUNT(*) AS n FROM tasks WHERE {base} "
-                "AND created_at >= ?", tuple(params + [since_iso]))
-            settled = await self.db.fetch_one(
-                f"SELECT COUNT(*) AS n FROM tasks WHERE {base} "
-                "AND status != 'pending' AND completed_at >= ?",
-                tuple(params + [since_iso]))
-            return {"open": open_now["n"], "spawned": spawned["n"],
-                    "settled": settled["n"]}
-        open_now = await self.db.fetch_one(
-            f"SELECT COUNT(*) AS n FROM tasks WHERE {base} AND status = 'pending'",
-            tuple(params))
-        return {"open": open_now["n"], "spawned": 0, "settled": 0}
+        count = f"SELECT COUNT(*) AS n FROM goals WHERE {_PROMISE} AND {base}"
+        async def _n(sql: str, args: list) -> int:
+            row = await self.db.fetch_one(sql, tuple(args))
+            return int(row["n"]) if row else 0
+
+        open_now = await _n(f"{count} AND status = 'pending'", params)
+        if since_iso is None:
+            return {"open": open_now, "spawned": 0, "settled": 0}
+        return {
+            "open": open_now,
+            "spawned": await _n(f"{count} AND created_at >= ?", params + [since_iso]),
+            "settled": await _n(
+                f"{count} AND status != 'pending' AND completed_at >= ?",
+                params + [since_iso]),
+        }
 
     def _goal_scope(self, goal_id: str, room_session: str) -> tuple[str, list]:
         """(WHERE-fragment-without-WHERE, params) for a goal's branch scope."""
         if room_session.startswith("agent:goal-"):
-            return ("(source_goal_id = ? OR waiter_session = ?)",
+            return ("(source_goal_id = ? OR origin_conversation_id = ?)",
                     [goal_id, room_session])
         return ("source_goal_id = ?", [goal_id])
 
@@ -154,9 +176,10 @@ class TaskRepository:
             return {}
         marks = ",".join("?" * len(goal_ids))
         rows = await self.db.fetch_all(
-            f"SELECT source_goal_id AS gid, COUNT(*) AS n FROM tasks "
-            f"WHERE status = 'pending' AND source_goal_id IN ({marks}) "
-            f"GROUP BY source_goal_id", tuple(goal_ids))
+            f"SELECT source_goal_id AS gid, COUNT(*) AS n FROM goals "
+            f"WHERE {_PROMISE} AND status = 'pending' "
+            f"AND source_goal_id IN ({marks}) GROUP BY source_goal_id",
+            tuple(goal_ids))
         return {r["gid"]: r["n"] for r in rows}
 
     async def list_for_goal(
@@ -164,25 +187,26 @@ class TaskRepository:
     ) -> list[dict[str, Any]]:
         base, params = self._goal_scope(goal_id, room_session)
         return await self.db.fetch_all(
-            f"SELECT * FROM tasks WHERE {base} "
+            f"{_SELECT} WHERE {_PROMISE} AND {base} "
             "ORDER BY created_at DESC LIMIT ?", tuple(params + [limit]))
 
     async def repoint_waiter(self, task_id: str, waiter_session: str) -> int:
         """CAS-ish move of a pending task to a new waiter (goal recreate
         carry-over; the backstop repoint lives in wakeups repo)."""
         return await self.db.execute(
-            "UPDATE tasks SET waiter_session = ?, updated_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (waiter_session, _now_iso(), task_id))
+            "UPDATE goals SET origin_conversation_id = ?, conversation_id = ?, "
+            f"updated_at = ? WHERE id = ? AND {_PROMISE} AND status = 'pending'",
+            (waiter_session, waiter_session, _now_iso(), task_id))
 
     async def delete_for_waiter(self, waiter_session: str) -> int:
         """Eval-fixture cleanup (goal_behavior G3 seeds real task rows via
         task_register); SQL lives here per the ownership rule."""
         return await self.db.execute(
-            "DELETE FROM tasks WHERE waiter_session = ?", (waiter_session,))
+            f"DELETE FROM goals WHERE {_PROMISE} AND origin_conversation_id = ?",
+            (waiter_session,))
 
     async def latest_for_waiter(self, waiter_session: str) -> dict | None:
         """Newest task row for a waiter (eval context flag)."""
         return await self.db.fetch_one(
-            "SELECT * FROM tasks WHERE waiter_session = ? "
+            f"{_SELECT} WHERE {_PROMISE} AND origin_conversation_id = ? "
             "ORDER BY created_at DESC LIMIT 1", (waiter_session,))

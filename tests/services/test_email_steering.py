@@ -20,12 +20,12 @@ def stub_llm(monkeypatch):
 
     seen: dict = {"reply": "No reply needed — internal wake only."}
 
-    async def _chat_with_tools(self, messages, tools, **kwargs):
+    async def _run_turn(self, messages, tools, **kwargs):
         seen["tools"] = [t.name for t in tools]
         seen["messages"] = messages
         return seen["reply"]
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat_with_tools)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _run_turn)
     return seen
 
 

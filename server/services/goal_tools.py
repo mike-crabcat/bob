@@ -135,16 +135,26 @@ def _register_goal_executors() -> None:
 _register_goal_executors()
 
 
-def make_goal_tools(ctx: AppContext, session_key: str,
-                    *, create_only: bool = False) -> list:
-    """Goal tools for a conversation: create, update, update state,
-    schedule wakeup, complete, list.
+def goal_tool_handlers(ctx: AppContext, session_key: str,
+                       *, create_only: bool = False) -> list:
+    """The goal handlers (create, update, update state, schedule wakeup,
+    complete, list) that the unified work tools wrap or expose
+    (goal_work_tools) — never attached directly.
 
     ``create_only=True`` (2026-10-04 creation-gate widening): untrusted
     GROUP turns get create/list ONLY — structuring an ask is not
     exercising reach. Mutating tools (update/complete on goals, wakeup
     scheduling) stay trusted-only; a group-created goal carries the
     pinned owner, and the room's capabilities scope to that creator."""
+
+    async def _version_or_current(goal_id: str, expected: int) -> int | None:
+        """flash omits expected_version (2026-10-05 evals) — the CAS still
+        guards writes racing this turn when we read it here."""
+        if expected is not None and expected >= 0:
+            return expected
+        from server.repositories.goals import GoalRepository
+        goal = await GoalRepository(ctx.db).get(goal_id)
+        return goal["version"] if goal else None
 
     @tool
     async def create_goal(
@@ -161,10 +171,10 @@ def make_goal_tools(ctx: AppContext, session_key: str,
           artefact/answer AND the proof that it's done. For research/
           build/negotiate/event goals, consult the goal-craft skill
           (use_skill "goal-craft") BEFORE writing the objective.
-        - kind: task | research | build | sales_target | negotiate | event_plan |
-          outreach | subagent | call | email_thread. Pick from the WORK's
-          shape: revenue/sales → sales_target; human confirmations →
-          negotiate; investigation → research; artefact → build.
+        - kind: a short label for the work's shape — research, build,
+          sales_target, negotiate, event_plan, outreach … (free text; it
+          picks playbook guidance, it never decides whether the goal gets
+          a room). Multi-step objectives get a room automatically.
         - deadline (optional, ISO 8601 UTC): schedules a wakeup — if the goal
           is still open then, the ROOT goal's working conversation is woken to
           follow up.
@@ -182,25 +192,10 @@ def make_goal_tools(ctx: AppContext, session_key: str,
           plus scenario data (e.g. decision rules)."""
         from server.services.effects import emit_and_deliver
 
-        # Kind gate (2026-09-25: 'event' instead of 'event_plan' silently
-        # created a room-less, loop-less goal). Canonicalise aliases, then
-        # REJECT unknowns with the valid list so the model retries — the
-        # service layer canonicalises too, but only the tool can correct
-        # the caller.
-        from server.services.goal_service import normalise_goal_kind
-        kind = normalise_goal_kind(kind)
-        _valid_kinds = {
-            "task", "research", "build", "sales_target", "negotiate",
-            "event_plan", "coordination", "commerce", "merch_order",
-            "performance", "outreach", "subagent", "call", "email_thread",
-        }
-        if kind not in _valid_kinds:
-            return json.dumps({
-                "ok": False,
-                "error": f"unknown kind '{kind}' — valid kinds: "
-                         f"{', '.join(sorted(_valid_kinds))}. "
-                         "Pick the closest match (event-shaped → event_plan).",
-            })
+        # No kind gate since the profile split (Phase 1, 2026-10-05): the
+        # room decision routes off profile, so an unexpected label can't
+        # cost the goal its room — it just gets no specific playbook.
+        kind = (kind or "task").strip() or "task"
 
         strategy_payload: dict | None = None
         if strategy.strip():
@@ -255,13 +250,16 @@ def make_goal_tools(ctx: AppContext, session_key: str,
     async def update_goal(
         goal_id: str,
         progress: str,
-        expected_version: int,
+        expected_version: int = -1,
     ) -> str:
-        """Record progress on an active goal. expected_version must match the
-        goal's current version (from list_goals) — a stale update is rejected
-        so an outdated strategy never overwrites a newer one."""
+        """Record progress on an active goal. expected_version (from
+        list_goals) is optional — pass it to reject a stale update; omitted,
+        the goal's current version is used."""
         from server.services.effects import emit_and_deliver
 
+        expected_version = await _version_or_current(goal_id, expected_version)
+        if expected_version is None:
+            return json.dumps({"ok": False, "error": f"no goal {goal_id}"})
         result = await emit_and_deliver(
             ctx, kind="goal_revise",
             idempotency_key=f"goal_revise:{goal_id}:{expected_version}",
@@ -275,15 +273,20 @@ def make_goal_tools(ctx: AppContext, session_key: str,
     async def update_goal_state(
         goal_id: str,
         state: str,
-        expected_version: int,
+        expected_version: int = -1,
     ) -> str:
         """Replace an active goal's state worksheet (the strategy JSON from
         list_goals, updated). Provide the COMPLETE updated state —
         {"plan": str, "known": [str], "open_questions": [str],
          "next_actions": [{"action": str, "due": str}],
          "refs": {"entities": [str], "claims": [str]}} — preserving keys you
-        are not changing. expected_version must match (from list_goals)."""
+        are not changing. expected_version (from list_goals) is optional —
+        omitted, the goal's current version is used."""
         from server.services.effects import emit_and_deliver
+
+        expected_version = await _version_or_current(goal_id, expected_version)
+        if expected_version is None:
+            return json.dumps({"ok": False, "error": f"no goal {goal_id}"})
 
         checked = _validate_strategy_payload(state)
         if "error" in checked:

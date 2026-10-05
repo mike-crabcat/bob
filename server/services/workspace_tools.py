@@ -2,10 +2,11 @@
 
 Usage:
     tools = make_workspace_tools(ctx)
-    result = await dispatch.chat_with_tools(messages, tools, ...)
+    result = await dispatch.run_turn(messages, tools, ...)
 """
 
 from __future__ import annotations
+
 
 import asyncio
 import base64
@@ -214,7 +215,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
             "run_bg_process WAKES YOU when its command finishes — do NOT "
             "add a sleep timer on top of it (a finished job once sat an "
             "extra hour because of exactly that). Pattern: (1) register "
-            "what you'll do on wake (task_register, or write it to the "
+            f"what you'll do on wake (add_goal(profile='promise'), or write it to the "
             "goal state) so the follow-through survives intervening "
             "messages; (2) run_bg_process(command='<the actual work>') "
             "and put the follow-up INSIDE the command or the task; "
@@ -259,7 +260,7 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                 "Use the sleep tool for short waits; for anything longer, "
                 "run_bg_process(command='<the work>') already WAKES you on "
                 "completion — no sleep timer needed. Register the "
-                "follow-through first (task_register / goal state), then "
+                f"follow-through first (add_goal(profile='promise') / goal state), then "
                 "END YOUR TURN.")
         syntax_error = await bash_syntax_check(command)
         if syntax_error:

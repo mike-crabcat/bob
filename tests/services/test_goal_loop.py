@@ -18,6 +18,7 @@ check-in path.
 
 from __future__ import annotations
 
+
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -430,26 +431,29 @@ async def test_branch_scope_excludes_nonroom_waiter_noise(ctx, loop_on):
     assert counts["open"] == 1
 
 
-async def test_event_alias_gets_the_room(ctx, loop_on):
-    """2026-09-25 live miss: the model created a figurine goal as kind
-    'event' — one word off 'event_plan' — and silently lost the room, loop
-    and playbook. Aliases canonicalise; unknown kinds are refused at the
-    tool with the valid list."""
-    goal = await _make_goal(ctx, kind="event")
-    assert goal["kind"] == "event_plan"
-    assert goal["conversation_id"].startswith("agent:goal-"), \
-        "the alias must reach the room decision, not just the row"
+async def test_any_outcome_label_gets_the_room(ctx, loop_on):
+    """2026-09-25 live miss: kind 'event' (one word off 'event_plan')
+    silently cost a goal its room, loop and playbook. Since the profile
+    split (Phase 1) the room routes off profile — any outcome label gets
+    one, and the label is kept as written."""
+    for label in ("event", "celebration"):
+        goal = await _make_goal(ctx, kind=label)
+        assert goal["kind"] == label
+        assert goal["profile"] == "outcome"
+        assert goal["conversation_id"].startswith("agent:goal-"), label
 
 
-async def test_tool_rejects_unknown_kind(ctx):
-    from server.services.goal_tools import make_goal_tools
-    tools = {t.name: t for t in make_goal_tools(ctx, ORIGIN)}
+async def test_promise_labels_get_no_room(ctx, loop_on):
+    goal = await _make_goal(ctx, kind="outreach")
+    assert goal["profile"] == "promise"
+    assert not goal["conversation_id"].startswith("agent:goal-")
+
+
+async def test_tool_accepts_any_label(ctx):
+    from server.services.goal_tools import goal_tool_handlers
+    tools = {t.name: t for t in goal_tool_handlers(ctx, ORIGIN)}
     r = json.loads(await tools["create_goal"].handler(
         objective="x", kind="celebration"))
-    assert not r["ok"] and "event_plan" in r["error"], \
-        "unknown kinds echo the valid list back to the model"
-    r = json.loads(await tools["create_goal"].handler(
-        objective="x", kind="event"))  # alias passes the gate
     assert r["ok"], r
 
 
@@ -501,7 +505,8 @@ async def test_repoint_moves_task_and_backstop(ctx, loop_on):
     other = "agent:goal-00000000-0000-0000-0000-000000000001:utility"
     assert await task_svc.repoint_task(ctx, task["id"], waiter_session=other)
     w = await ctx.db.fetch_one(
-        "SELECT waiter_session FROM tasks WHERE id=?", (task["id"],))
+        "SELECT origin_conversation_id AS waiter_session FROM goals "
+        "WHERE id=? AND kind='promise'", (task["id"],))
     assert w["waiter_session"] == other
     b = await ctx.db.fetch_one(
         "SELECT conversation_id FROM wakeups WHERE kind='task_due' "
@@ -541,10 +546,10 @@ async def test_task_prompts_command_immediate_fail_on_no_capability(ctx):
     from server.services import tasks as task_svc
     import inspect
     src = inspect.getsource(task_svc)
-    assert "IF YOUR TOOLS CANNOT DO WHAT THIS TASK ASKS" in src
-    assert "task_fail it immediately and move on" in src
+    assert "IF YOUR TOOLS CANNOT DO WHAT THIS PROMISE ASKS" in src
+    assert "fail it immediately and move on" in src
     # the tool surface carries it too
-    tools = {t.name: t for t in task_svc.make_task_tools(ctx, "agent:x:y")}
+    tools = {t.name: t for t in task_svc.promise_tool_handlers(ctx, "agent:x:y")}
     assert "CALL THIS IMMEDIATELY" in tools["task_fail"].description[:200]
 
 
@@ -562,7 +567,8 @@ async def test_room_to_group_delegation_refused(ctx, loop_on):
         expected_completer="agent:main:whatsapp:group:120363422982048691",
         due_minutes=240)
     assert not out.get("ok", True) and "cannot DM individuals" in out["error"]
-    rows = await ctx.db.fetch_all("SELECT * FROM tasks WHERE waiter_session=?", (room,))
+    rows = await ctx.db.fetch_all(
+        "SELECT * FROM goals WHERE kind='promise' AND origin_conversation_id=?", (room,))
     assert not rows, "no task row is created for the refused delegation"
     b = await ctx.db.fetch_all(
         "SELECT * FROM wakeups WHERE kind='task_due' AND conversation_id=?", (room,))
@@ -642,7 +648,7 @@ async def test_sleep_honeypot_short_ok_long_refused_with_doctrine(ctx):
     assert "slept 2s" in r
     r = await tools["sleep"].handler(seconds=540)
     assert "not slept" in r and "run_bg_process WAKES YOU" in r
-    assert "do NOT" in r and "task_register" in r, "the register-follow-through step is taught"
+    assert "do NOT" in r and "add_goal(profile='promise')" in r, "the register-follow-through step is taught"
     room_tools = {t.name: t for t in make_workspace_tools(
         ctx, session_key="agent:goal-x:utility")}
     r = await room_tools["sleep"].handler(seconds=60)
@@ -673,7 +679,7 @@ async def test_goals_block_hands_goal_work_to_the_room(ctx, loop_on):
     await _make_goal(ctx, kind="task")
     block = await ContextAssembler(ctx).goals_block(ORIGIN)
     assert "HANDED to the goal's room" in block
-    assert "task_register" in block and "completer_session" in block
+    assert "delegate_goal" in block, "goal work is delegated to the room"
     assert "does not run the goal's pipelines" in block
 
 
@@ -865,8 +871,8 @@ async def test_group_create_only_tools_pin_owner(ctx):
     creation refuses without a named owner (the room scopes to that
     creator), and mutating tools stay absent. The 2026-10-01 census
     needed an operator workaround for exactly this door."""
-    from server.services.goal_tools import make_goal_tools
-    tools = {t.name: t for t in make_goal_tools(
+    from server.services.goal_tools import goal_tool_handlers
+    tools = {t.name: t for t in goal_tool_handlers(
         ctx, "agent:main:whatsapp:group:120363422982048691",
         create_only=True)}
     assert set(tools) == {"create_goal", "list_goals"}
@@ -875,6 +881,6 @@ async def test_group_create_only_tools_pin_owner(ctx):
         objective="census v2", kind="build"))
     assert not r["ok"] and "needs an owner" in r["error"]
     # trusted surface unchanged: full set
-    full = {t.name for t in make_goal_tools(
+    full = {t.name for t in goal_tool_handlers(
         ctx, "agent:main:whatsapp:dm:61456224867")}
     assert {"update_goal", "complete_goal"} <= full

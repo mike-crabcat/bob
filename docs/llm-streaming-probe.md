@@ -45,7 +45,7 @@ the live rails: `gpt-5.6-sol` + `gpt-6-astra` (OpenAI-direct) and
    The explicit reasoning serializer keeps `summary` (plain dicts, `[]` when
    empty) and `encrypted_content`, but never the raw `content` text (GLM's
    ~1k-token thinking would bloat every later round).
-7. End-to-end smoke (our `chat_with_tools` + `_round`, 2026-10-03): sol
+7. End-to-end smoke (our turn loop + `_round`, 2026-10-03): sol
    streamed 76 reasoning deltas → 1 summary part (421 chars captured) →
    function_call args → final text; GLM streamed tool args + 13 text deltas
    with usage intact on both rails.

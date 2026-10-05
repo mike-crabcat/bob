@@ -198,7 +198,7 @@ async def probe_decide(
     try:
         from server.services.llm_dispatch import LLMDispatchService
 
-        result = await LLMDispatchService(ctx).chat(
+        result = await LLMDispatchService(ctx).prompt(
             [{"role": "system", "content": probe_system_prompt(
                 bot_name, reactions=reactions_enabled())},
              {"role": "user", "content": context_text}],

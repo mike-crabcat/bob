@@ -697,10 +697,12 @@ class EmailPollingService(BaseService):
         # Email-specific tools (reply/skip) + common tool set
         reply_sent = [False]
         reply_bodies: list[str] = []
-        tools = await self._email_turn_tools(
+        tools, mcp_note = await self._email_turn_tools(
             session_key=session_key, thread=thread, inbox=inbox,
             is_trusted=is_trusted, contact_id=contact_id,
             reply_sent=reply_sent, reply_bodies=reply_bodies)
+        if mcp_note:
+            system_content += "\n\n" + mcp_note
 
         dispatch_id = str(uuid4())
 
@@ -749,11 +751,9 @@ class EmailPollingService(BaseService):
         tools.extend(build_common_tools(
             self.ctx, session_key=session_key, is_trusted=is_trusted,
             contact_id=contact_id))
-        # Bob Events §1.5: goal tools for trusted email threads (parity with
-        # the WhatsApp inbound path).
+        # Goal/promise tools ride build_common_tools; approvals stay
+        # trusted-only.
         if is_trusted:
-            from server.services.goal_tools import make_goal_tools
-            tools.extend(make_goal_tools(self.ctx, session_key))
             from server.services.approval_tools import make_approval_tools
             tools.extend(make_approval_tools(self.ctx, session_key))
             # MCP administration: email threads are human-initiated by
@@ -783,11 +783,12 @@ class EmailPollingService(BaseService):
         tools.extend(await make_mcp_tools(
             self.ctx, session_key=session_key, is_trusted=is_trusted,
             reserved={t.name for t in tools}))
+        # The caller owns the prompt (this method used to append to a
+        # system_content it never had — UnboundLocalError whenever a thread
+        # carried MCP tools, 2026-09-25).
         mcp_note = await mcp_transparency_note(
             self.ctx, session_key=session_key, is_trusted=is_trusted)
-        if mcp_note:
-            system_content += "\n\n" + mcp_note
-        return tools
+        return tools, mcp_note
 
     async def wake_thread(
         self, session_key: str, content: str,
@@ -852,10 +853,12 @@ class EmailPollingService(BaseService):
 
         reply_sent = [False]
         reply_bodies: list[str] = []
-        tools = await self._email_turn_tools(
+        tools, mcp_note = await self._email_turn_tools(
             session_key=session_key, thread=thread, inbox=inbox,
             is_trusted=is_trusted, contact_id=contact_id,
             reply_sent=reply_sent, reply_bodies=reply_bodies)
+        if mcp_note:
+            system_content += "\n\n" + mcp_note
 
         from server.services.dispatch_runner import DispatchRunner, DispatchSpec
 

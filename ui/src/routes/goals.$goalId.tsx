@@ -44,7 +44,7 @@ interface GoalDetail {
     last_delta: { spawned?: number; settled?: number; frame?: string | null } | null;
     next_run: { at: string; frame: string | null; note: string } | null;
   };
-  branches: {
+  promises: {
     id: string;
     title: string;
     status: string;
@@ -108,7 +108,7 @@ function GoalDetailPage() {
   if (error || !data || "error" in (data as object))
     return <div className="p-4 text-red-400 text-xs">goal not found</div>;
 
-  const { goal, state, loop, branches, wakes, turns } = data;
+  const { goal, state, loop, promises, wakes, turns } = data;
   const budgetPct =
     loop.budget_total && loop.budget_spent != null
       ? Math.min(100, Math.round((loop.budget_spent / loop.budget_total) * 100))
@@ -138,7 +138,7 @@ function GoalDetailPage() {
 
   return (
     <div className="p-4 flex flex-col gap-3 max-w-3xl">
-      <Link to="/goals" className="text-[10px] text-accent hover:underline">← goals</Link>
+      <Link to="/work" className="text-[10px] text-accent hover:underline">← work</Link>
 
       <header className="bg-surface border border-border p-3 flex flex-col gap-2">
         <div className="flex items-baseline gap-2">
@@ -170,8 +170,8 @@ function GoalDetailPage() {
                 next:{" "}
                 {loop.next_run
                   ? `${fmtTs(loop.next_run.at)} (${loop.next_run.frame})`
-                  : branches.filter((b) => b.status === "pending").length > 0
-                    ? `event — ${branches.filter((b) => b.status === "pending").length} branch(es) pending`
+                  : promises.filter((b) => b.status === "pending").length > 0
+                    ? `event — ${promises.filter((b) => b.status === "pending").length} promise(s) pending`
                     : "idle — dead-man"}
               </span>
               {loop.last_frame && <span className="text-muted">last frame: {loop.last_frame}</span>}
@@ -273,9 +273,9 @@ function GoalDetailPage() {
         )}
       </Section>
 
-      <Section title={`branches (${branches.length})`}>
-        {branches.length === 0 && <div className="text-[11px] text-muted">no tasks tied to this goal yet</div>}
-        {branches.map((b) => (
+      <Section title={`promises (${promises.length})`}>
+        {promises.length === 0 && <div className="text-[11px] text-muted">no promises under this goal yet</div>}
+        {promises.map((b) => (
           <div key={b.id} className="border border-border p-1.5 text-[11px] flex flex-col gap-0.5">
             <div className="flex items-baseline gap-2">
               <span className={`text-[9px] uppercase shrink-0 ${b.status === "pending" ? "text-amber-500" : b.status === "completed" ? "text-green-500" : "text-muted"}`}>
@@ -284,7 +284,7 @@ function GoalDetailPage() {
               <span className="text-text break-words">{b.title}</span>
             </div>
             <div className="text-[10px] text-muted">
-              {b.id} · completer {b.completer || "open"} · due {fmtTs(b.due)}
+              {b.id} · owed by {b.completer || "itself"} · due {fmtTs(b.due)}
             </div>
             {b.result && <div className="text-[10px] text-text break-words">{b.result}</div>}
           </div>

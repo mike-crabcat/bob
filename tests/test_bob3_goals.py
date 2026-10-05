@@ -199,9 +199,9 @@ async def test_goal_tools_create_and_complete_via_effects(ctx, db, monkeypatch):
 
     wake = AsyncMock()
     monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, "agent:main:whatsapp:dm:1")}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, "agent:main:whatsapp:dm:1")}
     out = _json.loads(await tools["create_goal"].handler(objective="test obj"))
     assert out["ok"]
     goal_id = out["goal_id"]
@@ -224,12 +224,14 @@ async def test_goal_tools_create_and_complete_via_effects(ctx, db, monkeypatch):
     assert out["ok"], "duplicate idempotency key is suppressed as success"
 
 
-async def test_subagent_result_settles_goal_and_wakes_parent(ctx, db, monkeypatch):
-    """First subagent result completes the linked goal → origin wake; a
-    follow-up result (goal settled) wakes the parent directly."""
+async def test_subagent_result_settles_promise_and_wakes_parent(ctx, db, monkeypatch):
+    """First subagent result settles its promise → the settle effect wakes
+    the parent; a follow-up result (promise settled) wakes it directly."""
     wake = AsyncMock()
     monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    from server.repositories.tasks import TaskRepository
     from server.services.subagent_service import SubagentService
+    from server.services.tasks import register_task
 
     parent = "agent:main:whatsapp:dm:555"
     await db.execute(
@@ -239,29 +241,29 @@ async def test_subagent_result_settles_goal_and_wakes_parent(ctx, db, monkeypatc
                    'claude', '2026-01-01', '2026-01-01')""",
         (parent,),
     )
-    await goal_service.create_goal(
-        ctx, conversation_id="subagent:x:1", objective="do the thing",
-        origin_conversation_id=parent, kind="subagent", external_ref="sub-1")
+    task = await register_task(ctx, waiter_session=parent, title="do the thing",
+                               expected_completer="sub-1", due_minutes=60)
 
     svc = SubagentService(ctx)
     await svc._notify_parent("sub-1", "the result")
 
-    goal = await GoalRepository(db).get_by_external_ref("sub-1")
-    assert goal["status"] == "completed"
+    assert (await TaskRepository(db).get(task["id"]))["status"] == "completed"
     assert wake.await_count == 1
     assert wake.await_args.args[1] == parent
     assert "the result" in wake.await_args.args[2]
 
-    # Follow-up: goal already settled → direct wake.
+    # Follow-up: promise already settled → direct wake.
     await svc._notify_parent("sub-1", "more results")
     assert wake.await_count == 2
     assert "more results" in wake.await_args.args[2]
 
 
-async def test_subagent_failure_fails_goal(ctx, db, monkeypatch):
+async def test_subagent_failure_fails_promise(ctx, db, monkeypatch):
     wake = AsyncMock()
     monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    from server.repositories.tasks import TaskRepository
     from server.services.subagent_service import SubagentService
+    from server.services.tasks import register_task
 
     await db.execute(
         """INSERT INTO subagents (id, parent_session_key, session_key, task,
@@ -269,16 +271,10 @@ async def test_subagent_failure_fails_goal(ctx, db, monkeypatch):
            VALUES ('sub-2', 'agent:main:email:dm:a', 'subagent:x:2', 't',
                    'running', 'claude', '2026-01-01', '2026-01-01')""",
     )
-    await goal_service.create_goal(
-        ctx, conversation_id="subagent:x:2", objective="t",
-        origin_conversation_id="agent:main:email:dm:a", kind="subagent",
-        external_ref="sub-2")
-
+    task = await register_task(ctx, waiter_session="agent:main:email:dm:a",
+                               title="t", expected_completer="sub-2", due_minutes=60)
     await SubagentService(ctx)._notify_parent("sub-2", "ERROR: boom", failed=True)
-    goal = await GoalRepository(db).get_by_external_ref("sub-2")
-    assert goal["status"] == "failed"
-    wake.assert_awaited_once()
-    assert wake.await_args.args[1] == "agent:main:email:dm:a"
+    assert (await TaskRepository(db).get(task["id"]))["status"] == "failed"
 
 
 async def test_outreach_state_lives_on_goal(ctx, db):
@@ -296,7 +292,7 @@ async def test_outreach_state_lives_on_goal(ctx, db):
         strategy={"requestor": "Mike", "message": "hey, BBQ sat?"})
 
     prompt = await ContextAssembler(ctx).goals_block(target)
-    assert "## Active Goals" in prompt
+    assert "## Active Goals" in prompt or "### Goals this conversation holds" in prompt
     assert "Mike" in prompt and "ask about the BBQ" in prompt and "BBQ sat?" in prompt
     assert "finish_outreach" in prompt
 

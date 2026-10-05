@@ -76,7 +76,7 @@ async def _run(ctx, session_key: str, messages: list,
 
         tools = make_memory_tools(ctx, session_key=session_key) + [
             send_whatsapp_message, bash]
-        response = await LLMDispatchService(ctx).chat_with_tools(
+        response = await LLMDispatchService(ctx).run_turn(
             messages, tools,
             model=pinned_model(),
             call_category="eval",

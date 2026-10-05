@@ -366,6 +366,19 @@ class DreamStore(BaseService):
         # the goal; approval alone spawns nothing. dream_plans.task_id gets
         # written by that reply path (create_goal result recorded against
         # the plan) rather than here.
+        #
+        # Phase 4 (commitments plan): a plan the dream closes or expires
+        # takes its still-open suggestion with it — the chat must not keep
+        # offering something the dream has judged done or stale.
+        from server.services.dream.models import PLAN_TERMINAL_STATUSES
+        if status in PLAN_TERMINAL_STATUSES:
+            from server.repositories.goals import GoalRepository
+            repo = GoalRepository(self.db)
+            sug = await repo.suggestion_for_plan(plan_id)
+            if sug is not None and sug["status"] == "suggested":
+                await repo.settle_suggestion(
+                    sug["id"], status="declined" if status == "dismissed" else "expired",
+                    result=f"dream plan {status}")
 
     async def list_plans(self, statuses: list[str] | None = None, limit: int = 200) -> list[dict]:
         if statuses:

@@ -340,7 +340,7 @@ async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
         from server.services.goal_state_service import parse_strategy, render_strategy
 
         state_summary = render_strategy(parse_strategy(goal))
-        result = await LLMDispatchService(ctx).chat(
+        result = await LLMDispatchService(ctx).prompt(
             [{"role": "system", "content": _PROBE_SYSTEM},
              {"role": "user", "content":
               f"# Plan\n{goal['objective']}\n\n# Current state\n"

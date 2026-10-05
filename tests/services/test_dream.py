@@ -1,6 +1,6 @@
 """Dream system tests: validation, cursors, dedup, announce guards, runner e2e.
 
-LLM calls are stubbed at LLMDispatchService.chat / embed_text so the whole
+LLM calls are stubbed at LLMDispatchService.prompt / embed_text so the whole
 pipeline runs deterministically against the in-memory DB.
 """
 
@@ -66,8 +66,6 @@ def _messages(n: int = 6) -> list[dict]:
     ]
 
 
-
-
 async def _seed_route(db, session_key: str, autoplan: bool | None = None) -> None:
     """Seed the conversation + binding an ingress path would register."""
     from server.repositories.conversations import ConversationRepository
@@ -105,7 +103,7 @@ class _StubLLM:
         self.announce_text = announce
         self.calls: list[dict] = []
 
-    async def chat(self, messages: list[dict], *, call_category: str, **kwargs: Any) -> str:
+    async def prompt(self, messages: list[dict], *, call_category: str, **kwargs: Any) -> str:
         self.calls.append({"category": call_category, "model": kwargs.get("model")})
         system = messages[0]["content"] if messages else ""
         if call_category == "dream_review":
@@ -133,7 +131,7 @@ def stub_env(monkeypatch, ctx):
     """Patch LLM + embeddings + bridge; return handles for assertions."""
     stub_llm = _StubLLM()
     stub_bridge = _StubBridge()
-    monkeypatch.setattr("server.services.llm_dispatch.LLMDispatchService.chat", stub_llm.chat)
+    monkeypatch.setattr("server.services.llm_dispatch.LLMDispatchService.prompt", stub_llm.prompt)
     monkeypatch.setattr(
         "server.services.memory.embedding.embed_text",
         lambda text: _async_none(),
@@ -182,8 +180,8 @@ async def test_review_rejects_vacuous_success_signal(ctx, stub_env, monkeypatch)
     payload = json.loads(json.dumps(REVIEW_PAYLOAD))
     payload["resolutions"][0]["success_signal"] = "be better"
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat",
-        _StubLLM(review=payload).chat,
+        "server.services.llm_dispatch.LLMDispatchService.prompt",
+        _StubLLM(review=payload).prompt,
     )
     result = await ReviewService(ctx).review_session(session_key=SK, messages=_messages())
     assert result["resolutions"] == []
@@ -325,8 +323,8 @@ async def test_prospective_engagement_guard_blocks_expiry(ctx, stub_env, monkeyp
 
     prospective_payload = {"decisions": [{"item_type": "plan", "item_id": plan_id, "action": "expire", "reason": "due passed"}]}
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat",
-        _StubLLM(prospective=prospective_payload).chat,
+        "server.services.llm_dispatch.LLMDispatchService.prompt",
+        _StubLLM(prospective=prospective_payload).prompt,
     )
     await ProspectiveService(ctx).run(run_id="dream-x", settings=ctx.settings.dream)
     plan = await ctx.db.fetch_one("SELECT status FROM dream_plans WHERE id = ?", (plan_id,))
@@ -347,8 +345,8 @@ async def test_resolution_kept_requires_consecutive_signals(ctx, stub_env, monke
     )
     payload = {"decisions": [{"item_type": "resolution", "item_id": res_id, "action": "kept", "reason": "signal observed"}]}
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat",
-        _StubLLM(prospective=payload).chat,
+        "server.services.llm_dispatch.LLMDispatchService.prompt",
+        _StubLLM(prospective=payload).prompt,
     )
     settings = ctx.settings.dream
     settings.resolution_kept_consecutive_runs = 3
@@ -459,7 +457,7 @@ async def test_reannounce_single_followup_cap(ctx, stub_env):
     import server.services.dream.prospective as pros
 
     monkeypatch_holder = pytest.MonkeyPatch()
-    monkeypatch_holder.setattr(ld.LLMDispatchService, "chat", stub.chat)
+    monkeypatch_holder.setattr(ld.LLMDispatchService, "prompt", stub.prompt)
     try:
         stats = await ProspectiveService(ctx).run(run_id="dream-x", settings=ctx.settings.dream)
         assert "plan-rea1" in stats["reannounce"]
@@ -475,134 +473,7 @@ async def test_reannounce_single_followup_cap(ctx, stub_env):
 
 # ------------------------------------------------------------- plan tools
 
-async def test_plan_tools_session_bound(ctx):
-    await _seed_run_row(ctx.db)
-    from server.services.dream.tools import make_dream_tools
-
-    now = iso_utc()
-    await ctx.db.execute(
-        """INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, assistance_method,
-             status, evidence_json, source_run_id, created_at, updated_at)
-           VALUES ('plan-tb1', 't', 'd', 'a', 'm', 'approved', ?, 'dream-x', ?, ?)""",
-        (json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
-    )
-    await ctx.db.execute(
-        "INSERT INTO dream_item_links (item_type, item_id, session_key) VALUES ('plan', 'plan-tb1', ?)",
-        (SK,),
-    )
-
-    tools = {t.name: t for t in make_dream_tools(ctx, session_key=SK)}
-    listing = json.loads(await tools["list_plans"].handler())
-    assert any("plan-tb1" in p for p in listing["plans"])
-
-    out = json.loads(await tools["plan_cancel"].handler("they said it's off"))
-    assert out["ok"] is True
-    row = await ctx.db.fetch_one("SELECT status, evidence_json FROM dream_plans WHERE id = 'plan-tb1'")
-    assert row["status"] == "dismissed"
-    assert json.loads(row["evidence_json"])[-1]["kind"] == "cancelled"
-
-    # outsider session sees nothing and cannot touch the plan
-    outsider = {t.name: t for t in make_dream_tools(ctx, session_key="wa:contact:whatsapp:dm:61400000000")}
-    listing2 = json.loads(await outsider["list_plans"].handler())
-    assert listing2["plans"] == []
-    out2 = json.loads(await outsider["plan_cancel"].handler("cancel it", "plan-tb1"))
-    assert out2["ok"] is False
-
-
-async def test_plan_settles_are_idempotent_no_retry_loop(ctx):
-    """2026-09-24 Family-assistant incident: after the first plan_complete
-    succeeded, every repeat fell into the generic not-found error and the
-    model retried (rephrasing + RESENDING) 13 times. Settled plans must
-    answer terminally: ok-already for complete/cancel, an explicit
-    already-settled error for update."""
-    await _seed_run_row(ctx.db)
-    from server.services.dream.tools import make_dream_tools
-
-    now = iso_utc()
-    await ctx.db.execute(
-        """INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, assistance_method,
-             status, evidence_json, source_run_id, created_at, updated_at)
-           VALUES ('plan-pi1', 't', 'd', 'a', 'm', 'approved', ?, 'dream-x', ?, ?)""",
-        (json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
-    )
-    await ctx.db.execute(
-        "INSERT INTO dream_item_links (item_type, item_id, session_key) VALUES ('plan', 'plan-pi1', ?)",
-        (SK,),
-    )
-    tools = {t.name: t for t in make_dream_tools(ctx, session_key=SK)}
-
-    out1 = json.loads(await tools["plan_complete"].handler("plan-pi1"))
-    assert out1["ok"] is True and out1["completed"] == "plan-pi1"
-
-    # the loop shape: model calls complete again with the same id
-    out2 = json.loads(await tools["plan_complete"].handler("plan-pi1"))
-    assert out2["ok"] is True and out2["already"] == "completed"
-    assert "do not retry" in out2["note"]
-
-    # cancel on a completed plan is terminal too, not retry-bait
-    out3 = json.loads(await tools["plan_cancel"].handler("it's off", "plan-pi1"))
-    assert out3["ok"] is True and out3["already"] == "completed"
-
-    # update on a settled plan gets the explicit settled error
-    out4 = json.loads(await tools["plan_update"].handler("plan-pi1", progress="x"))
-    assert out4["ok"] is False and "already completed" in out4["error"]
-
-    # a genuinely unknown id keeps the guided error
-    out5 = json.loads(await tools["plan_complete"].handler("plan-nope"))
-    assert out5["ok"] is False and "plan not found" in out5["error"]
-
-
-async def test_plan_update_progress_moves_to_actioned(ctx):
-    await _seed_run_row(ctx.db)
-    from server.services.dream.tools import make_dream_tools
-
-    now = iso_utc()
-    await ctx.db.execute(
-        """INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, assistance_method,
-             status, evidence_json, source_run_id, created_at, updated_at)
-           VALUES ('plan-pu1', 't', 'd', 'a', 'm', 'approved', ?, 'dream-x', ?, ?)""",
-        (json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
-    )
-    await ctx.db.execute(
-        "INSERT INTO dream_item_links (item_type, item_id, session_key) VALUES ('plan', 'plan-pu1', ?)", (SK,)
-    )
-    tools = {t.name: t for t in make_dream_tools(ctx, session_key=SK)}
-    out = json.loads(await tools["plan_update"].handler(progress="checked calendar, proposed two Saturdays"))
-    assert out["ok"] is True
-    row = await ctx.db.fetch_one("SELECT status, evidence_json FROM dream_plans WHERE id = 'plan-pu1'")
-    assert row["status"] == "actioned"
-    assert any(e["kind"] == "progress" for e in json.loads(row["evidence_json"]))
-
-
 # ------------------------------------------------------------- injection
-
-async def test_injection_gated_and_compact(ctx):
-    await _seed_run_row(ctx.db)
-    from server.services.dream.injection import build_session_plans_prompt
-
-    now = iso_utc()
-    await ctx.db.execute(
-        """INSERT INTO dream_plans (id, title, what_was_discussed, proposed_action, assistance_method,
-             status, evidence_json, source_run_id, created_at, updated_at)
-           VALUES ('plan-in1', 'Book Mama San', 'dinner discussed', 'book Saturday', 'check calendar',
-             'approved', ?, 'dream-x', ?, ?)""",
-        (json.dumps([{"kind": "observed", "session_key": SK}]), now, now),
-    )
-    await ctx.db.execute(
-        "INSERT INTO dream_item_links (item_type, item_id, session_key) VALUES ('plan', 'plan-in1', ?)", (SK,)
-    )
-
-    off = await build_session_plans_prompt(ctx.db, SK, dream_enabled=False)
-    assert off == ""
-
-    on = await build_session_plans_prompt(ctx.db, SK, dream_enabled=True)
-    assert "Open Plans for this Session" in on and "plan-in1" in on
-
-    # drafts never show
-    await ctx.db.execute("UPDATE dream_plans SET status = 'draft' WHERE id = 'plan-in1'")
-    hidden = await build_session_plans_prompt(ctx.db, SK, dream_enabled=True)
-    assert hidden == ""
-
 
 # ------------------------------------------------------------- heartbeat
 
@@ -686,8 +557,8 @@ async def test_capped_candidates_defer_and_replay_next_run(ctx, stub_env, monkey
         "related_entities": [],
     })
     monkeypatch.setattr(
-        "server.services.llm_dispatch.LLMDispatchService.chat",
-        _StubLLM(review=payload).chat,
+        "server.services.llm_dispatch.LLMDispatchService.prompt",
+        _StubLLM(review=payload).prompt,
     )
     await _seed_messages(ctx.db, SK, _messages())
     result = await DreamRunner(ctx).maybe_run(trigger="cli")

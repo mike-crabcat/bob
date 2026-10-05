@@ -87,7 +87,7 @@ def test_prompt_hides_clips_when_disabled(monkeypatch):
 async def _probe_returning(ctx, reply: str):
     async def _chat(self, messages, **k):
         return reply
-    with patch("server.services.llm_dispatch.LLMDispatchService.chat", new=_chat):
+    with patch("server.services.llm_dispatch.LLMDispatchService.prompt", new=_chat):
         return await probe_decide(ctx, "context", session_key=SESSION)
 
 

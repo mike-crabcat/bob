@@ -214,9 +214,11 @@ function RoundSection({ events, iteration, newest }: { events: TraceEvent[]; ite
         {!done && <span className="text-accent animate-pulse">in flight…</span>}
       </div>
       <div className="p-2 flex flex-col gap-1">
-        <Collapsible title={`reasoning (${reasoning.length} chars)`} defaultOpen={newest && !!reasoning}>
-          <ThinkingBlock text={reasoning} streaming={false} />
-        </Collapsible>
+        {reasoning.length > 0 && (
+          <Collapsible title={`reasoning (${reasoning.length} chars)`} defaultOpen={newest}>
+            <ThinkingBlock text={reasoning} streaming={false} />
+          </Collapsible>
+        )}
         {toolCalls.map((tc, i) => {
           let name = (tc.meta?.name as string) ?? "(tool)";
           let args: string | undefined;
@@ -347,7 +349,11 @@ function CallDetailPage() {
 
   const allMsgs = call.messages ?? [];
   const priorMessages = allMsgs.filter((m) => isChat(m) && m.role !== "system").slice(0, -1) as ChatMessage[];
-  const toolItems = call.tool_calls ?? allMsgs;
+  // Tool calls come ONLY from this turn's own tool_blocks_json — messages
+  // is the wire context and carries REPLAYED history tool blocks from prior
+  // turns (2026-10-04: a zero-tool turn showed a week-old call here). Live
+  // tools while running render in the turn timeline above.
+  const toolItems = call.tool_calls ?? [];
   const toolCalls = toolItems.filter(isToolCall);
   const toolOutputs = toolItems.filter(isToolOutput);
   const webSearches = allMsgs.filter(isWebSearch);

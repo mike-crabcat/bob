@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
@@ -39,7 +38,7 @@ logger = logging.getLogger(__name__)
 _memory_tool_used: dict[str, bool] = {}
 _MEMORY_TOOL_NAMES = frozenset({"recall", "find"})
 
-# Per-dispatch tool-call trace, populated after chat_with_tools completes and
+# Per-dispatch tool-call trace, populated after run_turn completes and
 # consumed by SessionService.add_message via pop_tool_trace(). Mirrors the
 # _memory_tool_used pattern. Each value is {"items": [...], "summary": str}.
 _dispatch_tool_trace: dict[str, dict[str, Any]] = {}
@@ -567,7 +566,7 @@ class LLMDispatchService(BaseService):
     def memory_model(self) -> str:
         return self._get_settings().openai.get_memory_model()
 
-    async def chat(
+    async def prompt(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -582,7 +581,8 @@ class LLMDispatchService(BaseService):
         dispatch_id: str | None = None,
         contact_id: str | None = None,
     ) -> str:
-        """Non-streaming chat completion with automatic logging."""
+        """Single-round LLM call with automatic logging (streams underneath
+        via the shared _round transport; returns the complete text)."""
         resolved_model = self._resolve_model(model)
         provider = model_registry.provider_for(resolved_model)
         quota_gate.check(provider)
@@ -595,7 +595,7 @@ class LLMDispatchService(BaseService):
         try:
             stream_result = StreamResult()
             call_meta: dict[str, Any] = {}
-            result = await service.chat(
+            result = await service.prompt(
                 messages=messages,
                 model=resolved_model,
                 temperature=temperature,
@@ -695,143 +695,7 @@ class LLMDispatchService(BaseService):
             )
             raise
 
-    async def chat_stream(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str | None = None,
-        temperature: float = 0.7,
-        max_tokens: int | None = None,
-        call_category: str = "quick_prompt",
-        session_key: str | None = None,
-        project_id: str | None = None,
-        task_id: str | None = None,
-        dispatch_id: str | None = None,
-        contact_id: str | None = None,
-    ) -> AsyncIterator[str]:
-        """Streaming chat completion with automatic logging."""
-        resolved_model = self._resolve_model(model)
-        provider = model_registry.provider_for(resolved_model)
-        quota_gate.check(provider)
-        service = self._get_service()
-
-        system_prompt, user_message = _extract_from_messages(messages)
-        messages_json = json.dumps(messages)
-
-        stream_result = StreamResult()
-        call_meta: dict[str, Any] = {}
-        t0 = time.monotonic()
-        ttft: float | None = None
-        accumulated = ""
-
-        try:
-            async for chunk in service.chat_stream(
-                messages=messages,
-                model=resolved_model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream_result=stream_result,
-                call_meta=call_meta,
-            ):
-                if chunk:
-                    if ttft is None:
-                        ttft = time.monotonic() - t0
-                    accumulated += chunk
-                    yield chunk
-
-            elapsed = time.monotonic() - t0
-
-            log_id = await _record_log(
-                self.db,
-                provider=provider,
-                model=resolved_model,
-                call_category=call_category,
-                session_key=session_key,
-                system_prompt=system_prompt,
-                user_message=user_message,
-                messages_json=messages_json,
-                response_text=accumulated,
-                latency_seconds=elapsed,
-                ttft_seconds=ttft,
-                prompt_tokens=stream_result.prompt_tokens,
-                completion_tokens=stream_result.completion_tokens,
-                total_tokens=stream_result.total_tokens,
-                cached_tokens=stream_result.cached_tokens,
-                status="completed",
-                project_id=project_id,
-                task_id=task_id,
-                dispatch_id=dispatch_id,
-                contact_id=contact_id,
-                generation_id=call_meta.get("generation_id"),
-                reasoning_effort=call_meta.get("reasoning_effort"),
-            )
-            ls = getattr(self._get_settings(), "llm_streaming", None)
-            if ls is None or getattr(ls, "trace_enabled", True):
-                trace = _TraceWriter(
-                    self.db, log_id=log_id, dispatch_id=dispatch_id,
-                    session_key=session_key,
-                    max_rows=getattr(ls, "trace_max_rows_per_call", 400)
-                    if ls is not None else 400)
-                for part in call_meta.get("reasoning_parts") or []:
-                    trace.emit("reasoning_part", content=part["text"],
-                               meta={"source": part["source"]})
-                trace.emit(
-                    "round_completed",
-                    meta={"latency_seconds": round(elapsed, 3), "tool_calls": 0,
-                          "prompt_tokens": stream_result.prompt_tokens,
-                          "completion_tokens": stream_result.completion_tokens,
-                          "cached_tokens": stream_result.cached_tokens,
-                          "ttft_seconds": round(ttft, 3) if ttft else None})
-                await trace.close()
-
-            quota_gate.record_success(provider)
-            logger.info(
-                "LLM dispatch stream: model=%s category=%s latency=%.2fs ttft=%.2fs "
-                "input_chars=%d output_chars=%d tokens=%s",
-                resolved_model, call_category, elapsed, ttft or 0,
-                sum(_content_char_len(m.get("content", "")) for m in messages),
-                len(accumulated),
-                stream_result.total_tokens,
-            )
-            await self._publish_call(
-                status="completed", session_key=session_key,
-                call_category=call_category, model=resolved_model,
-                latency_seconds=elapsed, total_tokens=stream_result.total_tokens,
-                ttft_seconds=ttft,
-            )
-
-        except Exception as exc:
-            elapsed = time.monotonic() - t0
-            quota_gate.record_failure(exc, provider)
-            logger.error("LLM dispatch stream failed: model=%s error=%s", resolved_model, exc)
-            await _record_log(
-                self.db,
-                provider=provider,
-                model=resolved_model,
-                call_category=call_category,
-                session_key=session_key,
-                system_prompt=system_prompt,
-                user_message=user_message,
-                messages_json=messages_json,
-                response_text=accumulated,
-                latency_seconds=elapsed,
-                ttft_seconds=ttft,
-                status="failed",
-                error_message=str(exc),
-                project_id=project_id,
-                task_id=task_id,
-                dispatch_id=dispatch_id,
-                contact_id=contact_id,
-            )
-            await self._publish_call(
-                status="failed", session_key=session_key,
-                call_category=call_category, model=resolved_model,
-                latency_seconds=elapsed, total_tokens=None,
-                error_message=str(exc),
-            )
-            raise
-
-    async def chat_with_tools(
+    async def run_turn(
         self,
         messages: list[dict[str, Any]],
         tools: list[Tool],
@@ -922,7 +786,7 @@ class LLMDispatchService(BaseService):
                     "latency_seconds": round(round_latency, 3),
                     "tool_calls": n_calls})
 
-            result = await service.chat_with_tools(
+            result = await service.run_turn(
                 messages=messages,
                 tools=openai_tools,
                 tool_handlers=tool_handlers,

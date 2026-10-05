@@ -68,9 +68,11 @@ def rooms_enabled(ctx: AppContext) -> bool:
     return bool(settings and settings.enabled)
 
 
-def kind_gets_room(ctx: AppContext, kind: str) -> bool:
-    settings = getattr(ctx.settings, "goal_rooms", None)
-    return bool(settings and settings.enabled and settings.kind_gets_room(kind))
+def profile_gets_room(ctx: AppContext, profile: str) -> bool:
+    """Rooms are for outcomes (commitments plan Phase 1). Promise-profile
+    goals — wrappers around a contact's reply, a call, an email thread or a
+    subagent — are bookkeeping, not deliberation."""
+    return rooms_enabled(ctx) and profile == "outcome"
 
 
 def room_session_key(goal_id: str) -> str:
@@ -858,8 +860,8 @@ async def prune_room_routes(ctx: AppContext, goal_id: str) -> int:
 
 async def adopt_goal(ctx: AppContext, goal_id: str) -> dict[str, Any]:
     """Give an existing ACTIVE goal a room: create the room, retarget the
-    goal's working conversation, seed subscriptions + check-ins. Wrapper
-    kinds and non-active goals are refused. Idempotent per goal (re-adopt
+    goal's working conversation, seed subscriptions + check-ins. Promise
+    goals and non-active goals are refused. Idempotent per goal (re-adopt
     refreshes the charter)."""
     from server.repositories.goals import GoalRepository
 
@@ -868,9 +870,9 @@ async def adopt_goal(ctx: AppContext, goal_id: str) -> dict[str, Any]:
         return {"ok": False, "error": "goal not found"}
     if goal["status"] != "active":
         return {"ok": False, "error": f"goal is {goal['status']}, not active"}
-    if not kind_gets_room(ctx, goal["kind"]):
+    if not profile_gets_room(ctx, goal.get("profile") or "outcome"):
         return {"ok": False,
-                "error": f"kind {goal['kind']!r} does not get a room"}
+                "error": f"a {goal.get('profile')} goal does not get a room"}
     if not rooms_enabled(ctx):
         return {"ok": False, "error": "goal rooms are disabled"}
 

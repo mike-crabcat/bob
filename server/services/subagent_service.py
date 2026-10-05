@@ -127,30 +127,18 @@ class SubagentService(BaseService):
         # construction (the OOM-orphaned-Meshy class: completer death is a
         # reconcilable task state, not a silent stall).
         try:
-            from server.services.tasks import register_task, tasks_enabled
-            if tasks_enabled():
-                await register_task(
-                    self.ctx, waiter_session=parent_session_key,
-                    title=f"subagent {agent_type}: {task[:100]}",
-                    instruction=task[:2000],
-                    expected_completer=subagent_id,
-                    due_minutes=24 * 60,
-                    source_goal_id=goal_parent_id or None,
-                    extra_payload={"subagent_session": session_key},
-                )
-            else:
-                from server.services.goal_service import create_goal
-                await create_goal(
-                    self.ctx,
-                    conversation_id=session_key,
-                    objective=task[:2000],
-                    origin_conversation_id=parent_session_key,
-                    kind="call" if agent_type == "openai_voice" else "subagent",
-                    external_ref=subagent_id,
-                    parent_goal_id=goal_parent_id,
-                )
+            from server.services.tasks import register_task
+            await register_task(
+                self.ctx, waiter_session=parent_session_key,
+                title=f"subagent {agent_type}: {task[:100]}",
+                instruction=task[:2000],
+                expected_completer=subagent_id,
+                due_minutes=24 * 60,
+                source_goal_id=goal_parent_id or None,
+                extra_payload={"subagent_session": session_key},
+            )
         except Exception:
-            logger.warning("failed to create task/goal for subagent %s", short_id, exc_info=True)
+            logger.warning("failed to register promise for subagent %s", short_id, exc_info=True)
 
         # openai_voice dispatches synchronously so we can return voice_url / call_sid
         # to the LLM in the tool result. No background task — the row stays in
@@ -373,7 +361,22 @@ class SubagentService(BaseService):
                              parent_session_key: str = "") -> dict[str, Any]:
         row = await self._repo().get(subagent_id)
         if row is None:
-            return {"ok": False, "error": "Subagent not found"}
+            # Background flights live in runs since 2026-10-05 (commitments
+            # Phase 0); the prompt renders their 8-char ids.
+            run = await self._flight_run(subagent_id)
+            if run is None or (parent_session_key
+                               and run["session_key"] != parent_session_key):
+                return {"ok": False, "error": "Subagent not found"}
+            return {
+                "ok": True,
+                "subagent_id": run["id"],
+                "status": run["status"],
+                "result": run["result"],
+                "error": run["error_message"],
+                "cost_usd": None,
+                "task_preview": (run["summary"] or "")[:100],
+                "created_at": run["started_at"],
+            }
         if parent_session_key and row["parent_session_key"] != parent_session_key:
             # Don't confirm the existence of another session's subagent.
             return {"ok": False, "error": "Subagent not found"}
@@ -405,13 +408,26 @@ class SubagentService(BaseService):
     async def kill_subagent(self, subagent_id: str, *,
                             parent_session_key: str = "") -> dict[str, Any]:
         row = await self._repo().get(subagent_id)
-        if row is None and len(subagent_id.strip()) >= 6:
-            # The prompt renders 8-char task ids — accept a prefix, restricted
-            # to detached_turn so a prefix can never reach another type's task.
-            row = await self._repo().get_by_prefix(
-                subagent_id.strip(), agent_type="detached_turn")
         if row is None:
-            return {"ok": False, "error": "Subagent not found"}
+            # Background flights live in runs (2026-10-05). The live
+            # in-process task is cancelled via the backburner registry; its
+            # supervisor records the killed terminal state.
+            run = await self._flight_run(subagent_id)
+            if run is None or (parent_session_key
+                               and run["session_key"] != parent_session_key):
+                return {"ok": False, "error": "Subagent not found"}
+            if run["status"] != "running":
+                return {"ok": False,
+                        "error": f"Task already {run['status']} — nothing to cancel. "
+                                 "Check its result instead (check_subagent)."}
+            from server.services import backburner as _bb
+            res = _bb.request_kill(run["id"])
+            if not res.get("ok"):
+                return {"ok": False,
+                        "error": f"{res.get('error', 'not running')} — nothing to cancel. "
+                                 "Check its result instead (check_subagent)."}
+            logger.info("Background flight %s kill requested", run["id"][:8])
+            return {"ok": True, "subagent_id": run["id"], "status": "cancelling"}
         if parent_session_key and row["parent_session_key"] != parent_session_key:
             # Don't confirm the existence of another session's subagent.
             return {"ok": False, "error": "Subagent not found"}
@@ -466,18 +482,8 @@ class SubagentService(BaseService):
                     logger.info("Hung up phone call %s for killed subagent %s", call["call_sid"], subagent_id[:8])
 
         await self._update_status(subagent_id, "killed")
-        try:
-            from server.repositories.goals import GoalRepository
-            goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
-            if goal and goal["status"] == "active":
-                from server.services.goal_service import settle_goal
-                await settle_goal(self.ctx, goal["id"], status="cancelled",
-                                  result="subagent killed", wake_origin=False)
-        except Exception:
-            logger.warning("failed to cancel goal for killed subagent %s",
-                           subagent_id[:8], exc_info=True)
-        # Task path (Phase 3): the promise settles too — parent hears
-        # "killed" instead of riding to the due backstop.
+        # The promise settles — parent hears "killed" instead of riding to
+        # the due backstop.
         try:
             from server.repositories.tasks import TaskRepository
             from server.services.tasks import settle_task
@@ -492,6 +498,16 @@ class SubagentService(BaseService):
                            subagent_id[:8], exc_info=True)
         logger.info("Subagent %s killed", subagent_id[:8])
         return {"ok": True, "subagent_id": subagent_id, "status": "killed"}
+
+    async def _flight_run(self, run_id: str) -> dict[str, Any] | None:
+        """A background flight by full id or the 8-char prefix the prompt
+        renders (prefix match restricted to flights)."""
+        from server.repositories.runs import RunRepository
+        repo = RunRepository(self.db)
+        run = await repo.get(run_id.strip())
+        if run is None and len(run_id.strip()) >= 6:
+            run = await repo.get_by_prefix(run_id, kind="flight")
+        return run if run and run["kind"] == "flight" else None
 
     async def cleanup_stale(self) -> int:
         """Set any running subagents to failed (e.g. after server restart).
@@ -515,9 +531,9 @@ class SubagentService(BaseService):
     ) -> None:
         """Relay a subagent result to the parent conversation (Bob3 Phase V).
 
-        First result settles the linked goal, whose completion wakes the
-        origin conversation with the result — on any channel. Follow-up
-        results (goal already settled) wake the parent directly.
+        First result settles the subagent's promise, whose settle effect
+        wakes the parent with the result — on any channel. Follow-up results
+        (promise already settled) wake the parent directly.
         """
         row = await self._repo().get(subagent_id)
         if not row:
@@ -531,14 +547,12 @@ class SubagentService(BaseService):
             f"You can also use message_subagent to reply or kill_subagent to terminate."
         )
 
-        from server.repositories.goals import GoalRepository
-        from server.services.goal_service import settle_goal
         from server.services.wake_service import wake_conversation
 
         settled = False
-        # Task path (Phase 3): settle the promise; the effect wakes the
-        # parent with the provenance header. Falls through to legacy
-        # goal/direct-wake when no task exists.
+        # Settle the promise; the effect wakes the parent with the
+        # provenance header. Falls through to a direct wake when none is
+        # pending.
         try:
             from server.services.tasks import settle_task
             from server.repositories.tasks import TaskRepository
@@ -554,18 +568,6 @@ class SubagentService(BaseService):
                 settled = bool(out.get("ok"))
         except Exception:
             logger.warning("failed to settle task for subagent %s", short_id, exc_info=True)
-        if not settled:
-            try:
-                goal = await GoalRepository(self.db).get_by_external_ref(subagent_id)
-                if goal and goal["status"] == "active":
-                    settled = await settle_goal(
-                        self.ctx, goal["id"],
-                        status="failed" if failed else "completed",
-                        result=content,
-                    )
-            except Exception:
-                logger.warning("failed to settle goal for subagent %s", short_id, exc_info=True)
-
         if not settled:
             try:
                 await wake_conversation(
@@ -608,7 +610,7 @@ class SubagentService(BaseService):
         persona: bool = False,
         model: str = "",
     ) -> dict[str, Any]:
-        """Run a subagent in-process using the existing chat_with_tools loop."""
+        """Run a subagent in-process using the existing run_turn loop."""
         settings = self._get_settings()
         resolved_model = model or settings.harness.local_subagent_model
 
@@ -640,7 +642,7 @@ class SubagentService(BaseService):
 
         # Dispatch via LLM dispatch (logs calls, publishes events)
         from server.services.llm_dispatch import LLMDispatchService
-        result_text = await LLMDispatchService(self.ctx).chat_with_tools(
+        result_text = await LLMDispatchService(self.ctx).run_turn(
             messages=messages,
             tools=tools,
             model=resolved_model,

@@ -154,7 +154,7 @@ async def subagent_create_task(ctx):
 
     tools = _make_mock_workspace_tools() + _make_mock_subagent_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     tool_calls = _extract_tool_calls(messages)
     return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
@@ -185,7 +185,7 @@ async def subagent_follow_up(ctx):
 
     tools = _make_mock_workspace_tools() + _make_mock_subagent_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval")
 
     # Simulate a subagent result arriving
     messages.append({
@@ -196,7 +196,7 @@ async def subagent_follow_up(ctx):
         "role": "user",
         "content": "Great! Can you also add support for checking the market cap?",
     })
-    response2 = await dispatch.chat_with_tools(messages, tools, call_category="eval")
+    response2 = await dispatch.run_turn(messages, tools, call_category="eval")
 
     tool_calls = _extract_tool_calls(messages)
     return {"response": response2, "context": {"tool_calls": tool_calls}, "input_messages": messages}

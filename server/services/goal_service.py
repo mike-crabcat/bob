@@ -7,6 +7,7 @@ appends a goal event, and wakes the origin conversation with the result.
 
 from __future__ import annotations
 
+
 import json
 import logging
 import re
@@ -46,9 +47,11 @@ def extract_due_instant(due: str | None) -> datetime | None:
     return parsed
 
 
-# Kind aliases: the model shortens/renames kinds (live 2026-09-25: 'event'
-# instead of 'event_plan' — one word silently cost the goal its room, loop
-# and playbook). Canonicalise before anything consults room_kinds.
+# Kind aliases — ADVISORY only since the profile split (Phase 1,
+# 2026-10-05): they pick the playbook text and round budget for a label.
+# The room/loop decision routes off ``profile`` and never reads kind, so a
+# one-word-off label can no longer cost a goal its room (the 2026-09-25
+# 'event' vs 'event_plan' incident).
 _KIND_ALIASES = {
     "event": "event_plan",
     "events": "event_plan",
@@ -61,6 +64,20 @@ _KIND_ALIASES = {
 def normalise_goal_kind(kind: str) -> str:
     k = (kind or "").strip()
     return _KIND_ALIASES.get(k.lower(), k)
+
+
+# Goal profiles (commitments plan Phase 1): a closed enum that decides
+# behaviour. Wrapper labels are leaves owed by an external party/process.
+PROFILES = ("outcome", "promise")
+_PROMISE_LABELS = frozenset({"subagent", "call", "email_thread", "outreach"})
+
+
+def profile_for(kind: str, explicit: str | None = None) -> str:
+    """The behaviour profile: an explicit valid profile wins; otherwise
+    wrapper labels are promises and everything else is an outcome."""
+    if explicit and explicit.strip().lower() in PROFILES:
+        return explicit.strip().lower()
+    return "promise" if (kind or "").strip() in _PROMISE_LABELS else "outcome"
 
 
 async def create_goal(
@@ -76,6 +93,7 @@ async def create_goal(
     parent_goal_id: str | None = None,
     goal_id: str | None = None,
     creator_contact_id: str | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Create an active goal; a deadline schedules a wakeup so unanswered
     goals resurface.
@@ -86,10 +104,8 @@ async def create_goal(
     conversation, never the child's own channel endpoint."""
     from server.repositories.conversations import ConversationRepository
 
-    # Kind canonicalisation BEFORE any room_kinds consult: 'event' vs
-    # 'event_plan' silently decided whether the goal got a room, loop and
-    # playbook (live 2026-09-25).
-    kind = normalise_goal_kind(kind)
+    kind = (kind or "task").strip() or "task"
+    profile = profile_for(kind, profile)
     repo = GoalRepository(ctx.db)
     conv_repo = ConversationRepository(ctx.db)
     cid = await conv_repo.resolve_cid(conversation_id)
@@ -116,7 +132,7 @@ async def create_goal(
     # a check-in wakeup series is created with the room (D13: no room
     # without a next check-in). The asking conversation becomes the origin.
     from server.services import goal_rooms
-    use_room = goal_rooms.kind_gets_room(ctx, kind)
+    use_room = goal_rooms.profile_gets_room(ctx, profile)
     gid = goal_id or str(uuid4())
     if use_room:
         await goal_rooms.ensure_room(
@@ -131,6 +147,7 @@ async def create_goal(
         objective=objective,
         origin_conversation_id=origin_cid,
         kind=kind,
+        profile=profile,
         strategy_json=json.dumps(strategy) if strategy else None,
         deadline=deadline,
         external_ref=external_ref,
@@ -469,8 +486,8 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
             ctx, wakeup["conversation_id"],
             f"## Task overdue{label}\n"
             f"A task you were waiting on passed its due time without "
-            f"settling. list_tasks to see it; chase the completer, "
-            f"re-register, or task_cancel it.",
+            f"settling. list_goals to see it; chase the completer, "
+            f"re-register, or close_goal(outcome='cancelled') it.",
             call_category="task_due",
             metadata={"wakeup_id": wakeup["id"],
                       "task_id": payload.get("task_id")},

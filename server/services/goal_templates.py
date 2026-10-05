@@ -12,6 +12,7 @@ four: event_name, group_name, group_session_key, decide_by.
 
 from __future__ import annotations
 
+
 import json
 import logging
 import re
@@ -41,7 +42,7 @@ DEFAULT_TEMPLATES: dict[str, dict[str, Any]] = {
                     "finalists in the group. 3) Book the winner by phone "
                     "(voice subagent, goal_parent_id = the book child); on "
                     "success write the event entity + attendance claims. "
-                    "4) Remind at T-24h and T-2h via schedule_goal_wakeup. "
+                    f"4) Remind at T-24h and T-2h via schedule_goal. "
                     "5) Designs to the group; order merch ONLY after an "
                     "approved purchase approval."),
                 "known": [],

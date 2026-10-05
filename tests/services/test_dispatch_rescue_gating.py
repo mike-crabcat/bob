@@ -66,16 +66,16 @@ def _spec(session_key: str, send_tool: _FakeSendTool | None = None) -> DispatchS
 
 @pytest.fixture
 def stub_llm(monkeypatch):
-    """chat_with_tools returns un-sent text; captures the built messages.
+    """run_turn returns un-sent text; captures the built messages.
     Swap the canned reply via ``stub_llm["reply"] = …``."""
     from server.services.llm_dispatch import LLMDispatchService
     seen: dict = {"reply": "Folded. Blair's preferences recorded; no group post."}
 
-    async def _chat_with_tools(self, messages, tools, **kwargs):
+    async def _run_turn(self, messages, tools, **kwargs):
         seen["messages"] = messages
         return seen["reply"]
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat_with_tools)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _run_turn)
     return seen
 
 

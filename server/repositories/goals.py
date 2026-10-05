@@ -14,6 +14,7 @@ raw session_keys.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,12 @@ TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Eval sessions and eval-goal rooms (eval ids: 'eval-goal…', 'eg…' —
+# never hex, so production room keys can't match).
+_EVAL_SESSION = ("({col} LIKE 'eval:%' OR {col} LIKE 'agent:goal-eval-%' "
+                 "OR {col} LIKE 'agent:goal-eg%')")
 
 
 class GoalRepository:
@@ -44,6 +51,7 @@ class GoalRepository:
         parent_goal_id: str | None = None,
         goal_id: str | None = None,
         creator_contact_id: str | None = None,
+        profile: str = "outcome",
     ) -> dict[str, Any]:
         gid = goal_id or str(uuid.uuid4())
         now = _now_iso()
@@ -51,11 +59,11 @@ class GoalRepository:
             """INSERT INTO goals
                (id, conversation_id, origin_conversation_id, kind, objective,
                 strategy_json, deadline, external_ref, parent_goal_id, status,
-                version, created_at, updated_at, creator_contact_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)""",
+                version, created_at, updated_at, creator_contact_id, profile)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?)""",
             (gid, conversation_id, origin_conversation_id, kind, objective,
              strategy_json, deadline, external_ref, parent_goal_id, now, now,
-             creator_contact_id),
+             creator_contact_id, profile),
         )
         return (await self.get(gid))  # type: ignore[return-value]
 
@@ -110,16 +118,121 @@ class GoalRepository:
             f"DELETE FROM goals WHERE id IN ({marks})", tuple(ids))
         return ids
 
-    async def delete_eval_goals(self, prefix: str = "eval-goal") -> None:
+    # -- suggestions (commitments plan Phase 4) ------------------------------
+    # A dream offer awaiting an answer: kind 'suggestion', status
+    # 'suggested' → accepted | declined | expired. Never 'active', so no goal
+    # sweeper sees it; accepting creates a REAL goal via goal_service and
+    # stores its id as this row's result.
+
+    async def create_suggestion(
+        self, *, session_key: str, text: str, plan_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        existing = await self.suggestion_for_plan(plan_id)
+        if existing is not None:
+            return existing
+        gid = f"sug-{uuid.uuid4().hex[:8]}"
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            """INSERT INTO goals
+               (id, conversation_id, origin_conversation_id, kind, profile,
+                objective, status, external_ref, payload_json, version,
+                created_at, updated_at)
+               VALUES (?, ?, ?, 'suggestion', 'outcome', ?, 'suggested', ?, ?,
+                       1, ?, ?)""",
+            (gid, session_key, session_key, text, plan_id,
+             json.dumps(details or {}), now, now))
+        return (await self.get(gid))  # type: ignore[return-value]
+
+    async def suggestion_for_plan(self, plan_id: str) -> dict[str, Any] | None:
+        return await self.db.fetch_one(
+            "SELECT * FROM goals WHERE kind = 'suggestion' AND external_ref = ? "
+            "ORDER BY created_at DESC LIMIT 1", (plan_id,))
+
+    async def suggestions_for(self, session_key: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM goals WHERE kind = 'suggestion' AND status = 'suggested' "
+            "AND origin_conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+            (session_key, limit))
+        return [dict(r) for r in rows] if rows else []
+
+    async def pending_suggestions(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM goals WHERE kind = 'suggestion' AND status = 'suggested' "
+            "ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows] if rows else []
+
+    async def settle_suggestion(self, goal_id: str, *, status: str,
+                                result: str = "") -> bool:
+        """CAS suggested → accepted | declined | expired."""
+        n = await self.db.execute(
+            "UPDATE goals SET status = ?, result = ?, updated_at = ? "
+            "WHERE id = ? AND kind = 'suggestion' AND status = 'suggested'",
+            (status, result, datetime.now(timezone.utc).isoformat(), goal_id))
+        return bool(n)
+
+    async def tree_ids(self, goal_id: str) -> list[str]:
+        """A goal and every descendant outcome (parent_goal_id), BFS order."""
+        tree, frontier = [goal_id], [goal_id]
+        while frontier:
+            marks = ",".join("?" for _ in frontier)
+            rows = await self.db.fetch_all(
+                f"SELECT id FROM goals WHERE parent_goal_id IN ({marks})",
+                tuple(frontier))
+            frontier = [r["id"] for r in rows or []]
+            tree.extend(frontier)
+        return tree
+
+    async def promises_under(self, goal_ids: list[str]) -> list[dict[str, Any]]:
+        """Promise rows registered under any of these goals (source_goal_id)."""
+        if not goal_ids:
+            return []
+        marks = ",".join("?" for _ in goal_ids)
+        rows = await self.db.fetch_all(
+            f"SELECT id, objective, completer, source_goal_id, status FROM goals "
+            f"WHERE kind = 'promise' AND source_goal_id IN ({marks})",
+            tuple(goal_ids))
+        return [dict(r) for r in rows] if rows else []
+
+    async def delete_tree(self, goal_id: str) -> list[str]:
+        """Eval cleanup: a goal, every descendant outcome (parent_goal_id,
+        deepest first so the FK holds) and every promise registered under
+        any of them (source_goal_id). Returns the removed ids."""
+        tree = await self.tree_ids(goal_id)
+        marks = ",".join("?" for _ in tree)
+        await self.db.execute(
+            f"DELETE FROM goals WHERE kind = 'promise' AND source_goal_id IN ({marks})",
+            tuple(tree))
+        for gid in reversed(tree):
+            await self.db.execute(
+                "DELETE FROM goal_transitions WHERE goal_id = ?", (gid,))
+            await self.db.execute(
+                "DELETE FROM goal_conversations WHERE goal_id = ?", (gid,))
+            await self.db.execute("DELETE FROM goals WHERE id = ?", (gid,))
+        return tree
+
+    async def delete_eval_goals(self, prefix: str = "eval-goal") -> list[str]:
         """Eval-fixture removal (goal_behavior cases): the goals, their
         holder links, and transition rows. Eval-owned IDs carry the
-        prefix; production goals never do."""
-        await self.db.execute(
-            "DELETE FROM goal_transitions WHERE goal_id LIKE ?", (f"{prefix}%",))
-        await self.db.execute(
-            "DELETE FROM goal_conversations WHERE goal_id LIKE ?", (f"{prefix}%",))
-        await self.db.execute(
-            "DELETE FROM goals WHERE id LIKE ?", (f"{prefix}%",))
+        prefix; production goals never do. Tree-aware: children the model
+        created under an eval goal (parent_goal_id FK) go first."""
+        # Model-created goals carry production-shaped ids (create_goal mints
+        # a uuid) — catch them by their eval origin too, roots only (the
+        # tree delete takes the children). Leak found 2026-10-05: a room
+        # goal born in eval:commit:* lived on and woke on the live pump.
+        rows = await self.db.fetch_all(
+            "SELECT id FROM goals WHERE id LIKE ? OR ((" + _EVAL_SESSION.format(
+                col="conversation_id") + " OR " + _EVAL_SESSION.format(
+                col="origin_conversation_id") + ") AND "
+            "(parent_goal_id IS NULL OR parent_goal_id NOT IN "
+            "(SELECT id FROM goals WHERE origin_conversation_id LIKE 'eval:%'"
+            " OR id LIKE ?)))",
+            (f"{prefix}%", f"{prefix}%"))
+        removed: list[str] = []
+        for row in rows or []:
+            if row["id"] not in removed:
+                removed.extend(await self.delete_tree(row["id"]))
+        return removed
 
     async def holders_of(self, goal_id: str) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
@@ -153,16 +266,22 @@ class GoalRepository:
 
     async def goals_held_by(
         self, conversation_id: str, *, active_only: bool = True, limit: int = 5,
+        exclude_kinds: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         """Goals a conversation holds (any role), newest activity first —
         the prompt-injection query (plan §1.4)."""
         where = "1=1" if not active_only else "g.status = 'active'"
+        params: list[Any] = [conversation_id]
+        if exclude_kinds:
+            where += f" AND g.kind NOT IN ({','.join('?' for _ in exclude_kinds)})"
+            params.extend(exclude_kinds)
+        params.append(limit)
         rows = await self.db.fetch_all(
             f"""SELECT g.* FROM goals g
                 JOIN goal_conversations gc ON gc.goal_id = g.id
                 WHERE gc.conversation_id = ? AND {where}
                 ORDER BY g.updated_at DESC LIMIT ?""",
-            (conversation_id, limit))
+            tuple(params))
         return [dict(r) for r in rows] if rows else []
 
     async def active_goal_ids_referencing_entities(
@@ -362,17 +481,25 @@ class GoalRepository:
     async def cancel(self, goal_id: str, *, note: str | None = None) -> bool:
         return await self.transition(goal_id, to_status="cancelled", note=note)
 
-    async def list_recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_recent(
+        self, *, limit: int = 100, exclude_kinds: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        where = ""
+        params: list[Any] = []
+        if exclude_kinds:
+            where = f"WHERE kind NOT IN ({','.join('?' for _ in exclude_kinds)})"
+            params.extend(exclude_kinds)
+        params.append(limit)
         rows = await self.db.fetch_all(
-            """SELECT id, conversation_id, origin_conversation_id, kind, objective,
+            f"""SELECT id, conversation_id, origin_conversation_id, kind, objective,
                       progress, result, status, deadline, created_at, updated_at,
                       version, strategy_json, loop_state_json
-               FROM goals
+               FROM goals {where}
                ORDER BY CASE status WHEN 'active' THEN 0
                          WHEN conversation_id LIKE 'agent:goal-%' THEN 1
                          ELSE 2 END,
                         updated_at DESC
-               LIMIT ?""", (limit,))
+               LIMIT ?""", tuple(params))
         return [dict(r) for r in rows] if rows else []
 
     async def transitions_for(self, goal_ids: list[str]) -> list[dict[str, Any]]:

@@ -365,7 +365,7 @@ class BackburnerSettings:
 
 @dataclass(slots=True)
 class SelfWrapSettings:
-    """Self-wrap nudges for the chat_with_tools loop (openai_service).
+    """Self-wrap nudges for the run_turn loop (openai_service).
 
     Replaces the hard budget stop with a two-stage nudge: a soft one-shot
     prompt when the turn nears its time or iteration budget (the model wraps
@@ -556,14 +556,12 @@ class GoalRoomsSettings:
     fallback and serves wrapper-kind/legacy goals; BOB_GOAL_ROOMS=off is
     the kill switch (new goals take the legacy path, rooms go inert).
 
-    room_kinds: goal kinds that get rooms. Wrapper kinds (subagent, call,
-    email_thread, outreach) stay legacy — they are bookkeeping around an
-    external process or ride a target DM's routing, not deliberation.
+    Which goals get rooms is decided by goal PROFILE, not kind (commitments
+    plan Phase 1, 2026-10-05): outcome-profile goals get rooms; promise
+    goals (wrappers around a reply, call, email thread or subagent) don't.
     """
 
     enabled: bool = True
-    room_kinds: str = ("task,research,build,event_plan,negotiate,coordination,"
-                       "commerce,sales_target,merch_order")
     checkin_minutes_deadline: int = 1440     # daily while a deadline is set
     checkin_minutes_plain: int = 10080       # weekly otherwise
     max_routes_per_room: int = 20
@@ -576,9 +574,6 @@ class GoalRoomsSettings:
     # entities — zero room deliveries ever; route sets seeded as origin
     # chatter noise. Reversible: BOB_GOAL_ROOM_SENSATIONS=on.
     sensation_routes: bool = False
-
-    def kind_gets_room(self, kind: str) -> bool:
-        return kind in {k.strip() for k in self.room_kinds.split(",") if k.strip()}
 
 
 @dataclass(slots=True)
@@ -1053,10 +1048,6 @@ class Settings:
                 # Plan kill switch is the literal BOB_GOAL_ROOMS=off form.
                 enabled=os.getenv("BOB_GOAL_ROOMS", "on").strip().lower()
                 not in ("off", "0", "false", "no"),
-                room_kinds=os.getenv(
-                    "BOB_GOAL_ROOM_KINDS",
-                    "task,research,build,event_plan,negotiate,coordination,"
-                    "commerce,sales_target,merch_order"),
                 checkin_minutes_deadline=int(os.getenv(
                     "BOB_GOAL_ROOM_CHECKIN_DEADLINE_MIN", "1440")),
                 checkin_minutes_plain=int(os.getenv(

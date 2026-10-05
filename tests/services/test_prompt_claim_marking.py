@@ -218,7 +218,7 @@ async def test_dispatch_runner_marks_claims_end_to_end(ctx, db, monkeypatch):
         seen["messages"] = messages
         return ""
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _chat)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _chat)
 
     spec = DispatchSpec(
         session_key=key, system_content="sys", tools=[],

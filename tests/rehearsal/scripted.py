@@ -1,6 +1,6 @@
 """Scripted actors — deterministic LLM stand-ins driving the REAL pipeline.
 
-Interception happens at ``LLMDispatchService.chat`` / ``.chat_with_tools``
+Interception happens at ``LLMDispatchService.prompt`` / ``.run_turn``
 so everything underneath is real: the tool loop's handlers, effects,
 extraction tools, the router, reviser CAS writes, and wake dispatches. The
 stand-ins may cheat on READING (they consult the DB directly for history)
@@ -48,9 +48,9 @@ class ScriptedActors:
 
     def install(self, monkeypatch) -> None:
         from server.services.llm_dispatch import LLMDispatchService
-        monkeypatch.setattr(LLMDispatchService, "chat", self._chat)
+        monkeypatch.setattr(LLMDispatchService, "prompt", self._chat)
         monkeypatch.setattr(
-            LLMDispatchService, "chat_with_tools", self._chat_with_tools)
+            LLMDispatchService, "run_turn", self._run_turn)
 
     # ------------------------------------------------------------------
     async def _chat(self, messages, **kw) -> str:
@@ -65,7 +65,7 @@ class ScriptedActors:
             return "Restaurant booked Thursday 1pm for 8, name Bob, no deposit."
         return "{}"
 
-    async def _chat_with_tools(self, messages, tools, **kw) -> str:
+    async def _run_turn(self, messages, tools, **kw) -> str:
         handlers = {t.name: t.handler for t in tools}
         category = kw.get("call_category", "")
         if category == "memory_silent_turn":

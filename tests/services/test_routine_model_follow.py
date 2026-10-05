@@ -55,7 +55,7 @@ async def _fire(db, tmp_path, monkeypatch, captured):
         def __init__(self, ctx):
             pass
 
-        async def chat_with_tools(self, messages, tools, **kwargs):
+        async def run_turn(self, messages, tools, **kwargs):
             captured.update(kwargs)
             return "routine reply"
 

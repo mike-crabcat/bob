@@ -216,7 +216,7 @@ async def test_hooks_fire_on_llm_exception(ctx, monkeypatch):
     async def _boom(self, messages, tools, **kwargs):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr(LLMDispatchService, "chat_with_tools", _boom)
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _boom)
 
     async def _build(dummy, session_key, **kwargs):
         return [{"role": "user", "content": "hi"}]

@@ -68,7 +68,7 @@ def reviser(monkeypatch):
         mock.calls.append(kwargs)
         return mock.response
 
-    monkeypatch.setattr(LLMDispatchService, "chat", _chat)
+    monkeypatch.setattr(LLMDispatchService, "prompt", _chat)
     return mock
 
 
@@ -180,7 +180,7 @@ async def test_goals_block_caps_at_five_goals_and_truncates(ctx, db):
             strategy={"v": 2, "plan": long_plan if i == 6 else f"plan {i}"})
 
     block = await ContextAssembler(ctx).goals_block("work")
-    assert block.count("###") == 5, "top-5 by recency only"
+    assert block.count(", id ") == 5, "top-5 by recency only"
     assert "goal 6" in block and "goal 0" not in block
     rendered_plan = [ln for ln in block.splitlines() if ln.startswith("Plan:")]
     assert rendered_plan and len(rendered_plan[0]) <= 250, "plan truncated to budget"
@@ -196,9 +196,9 @@ async def test_goals_block_empty_without_goals(ctx, db):
 # ---------------------------------------------------------------------------
 
 async def test_create_goal_tool_with_parent_and_strategy(ctx, db, mock_wake):
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, "work")}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, "work")}
     root_out = json.loads(await tools["create_goal"].handler(
         objective="plan the lunch", kind="event_plan",
         strategy=json.dumps({"plan": "ask everyone",
@@ -225,9 +225,9 @@ async def test_create_goal_tool_with_parent_and_strategy(ctx, db, mock_wake):
 
 
 async def test_update_goal_state_tool_cas_write(ctx, db, mock_wake):
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, "work")}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, "work")}
     goal_id = json.loads(await tools["create_goal"].handler(objective="obj"))["goal_id"]
 
     out = json.loads(await tools["update_goal_state"].handler(
@@ -254,9 +254,9 @@ async def test_update_goal_state_tool_cas_write(ctx, db, mock_wake):
 
 
 async def test_schedule_goal_wakeup_tool_targets_root(ctx, db, mock_wake):
-    from server.services.goal_tools import make_goal_tools
+    from server.services.goal_tools import goal_tool_handlers
 
-    tools = {t.name: t for t in make_goal_tools(ctx, "work")}
+    tools = {t.name: t for t in goal_tool_handlers(ctx, "work")}
     root_id = json.loads(await tools["create_goal"].handler(objective="root"))["goal_id"]
     child_out = json.loads(await tools["create_goal"].handler(
         objective="child", parent_goal_id=root_id))

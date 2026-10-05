@@ -71,7 +71,7 @@ async def _run(ctx, session_key: str, messages: list,
     from server.services.llm_dispatch import LLMDispatchService
 
     tools, state = _mock_tools(search_result=search_result)
-    response = await LLMDispatchService(ctx).chat_with_tools(
+    response = await LLMDispatchService(ctx).run_turn(
         messages, tools,
         model=pinned_model(),
         call_category="eval",
