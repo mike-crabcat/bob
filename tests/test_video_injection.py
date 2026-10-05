@@ -213,3 +213,17 @@ async def test_read_video_blocks_outside_workspace(ctx, tmp_path):
         await tools["read_video"].handler(path="/etc/passwd")
     with pytest.raises(ValueError):
         await tools["read_video"].handler(path="../escape.mp4")
+
+
+def test_wire_guard_wraps_bare_string_parts():
+    """2026-10-06: the image-elision stub was a bare string inside a parts
+    array — OpenRouter 400s it (invalid_prompt). The guard types it."""
+    from server.services.openai_service import strip_unsupported_fco_video
+    items = [{"type": "function_call_output", "call_id": "c1",
+              "output": [{"type": "input_text", "text": "Image loaded from a.jpg"},
+                         "[image elided]"]}]
+    clean, n = strip_unsupported_fco_video(items)
+    assert n == 1
+    assert clean[0]["output"][1] == {"type": "input_text", "text": "[image elided]"}
+    assert all(isinstance(p, dict) for p in clean[0]["output"])
+    assert isinstance(items[0]["output"][1], str), "input list not mutated"

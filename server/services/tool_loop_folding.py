@@ -60,8 +60,12 @@ def fold_aged_image_outputs(
     n = 0
     for i in aged:
         m = messages[i]
+        # A typed text part, never a bare string: the Responses API accepts
+        # output as a string OR a list of typed parts — a bare string inside
+        # the list 400s (invalid_prompt; 19 lost turns 2026-09-30..10-05).
         m["output"] = [
-            IMAGE_ELISION if isinstance(p, dict) and p.get("type") == "input_image" else p
+            {"type": "input_text", "text": IMAGE_ELISION}
+            if isinstance(p, dict) and p.get("type") == "input_image" else p
             for p in m["output"]]
         n += 1
     return n

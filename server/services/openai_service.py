@@ -1304,8 +1304,8 @@ def _tool_result_messages(
 
 
 def strip_unsupported_fco_video(items: list[Any]) -> tuple[list[Any], int]:
-    """Wire-shape guard: remove input_video parts from any
-    function_call_output whose output is a parts array.
+    """Wire-shape guard for function_call_output parts arrays: wrap bare
+    string parts as input_text, and remove input_video parts.
 
     OpenRouter's Responses validator rejects input_video in tool outputs
     (input_text/input_image are fine) with a 400 invalid_prompt whose error
@@ -1322,6 +1322,20 @@ def strip_unsupported_fco_video(items: list[Any]) -> tuple[list[Any], int]:
     out: list[Any] = []
     stripped = 0
     for item in items:
+        # Bare strings inside a parts array are equally invalid (the
+        # 2026-09-30 image-elision stub 400'd every image-heavy frigate
+        # turn): wrap them as typed input_text parts.
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("output"), list)
+            and any(isinstance(p, str) for p in item["output"])
+        ):
+            stripped += 1
+            item = dict(item)
+            item["output"] = [
+                {"type": "input_text", "text": p} if isinstance(p, str) else p
+                for p in item["output"]]
         if (
             isinstance(item, dict)
             and item.get("type") == "function_call_output"
@@ -1360,8 +1374,8 @@ def _video_safe_wire(items: list[Any], *, dispatch_id: str | None,
     wire, stripped = strip_unsupported_fco_video(items)
     if stripped:
         logger.warning(
-            "stripped input_video from %d function_call_output row(s) on the "
-            "request wire (legacy stored shape) model=%s dispatch_id=%s",
+            "repaired %d function_call_output row(s) on the request wire "
+            "(bare-string or input_video parts) model=%s dispatch_id=%s",
             stripped, model, dispatch_id)
     return wire
 

@@ -716,11 +716,16 @@ def test_aged_image_outputs_fold_keep_three():
     n = tlf.fold_aged_image_outputs(msgs, keep_last=3)
     assert n == 3
     outs = [m for m in msgs if m.get("type") == "function_call_output"]
+    # Every part stays a TYPED dict — a bare string inside an output list
+    # is an invalid Responses API request (400 invalid_prompt, 2026-10-06).
+    for m in outs:
+        assert all(isinstance(p, dict) and "type" in p for p in m["output"]), m["output"]
     def parts(m):
-        return [p for p in m["output"] if isinstance(p, dict)]
+        return m["output"]
     for m in outs[:3]:   # OLDEST three — elided
         assert not any(p["type"] == "input_image" for p in parts(m))
-        assert any("elided" in p for p in m["output"] if isinstance(p, str)), \
+        texts = [p["text"] for p in parts(m) if p["type"] == "input_text"]
+        assert any("elided" in t for t in texts) and any("figurine" in t for t in texts), \
             "stub + provenance text both survive"
     for m in outs[3:]:   # newest three — kept inline
         assert any(p["type"] == "input_image" for p in parts(m)), "newest kept"
