@@ -1,133 +1,161 @@
 # Goals
 
-Goals are how work that takes more than one turn gets done. A goal is a
-conversation with a memory, a wallet of tasks, and a rule for when it
-speaks next — not a cron job, not a wish list. Everything below is how
-they actually behave on this system.
+Goals are how Bob keeps track of everything he owes, is doing, or has
+offered — anything that outlives a single turn. One table (`goals`), three
+shapes, six tools, one prompt block. Everything below is how it actually
+behaves on this system (current as of 2026-10-06).
 
-## What a goal is
+## The three shapes
 
-Four primitives, one job each:
+Every row is one of these, told apart by `kind` / `profile`:
 
-- **The room** — a private utility conversation that works exactly one
-  goal. The charter pasted into it is its behaviour spec; its history is
-  its working memory. Work is deliberated here, never in the group or DM
-  that asked for it.
-- **The state block** — the goal's living worksheet (`room_state`):
-  plan, known facts (append-only evidence), open questions, next steps,
-  the **strategies tree** (hypotheses with verdicts — pruned branches
-  stay, so "why we abandoned approach B" stays answerable), and the
-  **artefact registry** (every file the goal produced, with paths).
-- **Tasks** — the universal branch. Experiments, build steps,
-  confirmations from humans: all are promises between conversations.
-  Completing a task wakes the conversation waiting on it.
-- **The continuation** — how the goal decides when to work next (below).
+| Shape | What it is | Statuses | Gets a room? |
+|---|---|---|---|
+| **Outcome** (`profile='outcome'`) | A result to reach over many steps — "make $200 in merch sales", "a printable figurine for each member" | `active` → `completed` / `failed` / `cancelled` | Yes |
+| **Promise** (`kind='promise'`) | One thing owed, by one party — "send David the quote", "get Chris's office days" | `pending` → `completed` / `failed` / `cancelled` | No |
+| **Suggestion** (`kind='suggestion'`) | A dream offer, dormant until someone says yes | `suggested` → `accepted` / `declined` / `expired` | No |
 
-The goal row in the database is the lifecycle registry (status, budget
-counters, deadline, owner). The room owns the thinking; the row owns the
-bookkeeping.
+- **Outcomes** are the goals in the everyday sense. `kind` is a free label
+  (`build`, `research`, `event_plan`, `sales_target`…) that picks the
+  room's playbook; it is advisory, never refused.
+- **Promises** have a **waiter** (the conversation counting on it,
+  `origin_conversation_id`) and a **completer** (`completer`: itself,
+  another conversation's session key, a subagent id, or a script). Closing
+  is once-only; the close wakes the waiter with the result. Each promise
+  has a due-time backstop (default 1h; 24h for an outcome's children and
+  for outreach). A promise can stand alone or hang under an outcome
+  (`source_goal_id`) as one of its pieces. Ids look like `prm-xxxxxxxx`
+  (older ones `task-xxxxxxxx`; both resolve, short suffixes too).
+- **Suggestions** are written when a dream announces an offer in a chat.
+  `accept_suggestion` creates a real outcome goal; `close_goal` declines;
+  the dream closing its plan expires the suggestion. Only the chat it was
+  offered in can act on it. The dream's own drafts (`dream_plans`) are its
+  private notebook — chat turns never see them.
 
-## Kinds
+Promises and suggestions use different status words from outcomes on
+purpose: every goal sweeper (scheduler, loop, reviser, rooms) scans
+`status='active'` and so never touches them.
 
-`kind` picks the charter playbook — the discipline, not the machinery.
-One engine runs them all:
+**Not goals:** execution records (a background turn, a script, a subagent
+run) live in `runs`; routines live in `routines`. Neither is a commitment.
 
-- **task** — general single-objective work
-- **research** — investigate, evaluate, recommend. Branch, test, prune;
-  the tree of considered-and-rejected approaches is a first-class outcome
-- **build** — artefacts with proofs. Nothing is done until it passes its
-  declared verification. Code may run to green tests on a branch;
-  merging/deploying is requested from the owner, never done in-goal
-- **sales_target** — revenue goals. Bias to action, parallel branches,
-  group pushes requested via the origin, ledger is the proof
-- **negotiate** / **event_plan** — human confirmations and arrangements.
-  Every confirmation is a task pointed at the conversation that talks to
-  that person; silence gets a follow-up ladder (re-DM → email → call)
-- **performance** — improve the system you are running (e.g. trading):
-  measure, attribute, branch more of what pays, prune what loses; the
-  rules file is operator-owned, changes are requested
+## The tools
 
-Kinds are canonicalised at creation (`event` → `event_plan`, `sales` →
-`sales_target`); unknown kinds are refused with the valid list.
+Six, available wherever conversation turns run:
 
-## The loop: when a goal works
+| Tool | Does |
+|---|---|
+| `add_goal(text, profile, label, completer, instruction, due_minutes, deadline, parent_goal_id, owner, children)` | Record something owed. `profile="outcome"` (default) opens a room; `profile="promise"` records one thing owed. `children` (JSON array) adds one promise per person/item in a single call — on a new outcome, or under an existing one via `parent_goal_id` |
+| `close_goal(goal_id, outcome, result)` | Close it: `completed` / `failed` / `cancelled`. Closing something already closed is a harmless no-op |
+| `list_goals()` | What this conversation holds, is owed, and owes |
+| `delegate_goal(text, to, instruction, due_minutes)` | Ask another conversation to do something: records a promise it owes you and wakes it now. From a room, it files under the room's goal |
+| `schedule_goal(goal_id, …)` | Schedule a future wake for a goal (full access only) |
+| `accept_suggestion(goal_id, owner)` | Turn a dream offer into a real goal |
 
-Every room turn ends with a **continuation declaration**:
+Plus `update_goal` / `update_goal_state` (progress and the state worksheet;
+`expected_version` is optional) and goal templates.
 
-- `goal_continue_now(reason)` — chain the next round immediately (capped;
-  overuse forces a cooldown)
-- `goal_wait(minutes or until, reason)` — pause precisely; typed values
-  only, never prose
-- **nothing, when branches are pending** — task completions wake the room
-- `complete_goal` / declaring blocked — the series ends
+**Access** follows trust: trusted conversations get everything; untrusted
+groups can create (with a pinned owner) and record promises; untrusted DMs
+can record promises only. With no `owner` given, the goal's **principal**
+is the person being talked to (the DM contact, or the latest human
+speaker in a group).
 
-The declaration is a hint over a guaranteed floor: if a turn forgets to
-declare, pending tasks drive the next wake, and a **dead-man heartbeat**
-(a slow recurring check that skips itself when the room spoke recently)
-means no goal ever goes silent by accident. Budget is counted in
-**rounds** (one per turn); at ~70% the frames warn, at 100% the next
-round is a **terminal frame** — complete with findings, declare blocked,
-or request renewal from the origin. Renewal is owner-only.
+**Rules the tools enforce**
+- Only the conversation a promise is **owed by** can mark it completed.
+  Anyone else can only cancel it.
+- A room can't complete its own **approval checkpoint** ("Mike approves
+  the prototype order") until a human-owed promise under the same goal
+  has been answered — ask first with `delegate_goal`.
+- Promise due times are rendered in local time with offset.
 
-## Where the goal's voice goes
+## The Work block
 
-The **origin conversation** — wherever the goal was asked for — receives
-the goal's reports: completions, blocked declarations, renewal requests,
-and shared reveals. The dashboard is for following along; it never
-pushes. The owner (the person who commissioned it) is a participant, not
-a bystander: ask them for their own decisions, and treat anything they
-relay about someone else as authoritative.
+Every conversation's prompt carries one **Work** block, rendered fresh
+each turn:
 
-## The channel rules
+- **Goals this conversation holds** — outcomes with state and next wake
+- **Owed to this conversation** — promises others owe it, marked
+  "already recorded — do NOT add again"
+- **Suggested** — dream offers awaiting an answer here
+- **Asked of this conversation** — promises it owes others, with the exact
+  `close_goal` call to settle them
+- **Running in the background** — live background turns and subagents
 
-- **Per-person work — offers, chases, confirmations, approvals — happens
-  in that person's DM.** A task's completer is the DM conversation; their
-  reply settles it and wakes the room. Never chase individuals through a
-  group. Registration refuses room→group delegation outright.
-- **Shared artefacts are group content.** When the goal produces
-  something the group is waiting to see — a figurine, a mockup, a
-  lineup — post it as it lands. Reveals belong to the audience.
-- **Goal-scoped work is handed to the room.** If someone asks in a chat
-  "render X / build Y" and it belongs to an active goal, register a task
-  for the room — do not run the pipeline in the chat. Chats deliver
-  results; rooms run pipelines.
+## Rooms: how an outcome gets worked
 
-## Artefacts and the goal directory
+Each outcome gets a **room** — a private utility conversation
+(`agent:goal-<id>:utility`) that works exactly that goal. The **charter**
+pasted into it is its behaviour spec (re-stamped from code at every
+boot); its history is its working memory.
 
-Every goal gets `goals/<id8>/` in the workspace (created for it). Write
-every file the goal produces there, and record each in the state block
-with `goal_artefact(path, what)` as it lands. Closure evidence must
-enumerate all artefacts — inputs and final — and cite the delivery
-receipt. A result describing files nobody can find is not evidence.
+**The state block** (`room_state`) is the living worksheet: plan, known
+facts (append-only evidence), open questions, next actions, the
+strategies tree (hypotheses with verdicts — pruned branches stay), and
+the artefact registry (`goal_artefact(path, what)`). Files go in
+`goals/<id8>/` in the workspace.
 
-## Waiting and background work
+**The loop.** Every room turn ends with a continuation declaration:
+`goal_continue_now(reason)` (capped), `goal_wait(minutes|until, reason)`,
+nothing when children are pending (their closes wake the room), or
+`room_close(evidence)` / declaring blocked. A dead-man heartbeat means no
+room goes silent by accident. Budget is counted in rounds; near the cap
+the frames warn, at the cap the next round must close, declare blocked,
+or ask the origin for renewal (owner-only). A room's first round opens
+with **decompose first**: one child per person/item in a single
+`add_goal(parent_goal_id=…, children=[…])` call, and an approval child
+before anything paid or irreversible.
 
-Long waits never hold a turn: `run_bg_process` runs the work and **wakes
-the conversation when it finishes** — no sleep timer on top (a finished
-job once sat an extra hour because of one). The pattern: register what
-you'll do on wake (task or goal state) → start the background process →
-end the turn. Short sleeps (≤10s) are fine inline; the sleep tool
-refuses longer ones with this exact guidance.
+**Talking to humans.** A room's final text is delivered to **no one**.
+- To tell the origin something (progress, results, an artefact):
+  `send_report`.
+- To ask a human (approval, a decision, a choice): `delegate_goal(to=<the
+  origin conversation>, text=<the exact question with specifics>)`. Their
+  answer wakes the room.
+- Reporting the goal's own work to its origin needs no extra approval.
 
-## Failure modes this design exists to prevent
+**What a room can use.** A room runs with its **creator's trust**
+(`room_creator_principal`): a room for Mike can do what Mike's chat can;
+a room for an untrusted member gets that member's narrower set. It gets
+the chat toolset — memory (`recall`, `find`, `remember`,
+`memory_correct`), history search, contacts lookup, background jobs
+(`run_bg_process`, `bg_*`), subagents, docs, web search (MCP) — plus the
+room tools (`room_state`, `room_close`, `room_spawn`,
+`read_group_history`, loop tools), approvals, `send_report`, and DM
+outreach. **Withheld**, because rooms run on timers with nobody watching:
+`email_send`, `write_routine`, `delete_routine`, `create_contact` — ask
+via `delegate_goal` or `request_approval` instead.
 
-- **Clock-driven check-ins** — replaced by the continuation contract
-- **Silent stalls** — dead-man heartbeat + terminal frames; budgets
-  expire loudly, never quietly
-- **Duplicate chat rows / phantom sends** — every external action is an
-  effect, delivered once, receipt-citable
-- **Zombie rooms** — settling a goal disables its room; dead goals never
-  run again
-- **Group spam** — per-person work can't be delegated to groups; unmet
-  tasks get task_failed immediately, not retried into repetition
-- **Lost work** — artefacts registered, evidence append-only, verdicts
-  kept even for failures
+**Channel rules.**
+- Per-person work (offers, chases, confirmations) happens in **that
+  person's DM** — a promise whose completer is the DM. Never chase
+  individuals through a group; room→group delegation is refused.
+- Shared artefacts are **group content**: post them to the origin as they
+  land.
+
+## Who does what
+
+| Work | Goes to |
+|---|---|
+| Quick answer, one-off script | The current turn (long turns move to the background automatically and keep every tool) |
+| Needs Bob's memory, people or chat history | Bob himself, or an outcome goal with a child per person/item — **never a subagent** |
+| Code, file processing, builds in the workspace | A **Claude subagent** (`create_subagent`, files + bash only; briefs that need memory/history are refused) |
+| Minutes-long mechanical jobs (renders, crawls) | `run_bg_process` — wakes the conversation when done |
+| Something owed back later | A promise (`add_goal(profile="promise")`) |
+| Asking another chat or person | `delegate_goal` (chats) / `send_whatsapp_to_contact` with an `objective` (people). Without an `objective` it's a one-way delivery: nothing tracked, nobody woken |
 
 ## For operators
 
-- Dashboard: **Goals** — list with next-run, budget burn, branch counts;
-  drill into a goal for state, strategies tree, branches, and the
-  wake/turn timeline.
-- Kill switch: `BOB_GOAL_LOOP=off` reverts rooms to fixed check-ins.
-- Deep design: `goal-execution-plan.md` and `goal-rooms-plan.md` in the
-  platform repo docs (not in this workspace).
+- **Dashboard → Work** (`/dashboard/work`): goal tree with promises,
+  principal, loop status, next wake, live runs (linked to their turn
+  trace), standalone promises, suggestions, background runs, settled
+  history, and cancel. Goal detail: `/goals/<id>` (state, strategies,
+  promises, wake/turn timeline).
+- **API:** `GET /dashboard/api/work`, `GET /dashboard/api/goals[/<id>]`.
+- **Kill switches / knobs:** `BOB_GOAL_ROOMS=off` (no rooms),
+  `BOB_GOAL_LOOP=off` (fixed check-ins instead of the loop),
+  `BOB_GOAL_LOOP_*` (budgets, caps, dead-man interval),
+  `BOB_GOAL_ROOM_MAX_CHILDREN` / `_MAX_DEPTH`, `BOB_OUTREACH_VIA_TASKS`.
+- **Scripts closing promises:** `BOB_TASK_TOKEN` authenticates the script
+  completion endpoint.
+- **Data model:** `docs/datamodel.md` → Goals.

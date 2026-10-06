@@ -225,7 +225,7 @@ The service listens on `127.0.0.1:8420` by default.
 
 ## Bob Instances (Docker)
 
-The primary instance runs from this checkout under systemd (deploy = `systemctl --user restart bob.service`; the dashboard is the vite dev server in `ui/`). Additional Bob instances run via Docker — the image bundles the server, the built dashboard, the claude CLI harness, the core skill bundle, and the persona + avatar bundle (`self/` — persona files and avatar pack healed into the workspace at every boot; `user.md`, the owner profile, is seeded once and then owned by the instance). Registry: `ghcr.io/mike-crabcat/bob` (public). Full design: `docs/bob-docker-plan.md`.
+The primary instance runs from this checkout under systemd (deploy = `systemctl --user restart bob.service`; the dashboard is the vite dev server in `ui/`). Additional Bob instances run via Docker — the image bundles the server, the built dashboard, the claude CLI harness, the core skill bundle, and the persona + avatar bundle (`self/` — persona files and avatar pack healed into the workspace at every boot; `user.md`, the owner profile, is seeded once and then owned by the instance). Registry: `ghcr.io/mike-crabcat/bob` (public).
 
 ### Throwaway test instance (this box)
 
