@@ -57,8 +57,11 @@ from server.services.dispatch_runner import _is_quota_error, is_no_reply
 async def _notify_quota_exhausted(wa_service: Any, chat_id: str, session_key: str) -> None:
     """Send a one-line 'out of credit' notice to the chat, at most once per hour."""
     now = time.monotonic()
-    last = _quota_notify_last.get(session_key, 0.0)
-    if now - last < _QUOTA_NOTIFY_MIN_INTERVAL:
+    # No record = never notified. (A 0.0 default broke on hosts up < 1h:
+    # monotonic time starts near boot, so the first notice after a reboot
+    # was suppressed — found 2026-10-06 when the box had just rebooted.)
+    last = _quota_notify_last.get(session_key)
+    if last is not None and now - last < _QUOTA_NOTIFY_MIN_INTERVAL:
         return
     _quota_notify_last[session_key] = now
     try:

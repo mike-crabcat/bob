@@ -159,6 +159,35 @@ async def _session_tool_principal(
     return False, None
 
 
+# Outward-acting tools a goal room does NOT inherit: rooms run on timers with
+# no human watching, so trust ≠ autonomy. Rooms ask via delegate_goal /
+# request_approval instead (Mike 2026-10-06).
+_ROOM_WITHHELD_TOOLS = frozenset({
+    "email_send", "write_routine", "delete_routine", "create_contact"})
+
+
+async def room_inherited_tools(ctx: AppContext, session_key: str,
+                               have: set[str]) -> list:
+    """The common chat toolset (memory, contacts lookup, background jobs,
+    subagents, docs…) for a goal room, scoped by its CREATOR's principal —
+    a trusted owner's room gets what their chat gets, an untrusted member's
+    room the narrower set. 2026-10-06: rooms had no recall, so people work
+    routed to goals ran blind, and no run_bg_process, so renders ran inline.
+    Names already present keep their room-specific version."""
+    from server.services.goal_rooms import room_creator_principal
+    from server.services.tool_registry import build_common_tools
+    trusted, contact_id = await room_creator_principal(ctx, session_key)
+    out = []
+    for t in build_common_tools(ctx, session_key=session_key,
+                                is_trusted=trusted, contact_id=contact_id,
+                                include_routines=False):
+        if t.name in have or t.name in _ROOM_WITHHELD_TOOLS:
+            continue
+        have.add(t.name)
+        out.append(t)
+    return out
+
+
 async def _generic_wake_dispatch(
     ctx: AppContext,
     session_key: str,
@@ -250,6 +279,13 @@ async def _generic_wake_dispatch(
     from server.services.approval_tools import make_approval_tools
     tools.extend(make_approval_tools(ctx, session_key))
     tools.extend(utility_tools)
+    if session_key.startswith("agent:goal-"):
+        try:
+            tools.extend(await room_inherited_tools(
+                ctx, session_key, {t.name for t in tools}))
+        except Exception:
+            logger.warning("wake: room tool inheritance failed for %s",
+                           session_key, exc_info=True)
     # MCP tools for goal rooms (web search etc.) — scoped by the room's
     # principal like the session tools. Without them a pricing room
     # scraped vendor sites with curl | sed for 16 rounds (2026-10-06).
