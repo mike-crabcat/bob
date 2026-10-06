@@ -631,6 +631,10 @@ def _report(mp4: Path) -> None:
     gif_s = (f", gif {gif.stat().st_size / 1e6:.2f} MB"
              if gif.is_file() else ", no gif")
     print(f"  -> {mp4} : {size / 1e6:.2f} MB, {dur_s}{gif_s}")
+    # Unmissable success line (2026-10-06: a model re-ran a render it
+    # hadn't noticed had succeeded).
+    print(f"OK: video ready — {mp4}" + (f" and {gif}" if gif.is_file() else "")
+          + ". Done: do not re-run; send/use the file.")
 
 
 if __name__ == "__main__":

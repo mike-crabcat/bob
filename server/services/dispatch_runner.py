@@ -284,6 +284,17 @@ class DispatchRunner:
             # rescue (the human message still deserves a reply).
             provenances = await history_repo.claimed_provenances(claimed_ids)
             expect_send = any(p not in _SILENCE_OK_PROVENANCES for p in provenances)
+            # A turn that claimed a raw human message ("" = NULL provenance)
+            # is a REPLY whatever its spec category: a mid-turn arrival
+            # re-flies the running spec, so a human message can ride a
+            # steer/wake/routine-category turn. 2026-10-05 AI doom: Mike's
+            # message folded into a steer re-flight and its answer was
+            # dropped silently (category not in _SEND_RESCUE_CATEGORIES).
+            # WhatsApp only: email keeps its explicit email_reply contract —
+            # an email final text must never auto-send.
+            delivers_final = (spec.call_category in _SEND_RESCUE_CATEGORIES
+                              or ("" in provenances and spec.send_tool_name
+                                  == "send_whatsapp_message"))
             human_stimulus = any(p not in _DETACH_QUIET_PROVENANCES for p in provenances)
             # Steer-only turns detach SILENTLY (2026-09-06): a holding ack
             # ("give me a sec") answers nobody — the wake was machine-initiated.
@@ -508,10 +519,13 @@ class DispatchRunner:
                     retry_messages = messages + [
                         {"role": "assistant", "content": result[:2000]},
                         {"role": "user", "content":
-                         "[System correction] Your previous reply NARRATED "
+                         "[System correction] Your previous draft NARRATED "
                          "tool calls without actually calling them — the "
                          "transcript shows zero tool calls, so nothing was "
-                         "sent and nothing was started. Reply again and "
+                         "started. That draft was NOT sent: nobody saw it, "
+                         "so do not mention, correct or apologise for it "
+                         "(2026-10-06: Bob apologised to Mike for a draft "
+                         "he never received). Reply again and "
                          "ACTUALLY CALL the tools you intend "
                          "(send_whatsapp_message only for a progress update "
                          "or a media answer — your final text reply is "
@@ -532,7 +546,7 @@ class DispatchRunner:
                         "narration retry failed (session=%s, dispatch=%s)",
                         session_key, spec.dispatch_id)
             if (spec.send_tool_name
-                    and spec.call_category in _SEND_RESCUE_CATEGORIES
+                    and delivers_final
                     and expect_send
                     and result.strip()
                     and not is_no_reply(result)
@@ -558,14 +572,14 @@ class DispatchRunner:
                             session_key, spec.dispatch_id)
             elif (is_echo
                     and not spec.message_was_sent[0]
-                    and spec.call_category in _SEND_RESCUE_CATEGORIES
+                    and delivers_final
                     and result.strip()
                     and not is_no_reply(result)):
                 logger.warning(
                     "final-text delivery suppressed echo/marker-leak reply "
                     "(session=%s, dispatch=%s, head=%r)",
                     session_key, spec.dispatch_id, result.strip()[:120])
-            elif (spec.call_category in _SEND_RESCUE_CATEGORIES
+            elif (delivers_final
                     and not spec.message_was_sent[0] and result.strip()
                     and not is_no_reply(result) and not expect_send):
                 # Internal by policy — but a substantial un-sent reply that

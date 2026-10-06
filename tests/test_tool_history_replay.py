@@ -197,14 +197,16 @@ async def test_replay_expands_last_three_assistant_turns(ctx, db):
     fc_count = sum(1 for m in messages if isinstance(m, dict) and m.get("type") == "function_call")
     assert fc_count == 3, f"expected 3 expanded turns, got {fc_count}"
 
-    # Older turns should appear with [tools used: prefix].
-    summary_prefixed = [
-        m for m in messages
-        if isinstance(m, dict) and m.get("role") == "assistant"
-        and isinstance(m.get("content"), str)
-        and m["content"].startswith("[tools used:")
-    ]
-    assert len(summary_prefixed) == 2, f"expected 2 summary fallbacks, got {len(summary_prefixed)}"
+    # Older turns carry their tool record as a MARKED NOTE, never inside
+    # the assistant's own words (2026-10-06: an in-voice "[tools used: …]"
+    # prefix taught the model to fabricate one).
+    from server.services.prompt_assembler import TOOL_RECORD_MARKER
+    records = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"
+               and isinstance(m.get("content"), str)
+               and m["content"].startswith(TOOL_RECORD_MARKER)]
+    assert len(records) == 2, f"expected 2 tool records, got {len(records)}"
+    assert not any(m.get("role") == "assistant" and isinstance(m.get("content"), str)
+                   and "[tools used" in m["content"] for m in messages if isinstance(m, dict))
 
 
 async def test_replay_preserves_temporal_order_within_turn(ctx, db):

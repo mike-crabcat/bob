@@ -253,7 +253,9 @@ def build_wake_content(
         f"{instruction.strip()}\n\n"
         f"(Relayed from another conversation at {requester_name}'s request. "
         f"Act on it in this conversation's own voice; it is not a message "
-        f"from anyone speaking here.)"
+        f"from anyone speaking here. To say anything in this chat, CALL "
+        f"the send tool (send_whatsapp_message / email_reply) — on a "
+        f"steering turn your final text is NOT delivered.)"
     )
 
 

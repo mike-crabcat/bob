@@ -30,6 +30,7 @@ goal_service — no new lifecycle logic. Access mirrors today's gating:
 from __future__ import annotations
 
 import json
+import re
 import logging
 from typing import Any
 
@@ -57,10 +58,38 @@ def _parse_children(children: str) -> tuple[list[dict[str, Any]], str | None]:
     return specs, None
 
 
+_APPROVAL_RE = re.compile(
+    r"\b(approv\w*|sign[- ]?off|checkpoint|go[- ]ahead)\b", re.IGNORECASE)
+# Children are room work items measured in hours-to-days; the 1h promise
+# default made a room's three children all backstop-wake it in the same
+# second (2026-10-06 card-game goal).
+_CHILD_DEFAULT_DUE_MINUTES = 24 * 60
+
+
 def make_goal_work_tools(ctx: AppContext, session_key: str, *,
                          access: str = "full") -> list[Tool]:
     from server.services import tasks as task_svc
     from server.services.goal_tools import goal_tool_handlers
+
+    async def _human_answered_under(promise: dict) -> bool:
+        """A sibling promise owed by a human conversation (agent:main:…)
+        under the same goal has been completed — i.e. someone answered."""
+        from server.repositories.goals import GoalRepository
+        for sib in await GoalRepository(ctx.db).promises_under(
+                [promise["source_goal_id"]]):
+            owed = (sib.get("completer") or "").removeprefix("conversation:")
+            if (sib["id"] != promise["id"] and sib["status"] == "completed"
+                    and owed.startswith("agent:main:")):
+                return True
+        return False
+
+    async def _same_conversation(a: str, b: str) -> bool:
+        if a == b:
+            return True
+        from server.repositories.conversations import ConversationRepository
+        repo = ConversationRepository(ctx.db)
+        ca, cb = await repo.resolve_cid(a), await repo.resolve_cid(b)
+        return bool(ca) and ca == cb
 
     if access not in ACCESS_LEVELS:
         access = "none"
@@ -117,8 +146,11 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         splitting its own goal) they're added under that goal. E.g.
         [{"text": "Sam's figurine model", "completer": "", "instruction":
         "…", "due_minutes": 1440}]. Use it instead of many separate calls.
-        Before paid or irreversible steps, add a child whose completer is
-        the owner's conversation asking them to approve.
+        Before paid or irreversible steps, add an approval child ("Mike
+        approves the prototype order"). When you have the specifics, ASK:
+        delegate_goal(to=<the conversation the goal came from>, text=<the
+        exact question + quote>) — their answer wakes you; only then close
+        the approval child. Children default to due in 24h.
         """
         profile = (profile or "outcome").strip().lower()
         child_specs, bad = _parse_children(children)
@@ -138,7 +170,8 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
                         text=str(c["text"]),
                         instruction=str(c.get("instruction") or ""),
                         completer=str(c.get("completer") or ""),
-                        due_minutes=float(c.get("due_minutes") or 0),
+                        due_minutes=float(c.get("due_minutes")
+                                          or _CHILD_DEFAULT_DUE_MINUTES),
                         waiter=parent["conversation_id"] or session_key,
                         source_goal_id=parent["id"])
                     for c in child_specs]
@@ -183,7 +216,8 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
                     text=str(spec["text"]),
                     instruction=str(spec.get("instruction") or ""),
                     completer=str(spec.get("completer") or ""),
-                    due_minutes=float(spec.get("due_minutes") or 0),
+                    due_minutes=float(spec.get("due_minutes")
+                                      or _CHILD_DEFAULT_DUE_MINUTES),
                     waiter=waiter, source_goal_id=goal_id))
             created["children"] = kids
         created["profile"] = "outcome"
@@ -209,6 +243,30 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         repo = TaskRepository(ctx.db)
         promise = await repo.get(goal_id.strip()) or await repo.get_by_short_id(goal_id)
         if promise is not None:
+            owed_by = (promise.get("expected_completer") or "").removeprefix(
+                "conversation:")
+            if (outcome == "completed" and promise["status"] == "pending"
+                    and owed_by.startswith(("agent:", "eval:"))
+                    and not await _same_conversation(owed_by, session_key)):
+                # Only the party it's owed BY can complete it — a room must
+                # not tick off "Mike approves…" itself (2026-10-06).
+                return json.dumps({"ok": False, "goal_id": promise["id"], "error": (
+                    f"{promise['id']} is owed by {owed_by} — only that "
+                    "conversation can complete it (it closes when they "
+                    "answer). You can cancel it (outcome='cancelled') if "
+                    "it's no longer needed.")})
+            if (outcome == "completed" and promise["status"] == "pending"
+                    and session_key.startswith("agent:goal-")
+                    and _APPROVAL_RE.search(promise.get("title") or "")
+                    and promise.get("source_goal_id")
+                    and not await _human_answered_under(promise)):
+                return json.dumps({"ok": False, "goal_id": promise["id"], "error": (
+                    "this is an approval checkpoint and no human has "
+                    "answered yet. Ask first: delegate_goal(to=<the "
+                    "conversation the goal came from>, text=<the exact "
+                    "question + quote>). Your final text is NOT delivered "
+                    "to anyone. Close this checkpoint with their answer "
+                    "when it comes back.")})
             res = await task_svc.settle_task(
                 ctx, promise["id"], to_status=outcome,
                 result=result if outcome != "failed" else None,
@@ -275,10 +333,17 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         if not to.strip():
             return json.dumps({"ok": False, "error":
                 "`to` must be a conversation session key (use find_session)"})
+        source = parent_goal_id.strip() or None
+        if source is None:
+            # A room's delegation belongs to its goal (the approval guard
+            # looks for human-answered promises under the goal).
+            from server.services.goal_rooms import goal_for_room
+            room_goal = await goal_for_room(ctx, session_key)
+            source = room_goal["id"] if room_goal else None
         return json.dumps(await _register_promise(
             text=text, instruction=instruction or text, completer=to,
             due_minutes=due_minutes, waiter=session_key,
-            source_goal_id=parent_goal_id.strip() or None))
+            source_goal_id=source))
 
     async def _decline_suggestion(sug: dict, reason: str) -> dict:
         if sug["origin_conversation_id"] != session_key:

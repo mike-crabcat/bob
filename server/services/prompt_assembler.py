@@ -64,6 +64,8 @@ NEW_MARKER = "[NEW — awaiting your reply] "
 SYSTEM_NOTE_MARKER = "[system notification — not from the human] "
 GROUP_EVENT_MARKER = "[Group event] "
 STEER_MARKER = "[system relay — steering request] "
+TOOL_RECORD_MARKER = ("[record — tools you actually ran for your next reply "
+                      "below; not a message, never write this in a reply] ")
 BG_PLACEHOLDER_MARKER = "[background task at work — not a message to answer, "
 "and not your own voice; do not take over its work] "
 BG_SEND_TAG = "[bg {id8}] "
@@ -791,8 +793,15 @@ async def build_chat_messages(
                 if not expanded:
                     summary = row.get("tool_summary")
                     if summary:
-                        content = f"{summary}\n\n{content}" if content else summary
-                    messages.append({"role": "assistant", "content": content})
+                        # Out of my own voice (2026-10-06): prefixed INTO the
+                        # assistant reply, "[tools used: …]" taught the model
+                        # that replies start with one — it began fabricating
+                        # them. The record rides a marked note instead.
+                        messages.append({"role": "user", "content":
+                                         TOOL_RECORD_MARKER + summary.removeprefix(
+                                             "[tools used: ").removesuffix("]")})
+                    if content:
+                        messages.append({"role": "assistant", "content": content})
                 continue
 
             messages.append({"role": row["role"], "content": content})

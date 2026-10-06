@@ -382,7 +382,7 @@ async def test_append_call_completed_event_falls_back_to_origin(ctx):
 
 
 async def test_subagent_spawn_recorded_as_effect(ctx, monkeypatch):
-    """claude/local spawns ride a durable subagent_spawn effect; the executor
+    """claude spawns ride a durable subagent_spawn effect; the executor
     starts the run."""
     from server.services.subagent_service import SubagentService
 
@@ -394,7 +394,7 @@ async def test_subagent_spawn_recorded_as_effect(ctx, monkeypatch):
     monkeypatch.setattr(SubagentService, "_run_subagent", _fake_run)
 
     result = await SubagentService(ctx).create_subagent(
-        "write a haiku", "agent:main:whatsapp:dm:61400000001", agent_type="local",
+        "write a haiku", "agent:main:whatsapp:dm:61400000001", agent_type="claude",
     )
     assert result["ok"] is True
     effect = await ctx.db.fetch_one(
@@ -403,7 +403,7 @@ async def test_subagent_spawn_recorded_as_effect(ctx, monkeypatch):
     assert effect["status"] == "delivered"
     import json as _json
     payload = _json.loads(effect["payload_json"])
-    assert payload["executor"] == "local"
+    assert payload["executor"] == "claude"
     assert payload["subagent_id"] == result["subagent_id"]
     # Let the spawned task run.
     import asyncio as _asyncio

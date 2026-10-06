@@ -250,6 +250,22 @@ async def _generic_wake_dispatch(
     from server.services.approval_tools import make_approval_tools
     tools.extend(make_approval_tools(ctx, session_key))
     tools.extend(utility_tools)
+    # MCP tools for goal rooms (web search etc.) — scoped by the room's
+    # principal like the session tools. Without them a pricing room
+    # scraped vendor sites with curl | sed for 16 rounds (2026-10-06).
+    mcp_note = ""
+    if session_key.startswith("agent:goal-"):
+        try:
+            from server.services.mcp_service import (
+                make_mcp_tools, mcp_transparency_note)
+            tools.extend(await make_mcp_tools(
+                ctx, session_key=session_key, is_trusted=_st_trusted,
+                reserved={t.name for t in tools}))
+            mcp_note = await mcp_transparency_note(
+                ctx, session_key=session_key, is_trusted=_st_trusted)
+        except Exception:
+            logger.warning("wake: MCP tools unavailable for %s", session_key,
+                           exc_info=True)
     dispatch_id = str(uuid4())
 
     # Goal loop (docs/goal-execution-plan.md): arm the room turn — event
@@ -272,7 +288,7 @@ async def _generic_wake_dispatch(
             from server.services.history_tools import HISTORY_DISCIPLINE_NOTE
             system_content = "\n\n".join(
                 p for p in (workspace_prompt, goals_prompt, charter_block,
-                            HISTORY_DISCIPLINE_NOTE) if p)
+                            HISTORY_DISCIPLINE_NOTE, mcp_note) if p)
             messages = await build_chat_messages(
                 content, session_key, db=ctx.db,
                 system_content=system_content, max_history=20,

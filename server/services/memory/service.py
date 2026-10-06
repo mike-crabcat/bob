@@ -1083,6 +1083,55 @@ class MemoryService(BaseService):
                 return rows[0]["subject_id"]
         return None
 
+    async def person_profile_text(self, contact_id: str, *,
+                                  max_chars: int = 4000) -> str:
+        """What Bob knows about the person behind a contact, rendered for a
+        DM system prompt. 2026-10-06: the DM profile block had rendered
+        only the entity ID since 2026-08-22, and resolved only via a
+        contact_id claim (11 of 42 contacts) — Sylvain's DM never saw his
+        recorded "WFH Thursdays only" and Bob mis-recorded his answer.
+        Resolution: contact_id claim → name slug → display name."""
+        from server.repositories.contacts import ContactRepository
+        from server.services.memory.claim_types import render_entity
+
+        contact = await ContactRepository(self.db).get(contact_id)
+        if contact is None:
+            return ""
+        ws = self.ctx.settings.harness.workspace_dir
+        entity_id = await self.find_person_entry(ws, contact_id=contact_id)
+        # Name fallbacks only for a UNIQUE contact name: two "Chris"
+        # contacts must not both receive person-chris (a stranger would be
+        # shown another person's profile). Ambiguous → no profile.
+        if await ContactRepository(self.db).count_named(contact.get("name") or "") > 1:
+            contact = {**contact, "name": ""}
+        if not entity_id and contact.get("name"):
+            entity_id = await self.find_person_entry(ws, name=contact["name"])
+        if not entity_id and contact.get("name"):
+            row = await self.db.fetch_one(
+                "SELECT entity_id FROM memory_entities WHERE entity_type = 'person' "
+                "AND status = 'active' AND display_name = ? COLLATE NOCASE LIMIT 1",
+                (contact["name"].strip(),))
+            entity_id = row["entity_id"] if row else None
+        if not entity_id:
+            return ""
+        ent = await self.db.fetch_one(
+            "SELECT entity_type, display_name FROM memory_entities WHERE entity_id = ?",
+            (entity_id,))
+        claims = await self.db.fetch_all(
+            "SELECT claim_type_key, object_id, value FROM memory_claims "
+            "WHERE status = 'active' AND subject_id = ?", (entity_id,))
+        if not ent or not claims:
+            return ""
+        text = await render_entity(
+            ent["entity_type"], ent["display_name"] or contact["name"],
+            [dict(r) for r in claims], entity_id=entity_id)
+        if len(text) > max_chars:
+            text = text[:max_chars].rsplit("\n", 1)[0] + (
+                f"\n… (truncated — recall('{entity_id}') for the rest)")
+        # The id up front: memory writes need it, and the model otherwise
+        # invents full-name slugs (person-sylvain-ayrault, 2026-10-06).
+        return f"(memory entity: `{entity_id}`)\n{text}"
+
     async def sync_person_display_name_for_contact(
         self, contact_id: str, new_name: str
     ) -> str | None:

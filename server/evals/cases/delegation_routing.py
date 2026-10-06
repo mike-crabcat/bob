@@ -53,15 +53,21 @@ def _make_mock_tools(*, seeded_subagents: list[dict] | None = None,
 
     @tool
     async def create_subagent(task: str, agent_type: str = "claude",
-                              persona: bool = False, model: str = "",
                               contact_id: str | None = None,
                               modality: str = "phone",
                               goal_parent_id: str = "") -> str:
         """Spawn a subagent to work on a task asynchronously. Returns subagent_id immediately.
 
+        A subagent does NOT have your memory, chat history, people or
+        contacts. Work that needs any of those (learn about the group,
+        write something about members, recall what was said): do it
+        yourself here — long turns move to the background automatically and
+        keep every tool — or add_goal(...) with a child per person/item when
+        it splits. Such briefs are refused.
+
         agent_type:
-        - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
-        - 'local': runs in-process via run_turn (faster, no subprocess).
+        - 'claude' (default): Claude Code CLI in the workspace — files + bash
+          only. For code, scripts, builds, file processing.
         (For background shell commands use run_bg_process — that is process
         supervision, not a subagent: no model, no judgment, just a command
         whose completion wakes this conversation.)
@@ -91,11 +97,14 @@ def _make_mock_tools(*, seeded_subagents: list[dict] | None = None,
         The subagent stays in 'running' until the call ends; the transcript
         lands in `result` via check_subagent.
 
-        persona: if true and local, load full agent persona; if false, uses minimal system prompt.
-        model: override model for local subagents (default: gpt-5.6-sol).
-
         After calling this, you MUST send a message to the user summarizing what you delegated.
         Use check_subagent to poll for results and message_subagent for follow-up."""
+        # The production spawn gate, verbatim (fixture fidelity).
+        from server.services.subagent_service import spawn_refusal
+        refusal = spawn_refusal(task, agent_type, contact_id)
+        if refusal:
+            state.setdefault("refused", []).append({"task": task, "agent_type": agent_type})
+            return json.dumps({"ok": False, "error": refusal})
         sid = uuid.uuid4().hex[:8]
         state["subagents"][sid] = {
             "id": sid, "task": task, "agent_type": agent_type,
@@ -519,3 +528,58 @@ async def route_delegated_not_claimed_done(ctx):
             "properly, with a test this time.")},
     ]
     return await _run(ctx, "eval:delegation:d7", messages, files=_REPO_TREE)
+
+
+# ------------------------------------------------- memory work (2026-10-06)
+
+_GROUP = ("You are Bob in the AI doom WhatsApp group (members: Mike Cleaver, "
+          "David Shedden, Rupert Quekett, Sylvain Ayrault, Chris, Andrew "
+          "Cooksey, Andrea Bedini). Mike (trusted owner) is speaking.")
+
+# Bob's own memory/history surface — doing the work here means calling
+# these (or structuring it as a goal); a subagent has none of them.
+_SELF_WORK_TOOLS = ["get_session_messages", "search_session_messages",
+                    "recall", "find", "group_participants", "add_goal"]
+
+
+@eval_case(
+    id="route_memory_work_stays_with_bob",
+    category="delegation_routing",
+    description="Work that needs Bob's memory and chat history (learn "
+                "about the members, write about them) is NOT handed to a "
+                "subagent — subagents have no memory, history or "
+                "contacts. Bob does it himself or structures it as a goal "
+                "(2026-10-06 AI doom D&D bios: a Claude subagent was "
+                "briefed with Bob-only tools and dug through the raw DB).",
+    structural_checks=[
+        StructuralCheck(kind="context_flag",
+                        params={"key": "no_subagent_spawned"}),
+        StructuralCheck(kind="any_tool_call",
+                        params={"tool_names": _SELF_WORK_TOOLS}),
+    ],
+    judge_criteria=JudgeCriteria(
+        extra_instructions=(
+            "The ask needs the group's chat history and what Bob knows "
+            "about each member. CORRECT: Bob works it himself — history "
+            "search / recall / group_participants visible in INPUT "
+            "MESSAGES — or records it as a goal (add_goal, ideally a "
+            "child per member) so bios land one at a time. A refused "
+            "create_subagent followed by doing it himself is fine. "
+            "WRONG: a subagent (claude or otherwise) is spawned for the "
+            "research or the writing; or Bob claims bios are written or "
+            "posted when INPUT MESSAGES show no such work."
+        ),
+    ),
+)
+async def route_memory_work_stays_with_bob(ctx):
+    messages = [
+        {"role": "system", "content": await _persona_system(ctx, _GROUP)},
+        {"role": "user", "content": (
+            "[Mike Cleaver] Bob: learn about everyone in this group by "
+            "reading back their whole chat history. Contemplate their "
+            "character, personality and interests and write their D&D "
+            "character bio. Share here as each lands.")},
+    ]
+    out = await _run(ctx, "eval:delegation:mem1", messages)
+    out["context"]["no_subagent_spawned"] = not out["context"]["created_subagents"]
+    return out

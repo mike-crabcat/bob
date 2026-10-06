@@ -39,7 +39,7 @@ When manuscripts, chapters, books, or creative writing drafts are forwarded for 
   (e.g., `2026-06-09-jamie-the-last-watchtower-review.md`)
 
 ### 4. Spawn a Subagent for the Editorial Review
-- **Critical**: Use `create_subagent` with `agent_type="local"` for the substantive editorial review — this runs in-process with workspace tools and no persona overhead
+- **Critical**: Use `create_subagent` with `agent_type="claude"` for the substantive editorial review — it works on the manuscript file in the workspace (`local` subagents are retired)
 - Provide the subagent with a detailed editorial brief (see template below)
 - The subagent must understand they are producing a **review document**, not just a conversational response
 - Include the manuscript text/context in the subagent prompt
@@ -220,7 +220,7 @@ Happy to discuss any section in detail or answer follow-up questions from Jamie.
 
 ## Key Principles
 
-- **Agent delegation**: Always use `create_subagent(agent_type="local")` for the substantive review work — local subagents have workspace tools and run in-process
+- **Agent delegation**: Always use `create_subagent(agent_type="claude")` for the substantive review work — give it the manuscript path; it has files + bash in the workspace, not your memory, so put any needed context about the author in the brief
 - **Document-first**: The review document is the primary output; the email/message is a summary
 - **Constructive rigor**: Honest, specific, useful criticism beats vague politeness
 - **Respectful expertise**: Teacherly tone that respects the author's craft

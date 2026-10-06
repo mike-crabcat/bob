@@ -259,9 +259,17 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
         f"## Promise {outcome} — {task['title']}\n"
         f"Promise {task['id']} was {task['status']} by "
         f"{task.get('completed_by') or 'unknown'} at "
-        f"{(task.get('completed_at') or '')[:19]} UTC.\n\n"
+        f"{(task.get('completed_at') or '')[:19]} UTC.\n"
+        # Second-hand marker (2026-10-06 Sylvain "Thursday"): this body is
+        # Bob's own summary from another conversation, not the person's
+        # words — memory extraction must not let it overwrite a first-hand
+        # fact (prompts.py "Relayed results").
+        "[relayed result — Bob's summary from another conversation, "
+        "second-hand]\n\n"
         f"{body or '(no result recorded)'}\n\n"
-        "Fold this into whatever you were waiting on.")
+        "Fold this into whatever you were waiting on. If it contradicts "
+        "what you have on record, say so and check — don't assume it "
+        "replaces the record.")
     try:
         await wake_conversation(
             ctx, task["waiter_session"], content,

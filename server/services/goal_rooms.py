@@ -144,7 +144,14 @@ Standing rules:
   artefacts (inputs and final) and cites the effects receipt for any
   delivery; a result describing files nobody can find is not evidence.
 - Deliberate here; act through the platform's tools. Humans read your
-  send_report, not this conversation."""
+  send_report, not this conversation: your FINAL TEXT in this room is
+  delivered to NO ONE. To tell the origin something (progress, results,
+  a finished artefact) call send_report. To ASK a human — an approval, a
+  decision, a choice between options — call delegate_goal(to=<origin
+  conversation>, text=<the exact question with the specifics>); their
+  answer wakes you. Reporting this goal's own work to its origin needs no
+  extra approval phrase (2026-10-06: a card-game room waited all morning
+  on questions it had only written as final text)."""
 
 
 _SUBSCRIPTION_RULES = (
@@ -500,6 +507,35 @@ async def render_checkin(ctx: AppContext, goal: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Room tool surface (injected by wake_service for goal-room sessions)
 # ---------------------------------------------------------------------------
+
+async def refresh_room_charters(ctx: AppContext) -> int:
+    """Boot: re-stamp every active room's charter from the current code.
+    Charters are stored at room creation, so standing-rule edits never
+    reached existing rooms (2026-10-06: the "final text reaches no one"
+    rule had to be stamped by hand). ensure_room is idempotent."""
+    from server.repositories.goals import GoalRepository
+    n = 0
+    for goal in await GoalRepository(ctx.db).list_active(limit=500):
+        if not (goal.get("conversation_id") or "").startswith(ROOM_PREFIX):
+            continue
+        try:
+            await ensure_room(
+                ctx, goal_id=goal["id"], objective=goal["objective"],
+                kind=goal.get("kind") or "task", deadline=goal.get("deadline"),
+                origin_session=goal.get("origin_conversation_id") or "")
+            n += 1
+        except Exception:
+            logger.warning("charter refresh failed for %s", goal["id"], exc_info=True)
+    return n
+
+
+async def goal_for_room(ctx: AppContext, session_key: str) -> dict[str, Any] | None:
+    """The active goal a room session works, or None (not a room / no
+    active goal). Public face of _room_goal for other services."""
+    if not (session_key.startswith(ROOM_PREFIX) and session_key.endswith(ROOM_SUFFIX)):
+        return None
+    return await _room_goal(ctx, session_key)
+
 
 async def _room_goal(ctx: AppContext, session_key: str) -> dict[str, Any] | None:
     """The active goal whose room this session is (None for non-rooms)."""

@@ -1001,3 +1001,50 @@ async def test_check_and_kill_resolve_flight_prefix(ctx, bb):
     # no live task in the registry -> honest "nothing to cancel"
     res = await svc.kill_subagent("beefcafe", parent_session_key=DM_KEY)
     assert res["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_pre_detach_tool_calls_count_toward_honesty(ctx):
+    """2026-10-06 AI doom: a turn killed one subagent and spawned another,
+    THEN detached and only talked — the counter started at detach, so the
+    group got an UNVERIFIED 'ran no tools' banner. Calls made before detach
+    seed the counter; a truly tool-less turn still counts zero."""
+    from server.services import backburner as bb
+    await _seed_running_call(ctx, "d-pre", json.dumps([
+        {"role": "user", "content": "write the bios"},
+        {"type": "function_call", "name": "kill_subagent", "call_id": "c1", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+        {"type": "function_call", "name": "create_subagent", "call_id": "c2", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c2", "output": "ok"},
+    ]))
+    assert await bb._pre_detach_tool_count(ctx, "d-pre") == 2
+    await _seed_running_call(ctx, "d-none", json.dumps([
+        {"role": "user", "content": "what band is playing tonight?"}]))
+    assert await bb._pre_detach_tool_count(ctx, "d-none") == 0
+    assert await bb._pre_detach_tool_count(ctx, None) == 0
+
+
+async def test_terminal_spoken_flight_delivers_new_wrap_up(ctx, bb):
+    """2026-10-06 card drop: the flight posted progress ("DMs going out one
+    by one") and its final 'All done' wrap-up was dropped. New information
+    after a progress send is delivered."""
+    sends: list[str] = []
+    await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": True, "tool_calls": 9,
+                     "texts": ["Card drop starting — personal DMs going out one by one."]},
+        result_text=("All done. Eight cards rendered from each person's reference "
+                     "photo, montage posted, and all seven member cards delivered by DM."),
+        sends=sends)
+    assert sends and sends[0].startswith("All done.")
+
+
+async def test_terminal_spoken_flight_paraphrase_stays_quiet(ctx, bb):
+    """The duplicate-reply class: a final that restates what the flight
+    already posted is not re-delivered."""
+    sends: list[str] = []
+    await _settled_detached_task(
+        ctx, flight={"subagent_id": "aaaabbbb", "sent": True, "tool_calls": 4,
+                     "texts": ["The Grand has rooms on Friday for $180 a night, booked one for you."]},
+        result_text="Booked: The Grand has rooms Friday for $180 a night — one is booked for you.",
+        sends=sends)
+    assert sends == []

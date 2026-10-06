@@ -229,6 +229,17 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
                 return json.dumps({"ok": False, "error":
                                    f"owner {owner!r} matches no contact"})
             creator_contact_id = hit["id"]
+        else:
+            # No explicit owner: the person this conversation is talking to
+            # (DM contact, or the latest human speaker in a group) — the
+            # documented default, never implemented in v2 (2026-10-06: the
+            # card-game goal Mike approved ran principal-less, untrusted).
+            from server.repositories.conversations import ConversationRepository
+            from server.repositories.history import HistoryRepository
+            route = await ConversationRepository(ctx.db).route_for(session_key)
+            creator_contact_id = ((route or {}).get("contact_id")
+                                  or await HistoryRepository(ctx.db)
+                                  .latest_human_sender(session_key))
         result = await emit_and_deliver(
             ctx, kind="goal_create",
             idempotency_key=f"goal_create:{goal_id}",

@@ -120,6 +120,14 @@ class ContactRepository:
         return await self.db.fetch_all(
             "SELECT * FROM contacts WHERE deleted_at IS NULL ORDER BY name")
 
+    async def count_named(self, name: str) -> int:
+        """Live contacts sharing this exact name (case/space-insensitive) —
+        name-based identity is only safe when this is 1."""
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM contacts WHERE deleted_at IS NULL "
+            "AND lower(trim(name)) = lower(trim(?))", (name or "",))
+        return int(row["n"]) if row else 0
+
     async def search_by_name(self, name_like: str) -> dict | None:
         """First live contact whose name matches the LIKE pattern."""
         return await self.db.fetch_one(

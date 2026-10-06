@@ -109,13 +109,14 @@ class ContextAssembler:
         return "\n".join(lines)
 
     async def person_profile(self, contact_id: str | None) -> str:
-        """Person-memory profile block for DM sessions."""
+        """What Bob knows about the person in this DM — rendered claims, so
+        the turn can notice when an answer contradicts the record."""
         if not contact_id:
             return ""
         from server.services.memory import MemoryService
-        entry = await MemoryService(self.ctx).find_person_entry(
-            self.ctx.settings.harness.workspace_dir, contact_id=contact_id)
-        return f"## Person Profile\n\n{entry}" if entry else ""
+        text = await MemoryService(self.ctx).person_profile_text(contact_id)
+        return (f"## Person Profile — what you already know about them\n\n"
+                f"{text}") if text else ""
 
     async def group_memory_hint(self, session_key: str) -> str:
         """Recall hint + pushed expectations for groups with an accumulated

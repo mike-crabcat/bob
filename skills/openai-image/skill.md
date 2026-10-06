@@ -149,3 +149,8 @@ The OpenAI Image API supports edits with one or more image inputs. Masked edits 
 
 - Prompts containing apostrophes must be written to a file and passed via --prompt-file — inline single-quoted prompts die on shell quoting.
 - Image-edits that fully cover a child's face in fur/animal features can trip output moderation — rephrase the prompt to be less transformative.
+
+## Reference photos of people
+
+Never guess a photo path. Get it with:
+`skills/faces/.venv/bin/python skills/faces/faces.py gallery <name>` — prints `people/<slug>/<file>` (partial names work: `gallery sylvain`). Paths are workspace-relative, so run image commands from the workspace root (don't `cd` elsewhere first).

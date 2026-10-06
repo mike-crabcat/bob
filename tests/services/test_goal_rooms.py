@@ -292,11 +292,13 @@ async def test_extraction_candidates_exclude_goal_rooms(ctx):
         (room, _iso(datetime.now(timezone.utc)),
          _iso(datetime.now(timezone.utc))))
     await SessionService(ctx).add_message(room, "assistant", "room narration")
+    await SessionService(ctx).add_message("eval:goal:g2-origin", "user", "fixture talk")
 
     rows = await HistoryRepository(ctx.db).extraction_candidates(
         idle_threshold_minutes=0)
     keys = {r["session_key"] for r in rows}
     assert room not in keys
+    assert "eval:goal:g2-origin" not in keys, "eval fixtures are never extracted"
 
 
 # ---------------------------------------------------------- subscriptions

@@ -226,12 +226,19 @@ def make_whatsapp_outreach_tools(
     async def send_whatsapp_to_contact(
         contact_id: str,
         message: str,
-        objective: str,
+        objective: str = "",
         media_path: str = "",
         parent_goal_id: str = "",
     ) -> str:
         """Send a WhatsApp message to a contact (not the current chat).
-        The 'objective' describes the specific outcome you need from this conversation,
+        Before ASKING someone for information, check what you already know
+        about them (recall / the group's pushed facts) and ask only for
+        what's missing or genuinely needs confirming — re-asking known
+        facts annoys people (David, 2026-10-05: "you already know this").
+        Leave 'objective' EMPTY for a one-way delivery (a card, a file, an
+        announcement) — nothing is tracked and their chat isn't woken.
+        Set it only when you need something BACK: it describes the outcome
+        you need from this conversation,
         e.g. "Find out if John can meet on Thursday and what time works." The target
         session will be instructed to work toward this objective and report back when complete.
         Optionally attach an image or media file by providing media_path.
@@ -306,6 +313,12 @@ def make_whatsapp_outreach_tools(
         # Derive requestor name from current session context
         requestor_name = "the agent"
         from server.repositories.conversations import ConversationRepository
+        # Group/background turns have no contact route — name the chat
+        # instead of "the agent" (2026-10-05 lunch outreach).
+        _cid = await ConversationRepository(db).resolve_cid(current_session_key)
+        _chat = (await ConversationRepository(db).display_names([_cid])).get(_cid) if _cid else None
+        if _chat:
+            requestor_name = f"the {_chat} chat"
         current_route = await ConversationRepository(db).route_for(current_session_key)
         if current_route and current_route.get("contact_id"):
             from server.repositories.contacts import ContactRepository
@@ -315,7 +328,7 @@ def make_whatsapp_outreach_tools(
 
         # Outreach state (Phase 2 of the task registry, 2026-09-19): the
         # waiter/completer/waker trio is now a TASK — this conversation
-        # waits, the target DM completes (finish_outreach → task_complete),
+        # waits, the target DM completes (close_goal on the promise),
         # the settle effect wakes us back with the result. The delegation
         # (target-DM wake + instruction + refs inheritance for extraction
         # seeding) rides register_task's steer. 24h due = the outreach
@@ -325,7 +338,12 @@ def make_whatsapp_outreach_tools(
         import os as _os
         via_tasks = _os.getenv("BOB_OUTREACH_VIA_TASKS", "on").strip().lower() \
             not in ("off", "0", "false", "no")
-        if via_tasks:
+        # One-way delivery (no objective): no promise, no target wake —
+        # 2026-10-06 the card drop left seven "deliver the card" promises
+        # pending against a 24h backstop for deliveries already made.
+        if not objective.strip():
+            pass
+        elif via_tasks:
             try:
                 from server.services.tasks import register_task
                 phone_digits_g = re.sub(r"\D", "", phone)
@@ -340,9 +358,14 @@ def make_whatsapp_outreach_tools(
                 instruction = (
                     f"You (Bob) proactively messaged {contact['name']} on "
                     f"behalf of {requestor_name}: \"{message[:300]}\". "
-                    f"Achieve this objective through the conversation with "
-                    f"{contact['name']}; when you have the answer or outcome, "
-                    f"call finish_outreach to relay the result back.")
+                    "That message is ALREADY SENT — do not send it again; "
+                    "wait for their reply. When it comes, check it against "
+                    "what you already know about them (Person Profile, or "
+                    "recall): if it contradicts the record, ask them to "
+                    "confirm before closing — a one-word answer to a "
+                    "two-sided question is easy to misread. Achieve this "
+                    "objective through the conversation with "
+                    f"{contact['name']}.")
                 task = await register_task(
                     ctx, waiter_session=current_session_key,
                     title=f"Outreach: {objective[:120]}",

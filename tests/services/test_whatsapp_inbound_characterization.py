@@ -91,6 +91,7 @@ def stub_memory(monkeypatch):
     stub = SimpleNamespace(
         ensure_person_entry=AsyncMock(),
         find_person_entry=AsyncMock(return_value=None),
+        person_profile_text=AsyncMock(return_value=""),
         sync_person_display_name_for_contact=AsyncMock(),
     )
 
@@ -99,6 +100,7 @@ def stub_memory(monkeypatch):
             pass
         ensure_person_entry = staticmethod(stub.ensure_person_entry)
         find_person_entry = staticmethod(stub.find_person_entry)
+        person_profile_text = staticmethod(stub.person_profile_text)
         sync_person_display_name_for_contact = staticmethod(
             stub.sync_person_display_name_for_contact)
 

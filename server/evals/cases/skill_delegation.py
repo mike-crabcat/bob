@@ -208,11 +208,14 @@ async def subagent_follow_up(ctx):
     description="End-to-end: create a subagent that writes a hello world Python script.",
     structural_checks=[
         StructuralCheck(kind="min_length", params={"min_length": 5}),
+        StructuralCheck(kind="context_flag", params={"key": "file_created"}),
     ],
     judge_criteria=JudgeCriteria(
         extra_instructions=(
-            "Check that the subagent completed successfully and produced a result "
-            "referencing a hello world script. The result should indicate a file was created."
+            "This is a Claude Code subagent's report — its own tool calls are "
+            "internal and NOT in INPUT MESSAGES. The harness checked the disk "
+            "before cleanup: context['file_created']. PASS when the report "
+            "says hello.py was created and file_created is true."
         ),
     ),
 )
@@ -240,15 +243,16 @@ async def subagent_hello_world(ctx):
     status = await svc.check_subagent(subagent_id)
     response_text = status.get("result") or status.get("error") or "no result"
 
-    # Clean up the file if it was created
+    # Verify on disk BEFORE cleanup — the judge can't see a Claude
+    # subagent's internal tool calls, so a true "I created hello.py" read as
+    # unsubstantiated (2026-10-06). The file is the evidence.
+    file_created = False
     try:
-        settings = ctx.settings
-        workspace = settings.harness.workspace_dir.expanduser().resolve()
+        workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
         hello_py = workspace / "hello.py"
-        if hello_py.is_file():
-            content = hello_py.read_text()
-            if "hello" in content.lower() or "Hello" in content:
-                hello_py.unlink()
+        if hello_py.is_file() and "hello" in hello_py.read_text().lower():
+            file_created = True
+            hello_py.unlink()
     except Exception:
         pass
 
@@ -258,6 +262,7 @@ async def subagent_hello_world(ctx):
             "subagent_id": subagent_id,
             "status": status["status"],
             "ok": status["status"] != "failed",
+            "file_created": file_created,
         },
         "input_messages": [{"role": "user", "content": "Create hello.py"}],
     }

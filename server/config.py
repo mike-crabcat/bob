@@ -288,7 +288,6 @@ class HarnessSettings:
     skill_dev_enabled: bool = False
     skill_dev_max_budget_usd: float = 5.0
     skill_dev_timeout_seconds: float = 1800.0
-    local_subagent_model: str = "gpt-5.6-sol"
     # bg_* process tools: exit-watcher loop (completion wakes) and the
     # mandatory RuntimeMaxSec TTL for jobs started by untrusted sessions.
     bg_wake_enabled: bool = True
@@ -883,7 +882,6 @@ class Settings:
             skill_dev_enabled=os.getenv("BOB_HARNESS_SKILL_DEV_ENABLED", "false").lower() in ("true", "1", "yes", "on"),
             skill_dev_max_budget_usd=float(os.getenv("BOB_HARNESS_SKILL_DEV_MAX_BUDGET_USD", "5.0")),
             skill_dev_timeout_seconds=float(os.getenv("BOB_HARNESS_SKILL_DEV_TIMEOUT_SECONDS", "1800")),
-            local_subagent_model=os.getenv("BOB_HARNESS_LOCAL_SUBAGENT_MODEL", "gpt-5.6-sol"),
             bg_wake_enabled=os.getenv("BOB_BG_WAKE_ENABLED", "true").lower() in ("true", "1", "yes", "on"),
             bg_untrusted_ttl_seconds=int(os.getenv("BOB_BG_UNTRUSTED_TTL_SECONDS", "3600")),
         )

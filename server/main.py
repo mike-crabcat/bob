@@ -165,6 +165,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.warning("Backburner recovery sweep failed", exc_info=True)
 
+        # Room charters carry standing rules; re-stamp them so rule edits
+        # reach rooms created before the edit.
+        try:
+            from server.services.goal_rooms import refresh_room_charters
+            n = await refresh_room_charters(app_ctx)
+            if n:
+                logger.info("goal rooms: refreshed %d charter(s)", n)
+        except Exception:
+            logger.warning("Room charter refresh failed", exc_info=True)
+
         # Clean up stale voice sessions (bridges are gone after restart)
         try:
             from server.services.voice_session_service import VoiceSessionService

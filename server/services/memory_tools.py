@@ -125,6 +125,12 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
         if not reason:
             return json.dumps({"error": "reason is required for all corrections"})
 
+        # The model reaches for `value` when it means the new value
+        # (2026-10-06, flash): unambiguous for add_claim, where `value`
+        # has no filter meaning.
+        if action == "add_claim" and value and not new_value and not new_object_id:
+            new_value = value
+
         if action == "remove_entity":
             if not entity_id:
                 return json.dumps({"error": "entity_id is required for remove_entity"})
@@ -200,9 +206,12 @@ def make_memory_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
                 return json.dumps({"error": "Provide exactly one of new_value or new_object_id, not both"})
             subject_row = await memory_admin.entity_exists(ctx.db, entity_id)
             if not subject_row:
+                near = await memory_admin.similar_entity_ids(ctx.db, entity_id)
                 return json.dumps({
                     "error": f"subject_id {entity_id!r} has no row in memory_entities — "
-                             f"add_claim cannot create entities. Use action=create_entity first."
+                             f"add_claim cannot create entities."
+                             + (f" Did you mean {', '.join(near)}?" if near
+                                else " Use action=create_entity first.")
                 })
             claim = Claim(
                 id=f"claim-correct-{uuid.uuid4().hex[:8]}",

@@ -80,6 +80,24 @@ async def _claim_mention_entities(claim: Claim) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_NUM_RE = re.compile(r"\d+(?:[.:/-]\d+)*")
+
+
+def near_duplicate(a: str, b: str, *, threshold: float = 0.7, min_words: int = 8) -> bool:
+    """Two claim values say the same thing in different words. Path-like
+    values (no spaces — file paths, urls, ids) are never prose duplicates:
+    review.md and review.docx are different files."""
+    if " " not in a.strip() or " " not in b.strip():
+        return False
+    wa, wb = set(_WORD_RE.findall(a.lower())), set(_WORD_RE.findall(b.lower()))
+    if len(wa) < min_words or len(wb) < min_words:
+        return False
+    if set(_NUM_RE.findall(a)) != set(_NUM_RE.findall(b)):
+        return False
+    return len(wa & wb) / len(wa | wb) >= threshold
+
+
 async def write_claim(db: Any, claim: Claim) -> str:
     """Write a claim to the database. Deduplicates by merging message provenance."""
     # The DB CHECK constraint allows at most one of object_id / value. If both
@@ -141,6 +159,29 @@ async def write_claim(db: Any, claim: Claim) -> str:
             await update_entity_mentions(db, await _claim_mention_entities(claim),
                                          claim.source_messages)
             return existing_id
+
+    # Near-duplicate guard (2026-10-06): paraphrases of an existing active
+    # claim — Sylvain had NINE "has GPT-6 Astra access" rows — merge into it
+    # instead of stacking. Conservative: long values only, high word
+    # overlap, and identical numbers/dates (a changed amount or date is an
+    # update, never a duplicate).
+    if claim.status == "active" and claim.value and not claim.object_id:
+        siblings = await db.fetch_all(
+            "SELECT id, value, source_messages FROM memory_claims "
+            "WHERE status = 'active' AND claim_type_key = ? AND subject_id = ? "
+            "AND value IS NOT NULL",
+            (claim.claim_type_key, claim.subject_id))
+        for sib in siblings or []:
+            if near_duplicate(claim.value, sib["value"] or ""):
+                existing_messages = json.loads(sib["source_messages"]) if sib.get("source_messages") else []
+                merged = list(dict.fromkeys(existing_messages + claim.source_messages))
+                if len(merged) > len(existing_messages):
+                    await db.execute(
+                        "UPDATE memory_claims SET source_messages = ? WHERE id = ?",
+                        (json.dumps(merged), sib["id"]))
+                logger.info("near-duplicate claim merged into %s (%s/%s)",
+                            sib["id"], claim.subject_id, claim.claim_type_key)
+                return sib["id"]
 
     # self_state is single-active per facet (2026-09-14 self-memory review):
     # values are "facet: current value" (e.g. "primary model: glm-5.3-flash"),

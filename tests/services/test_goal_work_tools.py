@@ -142,3 +142,60 @@ async def test_update_goal_without_expected_version(ctx):
     assert not stale["ok"]
     r = await _call(t["update_goal"], goal_id="no-such-goal", progress="x")
     assert not r["ok"]
+
+
+async def _room_goal(ctx, text="Build the card game; proof: design doc"):
+    t = _tools(ctx, DM, "full")
+    r = await _call(t["add_goal"], text=text, label="build", children=json.dumps([
+        {"text": "Design doc"}, {"text": "Checkpoint: Mike approves prototype order"}]))
+    assert r["ok"], r
+    goal = await GoalRepository(ctx.db).get(r["goal_id"])
+    return goal, r["children"]
+
+
+async def test_children_default_to_a_day(ctx):
+    _, kids = await _room_goal(ctx)
+    from datetime import datetime, timezone
+    due = datetime.fromisoformat(kids[0]["due"].replace("Z", "+00:00"))
+    assert (due - datetime.now(timezone.utc)).total_seconds() > 20 * 3600
+
+
+async def test_room_cannot_approve_its_own_checkpoint(ctx):
+    """2026-10-06: the room closed 'Mike approves prototype order' itself."""
+    goal, kids = await _room_goal(ctx)
+    room = _tools(ctx, goal["conversation_id"], "full")
+    approval = kids[1]["goal_id"]
+    r = await _call(room["close_goal"], goal_id=approval, result="checkpoint reached")
+    assert not r["ok"] and "delegate_goal" in r["error"]
+    # Ask the origin; once it answers, the checkpoint can close.
+    d = await _call(room["delegate_goal"], text="Mike: approve 54-card prototype ~US$20?",
+                    to=DM)
+    assert d["ok"], d
+    asked = await GoalRepository(ctx.db).get(d["goal_id"])
+    assert asked["source_goal_id"] == goal["id"], "room delegations file under its goal"
+    origin = _tools(ctx, DM, "full")
+    closed = await _call(origin["close_goal"], goal_id=d["goal_id"], result="yes, go")
+    assert closed["ok"], closed
+    assert (await _call(room["close_goal"], goal_id=approval, result="Mike approved"))["ok"]
+
+
+async def test_only_the_completer_completes_a_promise(ctx):
+    t = _tools(ctx, DM, "full")
+    d = await _call(t["delegate_goal"], text="Get Sam's address", to=GROUP)
+    r = await _call(t["close_goal"], goal_id=d["goal_id"], result="done")
+    assert not r["ok"] and "only that conversation" in r["error"]
+    assert (await _call(t["close_goal"], goal_id=d["goal_id"], outcome="cancelled",
+                        result="not needed"))["ok"]
+
+
+async def test_goal_creator_defaults_to_the_person_talking(ctx):
+    from server.services.session_service import SessionService
+    await ctx.db.execute(
+        "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
+        "VALUES ('c-mike', 'Mike', '+61400009999', datetime('now'), datetime('now'))")
+    await SessionService(ctx).add_message(GROUP, "user", "Do it! Unlimited budget.",
+                                          sender_id="c-mike")
+    t = _tools(ctx, GROUP, "full")
+    r = await _call(t["add_goal"], text="Build the game; proof: doc", label="build")
+    assert r["ok"], r
+    assert (await GoalRepository(ctx.db).get(r["goal_id"]))["creator_contact_id"] == "c-mike"

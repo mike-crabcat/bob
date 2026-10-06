@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import logging
 import shutil
@@ -40,13 +41,78 @@ Your working directory is the workspace — write files here by default (no abso
 Provide clear, concise output describing what you did and what the result is.
 """
 
-LOCAL_SUBAGENT_SYSTEM_PROMPT = """\
-You are a subagent of Bob. You have been assigned a task.
-Use your available tools to accomplish it.
-Your working directory is the workspace root.
-Provide clear, concise output describing what you did and what the result is.
-When done, output your final answer as plain text.
-"""
+# Spellings the LLM uses for the Claude Code worker (historical rows:
+# claude_code, coder, editor, general, research, …). Only these map;
+# anything else is refused — unknown types used to fall through to Claude
+# silently, which is how memory-shaped work landed on a worker that has
+# no memory.
+_CLAUDE_AGENT_TYPE_ALIASES = {
+    "claude", "claude_code", "claude-code", "claudecode", "coder", "code",
+    "coding", "editor", "developer", "dev",
+    # Generic worker names the LLM reaches for — historically all ran as
+    # Claude and were mostly real Claude jobs (PDF builds, research, test
+    # harnesses). The brief guard still catches memory-shaped work.
+    "general", "general-purpose", "general_purpose", "research",
+    "researcher", "worker", "agent", "subagent",
+}
+
+# Where memory/people/history work goes instead (shared by the retired-
+# local refusal, the unknown-type refusal and the brief guard).
+_SELF_WORK_GUIDANCE = (
+    "Work that needs your memory, chat history, people or contacts: do it "
+    "yourself in this conversation (long turns move to the background "
+    "automatically and keep every tool), or add_goal(...) with a child "
+    "per person/item when it splits. agent_type='claude' is for code, "
+    "files and builds in the workspace only; 'openai_voice' places calls.")
+
+# Bob-only capabilities a Claude Code worker does not have. A brief that
+# leans on them would run blind (2026-10-06: the AI doom bios brief told
+# Claude to call get_session_messages; it dug through the raw DB instead).
+_BOB_ONLY_TOOLS = (
+    "memory_correct", "get_session_messages",
+    "search_session_messages", "find_session", "search_contacts",
+    "group_participants", "email_thread_read", "email_thread_search",
+    "location_history", "docs_search",
+)
+_MEMORY_BRIEF_RE = re.compile(
+    r"\b(" + "|".join(_BOB_ONLY_TOOLS) + r")\b"
+    # recall/remember are English words too — only as tool calls.
+    r"|\b(?:recall|remember)\s*\("
+    r"|agent:main:(?:whatsapp|email)"
+    r"|\b(?:chat|group|message|conversation|dm|whatsapp)[ -]histor(?:y|ies)\b",
+    re.IGNORECASE)
+
+
+def memory_brief_reason(task: str) -> str | None:
+    """Why this brief needs Bob's own tools (None when it doesn't)."""
+    m = _MEMORY_BRIEF_RE.search(task or "")
+    return m.group(0) if m else None
+
+
+def spawn_refusal(task: str, agent_type: str | None,
+                  contact_id: str | None = None) -> str | None:
+    """The spawn gate (2026-10-06), pure so the eval mock applies the exact
+    production rules: retired 'local', unknown types, and Claude briefs
+    that need Bob's own tools. None = allowed."""
+    raw = (agent_type or "claude").strip().lower()
+    if raw == "local":
+        return ("agent_type='local' is retired (2026-10-06): it ran your "
+                "model WITHOUT memory, history or contact tools. "
+                + _SELF_WORK_GUIDANCE)
+    is_claude = raw in _CLAUDE_AGENT_TYPE_ALIASES
+    is_voice = _normalise_voice_agent_type(raw) == "openai_voice"
+    if not (is_claude or is_voice or contact_id):
+        return (f"unknown agent_type {agent_type!r}. Use 'claude' (code, "
+                "files, builds) or 'openai_voice' (calls). "
+                + _SELF_WORK_GUIDANCE)
+    if is_claude:
+        reason = memory_brief_reason(task)
+        if reason:
+            return (f"NOT SPAWNED: this brief needs your own tools/data "
+                    f"({reason!r}) — a Claude subagent has only files + bash "
+                    "in the workspace and cannot read memory, chat history "
+                    "or contacts. " + _SELF_WORK_GUIDANCE)
+    return None
 
 
 def _get_lock(subagent_id: str) -> asyncio.Lock:
@@ -100,8 +166,14 @@ class SubagentService(BaseService):
         from server.services.voice_dispatch_service import normalise_voice_modality
 
         requested_modality = modality
+        refusal = spawn_refusal(task, agent_type, contact_id)
+        if refusal:
+            return {"ok": False, "error": refusal}
         normalised_type = _normalise_voice_agent_type(agent_type)
-        if normalised_type == "openai_voice" or (contact_id and agent_type not in ("claude", "local")):
+        is_claude = (agent_type or "claude").strip().lower() in _CLAUDE_AGENT_TYPE_ALIASES
+        if is_claude:
+            agent_type = "claude"
+        if normalised_type == "openai_voice" or (contact_id and not is_claude):
             agent_type = "openai_voice"
             # Unknown modality vocabulary defaults to phone — never guess toward
             # a modality the caller didn't clearly pick... except that bare
@@ -229,32 +301,17 @@ class SubagentService(BaseService):
         await self._update_status(subagent_id, "running")
 
         row = await self._repo().get(subagent_id)
-        agent_type = row["agent_type"] if row else "claude"
         session_key = row["session_key"] if row else ""
-        persona = bool(row["persona"]) if row else False
-        model = row["model"] if row else ""
 
         settings = self._get_settings()
 
         try:
-            if agent_type == "local":
-                # Store user message in session before execution
-                from server.services.session_service import SessionService
-                await SessionService(self.ctx).add_message(
-                    session_key, "user", task, channel="subagent",
-                )
-                result = await self._run_local(
-                    session_key=session_key,
-                    persona=persona,
-                    model=model,
-                )
-            else:
-                workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
-                result = await self._run_claude(
-                    prompt=task,
-                    cwd=workspace_dir,
-                    max_budget=settings.harness.skill_dev_max_budget_usd,
-                )
+            workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
+            result = await self._run_claude(
+                prompt=task,
+                cwd=workspace_dir,
+                max_budget=settings.harness.skill_dev_max_budget_usd,
+            )
         except Exception as e:
             logger.error("Subagent %s failed: %s", short_id, e)
             await self._update_status(subagent_id, "failed", error=str(e))
@@ -271,12 +328,10 @@ class SubagentService(BaseService):
             subagent_id, result=result_text, claude_session_id=claude_session_id,
             cost_usd=cost, now_iso=now)
 
-        # Store assistant message in subagent session
-        # (user message already stored before execution for local, or stored here for claude)
+        # Store the exchange in the subagent session
         from server.services.session_service import SessionService
         session_svc = SessionService(self.ctx)
-        if agent_type != "local":
-            await session_svc.add_message(session_key, "user", task, channel="subagent")
+        await session_svc.add_message(session_key, "user", task, channel="subagent")
         await session_svc.add_message(session_key, "assistant", result_text, channel="subagent")
 
         await self._publish_event(subagent_id, "result_ready")
@@ -301,37 +356,27 @@ class SubagentService(BaseService):
         if row["status"] not in ("waiting_for_parent", "running"):
             return {"ok": False, "error": f"Subagent is in status '{row['status']}', cannot receive messages"}
 
-        agent_type = row["agent_type"]
-        persona = bool(row["persona"])
+        if row["agent_type"] == "local":
+            return {"ok": False, "error": "local subagents are retired — "
+                    "this one cannot be resumed. " + _SELF_WORK_GUIDANCE}
         session_key = row["session_key"]
-        model = row["model"]
 
         async with _get_lock(subagent_id):
             await self._update_status(subagent_id, "running")
 
             settings = self._get_settings()
 
-            # Store user message before execution (local needs it in session history)
             from server.services.session_service import SessionService
             session_svc = SessionService(self.ctx)
-            if agent_type == "local":
-                await session_svc.add_message(session_key, "user", message, channel="subagent")
 
             try:
-                if agent_type == "local":
-                    result = await self._run_local(
-                        session_key=session_key,
-                        persona=persona,
-                        model=model,
-                    )
-                else:
-                    workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
-                    result = await self._run_claude(
-                        prompt=message,
-                        cwd=workspace_dir,
-                        session_id=row["claude_session_id"],
-                        max_budget=settings.harness.skill_dev_max_budget_usd,
-                    )
+                workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
+                result = await self._run_claude(
+                    prompt=message,
+                    cwd=workspace_dir,
+                    session_id=row["claude_session_id"],
+                    max_budget=settings.harness.skill_dev_max_budget_usd,
+                )
             except Exception as e:
                 await self._update_status(subagent_id, "failed", error=str(e))
                 return {"ok": False, "error": str(e), "subagent_id": subagent_id}
@@ -347,8 +392,7 @@ class SubagentService(BaseService):
                 cost_usd=total_cost, now_iso=now)
 
             # Store messages in subagent session
-            if agent_type != "local":
-                await session_svc.add_message(session_key, "user", message, channel="subagent")
+            await session_svc.add_message(session_key, "user", message, channel="subagent")
             await session_svc.add_message(session_key, "assistant", result_text, channel="subagent")
 
             await self._publish_event(subagent_id, "result_ready")
@@ -602,61 +646,6 @@ class SubagentService(BaseService):
                 "subagent_id": subagent_id,
                 "status": status,
             })
-
-    async def _run_local(
-        self,
-        *,
-        session_key: str,
-        persona: bool = False,
-        model: str = "",
-    ) -> dict[str, Any]:
-        """Run a subagent in-process using the existing run_turn loop."""
-        settings = self._get_settings()
-        resolved_model = model or settings.harness.local_subagent_model
-
-        # Build system prompt
-        if persona:
-            from server.services.prompt_assembler import load_workspace_prompt
-            system_content = await load_workspace_prompt(
-                settings.harness.workspace_dir, db=self.db,
-            )
-        else:
-            workspace_dir = settings.harness.workspace_dir.expanduser().resolve()
-            system_content = (
-                LOCAL_SUBAGENT_SYSTEM_PROMPT
-                + f"\nYour workspace root is: {workspace_dir}"
-            )
-
-        # Build workspace-only tool set
-        from server.services.workspace_tools import make_workspace_tools
-        tools = make_workspace_tools(self.ctx, session_key=session_key)
-
-        # Build messages from session history
-        from server.services.prompt_assembler import build_chat_messages
-        messages = await build_chat_messages(
-            None, session_key,
-            db=self.db,
-            system_content=system_content,
-            max_history=50,
-        )
-
-        # Dispatch via LLM dispatch (logs calls, publishes events)
-        from server.services.llm_dispatch import LLMDispatchService
-        result_text = await LLMDispatchService(self.ctx).run_turn(
-            messages=messages,
-            tools=tools,
-            model=resolved_model,
-            max_iterations=30,
-            call_category="local_subagent",
-            session_key=session_key,
-        )
-
-        logger.info(
-            "Local subagent: model=%s chars=%d",
-            resolved_model, len(result_text),
-        )
-
-        return {"result": result_text, "session_id": "", "cost_usd": 0}
 
     async def _run_claude(
         self,

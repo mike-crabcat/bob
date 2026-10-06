@@ -382,6 +382,38 @@ def _transcript_tool_names(messages_json: str | None) -> list[str]:
     return names
 
 
+def _restates(final: str, sent: str) -> bool:
+    """The final text substantially repeats something the flight already
+    posted: containment either way, or high word overlap (paraphrase)."""
+    f = " ".join(final.lower().split())
+    t = " ".join((sent or "").lower().split())
+    if not t:
+        return False
+    if f in t or (len(t) >= 40 and t in f):
+        return True
+    fw, tw = set(f.split()), set(t.split())
+    if not fw or not tw:
+        return False
+    return len(fw & tw) / min(len(fw), len(tw)) >= 0.6
+
+
+async def _pre_detach_tool_count(ctx: Any, dispatch_id: str | None) -> int:
+    """Tool calls the turn made BEFORE detaching. The flight's honesty
+    counter starts at detach, so without this seed a turn that did its
+    real work up front (kill + spawn, 2026-10-06 AI doom) and then only
+    talked was stamped UNVERIFIED in the group. Read failure → 0 (the
+    old behaviour)."""
+    if not dispatch_id:
+        return 0
+    try:
+        from server.repositories.llm_call_log import LlmCallLogRepository
+        row = await LlmCallLogRepository(ctx.db).get_running_by_dispatch(dispatch_id)
+        return len(_transcript_tool_names(row.get("messages_json"))) if row else 0
+    except Exception:
+        logger.warning("backburner: pre-detach tool count failed", exc_info=True)
+        return 0
+
+
 async def run_probe(ctx: Any, dispatch_id: str, *,
                     session_key: str | None = None, contact_id: str | None = None) -> dict[str, str]:
     """Inspect the in-flight turn and produce summary + holding ack.
@@ -569,7 +601,8 @@ class BackburnerService(BaseService):
         # can tell a silent-but-real flight from pure narration. Registered
         # here, fed by note_tool_call from the dispatch layer's per-call
         # callback, dropped in the supervisor's finally.
-        spec.flight["tool_calls"] = 0
+        spec.flight["tool_calls"] = await _pre_detach_tool_count(
+            self.ctx, spec.dispatch_id)
         _flight_by_dispatch[spec.dispatch_id] = spec.flight
         # Attribution token (2026-09-17): only THIS llm_task's sends belong
         # to the task. The attention coordinator's leftover sweep can re-fly
@@ -802,13 +835,26 @@ class BackburnerService(BaseService):
             if status == "completed":
                 await runs.finish(subagent_id, status="completed", now_iso=now,
                                   result=combined or "(finished with no output)")
-                quiet = (spoke or (not combined) or is_no_reply(combined)
-                         or steer_origin)
+                final_only = (result_text or "").strip()
+                if spoke:
+                    # A flight that already spoke still owes its wrap-up when
+                    # the final text is NEW (2026-10-06 card drop: "All done
+                    # — 7 DMs delivered" was dropped after a progress send).
+                    # Repeats/paraphrases of what it posted stay quiet — the
+                    # duplicate-reply class.
+                    quiet = (steer_origin or len(final_only) < 40
+                             or is_no_reply(final_only)
+                             or any(_restates(final_only, t) for t in teed))
+                    deliverable = final_only
+                else:
+                    quiet = ((not combined) or is_no_reply(combined)
+                             or steer_origin)
+                    deliverable = combined
                 if not quiet:
                     # Silent completion with a result: the flight's stimulus
                     # was a human question and the holding ack promised an
                     # answer — deliver it VERBATIM (Mike 2026-10-03).
-                    body = _delivery_cap(combined)
+                    body = _delivery_cap(deliverable)
                     if not made_tool_calls:
                         body = (
                             "(UNVERIFIED: this turn ran no tools, so claims "

@@ -25,6 +25,16 @@ reply is responding to a `[SYNTHETIC]` message, treat it as **corroboration of e
 memory, not a fresh assertion**: record it at most once, at lower confidence, and do not \
 mint a brand-new entity purely on the strength of confirming something you already said.
 
+**Relayed results are second-hand.** Messages marked `[relayed result …]`, \
+`## Promise …`, `## Goal …`, `[Report from …]` or `[bg …]` are your OWN summaries \
+written in another conversation, delivered here as notifications — not the person's \
+words. Never use one to correct or supersede a fact the person stated themselves. \
+If it agrees with the record, record nothing. If it conflicts, do not overwrite: add \
+at most one claim worded "unconfirmed (relayed, <date>): …" and leave the existing \
+claim active — the conversation where the person actually spoke is the authority \
+(2026-10-06: a relayed "in the office Thursdays" overwrote Sylvain's own "I only work \
+from home Thursdays").
+
 ---
 
 # How to record (use the tools)

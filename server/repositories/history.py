@@ -311,6 +311,17 @@ class HistoryRepository:
             (await self._cid(session_key),))
         return row is not None
 
+    async def latest_human_sender(self, session_key: str) -> str | None:
+        """contact id of the most recent raw human message (NULL
+        provenance, sender_id set) in a conversation — the person a group
+        turn is answering."""
+        row = await self.db.fetch_one(
+            "SELECT sender_id FROM messages WHERE conversation_id = ? "
+            "AND role = 'user' AND provenance IS NULL AND sender_id IS NOT NULL "
+            "AND sender_id != '' ORDER BY created_at DESC LIMIT 1",
+            (session_key,))
+        return row["sender_id"] if row else None
+
     async def recent_with_sender_names(
         self, session_key: str, *, limit: int, before_utc: str | None = None
     ) -> list[dict]:
@@ -573,7 +584,8 @@ class HistoryRepository:
         idle clock — see _MACHINE_PROVENANCES. Goal rooms are exempt whole
         (goal-rooms plan D6): a room's own narration re-extracted as claims
         is the self-echo churn (2026-09-16: David's WFH schedule claim-written
-        4× in 4.5h from Bob's own roster text)."""
+        4× in 4.5h from Bob's own roster text). Eval sessions are exempt too
+        — fixtures are fiction."""
         rows = await self.db.fetch_all(
             """
             SELECT
@@ -588,6 +600,9 @@ class HistoryRepository:
             FROM messages sm
             WHERE sm.conversation_id NOT LIKE 'subagent:%'
               AND sm.conversation_id NOT LIKE 'agent:goal-%:utility'
+              -- eval fixtures are fiction: 2026-10-06 they had seeded 31
+              -- live claims (a fake Christmas trip, hello.py 'incidents')
+              AND sm.conversation_id NOT LIKE 'eval:%'
               AND (sm.provenance IS NULL
                    OR sm.provenance NOT IN ('steer', 'steer_relay', 'task_relay',
                                              'extraction_marker'))

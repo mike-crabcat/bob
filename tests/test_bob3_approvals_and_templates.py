@@ -256,3 +256,31 @@ async def test_outreach_tool_parents_under_goal(ctx, db, mock_wake, monkeypatch)
     goals = await GoalRepository(db).children_of(root["id"])
     outreach = [g for g in goals if g["kind"] == "outreach"]
     assert outreach and outreach[0]["parent_goal_id"] == root["id"]
+
+
+async def test_outreach_without_objective_is_one_way(ctx, db):
+    """2026-10-06 card drop: one-way deliveries registered a promise each
+    (and woke each recipient's chat) against a 24h backstop. No objective
+    = just send: nothing tracked, no wake."""
+    from server.repositories.tasks import TaskRepository
+    from server.services.whatsapp_outreach_tools import (
+        make_whatsapp_outreach_tools,
+    )
+
+    class _FakeBridge:
+        connected = True
+
+        async def send_message(self, jid, message):
+            return "req-1"
+
+    tools = {t.name: t for t in make_whatsapp_outreach_tools(
+        ctx, _FakeBridge(), "work")}
+    await db.execute(
+        "INSERT INTO contacts (id, name, phone_number, created_at, updated_at) "
+        "VALUES ('c-bea', 'Bea', '+61400000003', datetime('now'), datetime('now'))")
+    out = json.loads(await tools["send_whatsapp_to_contact"].handler(
+        contact_id="c-bea", message="here's your card"))
+    assert out["ok"]
+    assert not await TaskRepository(db).list_for_completer(
+        "agent:main:whatsapp:dm:61400000003")
+    assert not await TaskRepository(db).list_for_waiter("work")

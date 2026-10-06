@@ -24,6 +24,20 @@ async def entity_exists(db: Any, entity_id: str) -> bool:
     return row is not None
 
 
+async def similar_entity_ids(db: Any, entity_id: str, *, limit: int = 3) -> list[str]:
+    """Active entities sharing the invented id's type prefix and first name
+    token — "person-sylvain-ayrault" → ["person-sylvain"] (2026-10-06: the
+    model invents full-name slugs for entities keyed by first name)."""
+    parts = entity_id.strip().lower().split("-")
+    if len(parts) < 2:
+        return []
+    rows = await db.fetch_all(
+        "SELECT entity_id FROM memory_entities WHERE status = 'active' "
+        "AND (entity_id = ? OR entity_id LIKE ?) ORDER BY length(entity_id) LIMIT ?",
+        (f"{parts[0]}-{parts[1]}", f"{parts[0]}-{parts[1]}-%", limit))
+    return [r["entity_id"] for r in rows or [] if r["entity_id"] != entity_id]
+
+
 async def archive_entity(db: Any, entity_id: str) -> None:
     await db.execute(
         "UPDATE memory_entities SET status = 'archived' WHERE entity_id = ?",

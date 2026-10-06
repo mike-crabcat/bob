@@ -380,3 +380,57 @@ async def test_no_reply_final_text_stays_silent(
     await DispatchRunner(ctx).run(_spec(key, send_tool))
 
     assert send_tool.delivered == []
+
+
+async def test_human_message_on_steer_turn_gets_its_reply(
+        ctx, db, stub_llm, stub_history):
+    """2026-10-05 AI doom: Mike's message arrived mid-turn and was folded
+    into the running steer turn's re-flight (the spec keeps call_category
+    'steer'); the answer was dropped because steer isn't a delivering
+    category. A claimed human message makes the turn a reply."""
+    key = "test:final:steer-plus-human"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "[Steering request] context from Mike",
+                          dispatched=0, provenance="steer")
+    await svc.add_message(key, "user", "That'll probably get dropped.", dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    spec.call_category = "steer"
+    stub_llm["reply"] = "Registered — and noted about the overnight code work."
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == [stub_llm["reply"]]
+
+
+async def test_steer_only_turn_still_silent(ctx, db, stub_llm, stub_history):
+    """The steer decline stays silent: no human message claimed."""
+    key = "test:final:steer-only"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "[Steering request] nothing to do",
+                          dispatched=0, provenance="steer")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    spec.call_category = "steer"
+    stub_llm["reply"] = "Nothing to report; declining."
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == []
+
+
+async def test_email_turn_final_text_never_auto_sends(
+        ctx, db, stub_llm, stub_history):
+    """Email keeps the explicit email_reply contract: a human-claimed
+    email turn must not auto-deliver its final text."""
+    key = "test:final:email"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "an inbound email", dispatched=0)
+    send_tool = _FakeSendTool("email_reply")
+    spec = _spec(key, send_tool)
+    spec.call_category = "email_incoming"
+    stub_llm["reply"] = "Draft thoughts about the email."
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == []

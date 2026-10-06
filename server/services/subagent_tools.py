@@ -36,17 +36,22 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
     async def create_subagent(
         task: str,
         agent_type: str = "claude",
-        persona: bool = False,
-        model: str = "",
         contact_id: str | None = None,
         modality: str = "phone",
         goal_parent_id: str = "",
     ) -> str:
         """Spawn a subagent to work on a task asynchronously. Returns subagent_id immediately.
 
+        A subagent does NOT have your memory, chat history, people or
+        contacts. Work that needs any of those (learn about the group,
+        write something about members, recall what was said): do it
+        yourself here — long turns move to the background automatically and
+        keep every tool — or add_goal(...) with a child per person/item when
+        it splits. Such briefs are refused.
+
         agent_type:
-        - 'claude' (default): spawns Claude CLI subprocess with the task as prompt.
-        - 'local': runs in-process via run_turn (faster, no subprocess).
+        - 'claude' (default): Claude Code CLI in the workspace — files + bash
+          only. For code, scripts, builds, file processing.
         (For background shell commands use run_bg_process — that is process
         supervision, not a subagent: no model, no judgment, just a command
         whose completion wakes this conversation.)
@@ -76,9 +81,6 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         The subagent stays in 'running' until the call ends; the transcript
         lands in `result` via check_subagent.
 
-        persona: if true and local, load full agent persona; if false, uses minimal system prompt.
-        model: override model for local subagents (default: gpt-5.6-sol).
-
         After calling this, you MUST send a message to the user summarizing what you delegated.
         Use check_subagent to poll for results and message_subagent for follow-up."""
         from server.services.subagent_service import SubagentService
@@ -104,8 +106,6 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
             session_key,
             agent_type=agent_type,
             goal_parent_id=goal_parent_id or None,
-            persona=persona,
-            model=model,
             contact_id=contact_id,
             modality=modality,
         )

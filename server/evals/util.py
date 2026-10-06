@@ -89,6 +89,19 @@ def make_planted_bash(files: dict, *, cwd_subdir: str = ""):
         Do NOT write files under memory/ with this tool — use memory_write instead, or the memory index (claims, entities) will not pick them up.
 
         SANDBOX: The workspace is the only allowed directory. Reaching outside it (DB clients, /etc, /home/bob/data, /home/bob/config, ~, .., sudo, secrets) is blocked. Use memory_*/contact_*/group_*/docs_* tools for data outside the workspace — do not try to bypass blocks via subshells, python, or symlinks."""
+        # The fixture IS the world (2026-10-06): absolute paths used to
+        # reach the live workspace and ~/data — a fan-out case spent 86
+        # rounds mining real figurine history and an archived DB dump.
+        # Same sandbox filter as Bob's real bash, plus no /home/bob at all.
+        from server.services.workspace_tools import _check_command_safety
+        blocked = _check_command_safety(
+            command, db_path=None, data_dir=pathlib.Path("/home/bob/data"),
+            config_dir=pathlib.Path("/home/bob/config"))
+        if blocked:
+            return blocked
+        if "/home/bob" in command or "~/" in command:
+            return ("BLOCKED: path outside the workspace. The workspace is "
+                    "the cwd — use relative paths.")
         proc = await asyncio.create_subprocess_exec(
             "bash", "-c", command, cwd=cwd,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
