@@ -525,7 +525,12 @@ def _start_gateway() -> Any:
                     {"b64_json": base64.b64encode(png).decode()}]})
             if service == "runware" and method == "POST":
                 tid = str(_uuid.uuid4())
-                tasks[tid] = {"t0": time.monotonic(), "kind": rest}
+                try:
+                    payload = json.loads(raw or b"{}")
+                except ValueError:
+                    payload = {}
+                tasks[tid] = {"t0": time.monotonic(), "kind": rest,
+                              "payload": payload, "world": w}
                 return self._reply(200, {"taskUUID": tid, "status": "processing"})
             if service == "runware" and rest.startswith("v1/tasks/"):
                 tid = rest.split("/")[-1]
@@ -538,8 +543,8 @@ def _start_gateway() -> Any:
                 return self._reply(200, {"taskUUID": tid, "status": "completed",
                                          "artifactURL": f"{base}/v1/artifacts/{tid}"})
             if service == "runware" and rest.startswith("v1/artifacts/"):
-                from server.evals.cases._kit import real_mp4
-                return self._reply(200, real_mp4(2), "video/mp4")
+                t = tasks.get(rest.split("/")[-1]) or {}
+                return self._reply(200, _render_artifact(t), "video/mp4")
             return self._reply(404, {"error": f"no fixture for {service}/{rest}"})
 
         def _proxy_openai(self, w: Any, rest: str, raw: bytes) -> None:
@@ -582,6 +587,51 @@ def _start_gateway() -> Any:
     threading.Thread(target=server.serve_forever, name="eval-gateway",
                      daemon=True).start()
     return server
+
+
+def _render_artifact(task: dict) -> bytes:
+    """What a video API would hand back for THIS request: a slow zoom over
+    the actual input image at the requested size and duration. A fixed
+    test pattern got inspected (ffprobe: 64x64, 2s for a 5s 1024x1536 ask)
+    and correctly called a fake, 2026-10-08."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from server.evals.cases._kit import canon_image, real_mp4
+    payload = task.get("payload") or {}
+    w = task.get("world")
+    seconds = max(1, min(int(payload.get("duration") or 5), 10))
+    try:
+        width, height = (int(x) for x in str(payload.get("size") or "1280x720").split("x"))
+    except ValueError:
+        width, height = 1280, 720
+    width, height = width - width % 2, height - height % 2
+    src = None
+    for ref in payload.get("inputImages") or [payload.get("inputImage")]:
+        if ref and w is not None:
+            cand = (w.workspace / str(ref)) if not str(ref).startswith("/") else Path(ref)
+            if cand.is_file():
+                src = cand
+                break
+    with tempfile.TemporaryDirectory() as tmp:
+        if src is None:
+            src = Path(tmp) / "in.png"
+            src.write_bytes(canon_image("refpack-12-pint.png"))
+        out = f"{tmp}/out.mp4"
+        frames = seconds * 24
+        vf = (f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,"
+              f"crop={width * 2}:{height * 2},"
+              f"zoompan=z='min(zoom+0.0008,1.15)':d={frames}:s={width}x{height}:fps=24")
+        try:
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-loop", "1", "-i", str(src),
+                            "-vf", vf, "-t", str(seconds), "-pix_fmt", "yuv420p",
+                            "-c:v", "libx264", "-preset", "ultrafast",
+                            "-movflags", "+faststart", out],
+                           check=True, timeout=120)
+            return open(out, "rb").read()
+        except Exception:
+            return real_mp4(seconds)
 
 
 def gateway_url(w: "World", service: str) -> str:

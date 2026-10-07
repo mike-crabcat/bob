@@ -38,6 +38,11 @@ async def cap_reminder_fires_and_lands(w):
     local_now = w.now.astimezone(PERTH)
     target = (local_now + timedelta(days=1)).replace(hour=9, minute=0, second=0,
                                                      microsecond=0)
+    # Between midnight and 6am "tomorrow at 9am" is genuinely ambiguous
+    # (people mean the coming morning) — accept today 9am too.
+    targets = [target]
+    if local_now.hour < 6:
+        targets.append(target - timedelta(days=1))
     rows = await WakeupRepository(w.db).list_all_scheduled(limit=200)
     when = []
     for r in rows:
@@ -49,8 +54,8 @@ async def cap_reminder_fires_and_lands(w):
         except ValueError:
             continue
     w.flag("scheduled", [t.astimezone(PERTH).isoformat() for t in when])
-    w.flag("scheduled_at_9am_local", any(abs((t - target).total_seconds()) <= 15 * 60
-                                         for t in when))
+    w.flag("scheduled_at_9am_local", any(abs((t - tg).total_seconds()) <= 15 * 60
+                                         for t in when for tg in targets))
     before = len(w.sent_to("Mike"))
     horizon = (target + timedelta(minutes=30)) - datetime.now(PERTH)
     await w.tick(advance=horizon)
