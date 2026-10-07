@@ -121,6 +121,23 @@ async def test_get_session_messages_defaults_to_current_session(seeded):
     assert contents == ["Lunch Sunday?", "I'm in and I'm bringing my kids", "Noted."]
 
 
+async def test_get_session_messages_aliases_literal_current(seeded):
+    """session_key="current" must resolve to the calling session, not read
+    as a foreign key and get denied (2026-10-08: the rain-jacket routine's
+    mandatory history check died on exactly this and the forecast went out
+    with no date context)."""
+    tools = make_session_tools(seeded, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
+    result = json.loads(await _tool(tools, "get_session_messages").handler(
+        session_key="current", limit=50))
+    assert result["session_key"] == GROUP_KEY
+    assert isinstance(result["messages"], list)
+
+    # Same alias on the search tool.
+    search = json.loads(await _tool(tools, "search_session_messages").handler(
+        query="Lunch", session_key="current"))
+    assert search["matches"], "aliased search should hit the current session"
+
+
 async def test_get_session_messages_resolves_sender_names(seeded):
     tools = make_session_tools(seeded, is_trusted=False, contact_id=None, session_key=GROUP_KEY)
     result = json.loads(await _tool(tools, "get_session_messages").handler())

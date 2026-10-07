@@ -157,7 +157,16 @@ def make_session_tools(
         page preceding it. Repeat to walk back through the full history.
         (Messages in the same second as the boundary may be skipped — use
         search_session_messages when precision matters.)"""
-        target = session_key.strip() or current_session_key
+        # Models read "defaults to the current session" and sometimes pass the
+        # literal word instead of omitting the arg (2026-10-08: luna passed
+        # session_key="current" on the rain-jacket routine's mandatory
+        # history check → "Session not accessible" → the forecast posted
+        # with no history context and the wrong day's grid). Alias the
+        # natural self-references instead of denying them.
+        key = session_key.strip()
+        if key.lower() in {"", "current", "this", "this session"}:
+            key = current_session_key
+        target = key
         if not target:
             return json.dumps({"error": "No session specified"})
 
@@ -235,7 +244,12 @@ def make_session_tools(
                 matches = await HistoryRepository(db).search_messages_with_sender_names(
                     q, session_key=None, limit=limit)
         else:
-            target = session_key.strip() or current_session_key
+            # Same self-reference aliases as get_session_messages (a literal
+            # "current" must not read as a foreign session).
+            key = session_key.strip()
+            if key.lower() in {"", "current", "this", "this session"}:
+                key = current_session_key
+            target = key
             if not target:
                 return json.dumps({"error": "No session specified"})
             if accessible_keys is not None and target not in accessible_keys:
