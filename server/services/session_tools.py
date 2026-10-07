@@ -207,7 +207,10 @@ def make_session_tools(
         Use this for "when did we discuss X" / "what did <person> say about X"
         over the full history — memory recall only holds what extraction kept,
         this reads what was actually said. Use get_session_messages(before=...)
-        to read the context around a match."""
+        to read the context around a match.
+        Searches MESSAGE TEXT only — it cannot tell you how work was executed
+        (which tool, pipeline, or settings produced a thing); check workspace
+        logs and output files with bash for that."""
         q = query.strip()
         if not q:
             return json.dumps({"error": "Query cannot be empty"})

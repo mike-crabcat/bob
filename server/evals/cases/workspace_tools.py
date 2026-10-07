@@ -90,8 +90,8 @@ def _make_mock_media_tools():
         # 1x1 red pixel PNG — enough for the injection flow, nothing to
         # actually analyse, so the case tests the FETCH decision, not vision.
         return ImageInjection(
-            text=f"Image loaded from {path} (85 bytes)",
-            data_url="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8BQDwAEgAF/p4BPBwAAAABJRU5ErkJggg==",
+            text=f"Image loaded from {path} (70 bytes)",
+            data_url="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
         )
 
     return [read_image]

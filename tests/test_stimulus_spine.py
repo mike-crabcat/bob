@@ -151,7 +151,7 @@ async def test_drain_batches_per_target_and_marks_processed(db, ctx, monkeypatch
     assert counts["steered"] == 2
     assert len(calls) == 1  # batched: correlated events wake ONE turn
     assert "120363410716086644" in calls[0][0]
-    assert "no reply is needed" in calls[0][1]  # silent-decline line
+    assert "finish with NO_REPLY" in calls[0][1]  # silent-decline line (final-text contract, 2026-10-07)
     assert calls[0][1].count("[Stimulus:") == 2
     assert (await StimulusRepository(db).pending_events()) == []
 
@@ -194,4 +194,5 @@ def test_render_instruction_carries_summary_and_dedup():
     text = render_instruction([{**ENVELOPE}])
     assert "SOL +3.2% over 1h" in text
     assert "mom1h:SOL:2026-09-04" in text
-    assert "no reply is needed" in text
+    assert "finish with NO_REPLY" in text
+    assert "status messages" in text  # no progress sends about alerts

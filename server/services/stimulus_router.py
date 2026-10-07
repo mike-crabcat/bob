@@ -166,8 +166,10 @@ def render_instruction(events: list[dict[str, Any]]) -> str:
         if e.get("summary"):
             lines.append(str(e["summary"]))
     lines.append(
-        "If you act on this, do it with the platform's tools and report here; "
-        "if not, no reply is needed.")
+        "If you act on this, do it with the platform's tools and put the "
+        "outcome in your final text. If you cannot act or cannot verify the "
+        "action, that is a decline — finish with NO_REPLY. Do not send "
+        "progress or status messages about stimulus alerts.")
     return "\n".join(lines)
 
 
