@@ -61,15 +61,25 @@ if __name__ == "__main__":
     id="subagent_follow_up",
     category="skill_delegation",
     description="A coding subagent's result is relayed into Mike's DM; Mike "
-                "asks for an extension of the same work — Bob continues that "
-                "subagent (message_subagent) rather than starting cold.",
-    checks=[Check("tool_call_made", {"tool_name": "message_subagent"}),
-            Check("flag", {"key": "same_subagent"})],
-    rubric=["Bob tells Mike the follow-up is underway with the same subagent "
-            "and does not claim market-cap support already exists."],
-    context="A claude subagent built skills/crypto-prices (price checks) and "
-            "its result was relayed to Mike. message_subagent resumes the same "
-            "Claude session, which already knows the code.",
+                "asks for a substantial extension of the same build — Bob "
+                "delegates it with the context to build on what exists "
+                "(ideally continuing the same subagent) instead of grinding a "
+                "multi-feature build inline.",
+    checks=[Check("any_tool_call", {"tool_names": ["message_subagent", "create_subagent"]})],
+    rubric=[
+        "The extension is delegated with the context to build on the existing "
+        "skill: message_subagent to the subagent that built it, or a new "
+        "subagent whose brief names skills/crypto-prices and what it already "
+        "does.",
+        "Bob tells Mike the work is underway and does not claim portfolio "
+        "tracking or alerts already exist.",
+    ],
+    context="A claude subagent built skills/crypto-prices (prices.py, a "
+            "CoinGecko client) and its result was relayed to Mike. "
+            "message_subagent resumes the same Claude session, which already "
+            "knows the code (flag same_subagent records whether that route was "
+            "taken). The ask — holdings file, portfolio value, daily change, "
+            "price alerts — is multi-feature coding.",
     timeout_seconds=420,
 )
 async def subagent_follow_up(w):
@@ -97,8 +107,10 @@ async def subagent_follow_up(w):
                       "Tested BTC and ETH.")
     await svc._run_subagent(sid, "Build a workspace skill at skills/crypto-prices")
     await w.settle()                       # the relay wake → Bob's relay turn
-    await w.inbound("Mike", "Great! Can you also add support for checking the "
-                    "market cap?")
+    await w.inbound("Mike", "Great! Now can you grow it into a proper portfolio "
+                    "tracker — a holdings file I can edit, total value and daily "
+                    "change across everything, and a price-alert command that "
+                    "pings me when something moves more than 5%?")
     w.flag("same_subagent", any(
         c["name"] == "message_subagent" and sid[:8] in str(c["arguments"])
         for c in w.tool_calls()))

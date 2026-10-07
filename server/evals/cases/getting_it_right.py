@@ -28,6 +28,7 @@ from server.evals.registry import eval_case
     ],
     context="Bob delivered (1) a card-game design doc, then (2) a 10-slide "
             "text-only rules SLIDE DECK; both files are in the workspace.",
+    timeout_seconds=600,   # a real rework can run long (production budget 1800s)
 )
 async def ambiguous_reference_names_its_target(w):
     w.files({

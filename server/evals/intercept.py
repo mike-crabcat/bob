@@ -516,6 +516,9 @@ def _start_gateway() -> Any:
                 w.api_calls.append({"service": service, "method": method,
                                     "path": rest, "bytes": len(raw),
                                     "body": raw[:2000].decode("utf-8", "replace")})
+            if service == "openai" and rest.startswith("v1/images/") \
+                    and w is not None and w.real_image_api:
+                return self._proxy_openai(w, rest, raw)
             if service == "openai" and rest.startswith("v1/images/"):
                 png = canon_image("refpack-08-cartoon.png")
                 return self._reply(200, {"created": int(time.time()), "data": [
@@ -538,6 +541,36 @@ def _start_gateway() -> Any:
                 from server.evals.cases._kit import real_mp4
                 return self._reply(200, real_mp4(2), "video/mp4")
             return self._reply(404, {"error": f"no fixture for {service}/{rest}"})
+
+        def _proxy_openai(self, w: Any, rest: str, raw: bytes) -> None:
+            """Opt-in (w.real_image_api): forward to the real OpenAI images
+            API with the eval process's key, quality forced to low. For
+            cases where what the image SHOWS is under test — a canned image
+            gets inspected and correctly called broken."""
+            import os
+            import urllib.error
+            import urllib.request
+            ctype = self.headers.get("Content-Type", "application/json")
+            body = raw
+            if ctype.startswith("application/json"):
+                data = json.loads(raw or b"{}")
+                data["quality"] = "low"
+                body = json.dumps(data).encode()
+            elif "boundary=" in ctype:
+                b = ctype.split("boundary=", 1)[1].strip().encode()
+                field = (b"--" + b + b'\r\nContent-Disposition: form-data; '
+                         b'name="quality"\r\n\r\nlow\r\n')
+                body = raw.replace(b"--" + b + b"--", field + b"--" + b + b"--", 1)
+            key = os.getenv("BOB_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+            req = urllib.request.Request(
+                f"https://api.openai.com/{rest}", data=body, method="POST",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": ctype})
+            w.api_calls[-1]["real"] = True
+            try:
+                with urllib.request.urlopen(req, timeout=240) as r:
+                    return self._reply(r.status, r.read())
+            except urllib.error.HTTPError as e:
+                return self._reply(e.code, e.read())
 
         def do_POST(self) -> None:
             self._route("POST")

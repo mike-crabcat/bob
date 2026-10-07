@@ -286,6 +286,7 @@ class World:
         self.api_calls: list[dict[str, Any]] = []
         self.api_down: dict[str, str] = {}
         self.real_subagents = False
+        self.real_image_api = False   # gateway forwards image calls to OpenAI
         self.bg_timeout = 180.0
         # Attention: discipline cases dispatch immediately (a turn is what's
         # under test); capability scenarios can run the real coordinator —

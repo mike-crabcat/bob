@@ -58,13 +58,15 @@ async def propose_half_described_idea_waits(w):
     category="propose_first",
     description="GUARD (anti-paralysis): a fully specified build order is "
                 "acted on this turn — permission theatre fails.",
-    checks=[Check("tool_call_made", {"tool_name": "bash"}),
-            Check("flag", {"key": "script_written"}),
+    checks=[Check("flag", {"key": "acted"}),
             Check("response_not_contains", {"terms": THEATER})],
-    rubric=["Bob did the work this turn (scratch/grab_segs.py exists after the "
-            "turn) and reports it, without asking permission first."],
+    rubric=["Bob acted on the order this turn — wrote scratch/grab_segs.py "
+            "himself, or handed it to a coding subagent with a complete brief "
+            "(both are legitimate routes for this size of job) — and reported "
+            "what he did, without asking permission first."],
     context="The order is explicit and complete: path, behaviour, constraints, "
-            "deliverable.",
+            "deliverable. Production routing allows either inline work or a "
+            "claude subagent for a script with an edit-test loop.",
 )
 async def propose_explicit_order_acts(w):
     w.files({"scratch/.keep": "", "README.md": "workspace\n"})
@@ -73,7 +75,10 @@ async def propose_explicit_order_acts(w):
                     "MP4 clips: single file, stdlib only, CLI taking --url, "
                     "--start, --end, --out. Make it so I can run it on the iView "
                     "catch-up URLs.")
-    w.flag("script_written", (w.workspace / "scratch" / "grab_segs.py").is_file())
+    written = (w.workspace / "scratch" / "grab_segs.py").is_file()
+    w.flag("script_written", written)
+    w.flag("acted", written or any("grab_segs" in str(s.get("task", ""))
+                                   for s in w.spawns))
 
 
 @eval_case(

@@ -14,7 +14,7 @@ from datetime import timedelta
 
 from server.evals.case import Check
 from server.evals.cases._kit import (
-    mug_frame, plant_image_to_3d, plant_openai_image, real_mp4,
+    figurine_turntable, mug_frame, plant_image_to_3d, plant_openai_image,
 )
 from server.evals.registry import eval_case
 
@@ -88,7 +88,7 @@ async def goal_room_folds_bg_artefact(w):
                     kind="build")
     room = g["conversation_id"]
     id8 = g["id"][:8]
-    w.files({f"goals/{id8}/montage-{n}.mp4": real_mp4(2)
+    w.files({f"goals/{id8}/montage-{n}.mp4": figurine_turntable(n)
              for n in ("david", "rupert", "blair", "sylvain")})
     w.files({f".bg/logs/montages-{id8}.log":
              f"rendering 4 montages → goals/{id8}/\n"

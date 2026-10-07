@@ -74,6 +74,54 @@ def mug_frame(frame: int, total: int = 240) -> bytes:
     return buf.getvalue()
 
 
+_FIG_CACHE: dict[str, bytes] = {}
+
+
+def figurine_turntable(name: str, *, seconds: int = 3) -> bytes:
+    """A real MP4 turntable of a stylised figurine, name-captioned — what a
+    'member montage' render log promises (a generic test pattern got the
+    renders judged wrong and deleted, 2026-10-08)."""
+    if name in _FIG_CACHE:
+        return _FIG_CACHE[name]
+    import io
+    import math
+    import subprocess
+    import zlib
+
+    from PIL import Image, ImageDraw
+    hue = zlib.crc32(name.encode()) % 360
+    import colorsys
+    r, g, b = (int(c * 255) for c in colorsys.hsv_to_rgb(hue / 360, 0.55, 0.85))
+    frames = []
+    n = seconds * 12
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        img = Image.new("RGB", (256, 256), (28, 28, 34))
+        d = ImageDraw.Draw(img)
+        d.ellipse((68, 214, 188, 236), fill=(60, 60, 66))                  # plinth
+        w = int(44 + 10 * abs(math.cos(a)))
+        d.rectangle((128 - w // 2, 120, 128 + w // 2, 214), fill=(r, g, b))  # body
+        d.ellipse((104, 72, 152, 120), fill=(232, 200, 170))               # head
+        d.polygon([(100, 80), (156, 80), (128, 22 + int(6 * math.sin(a)))],
+                  fill=(max(r - 60, 0), max(g - 60, 0), max(b - 60, 0)))   # hat
+        eye = int(10 * math.sin(a))
+        d.ellipse((118 + eye, 90, 124 + eye, 96), fill=(20, 20, 20))
+        d.ellipse((132 + eye, 90, 138 + eye, 96), fill=(20, 20, 20))
+        d.text((10, 8), f"{name.upper()} - figurine montage", fill=(240, 240, 240))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        frames.append(buf.getvalue())
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        out = f"{tmp}/m.mp4"
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "image2pipe",
+                        "-framerate", "12", "-i", "-", "-pix_fmt", "yuv420p",
+                        "-c:v", "libx264", "-movflags", "+faststart", out],
+                       input=b"".join(frames), check=True, timeout=120)
+        _FIG_CACHE[name] = open(out, "rb").read()
+    return _FIG_CACHE[name]
+
+
 _MP4_CACHE: dict[int, bytes] = {}
 
 

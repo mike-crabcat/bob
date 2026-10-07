@@ -265,9 +265,14 @@ def _classify(w: World, trial: Trial) -> str:
                     return "tool_format"
         if t.result and _LEAKED_TOOL_TEXT.search(t.result):
             return "tool_format"
-        if any(e["output"].startswith("[raised] TypeError") and "argument" in e["output"]
-               for e in t.tool_events):
-            return "tool_format"   # schema violation: invented/missing params
+        # Schema violations (invented/missing params) count only when the
+        # tool never succeeded afterwards — a recovered retry isn't the cause.
+        for i, e in enumerate(t.tool_events):
+            if e["output"].startswith("[raised] TypeError") and "argument" in e["output"]:
+                if not any(later["name"] == e["name"]
+                           and not later["output"].startswith("[raised]")
+                           for later in t.tool_events[i + 1:]):
+                    return "tool_format"
     if turns and all(not (t.result or "").strip() and not t.tool_calls
                      for t in turns) and not w.deliveries:
         return "empty_response"
