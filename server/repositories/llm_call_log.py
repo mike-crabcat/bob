@@ -247,6 +247,22 @@ class LlmCallLogRepository:
                ORDER BY call_category, model""")
         return [dict(r) for r in rows] if rows else []
 
+    async def usage_by_model(self) -> list[dict[str, Any]]:
+        """Whole-table usage per model + status counts — an eval world's DB
+        holds exactly one trial's calls."""
+        rows = await self.db.fetch_all(
+            """SELECT model, provider, call_category,
+                      SUM(COALESCE(prompt_tokens, 0)) as prompt_tokens,
+                      SUM(COALESCE(completion_tokens, 0)) as completion_tokens,
+                      SUM(COALESCE(cached_tokens, 0)) as cached_tokens,
+                      COUNT(*) as calls,
+                      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                      GROUP_CONCAT(CASE WHEN status = 'failed'
+                                   THEN substr(error_message, 1, 300) END, ' | ')
+                          as errors
+               FROM llm_call_log GROUP BY model, provider, call_category""")
+        return [dict(r) for r in rows] if rows else []
+
     async def recent_for_transcript(
         self, session_key: str, *, limit: int,
     ) -> list[dict[str, Any]]:
