@@ -402,10 +402,13 @@ def _routing_extra(settings: Any, resolved_model: str) -> dict[str, Any]:
       so they win price-weighted routing often. The comma list ("" or "off"
       to disable) becomes provider.quantizations, keeping competition among
       the allowed-precision hosts.
-    - providers (2026-10-07): comma list becomes provider.allow — pins
-      serving to named providers after attribution showed sick endpoints
-      inside the fp8 pool (Novita reasoning-only completions, Morph/NextBit
-      15-19-minute tails). "" disables the pin.
+    - providers (2026-10-07): comma list pins serving to named providers
+      after attribution showed sick endpoints inside the fp8 pool (Novita
+      reasoning-only completions, Morph/NextBit 15-19-minute tails).
+      Emitted as provider.order + allow_fallbacks:false — probe-verified
+      live: the Responses API rejects provider.allow ("unrecognized key",
+      it's a chat/completions-only field) but accepts order and
+      allow_fallbacks. "" disables the pin.
 
     Non-OpenRouter models get {}."""
     from server.services import model_registry
@@ -419,7 +422,8 @@ def _routing_extra(settings: Any, resolved_model: str) -> dict[str, Any]:
     raw_providers = getattr(settings.openrouter, "providers", "") or ""
     allowed = [p.strip() for p in raw_providers.split(",") if p.strip()]
     if allowed and allowed != ["off"]:
-        provider["allow"] = allowed
+        provider["order"] = allowed
+        provider["allow_fallbacks"] = False
     if not provider:
         return {}
     return {"extra_body": {"provider": provider}}

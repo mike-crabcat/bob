@@ -82,11 +82,13 @@ def test_routing_extra_pins_providers_when_set():
     assert _routing_extra(
         _settings(providers="StreamLake, GMICloud"), OR_MODEL
     ) == {"extra_body": {"provider": {
-        "quantizations": ["fp8"], "allow": ["StreamLake", "GMICloud"]}}}
+        "quantizations": ["fp8"], "order": ["StreamLake", "GMICloud"],
+        "allow_fallbacks": False}}}
     # Pin alone still works; disabled pin leaves quantizations untouched.
     assert _routing_extra(
         _settings(quantizations="", providers="StreamLake"), OR_MODEL
-    ) == {"extra_body": {"provider": {"allow": ["StreamLake"]}}}
+    ) == {"extra_body": {"provider": {
+        "order": ["StreamLake"], "allow_fallbacks": False}}}
     assert _routing_extra(_settings(providers=""), OR_MODEL) == {
         "extra_body": {"provider": {"quantizations": ["fp8"]}}}
     assert _routing_extra(_settings(providers="off"), OR_MODEL) == {
