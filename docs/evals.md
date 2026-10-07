@@ -228,8 +228,15 @@ loses on `behavioural`.
 
 ## Judge calibration
 
-The judge (`gpt-6-astra`, temperature 0) is an instrument and gets
-measured like one. The labelled set lives at
+The judge (default `gpt-6-astra`, temperature 0; override with
+`--judge-model`, `--judge-effort`) is an instrument and gets measured like
+one.
+
+**Circuit breaker.** Three judge failures that look run-wide (no credits,
+quota, billing, bad key) abort the run, and those trials aren't recorded,
+because they say nothing about the model. On 2026-10-08 the OpenAI
+account ran dry mid-run; without the breaker every judged trial became a
+harness error. The labelled set lives at
 `~/data/evals/calibration.jsonl`, outside the repo because transcripts
 carry prompts. Each entry holds `case_id`, `rubric`, `transcript`,
 `response`, `label` (pass/fail), optional `item_labels`, `labeller` and
@@ -255,6 +262,21 @@ Mike's confirmation.
   long"). Each disputed entry is annotated in its `note`.
 - In the same set the v1 judge failed two answers identical to ones it
   passed. That's the noise the checklist judge removes.
+- **z-ai/glm-5.3@low: 98% (39/40), κ = 0.94.** Roughly 7× cheaper per
+  token, fast, and doesn't need OpenAI credit. Its one disagreement is an
+  entry both judges fail, so the label is probably wrong. Caveats: the
+  labels are Claude's drafts until reviewed, and a GLM judge scoring GLM
+  models risks same-family bias, so prefer a cross-vendor judge when
+  comparing GLM against OpenAI models.
+
+## External dependencies of a run
+
+- Bob's own turns use the model under test.
+- The judge uses whatever `--judge-model` names (default: OpenAI).
+- Memory embeddings use OpenAI `text-embedding-3-small`. Without OpenAI
+  credit, recall degrades to full-text search, as it does in production.
+- `persona_no_phantom_refusal` makes real OpenAI image calls.
+- `cap_subagent_end_to_end` runs real Claude Code.
 
 ## Known gaps
 
