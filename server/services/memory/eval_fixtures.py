@@ -1,69 +1,81 @@
-"""Eval-fixture seeding for the memory tables (Phase 1, 2026-09-28).
+"""Memory seeding for eval worlds (server/evals/world.py).
 
-The memory tables' SQL lives here, not in the eval case files —
-test_sql_ownership enforces the boundary, and seeding through this
-module also populates the FTS index the recall path resolves through
-(raw-SQL inserts in the case file bypassed it: the 2026-09-28 baseline
-M3 case queried honestly and still couldn't find the seeded person).
-
-All fixture IDs are prefixed ``eval-``; ``cleanup_eval_fixtures``
-removes exactly those rows and index entries.
+Worlds are throwaway DBs, so there is nothing to clean up: the old
+live-DB ``eval-`` prefix + cleanup path is retired (docs/evals.md). Seeds
+go through the production write path (write_entity → write_claim →
+FTS → embedding), so recall/find see them exactly as they see
+extracted memory. The memory tables' SQL stays in this package
+(test_sql_ownership owns the boundary).
 """
 
 from __future__ import annotations
 
+import re
+import sqlite3
 import uuid
 from typing import Any
 
+_ENTITY_REF = re.compile(r"^[a-z]+-[a-z0-9-]+$")
 
-async def seed_entity(db: Any, entity_id: str, entity_type: str,
-                      display_name: str,
-                      claims: list[tuple[str, str]]) -> None:
-    """Create (or reactivate) an eval entity with scalar claims, indexed."""
-    await db.execute(
-        "INSERT INTO memory_entities (entity_id, entity_type, display_name, "
-        "status) VALUES (?, ?, ?, 'active') "
-        "ON CONFLICT(entity_id) DO UPDATE SET status='active'",
-        (entity_id, entity_type, display_name))
-    # FTS row (entity_id, display_name, rendered_body) — recall resolves
-    # through this index; claims render into the body so name- and
-    # content-shaped queries both land.
-    body = " ".join(f"{k}: {v}" for k, v in claims)
-    await db.execute(
-        "INSERT INTO memory_entities_fts (entity_id, display_name, "
-        "rendered_body) VALUES (?, ?, ?)",
-        (entity_id, display_name, body))
-    # Embedding, the way production claim-writes populate it (claim_service
-    # embeds the rendered body): without this, fresh seeds are invisible to
-    # the embedding search path and evals under-measure recall. Best-effort
-    # — no API key / provider error degrades to FTS + display-name paths.
+
+async def seed_entity(ctx: Any, entity_id: str, entity_type: str,
+                      display_name: str, claims: list[tuple[str, str]],
+                      *, embed: bool = True) -> None:
+    """Create an entity with claims. A claim value that is an entity
+    reference (person-x, group-y) is stored as object_id."""
+    from server.services.memory import MemoryService
+    from server.services.memory.claim_service import (
+        update_entity_fts, write_claim,
+    )
+    from server.services.memory.models import Claim, EntityDocument
+
+    svc = MemoryService(ctx)
+    await svc.write_entity(ctx.settings.harness.workspace_dir, EntityDocument(
+        entity_id=entity_id, entity_type=entity_type,
+        display_name=display_name, status="active"))
+    for key, value in claims:
+        is_ref = bool(_ENTITY_REF.match(value)) and " " not in value
+        await write_claim(ctx.db, Claim(
+            id=f"claim-{uuid.uuid4().hex[:12]}", claim_type_key=key,
+            subject_id=entity_id,
+            object_id=value if is_ref else None,
+            value=None if is_ref else value))
+    await update_entity_fts(ctx.db, entity_id)
+    if embed:
+        await embed_entity(ctx.db, entity_id)
+
+
+async def embed_entity(db: Any, entity_id: str) -> None:
+    """Best-effort single-entity embedding (no key → FTS-only recall)."""
     try:
+        from server.services.memory.claim_types import render_entity
         from server.services.memory.embedding import embed_text, upsert_embedding
-        embedding = await embed_text(f"{display_name}\n{body}")
-        if embedding:
-            await upsert_embedding(db, entity_id, embedding)
+        row = await db.fetch_one(
+            "SELECT entity_type, display_name FROM memory_entities "
+            "WHERE entity_id = ?", (entity_id,))
+        if not row:
+            return
+        claims = await db.fetch_all(
+            "SELECT claim_type_key, object_id, value FROM memory_claims "
+            "WHERE status = 'active' AND subject_id = ?", (entity_id,))
+        body = await render_entity(
+            row["entity_type"], row["display_name"],
+            [dict(c) for c in claims], entity_id=entity_id, db=db)
+        vec = await embed_text(body)
+        if vec:
+            await upsert_embedding(db, entity_id, vec)
     except Exception:
         pass
-    for key, value in claims:
-        await db.execute(
-            "INSERT INTO memory_claims (id, claim_type_key, subject_id, "
-            "value, status, visibility, created_at) "
-            "VALUES (?, ?, ?, ?, 'active', 'channel', "
-            "strftime('%Y-%m-%dT%H:%M:%S','now'))",
-            (str(uuid.uuid4()), key, entity_id, value))
 
 
-async def cleanup_eval_fixtures(db: Any) -> None:
-    """Remove every eval-prefixed entity, claim, and FTS row."""
-    await db.execute(
-        "DELETE FROM memory_claims WHERE subject_id LIKE 'eval-%'")
-    await db.execute(
-        "DELETE FROM memory_entities_fts WHERE entity_id LIKE 'eval-%'")
-    try:
-        await db.execute(
-            "DELETE FROM memory_entity_embeddings WHERE entity_id LIKE "
-            "'eval-%'")
-    except Exception:
-        pass  # vec table unavailable in some builds
-    await db.execute(
-        "DELETE FROM memory_entities WHERE entity_id LIKE 'eval-%'")
+def export_self_claims(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Self-bob's brief-whitelisted claims from an (operator-opened,
+    read-only) production DB — the snapshot's self-knowledge, so world
+    prompts carry the same learned practices production turns do."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT claim_type_key, value, created_at FROM memory_claims "
+        "WHERE subject_id = 'self-bob' AND status = 'active' "
+        "AND claim_type_key IN ('self_state', 'self_image', 'practice', 'limit') "
+        "AND value IS NOT NULL ORDER BY created_at").fetchall()
+    return [dict(r) for r in rows]

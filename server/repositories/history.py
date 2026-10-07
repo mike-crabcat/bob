@@ -465,6 +465,13 @@ class HistoryRepository:
         text = text.strip()
         return text if len(text) <= 1800 else text[:1800] + "…"
 
+    async def set_created_at(self, message_id: str, created_at: str) -> None:
+        """Backdate a stored row ('YYYY-MM-DD HH:MM:SS' UTC) — eval worlds
+        seed history that happened before the turn under test."""
+        await self.db.execute(
+            "UPDATE messages SET created_at = ? WHERE id = ?",
+            (created_at, message_id))
+
     async def restore_pending(self, message_ids: list[str]) -> None:
         """Undo a dispatch claim (e.g. after LLM quota failure)."""
         if not message_ids:

@@ -165,3 +165,13 @@ class McpServerRepository:
             "SELECT a.conversation_id, a.attached_by, a.created_at FROM "
             "conversation_mcp_attachments a WHERE a.mcp_server_id = ? "
             "ORDER BY a.created_at", (server_id,))]
+
+
+def export_rows_readonly(conn: Any) -> list[dict[str, Any]]:
+    """Enabled server rows from an operator-opened read-only sqlite3
+    connection (``bob eval snapshot`` reads the live DB this way to list
+    each server's tools for eval worlds)."""
+    import sqlite3
+    conn.row_factory = sqlite3.Row
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM mcp_servers WHERE enabled = 1 ORDER BY name").fetchall()]

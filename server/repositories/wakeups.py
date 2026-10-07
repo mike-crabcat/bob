@@ -77,20 +77,6 @@ class WakeupRepository:
         )
         return bool(count)
 
-    async def delete_eval_wakeups(self) -> None:
-        """Eval-fixture removal (goal_behavior cases): wakeups aimed at
-        eval sessions or eval-goal rooms. Production rows never match."""
-        await self.db.execute(
-            "DELETE FROM wakeups WHERE conversation_id LIKE 'eval:%' "
-            "OR conversation_id LIKE 'agent:goal-eval-%' "
-            "OR conversation_id LIKE 'agent:goal-eg%'")
-        # Promise backstops key on payload.task_id, not goal_id — once the
-        # eval promise row is gone its task_due wake is an orphan.
-        await self.db.execute(
-            "UPDATE wakeups SET status = 'cancelled' WHERE status = 'scheduled' "
-            "AND kind = 'task_due' AND json_extract(payload_json, '$.task_id') "
-            "NOT IN (SELECT id FROM goals)")
-
     async def cancel_for_goal(self, goal_id: str) -> int:
         return await self.db.execute(
             "UPDATE wakeups SET status = 'cancelled' "
@@ -115,6 +101,22 @@ class WakeupRepository:
             "AND json_extract(payload_json, '$.task_id') = ?",
             (task_id,),
         )
+
+    async def pull_forward(self, within_seconds: float) -> int:
+        """Make scheduled wakeups due within the window due NOW (eval worlds
+        fast-forward schedules without faking the clock). Returns count."""
+        now = datetime.now(timezone.utc)
+        horizon = now.timestamp() + within_seconds
+        rows = await self.db.fetch_all(
+            "SELECT id, not_before FROM wakeups WHERE status = 'scheduled'")
+        ids = [r["id"] for r in rows
+               if (when := _parse_instant(r["not_before"])) is not None
+               and when.timestamp() <= horizon]
+        for wid in ids:
+            await self.db.execute(
+                "UPDATE wakeups SET not_before = ? WHERE id = ? "
+                "AND status = 'scheduled'", (now.isoformat(), wid))
+        return len(ids)
 
     async def claim_due(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Claim due wakeups by CAS scheduled→fired one at a time; only rows

@@ -220,7 +220,9 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
         path = workspace_dir / rel
         mtimes[f"self:{rel}"] = path.stat().st_mtime if path.is_file() else 0.0
 
-    mtime_hash = tuple(mtimes.items())
+    # The directory rides the key too: eval worlds (server/evals) run
+    # concurrent workspaces whose files can share mtimes.
+    mtime_hash = (str(workspace_dir), tuple(mtimes.items()))
     if _cached_prompt is not None and _cached_prompt[0] == mtime_hash:
         return _cached_prompt[1] + await _self_brief_suffix(db)
 
