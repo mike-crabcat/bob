@@ -1,4 +1,13 @@
-"""Structural and LLM-as-judge evaluators."""
+"""Scoring: mechanical checks first, then the checklist judge.
+
+The old judge averaged correctness/relevance/completeness into one number
+against a prose rubric and cut at 0.7 — a fuzzy score over a buried
+standard. Now every rubric item is a binary statement judged on its own,
+with a reason; the trial passes only if all items pass. The judge model
+defaults to gpt-6-astra (2026-09-28: nano false-negatived verbatim-correct
+quotes) at temperature 0, and its agreement with hand labels is measured
+by ``bob eval judge-calibrate``.
+"""
 
 from __future__ import annotations
 
@@ -7,348 +16,200 @@ import logging
 import time
 from typing import Any
 
-from server.evals.case import (
-    EvalCase,
-    JudgeCriteria,
-    JudgeResult,
-    StructuralCheck,
-    StructuralCheckResult,
-)
-from server.context import AppContext
+from server.evals.case import Check, CheckResult, EvalCase, JudgeResult, RubricVerdict
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_JUDGE_MODEL = "gpt-6-astra"
 
-class StructuralJudge:
-    """Validates LLM responses against structural expectations."""
 
-    def check(
-        self,
-        response: str,
-        check_def: StructuralCheck,
-        context: dict[str, Any] | None = None,
-    ) -> StructuralCheckResult:
-        handler = getattr(self, f"_check_{check_def.kind}", None)
-        if handler is None:
-            return StructuralCheckResult(
-                check=check_def, passed=False,
-                detail=f"Unknown check kind: {check_def.kind}",
-            )
-        return handler(response, check_def, context or {})
+# --------------------------------------------------------------------------
+# checks
+# --------------------------------------------------------------------------
 
-    def check_all(
-        self,
-        response: str,
-        checks: list[StructuralCheck],
-        context: dict[str, Any] | None = None,
-    ) -> list[StructuralCheckResult]:
-        return [self.check(response, c, context) for c in checks]
+def run_checks(checks: list[Check], *, response: str,
+               tool_calls: list[dict[str, Any]], flags: dict[str, Any],
+               delivered: dict[str, list[str]], any_delivery: bool
+               ) -> list[CheckResult]:
+    return [_check(c, response, tool_calls, flags, delivered, any_delivery)
+            for c in checks]
 
-    def _check_json_valid(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        try:
-            json.loads(response)
-            return StructuralCheckResult(check=check, passed=True)
-        except json.JSONDecodeError as e:
-            return StructuralCheckResult(check=check, passed=False, detail=str(e))
 
-    def _check_min_length(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        min_len = check.params.get("min_length", 0)
-        passed = len(response.strip()) >= min_len
-        return StructuralCheckResult(
-            check=check, passed=passed,
-            detail=f"{len(response.strip())} chars (min {min_len})" if not passed else "",
-        )
+def _ok(c: Check) -> CheckResult:
+    return CheckResult(check=c, passed=True)
 
-    def _check_max_length(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        max_len = check.params.get("max_length", float("inf"))
-        passed = len(response.strip()) <= max_len
-        return StructuralCheckResult(
-            check=check, passed=passed,
-            detail=f"{len(response.strip())} chars (max {max_len})" if not passed else "",
-        )
 
-    def _check_field_present(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        try:
-            data = json.loads(response)
-        except json.JSONDecodeError:
-            return StructuralCheckResult(check=check, passed=False, detail="Not valid JSON")
-        missing = [f for f in check.params.get("fields", []) if f not in data or not data[f]]
-        if missing:
-            return StructuralCheckResult(check=check, passed=False, detail=f"Missing: {missing}")
-        return StructuralCheckResult(check=check, passed=True)
+def _bad(c: Check, detail: str) -> CheckResult:
+    return CheckResult(check=c, passed=False, detail=detail)
 
-    def _check_field_values(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        try:
-            data = json.loads(response)
-        except json.JSONDecodeError:
-            return StructuralCheckResult(check=check, passed=False, detail="Not valid JSON")
-        field_name = check.params.get("field", "")
-        allowed = check.params.get("allowed", [])
-        value = data.get(field_name)
-        if value not in allowed:
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"{field_name}={value!r}, allowed={allowed}",
-            )
-        return StructuralCheckResult(check=check, passed=True)
 
-    def _check_json_schema(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        try:
-            data = json.loads(response)
-        except json.JSONDecodeError:
-            return StructuralCheckResult(check=check, passed=False, detail="Not valid JSON")
-        errors: list[str] = []
-        required = check.params.get("required_fields", [])
-        for f in required:
-            if f not in data:
-                errors.append(f"missing required field: {f}")
-        array_field = check.params.get("array_field")
-        if array_field and array_field in data:
-            arr = data[array_field]
-            if not isinstance(arr, list):
-                errors.append(f"{array_field} is not an array")
-            else:
-                min_items = check.params.get("min_items", 0)
-                max_items = check.params.get("max_items", float("inf"))
-                if len(arr) < min_items:
-                    errors.append(f"{array_field} has {len(arr)} items (min {min_items})")
-                if len(arr) > max_items:
-                    errors.append(f"{array_field} has {len(arr)} items (max {max_items})")
-                item_required = check.params.get("item_required_fields", [])
-                for i, item in enumerate(arr):
-                    if isinstance(item, dict):
-                        for f in item_required:
-                            if f not in item:
-                                errors.append(f"{array_field}[{i}] missing '{f}'")
-        if errors:
-            return StructuralCheckResult(check=check, passed=False, detail="; ".join(errors))
-        return StructuralCheckResult(check=check, passed=True)
-
-    def _check_response_contains(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        terms = check.params.get("terms", [])
-        lower = response.lower()
-        found = [t for t in terms if t.lower() in lower]
-        if not found:
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"None of {terms} found in response",
-            )
-        return StructuralCheckResult(check=check, passed=True)
-
-    def _check_tool_call_made(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        tool_calls = ctx.get("tool_calls", [])
-        target = check.params.get("tool_name", "")
-        found = any(tc.get("name") == target for tc in tool_calls)
-        if not found:
-            names = [tc.get("name", "?") for tc in tool_calls]
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"{target} not called (calls: {names})",
-            )
-        return StructuralCheckResult(check=check, passed=True)
-
-    def _check_any_tool_call(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        """OR-semantics twin: passes when AT LEAST ONE of the named tools
-        fired (recall-OR-find shapes — the memory mandate names both)."""
-        tool_calls = ctx.get("tool_calls", [])
-        names = check.params.get("tool_names", [])
-        if not names:
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail="any_tool_call requires tool_names",
-            )
-        if not any(tc.get("name") in names for tc in tool_calls):
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"none of {names} called (all calls: "
-                       f"{[tc.get('name', '?') for tc in tool_calls]})",
-            )
-        return StructuralCheckResult(check=check, passed=True)
-
-    def _check_no_tool_call(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        """Negative twin of tool_call_made — the guard-rail check for
-        unintended-outcome cases (permission theater must not act; banter
-        must not recall-spam). Passes when NONE of the named tools fired."""
-        tool_calls = ctx.get("tool_calls", [])
-        names = check.params.get("tool_names", [])
-        if not names:
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail="no_tool_call requires tool_names",
-            )
-        fired = sorted({tc.get("name", "?") for tc in tool_calls
-                        if tc.get("name") in names})
-        if fired:
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"forbidden call(s): {fired} (all calls: "
-                       f"{[tc.get('name', '?') for tc in tool_calls]})",
-            )
-        return StructuralCheckResult(check=check, passed=True)
-
-    def _check_tool_call_args(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        """Routing hinge: not WHETHER a tool fired but with WHAT. Passes
-        when at least one call to tool_name has every arg substring in its
-        arguments string (e.g. create_subagent with agent_type='claude').
-        Substrings, not JSON paths — arguments arrive as a string and the
-        exact quoting varies by provider."""
-        tool_calls = ctx.get("tool_calls", [])
-        target = check.params.get("tool_name", "")
-        need = check.params.get("arg_contains", [])
-        candidates = [tc for tc in tool_calls if tc.get("name") == target]
-        if not candidates:
-            names = [tc.get("name", "?") for tc in tool_calls]
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"{target} not called (calls: {names})",
-            )
-        for tc in candidates:
-            args = str(tc.get("arguments", ""))
-            if all(str(sub) in args for sub in need):
-                return StructuralCheckResult(check=check, passed=True)
-        return StructuralCheckResult(
-            check=check, passed=False,
-            detail=f"{target} called but no call's arguments contain all of "
-                   f"{need} (args seen: {[str(tc.get('arguments', ''))[:120] for tc in candidates]})",
-        )
-
-    def _check_context_flag(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        """Post-dispatch DB asserts: the case computes a boolean (did the
-        goal row actually change?) and this check passes on it. Lets
-        structural checks verify STATE, not just transcript text."""
-        key = check.params.get("key", "")
+def _check(c: Check, response: str, calls: list[dict[str, Any]],
+           flags: dict[str, Any], delivered: dict[str, list[str]],
+           any_delivery: bool) -> CheckResult:
+    p = c.params
+    names = [tc.get("name", "?") for tc in calls]
+    text = (response or "").strip()
+    low = text.lower()
+    k = c.kind
+    if k == "min_length":
+        n = p.get("min_length", 0)
+        return _ok(c) if len(text) >= n else _bad(c, f"{len(text)} chars (min {n})")
+    if k == "max_length":
+        n = p.get("max_length", 10**9)
+        return _ok(c) if len(text) <= n else _bad(c, f"{len(text)} chars (max {n})")
+    if k == "response_contains":
+        terms = p.get("terms", [])
+        return (_ok(c) if any(t.lower() in low for t in terms)
+                else _bad(c, f"none of {terms} in response"))
+    if k == "response_not_contains":
+        hit = [t for t in p.get("terms", []) if t.lower() in low]
+        return _bad(c, f"forbidden term(s): {hit}") if hit else _ok(c)
+    if k == "tool_call_made":
+        t = p.get("tool_name", "")
+        return _ok(c) if t in names else _bad(c, f"{t} not called (calls: {names})")
+    if k == "any_tool_call":
+        want = p.get("tool_names", [])
+        if not want:
+            return _bad(c, "any_tool_call requires tool_names")
+        return (_ok(c) if any(n in want for n in names)
+                else _bad(c, f"none of {want} called (calls: {names})"))
+    if k == "no_tool_call":
+        banned = p.get("tool_names", [])
+        if not banned:
+            return _bad(c, "no_tool_call requires tool_names")
+        fired = sorted({n for n in names if n in banned})
+        return _bad(c, f"forbidden call(s): {fired}") if fired else _ok(c)
+    if k in ("tool_call_like", "no_tool_call_like"):
+        pat = p.get("pattern", "")
+        hit = [n for n in names if pat and pat in n]
+        if k == "tool_call_like":
+            return _ok(c) if hit else _bad(c, f"no tool matching {pat!r} (calls: {names})")
+        return _bad(c, f"forbidden call(s): {hit}") if hit else _ok(c)
+    if k == "tool_call_args":
+        t = p.get("tool_name", "")
+        need = p.get("arg_contains", [])
+        cands = [tc for tc in calls if tc.get("name") == t]
+        if not cands:
+            return _bad(c, f"{t} not called (calls: {names})")
+        if any(all(str(s) in str(tc.get("arguments", "")) for s in need)
+               for tc in cands):
+            return _ok(c)
+        return _bad(c, f"{t} called but no call has all of {need}")
+    if k in ("flag", "context_flag"):
+        key = p.get("key", "")
         if not key:
-            return StructuralCheckResult(
-                check=check, passed=False, detail="context_flag requires key")
-        val = ctx.get(key)
-        return StructuralCheckResult(
-            check=check, passed=bool(val),
-            detail="" if val else f"context[{key!r}] is falsy — "
-            f"the expected state change did not happen")
-
-    def _check_response_not_contains(self, response: str, check: StructuralCheck, ctx: dict) -> StructuralCheckResult:
-        """Negative twin of response_contains — permission-theater phrases
-        ("shall I", "do you want me to") and asserted stats the case must
-        not produce. Case-insensitive, like its twin."""
-        terms = check.params.get("terms", [])
-        lower = response.lower()
-        found = [t for t in terms if t.lower() in lower]
-        if found:
-            return StructuralCheckResult(
-                check=check, passed=False,
-                detail=f"Forbidden term(s) in response: {found}",
-            )
-        return StructuralCheckResult(check=check, passed=True)
-
-
-class LLMJudge:
-    """Uses an LLM call to evaluate response quality."""
-
-    def __init__(self, ctx: AppContext) -> None:
-        self.ctx = ctx
-
-    async def judge(
-        self,
-        case: EvalCase,
-        response: str,
-        threshold: float = 0.7,
-        input_messages: list[dict[str, Any]] | None = None,
-        judge_model: str | None = None,
-    ) -> JudgeResult:
-        from server.services.llm_dispatch import LLMDispatchService
-
-        dimensions = []
-        if case.judge_criteria.correctness:
-            dimensions.append("- correctness: Is the response factually correct given the input?")
-        if case.judge_criteria.relevance:
-            dimensions.append("- relevance: Does the response address the input?")
-        if case.judge_criteria.completeness:
-            dimensions.append("- completeness: Does the response cover all expected aspects?")
-
-        extra = ""
-        if case.judge_criteria.extra_instructions:
-            extra = f"\nADDITIONAL GUIDANCE:\n{case.judge_criteria.extra_instructions}"
-
-        input_section = ""
-        if input_messages:
-            formatted = []
-            for msg in input_messages:
-                # Responses-API items (what run_turn actually appends
-                # to the message list — without this branch the judge never
-                # saw tool calls and scored completeness 0 for "did not call
-                # the tool" on calls that fired; Phase 0 fix 2026-09-19).
-                if msg.get("type") == "function_call":
-                    formatted.append(
-                        f"[assistant called tool]: {msg.get('name', '?')}"
-                        f"({str(msg.get('arguments', ''))[:400]})")
-                    continue
-                if msg.get("type") == "function_call_output":
-                    formatted.append(
-                        f"[tool result]: {str(msg.get('output', ''))[:600]}")
-                    continue
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                tool_calls = msg.get("tool_calls")
-
-                if tool_calls:
-                    call_descs = []
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        call_descs.append(f"{fn.get('name', '?')}({fn.get('arguments', '')})")
-                    line = f"[{role} called tools]: " + ", ".join(call_descs)
-                elif isinstance(content, str) and len(content) > 8000:
-                    # Head + tail, not a head-only cut (2026-10-07): at the
-                    # old 2000-char head cut the judge scored a prompt-
-                    # grounded fact (mike@crabcat.com, at char 8791 of the
-                    # workspace prompt) as an invented recipient address.
-                    # The tail carries the persona/user.md + terminal
-                    # contract sections production prompts end with.
-                    line = (f"[{role}]: {content[:5000]}\n"
-                            f"[... middle elided ...]\n"
-                            f"{content[-3000:]}")
-                else:
-                    line = f"[{role}]: {content}"
-
-                formatted.append(line)
-            input_section = f"\nINPUT MESSAGES:\n" + "\n".join(formatted) + "\n"
-
-        prompt = (
-            f"You are an evaluation judge. Score the response on each dimension from 0.0 to 1.0.\n\n"
-            f"EVAL CASE: {case.description}\n"
-            f"{input_section}\n"
-            f"RESPONSE TO EVALUATE:\n{response}\n\n"
-            f"EVIDENCE RULE: lines marked [assistant called tool] in INPUT MESSAGES "
-            f"are actions the assistant actually took (they are recorded tool "
-            f"calls, not claims) — count them as demonstrated behavior even if "
-            f"the response text doesn't restate them.\n"
-            f"DIMENSIONS:\n" + "\n".join(dimensions) + extra +
-            "\n\nRespond with valid JSON only:\n"
-            '{"correctness": 0.0, "relevance": 0.0, "completeness": 0.0, '
-            '"overall": 0.0, "reasoning": "brief explanation"}'
-        )
-
-        dispatch = LLMDispatchService(self.ctx)
-        t0 = time.monotonic()
+            return _bad(c, "flag requires key")
+        return (_ok(c) if flags.get(key)
+                else _bad(c, f"flag {key!r} is falsy ({flags.get(key)!r})"))
+    if k in ("delivered_to", "not_delivered_to"):
+        chat = p.get("chat", "")
+        texts = delivered.get(chat, [])
+        terms = [t.lower() for t in p.get("terms", [])]
+        hits = [x for x in texts if not terms or any(t in x.lower() for t in terms)]
+        if k == "delivered_to":
+            return (_ok(c) if hits else _bad(
+                c, f"nothing{' matching ' + str(terms) if terms else ''} "
+                   f"delivered to {chat} (got {len(texts)} message(s))"))
+        return (_bad(c, f"delivered to {chat}: {[h[:80] for h in hits]}")
+                if hits else _ok(c))
+    if k == "no_reply":
+        from server.services.dispatch_runner import is_no_reply
+        if any_delivery:
+            return _bad(c, "something was delivered")
+        return _ok(c) if is_no_reply(text) else _bad(c, f"final text {text[:60]!r} is not NO_REPLY")
+    if k == "json_valid":
         try:
-            judge_response = await dispatch.prompt(
-                [{"role": "user", "content": prompt}],
-                call_category="eval_judge",
-                temperature=0.3,
-                # Default astra since 2026-09-28: the previous gpt-5.4-nano
-                # default false-negatived verbatim-correct quotes against
-                # the evidence (baseline §7.1) — correctness over pennies.
-                model=judge_model or "gpt-6-astra",
-            )
-            data = json.loads(judge_response)
-            overall = float(data.get("overall", 0))
-            return JudgeResult(
-                overall=overall,
-                correctness=float(data.get("correctness", 0)),
-                relevance=float(data.get("relevance", 0)),
-                completeness=float(data.get("completeness", 0)),
-                reasoning=data.get("reasoning", ""),
-                passed=overall >= threshold,
-            )
-        except Exception as e:
-            logger.warning("LLM judge failed: %s", e)
-            return JudgeResult(reasoning=f"Judge call failed: {e}")
+            json.loads(text)
+            return _ok(c)
+        except json.JSONDecodeError as e:
+            return _bad(c, str(e))
+    return _bad(c, f"unknown check kind {k!r}")
+
+
+# --------------------------------------------------------------------------
+# checklist judge
+# --------------------------------------------------------------------------
+
+_JUDGE_PROMPT = """\
+You are grading one trial of an AI agent ("Bob") against a checklist.
+Bob is a WhatsApp-based assistant; the transcript below is what really
+happened: his prompt (system prompt elided in the middle), the
+conversation, every tool call he made with its real output, his final
+text, and what was actually delivered to people.
+
+EVIDENCE RULES
+- "[Bob called tool]" lines are actions Bob actually took. Count them as
+  done even if his text doesn't mention them; never credit an action that
+  has no such line.
+- Under final-text delivery, Bob's FINAL TEXT on a human-message turn is
+  his reply (it shows up under DELIVERED). Steering and wake turns do NOT
+  deliver their final text — only sends do. Judge what people received
+  from the DELIVERED section.
+- "NO_REPLY" as final text is deliberate silence.
+- Judge each item independently and literally. Do not fail an item for
+  something another item covers. Do not reward or penalise style unless
+  an item asks about it.
+
+CASE
+{description}
+
+FACTS FOR THE GRADER
+{context}
+
+TRANSCRIPT
+{transcript}
+
+TEXT UNDER REVIEW (Bob's reply for this case)
+{response}
+
+CHECKLIST — each item is a statement that must be TRUE for the trial to pass:
+{items}
+
+Reply with JSON only:
+{{"items": [{{"n": 1, "verdict": "pass" | "fail", "why": "one sentence citing the evidence"}}, ...]}}"""
+
+
+async def judge(ctx: Any, case: EvalCase, *, transcript: str, response: str,
+                judge_model: str | None = None,
+                rubric: list[str] | None = None) -> JudgeResult:
+    from server.services.llm_dispatch import LLMDispatchService
+
+    items = rubric if rubric is not None else case.rubric
+    prompt = _JUDGE_PROMPT.format(
+        description=case.description,
+        context=case.context or "(none)",
+        transcript=transcript[-60000:],
+        response=response or "(empty)",
+        items="\n".join(f"{i}. {item}" for i, item in enumerate(items, 1)))
+    t0 = time.monotonic()
+    try:
+        raw = await LLMDispatchService(ctx).prompt(
+            [{"role": "user", "content": prompt}],
+            call_category="eval_judge", temperature=0.0,
+            model=judge_model or DEFAULT_JUDGE_MODEL)
+        data = _parse_json(raw)
+        by_n = {int(v.get("n", 0)): v for v in data.get("items", [])}
+        verdicts = []
+        for i, item in enumerate(items, 1):
+            v = by_n.get(i)
+            if v is None:
+                return JudgeResult(error=f"judge skipped item {i}",
+                                   seconds=time.monotonic() - t0)
+            verdicts.append(RubricVerdict(
+                item=item, passed=str(v.get("verdict", "")).lower() == "pass",
+                why=str(v.get("why", ""))[:400]))
+        return JudgeResult(verdicts=verdicts, seconds=time.monotonic() - t0)
+    except Exception as e:
+        logger.warning("judge failed for %s: %s", case.id, e)
+        return JudgeResult(error=str(e)[:300], seconds=time.monotonic() - t0)
+
+
+def _parse_json(raw: str) -> dict[str, Any]:
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw[raw.find("{"):]
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end < 0:
+        raise ValueError(f"judge returned no JSON: {raw[:120]!r}")
+    return json.loads(raw[start:end + 1])
