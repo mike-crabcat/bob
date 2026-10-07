@@ -96,7 +96,7 @@ unchanged.
 | email out, subagent spawn | the `email_*` and `subagent_spawn` executors record instead of acting. Internal effect kinds (`goal_*`, `approval_*`, `mcp_registered`) keep their real executors, because they are state writes. |
 | background jobs | run for real in the world workspace (scrubbed env, host guard, capped at 180s) and exit through production's `poll_bg_jobs` and exit wake. `systemctl` is never called. |
 | Claude Code | `_run_claude` records and returns `w.claude_reply`, unless the world sets `w.real_subagents = True` |
-| paid APIs | an in-process gateway stands in for OpenAI images and Runware video/3D. Planted skill scripts are ordinary API clients whose base URL (`OPENAI_BASE_URL`, `RUNWARE_API_BASE`) points at it. `w.outage(service, err)` makes it return 503. |
+| paid APIs | an in-process gateway stands in for OpenAI images and Runware video/3D. Planted skill scripts are ordinary API clients whose base URL (`OPENAI_BASE_URL`, `RUNWARE_API_BASE`) points at it. `w.outage(service, err)` makes it return 503. For cases where what the image *shows* is under test, `w.real_image_api = True` makes the gateway forward to the real OpenAI images API (quality forced to low, about a cent per image). Bob inspects his output, and a canned image is correctly called broken. |
 | skill env | production env minus every secret (key/token/auth/Twilio), plus a fake key and the gateway URLs |
 | bash | the real tool. `/home/bob/workspace` paths are rewritten to the world workspace. A guard refuses `/home/bob`, `~`, `systemctl`, `kill`, `journalctl` and the local API. |
 | MCP | a real `McpManager` over the snapshot's tool lists. `w.web({...})` answers the web search tool; other MCP tools reply "unavailable". |
@@ -243,8 +243,18 @@ carry prompts. Each entry holds `case_id`, `rubric`, `transcript`,
   disagreement.
 - Re-run it whenever the judge prompt, judge model or rubrics change.
 
-The initial set was drafted by Claude (`labeller: claude-draft`). Labels
-marked that way want Mike's confirmation.
+The initial set is 40 legacy v1 transcripts labelled against the current
+rubrics by Claude (`labeller: claude-draft`). Labels marked that way want
+Mike's confirmation.
+
+**Baseline (2026-10-08, gpt-6-astra):**
+- 88% overall agreement (35/40), Cohen's κ = 0.73.
+- No lenient errors; all 5 disagreements are judge-strict.
+- On review the judge was right on one (a miscount), arguably right on
+  three, and over-strict on one (it called a two-sentence reply "too
+  long"). Each disputed entry is annotated in its `note`.
+- In the same set the v1 judge failed two answers identical to ones it
+  passed. That's the noise the checklist judge removes.
 
 ## Known gaps
 

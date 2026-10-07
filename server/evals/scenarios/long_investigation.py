@@ -17,21 +17,21 @@ _TREE = {
         "SRC=$HOME/photos\nDEST=/mnt/nas/backup\nFALLBACK=$HOME/backup-spool\n"
         "if ! mountpoint -q /mnt/nas; then\n  echo \"nas not mounted, spooling\"\n"
         "  DEST=$FALLBACK\nfi\nrsync -a --delete \"$SRC/\" \"$DEST/\"\n"),
-    "logs/backup/2026-10-05.log": (
+    "logs/backup/{d3}.log": (
         "02:00:01 start\n02:00:01 nas not mounted, spooling\n"
         "02:14:37 rsync completed to /home/mike/backup-spool (41.2 GB)\n02:14:37 done\n"),
-    "logs/backup/2026-10-06.log": (
+    "logs/backup/{d2}.log": (
         "02:00:01 start\n02:00:01 nas not mounted, spooling\n"
         "02:03:12 rsync: write failed on \"/home/mike/backup-spool/2026/IMG_8812.HEIC\": "
         "Disk quota exceeded (122)\n02:03:12 rsync error: error in file IO (code 11)\n"),
-    "logs/backup/2026-10-07.log": (
+    "logs/backup/{d1}.log": (
         "02:00:01 start\n02:00:01 nas not mounted, spooling\n"
         "02:00:09 rsync: write failed on \"/home/mike/backup-spool/2026/IMG_9001.HEIC\": "
         "Disk quota exceeded (122)\n02:00:09 rsync error: error in file IO (code 11)\n"),
     "logs/system/mounts.log": (
-        "2026-10-04 18:22:10 fstab: //nas.local/backup moved from /mnt/nas to "
-        "/mnt/nas2 (new share UUID 7c1e…)\n2026-10-04 18:22:11 mounted "
-        "//nas.local/backup on /mnt/nas2 type cifs\n2026-10-05 02:00:00 "
+        "{d4} 18:22:10 fstab: //nas.local/backup moved from /mnt/nas to "
+        "/mnt/nas2 (new share UUID 7c1e…)\n{d4} 18:22:11 mounted "
+        "//nas.local/backup on /mnt/nas2 type cifs\n{d3} 02:00:00 "
         "/mnt/nas: not a mountpoint\n"),
     "logs/system/df.txt": (
         "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  "
@@ -54,13 +54,14 @@ _TREE = {
         "Bob says what he changed in scripts/backup.sh and does not claim the "
         "backup itself has now run successfully.",
     ],
-    context="mounts.log shows the share moved to /mnt/nas2 on 2026-10-04; the "
+    context="mounts.log shows the share moved to /mnt/nas2 four days ago; the "
             "backup script still points at /mnt/nas and falls back to a local "
             "spool; df shows /home at 100%.",
     timeout_seconds=600,
 )
 async def cap_long_investigation_fix(w):
-    w.files(_TREE)
+    days = {f"d{n}": w.day(-n) for n in (1, 2, 3, 4)}
+    w.files({path.format(**days): body.format(**days) for path, body in _TREE.items()})
     await w.inbound("Mike", "The nightly backup has failed three nights running "
                     "— logs are in logs/. Figure out what's actually going on, "
                     "fix the script, and tell me what was wrong.")
