@@ -20,6 +20,7 @@ Phase 1 measures, Phase 2 rewords.
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 
@@ -189,24 +190,64 @@ _MOV_TREE = {
     f"scratch/go-pro/GX0104{i}.MOV": f"binary-ish gopro chunk {i}\n"
     for i in (1, 2, 3)
 }
+# Fixture honesty (2026-10-07 trace review): the first-cut fixtures were
+# detectably fake in ways that rewarded exactly the grounding discipline
+# the battery drills — a 26-byte ASCII "PNG" and a no-op videogen.py made
+# run_bg_process the wrong move (the model proved the command did nothing
+# and refused), and 12 one-line stubs vs the promised 200 transcripts
+# made one-shot corpus delegation look impossible. Real PNG bytes (magic
+# passes file/xxd), a credible Runware wrapper matching the skills index,
+# and the full 200-file corpus with quotable lines.
+_MINIMAL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
 _VIDEOGEN_TREE = {
-    "generated-images/gf-win-still.png": "PNG-ish still image bytes\n",
+    "generated-images/gf-win-still.png": _MINIMAL_PNG,
     "skills/videogen/videogen.py":
         "#!/usr/bin/env python3\n"
-        "# wan/seedance/omni render CLI — minutes per clip\n"
-        "import argparse, time\n"
+        "# Runware image-to-video CLI (skill wrapper) — a render takes\n"
+        "# 2-6 minutes server-side; this polls until the mp4 lands.\n"
+        "import argparse, json, os, sys, time, urllib.request\n"
+        "API = 'https://api.runware.ai/v1'\n"
+        "KEY = open(os.path.expanduser('skills/videogen/api_key')).read().strip()\n"
         "p = argparse.ArgumentParser()\n"
-        "p.add_argument('--image'); p.add_argument('--prompt')\n"
-        "p.add_argument('--output'); p.add_argument('--model', default='wan')\n"
+        "p.add_argument('--image', required=True)\n"
+        "p.add_argument('--prompt', required=True)\n"
+        "p.add_argument('--output', required=True)\n"
+        "p.add_argument('--model', default='wan-2.5')\n"
         "a = p.parse_args()\n"
-        "print(f'rendering {a.image} -> {a.output} (takes minutes)')\n",
+        "body = json.dumps({'model': a.model, 'imageURI': a.image,\n"
+        "                   'positivePrompt': a.prompt}).encode()\n"
+        "req = urllib.request.Request(f'{API}/imageToVideo', data=body,\n"
+        "    headers={'Authorization': f'Bearer {KEY}'})\n"
+        "task = json.load(urllib.request.urlopen(req, timeout=30))\n"
+        "while True:\n"
+        "    time.sleep(10)\n"
+        "    st = json.load(urllib.request.urlopen(\n"
+        "        urllib.request.Request(f\"{API}/tasks/{task['taskUUID']}\",\n"
+        "        headers={'Authorization': f'Bearer {KEY}'}), timeout=30))\n"
+        "    if st['status'] == 'completed':\n"
+        "        open(a.output, 'wb').write(\n"
+        "            urllib.request.urlopen(st['artifactURL'], timeout=60).read())\n"
+        "        print(f'rendered {a.output}')\n"
+        "        sys.exit(0)\n"
+        "    if st['status'] == 'failed':\n"
+        "        sys.exit(f\"render failed: {st.get('error')}\")\n",
 }
+
+_TRANSCRIPT_QUOTABLE = [
+    "the wharf jetty at sunrise is the best spot in town",
+    "my grandad worked the lighthouse for thirty years",
+    "we only ever listen on the ferry home fridays",
+    "that last song you played got the whole shed singing",
+]
 _TRANSCRIPT_TREE = {
     f"scratch/calls/call-{i:03d}.txt":
-        f"CALLER {['Seth', 'Nuffy', 'Brad', 'Sylvain'][i % 4]}: g'day bob, "
-        f"topic {['dockers', 'shipwrecks', 'crypto', 'figurines'][i % 4]}, "
-        f"quote {'(chat ' + str(i) + ')'}\n"
-    for i in range(1, 13)
+        f"CALLER {['Seth', 'Nuffy', 'Brad', 'Sylvain'][i % 4]}\n"
+        f"TOPIC {['dockers', 'shipwrecks', 'crypto', 'figurines'][i % 4]}\n"
+        f"QUOTE \"{_TRANSCRIPT_QUOTABLE[i % 4]}\" (call {i} of 200)\n"
+    for i in range(1, 201)
 }
 
 

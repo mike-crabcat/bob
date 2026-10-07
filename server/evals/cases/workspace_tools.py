@@ -1,6 +1,7 @@
 """Workspace bash tool eval cases with mocked handlers."""
 
 from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.util import pinned_model
 from server.evals.registry import eval_case
 
 _MOCK_LS_OUTPUT = (
@@ -71,7 +72,8 @@ async def workspace_bash(ctx):
 
     tools = _make_mock_workspace_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval",
+                                model=pinned_model())
 
     tool_calls = _extract_tool_calls(messages)
     return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
@@ -142,7 +144,8 @@ async def media_stub_fetch_on_reference(ctx):
 
     tools = _make_mock_media_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval",
+                                model=pinned_model())
 
     tool_calls = _extract_tool_calls(messages)
 

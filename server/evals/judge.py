@@ -296,8 +296,16 @@ class LLMJudge:
                         fn = tc.get("function", {})
                         call_descs.append(f"{fn.get('name', '?')}({fn.get('arguments', '')})")
                     line = f"[{role} called tools]: " + ", ".join(call_descs)
-                elif isinstance(content, str) and len(content) > 2000:
-                    line = f"[{role}]: {content[:2000]}... [truncated]"
+                elif isinstance(content, str) and len(content) > 8000:
+                    # Head + tail, not a head-only cut (2026-10-07): at the
+                    # old 2000-char head cut the judge scored a prompt-
+                    # grounded fact (mike@crabcat.com, at char 8791 of the
+                    # workspace prompt) as an invented recipient address.
+                    # The tail carries the persona/user.md + terminal
+                    # contract sections production prompts end with.
+                    line = (f"[{role}]: {content[:5000]}\n"
+                            f"[... middle elided ...]\n"
+                            f"{content[-3000:]}")
                 else:
                     line = f"[{role}]: {content}"
 

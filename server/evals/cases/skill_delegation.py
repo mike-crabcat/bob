@@ -3,6 +3,7 @@
 import json
 
 from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.util import extract_tool_calls, pinned_model
 from server.evals.registry import eval_case
 
 
@@ -90,18 +91,6 @@ def _make_mock_workspace_tools():
     return [ls, read_file, write_file, send_whatsapp_message]
 
 
-def _extract_tool_calls(messages: list) -> list[dict]:
-    calls = []
-    for msg in messages:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
-                calls.append({
-                    "name": tc["function"]["name"],
-                    "arguments": tc["function"]["arguments"],
-                })
-    return calls
-
-
 AGENDA = """\
 You are managing a WhatsApp conversation. An incoming message has been received.
 
@@ -154,9 +143,10 @@ async def subagent_create_task(ctx):
 
     tools = _make_mock_workspace_tools() + _make_mock_subagent_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval",
+                                model=pinned_model())
 
-    tool_calls = _extract_tool_calls(messages)
+    tool_calls = extract_tool_calls(messages)
     return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
 
 
@@ -185,7 +175,8 @@ async def subagent_follow_up(ctx):
 
     tools = _make_mock_workspace_tools() + _make_mock_subagent_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval",
+                                model=pinned_model())
 
     # Simulate a subagent result arriving
     messages.append({
@@ -196,9 +187,10 @@ async def subagent_follow_up(ctx):
         "role": "user",
         "content": "Great! Can you also add support for checking the market cap?",
     })
-    response2 = await dispatch.run_turn(messages, tools, call_category="eval")
+    response2 = await dispatch.run_turn(messages, tools, call_category="eval",
+                                model=pinned_model())
 
-    tool_calls = _extract_tool_calls(messages)
+    tool_calls = extract_tool_calls(messages)
     return {"response": response2, "context": {"tool_calls": tool_calls}, "input_messages": messages}
 
 

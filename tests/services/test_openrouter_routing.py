@@ -74,6 +74,25 @@ def test_routing_extra_skips_non_openrouter_models():
     assert _routing_extra(_settings(), OPENAI_MODEL) == {}
 
 
+def test_routing_extra_pins_providers_when_set():
+    from server.services.openai_service import _routing_extra
+    # provider.allow (2026-10-07): pin serving to named providers after
+    # attribution showed sick endpoints inside the fp8 pool. Merges with
+    # the quantizations allowlist; "" or "off" disables the pin.
+    assert _routing_extra(
+        _settings(providers="StreamLake, GMICloud"), OR_MODEL
+    ) == {"extra_body": {"provider": {
+        "quantizations": ["fp8"], "allow": ["StreamLake", "GMICloud"]}}}
+    # Pin alone still works; disabled pin leaves quantizations untouched.
+    assert _routing_extra(
+        _settings(quantizations="", providers="StreamLake"), OR_MODEL
+    ) == {"extra_body": {"provider": {"allow": ["StreamLake"]}}}
+    assert _routing_extra(_settings(providers=""), OR_MODEL) == {
+        "extra_body": {"provider": {"quantizations": ["fp8"]}}}
+    assert _routing_extra(_settings(providers="off"), OR_MODEL) == {
+        "extra_body": {"provider": {"quantizations": ["fp8"]}}}
+
+
 def test_note_generation_keeps_last_id():
     from server.services.openai_service import _note_generation
 

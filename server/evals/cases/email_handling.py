@@ -1,6 +1,7 @@
 """Email handling eval cases."""
 
 from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.util import pinned_model
 from server.evals.registry import eval_case
 
 
@@ -56,7 +57,8 @@ async def email_professional_reply(ctx):
     ]
 
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.prompt(messages, call_category="eval")
+    response = await dispatch.prompt(messages, call_category="eval",
+                                model=pinned_model())
     return {"response": response, "input_messages": messages}
 
 
@@ -101,5 +103,6 @@ async def email_untrusted_sender_caution(ctx):
     ]
 
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.prompt(messages, call_category="eval")
+    response = await dispatch.prompt(messages, call_category="eval",
+                                model=pinned_model())
     return {"response": response, "input_messages": messages}

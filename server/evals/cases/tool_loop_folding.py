@@ -9,6 +9,7 @@ actually engage (a silently-unfolded run would pass trivially).
 """
 
 from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.util import pinned_model
 from server.evals.registry import eval_case
 
 # Fixed so the structural checks can assert them statically.
@@ -95,6 +96,7 @@ async def tool_loop_folding_long_loop(ctx):
             messages, [read_ledger, step],
             call_category="eval",
             session_key=session_key,
+            model=pinned_model(),
         )
 
         from server.services.tool_loop_folding import ELISION_TAG

@@ -391,23 +391,38 @@ _clients: dict[tuple[str, str], Any] = {}
 
 
 def _routing_extra(settings: Any, resolved_model: str) -> dict[str, Any]:
-    """OpenRouter routing constraint (2026-09-26): the default router serves
-    glm-5.3-flash (and other routed slugs) from a 33-endpoint pool that
-    includes fp4/nvfp4 and undeclared-quant hosts — the fp4 ones are the
-    cheapest, so they win price-weighted routing often. settings.openrouter
-    .quantizations (comma list, "" or "off" to disable) becomes
-    provider.quantizations, keeping competition among the allowed-precision
-    hosts and excluding endpoints that don't declare a listed quant. Sent via
-    extra_body on every request shape (chat/completions and responses both
-    honour it; verified live 2026-09-26). Non-OpenRouter models get {}."""
+    """OpenRouter routing constraints. Two layers, both from
+    settings.openrouter and both sent via extra_body on every request shape
+    (chat/completions and responses both honour them; verified live
+    2026-09-26 / 2026-10-07):
+
+    - quantizations (2026-09-26): the default router serves glm-5.3-flash
+      (and other routed slugs) from a 33-endpoint pool that includes
+      fp4/nvfp4 and undeclared-quant hosts — the fp4 ones are the cheapest,
+      so they win price-weighted routing often. The comma list ("" or "off"
+      to disable) becomes provider.quantizations, keeping competition among
+      the allowed-precision hosts.
+    - providers (2026-10-07): comma list becomes provider.allow — pins
+      serving to named providers after attribution showed sick endpoints
+      inside the fp8 pool (Novita reasoning-only completions, Morph/NextBit
+      15-19-minute tails). "" disables the pin.
+
+    Non-OpenRouter models get {}."""
     from server.services import model_registry
     if model_registry.provider_for(resolved_model) != model_registry.PROVIDER_OPENROUTER:
         return {}
-    raw = getattr(settings.openrouter, "quantizations", "") or ""
-    quants = [q.strip() for q in raw.split(",") if q.strip()]
-    if not quants or quants == ["off"]:
+    provider: dict[str, Any] = {}
+    raw_quants = getattr(settings.openrouter, "quantizations", "") or ""
+    quants = [q.strip() for q in raw_quants.split(",") if q.strip()]
+    if quants and quants != ["off"]:
+        provider["quantizations"] = quants
+    raw_providers = getattr(settings.openrouter, "providers", "") or ""
+    allowed = [p.strip() for p in raw_providers.split(",") if p.strip()]
+    if allowed and allowed != ["off"]:
+        provider["allow"] = allowed
+    if not provider:
         return {}
-    return {"extra_body": {"provider": {"quantizations": quants}}}
+    return {"extra_body": {"provider": provider}}
 
 
 def _note_generation(call_meta: dict | None, response: Any) -> None:
@@ -581,9 +596,18 @@ class OpenAIService(BaseService):
 
         web_search is an OpenAI-native Responses built-in and is dropped for
         OpenRouter-served models, which don't accept the tool type.
+
+        An explicitly EMPTY list opts out of built-ins too: ``tools=[]``
+        means "no tools this call, web_search included" (zero-tool eval
+        drafting cases leaked the built-in and turned drafting into
+        research — goal_craft scored 0.98 on models that can't get it and
+        0.4-0.5 on OpenAI models that silently could, 2026-10-07).
+        ``tools=None`` (the default) keeps the built-in.
         """
         merged: list[dict[str, Any]] = []
         resolved = model or self._get_settings().openai.default_model
+        if (tools is not None and not tools):
+            return merged
         if (self._web_search_tool
                 and model_registry.provider_for(resolved) == model_registry.PROVIDER_OPENAI):
             merged.append(self._web_search_tool)

@@ -239,6 +239,17 @@ class OpenRouterSettings:
     # disables the filter (OpenRouter default routing).
     quantizations: str = "fp8"
 
+    # Provider allowlist (2026-10-07): comma-separated OpenRouter provider
+    # names sent as provider.allow on every request. Serving attribution
+    # (llm_call_log.served_by) showed the fp8 pool still contains sick
+    # endpoints — Novita returned a reasoning-only "completed" response
+    # (2026-10-06 Blair incident) and burned a 12.8k-token bender (483s);
+    # Morph/NextBit/Near run 66-72s averages with 15-19-minute tails.
+    # Pinned to the two proven workhorses (StreamLake ~24s avg / GMICloud
+    # ~39s avg over 700-900 calls each, zero incidents). "" disables the
+    # pin (any fp8-declaring provider may serve).
+    providers: str = ""
+
     @property
     def enabled(self) -> bool:
         return bool(self.api_key)
@@ -854,6 +865,7 @@ class Settings:
             api_key=openrouter_key,
             base_url=os.getenv("BOB_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/"),
             quantizations=os.getenv("BOB_OPENROUTER_QUANTIZATIONS", "fp8"),
+            providers=os.getenv("BOB_OPENROUTER_PROVIDERS", ""),
         )
 
         realtime_voice = os.getenv("BOB_OPENAI_REALTIME_VOICE", "cedar")

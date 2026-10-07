@@ -8,6 +8,7 @@ failure fails here rather than in prod.
 from __future__ import annotations
 
 from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.util import pinned_model
 from server.evals.registry import eval_case
 
 _MOCK_IMAGEGEN_OUTPUT = (
@@ -151,7 +152,8 @@ async def persona_no_phantom_refusal(ctx):
 
     tools = _make_mock_tools()
     dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval")
+    response = await dispatch.run_turn(messages, tools, call_category="eval",
+                                model=pinned_model())
 
     return {
         "response": response,

@@ -76,7 +76,10 @@ def make_planted_bash(files: dict, *, cwd_subdir: str = ""):
     for rel, content in (files or {}).items():
         path = pathlib.Path(root) / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content)
 
     cwd = str(pathlib.Path(root) / cwd_subdir) if cwd_subdir else root
 

@@ -1,6 +1,7 @@
 """Tool calling eval cases."""
 
 from server.evals.case import JudgeCriteria, StructuralCheck
+from server.evals.util import pinned_model
 from server.evals.registry import eval_case
 
 
@@ -74,6 +75,7 @@ async def tool_calling_update_agenda(ctx):
         messages, tools,
         call_category="eval",
         session_key=session_key,
+        model=pinned_model(),
         # GLM narrates tool use on minimal prompts instead of calling (the
         # send-tool-skip quirk's general shape) — force the first round so
         # this case verifies the loop itself, not model willingness.
