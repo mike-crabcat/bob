@@ -207,6 +207,7 @@ class Template:
                                        is_trusted=p.trusted, now_iso=now_iso)
                 await grepo.set_memory_entity(gid, g.slug)
 
+            from server.services.memory.eval_fixtures import no_embedding
             mem = MemoryService(ctx)
             await mem.ensure_self_entity()
             seeded = set()
@@ -226,7 +227,8 @@ class Template:
                     id=f"claim-self-{abs(hash(c['value'])) % 10**12}",
                     claim_type_key=c["claim_type_key"], subject_id="self-bob",
                     value=c["value"]))
-            await mem.rebuild_fts()
+            with no_embedding():
+                await mem.rebuild_fts()
             if embed:
                 try:
                     await mem.rebuild_embeddings()

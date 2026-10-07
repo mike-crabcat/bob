@@ -693,6 +693,24 @@ class FakeAgentMail:
 # task tracking
 # --------------------------------------------------------------------------
 
+def _install_embedding_gate() -> None:
+    """Honour eval_fixtures.SKIP_EMBEDDING: seeding writes embed per entity
+    in production code; worlds embed once in a batch instead."""
+    from server.services.memory import embedding
+    from server.services.memory.eval_fixtures import SKIP_EMBEDDING
+    if getattr(embedding.embed_batch, "_bob_eval", False):
+        return
+    real = embedding.embed_batch
+
+    async def embed_batch(texts):
+        if SKIP_EMBEDDING.get():
+            return [None] * len(texts)
+        return await real(texts)
+
+    embed_batch._bob_eval = True  # type: ignore[attr-defined]
+    embedding.embed_batch = embed_batch
+
+
 def _install_task_tracker() -> None:
     """Remember every task created inside a world so World.settle() can
     wait for its background work (wake dispatches, backburner flights)."""
@@ -723,6 +741,7 @@ def install() -> None:
     _install_process_fakes()
     _install_misc_fakes()
     _install_subagent_fake()
+    _install_embedding_gate()
     _install_skill_env()
     global _GATEWAY
     _GATEWAY = _start_gateway()

@@ -420,3 +420,23 @@ def test_classify_failure_classes():
     assert _classify(W([turn(result="sure thing")]), tr) == "behavioural"
     tr.flags["_llm_errors"] = "429 rate limit exceeded"
     assert _classify(W([turn(result="x")]), tr) == "provider_error"
+
+
+async def test_seeding_makes_no_embedding_calls(template, monkeypatch):
+    """Seeding goes through production writes that embed per entity; the
+    world gate turns those into no-ops (one batch embed later, or none)."""
+    from server.services.memory import embedding
+    from server.services.memory.eval_fixtures import no_embedding
+
+    calls = []
+
+    async def boom(*a, **k):
+        calls.append(a)
+        raise AssertionError("network embedding call during seeding")
+    real = embedding.embed_batch._bob_eval_real if hasattr(
+        embedding.embed_batch, "_bob_eval_real") else None
+    assert getattr(embedding.embed_batch, "_bob_eval", False)
+    with no_embedding():
+        assert await embedding.embed_text("hello") is None
+        assert await embedding.embed_batch(["a", "b"]) == [None, None]
+    assert not calls and real is None

@@ -10,12 +10,30 @@ extracted memory. The memory tables' SQL stays in this package
 
 from __future__ import annotations
 
+import contextvars
 import re
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 _ENTITY_REF = re.compile(r"^[a-z]+-[a-z0-9-]+$")
+
+# Seeding writes go through production paths that embed on every entity
+# write (update_entity_fts). The eval boundary (server/evals/intercept.py)
+# honours this flag so seeding makes no per-entity embedding calls; worlds
+# embed once, in a batch, after seeding.
+SKIP_EMBEDDING: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "bob_eval_skip_embedding", default=False)
+
+
+@contextmanager
+def no_embedding():
+    token = SKIP_EMBEDDING.set(True)
+    try:
+        yield
+    finally:
+        SKIP_EMBEDDING.reset(token)
 
 
 async def seed_entity(ctx: Any, entity_id: str, entity_type: str,
@@ -30,17 +48,18 @@ async def seed_entity(ctx: Any, entity_id: str, entity_type: str,
     from server.services.memory.models import Claim, EntityDocument
 
     svc = MemoryService(ctx)
-    await svc.write_entity(ctx.settings.harness.workspace_dir, EntityDocument(
-        entity_id=entity_id, entity_type=entity_type,
-        display_name=display_name, status="active"))
-    for key, value in claims:
-        is_ref = bool(_ENTITY_REF.match(value)) and " " not in value
-        await write_claim(ctx.db, Claim(
-            id=f"claim-{uuid.uuid4().hex[:12]}", claim_type_key=key,
-            subject_id=entity_id,
-            object_id=value if is_ref else None,
-            value=None if is_ref else value))
-    await update_entity_fts(ctx.db, entity_id)
+    with no_embedding():
+        await svc.write_entity(ctx.settings.harness.workspace_dir, EntityDocument(
+            entity_id=entity_id, entity_type=entity_type,
+            display_name=display_name, status="active"))
+        for key, value in claims:
+            is_ref = bool(_ENTITY_REF.match(value)) and " " not in value
+            await write_claim(ctx.db, Claim(
+                id=f"claim-{uuid.uuid4().hex[:12]}", claim_type_key=key,
+                subject_id=entity_id,
+                object_id=value if is_ref else None,
+                value=None if is_ref else value))
+        await update_entity_fts(ctx.db, entity_id)
     if embed:
         await embed_entity(ctx.db, entity_id)
 
