@@ -421,6 +421,12 @@ def _install_misc_fakes() -> None:
     # concurrent worlds serialise on the cast's shared session keys.
     from server.services.session_dispatch_gate import SessionDispatchGate
     SessionDispatchGate._locks = _Routed(SessionDispatchGate._locks, "dispatch_locks")
+    # The due-notice coalescer is module-level and keyed by conversation:
+    # across worlds it swallowed a later trial's reminder as a 'sibling'.
+    from server.services import goal_service
+    if isinstance(getattr(goal_service, "_OVERDUE_LAST_WAKE", None), dict):
+        goal_service._OVERDUE_LAST_WAKE = _Routed(
+            goal_service._OVERDUE_LAST_WAKE, "overdue_last_wake")
 
     V, H, A = VoiceDispatchService, HomeAssistantClient, AttentionCoordinator
     V.dispatch_contact_call = _world_only(V.dispatch_contact_call, dispatch_contact_call)  # type: ignore[method-assign]
