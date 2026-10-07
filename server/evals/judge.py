@@ -170,7 +170,7 @@ Reply with JSON only:
 
 
 async def judge(ctx: Any, case: EvalCase, *, transcript: str, response: str,
-                judge_model: str | None = None,
+                judge_model: str | None = None, judge_effort: str | None = None,
                 rubric: list[str] | None = None) -> JudgeResult:
     from server.services.llm_dispatch import LLMDispatchService
 
@@ -186,7 +186,8 @@ async def judge(ctx: Any, case: EvalCase, *, transcript: str, response: str,
         raw = await LLMDispatchService(ctx).prompt(
             [{"role": "user", "content": prompt}],
             call_category="eval_judge", temperature=0.0,
-            model=judge_model or DEFAULT_JUDGE_MODEL)
+            model=judge_model or DEFAULT_JUDGE_MODEL,
+            reasoning_effort=judge_effort)
         data = _parse_json(raw)
         by_n = {int(v.get("n", 0)): v for v in data.get("items", [])}
         verdicts = []

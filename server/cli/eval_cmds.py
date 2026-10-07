@@ -39,6 +39,8 @@ def eval_run(
     effort: Annotated[Optional[str], typer.Option(
         "--effort", help="Reasoning effort override for Bob turns")] = None,
     judge_model: Annotated[Optional[str], typer.Option("--judge-model")] = None,
+    judge_effort: Annotated[Optional[str], typer.Option(
+        "--judge-effort", help="Reasoning effort for the judge model")] = None,
     skip_judge: Annotated[bool, typer.Option("--skip-judge")] = False,
     notes: Annotated[str, typer.Option("--notes")] = "",
     verbose: Annotated[bool, typer.Option("--verbose", "-v",
@@ -51,11 +53,11 @@ def eval_run(
         for name in ("server", "httpx", "openai", "mcp"):
             logging.getLogger(name).setLevel(logging.CRITICAL)
     asyncio.run(_eval_run(category, case_ids, tier, repeats, concurrency,
-                          model, effort, judge_model, skip_judge, notes))
+                          model, effort, judge_model, judge_effort, skip_judge, notes))
 
 
 async def _eval_run(category, case_ids, tier, repeats, concurrency, model,
-                    effort, judge_model, skip_judge, notes) -> None:
+                    effort, judge_model, judge_effort, skip_judge, notes) -> None:
     from server.evals import report
     from server.evals.registry import select
     from server.evals.runner import EvalRunner, RunConfig, open_store
@@ -70,6 +72,7 @@ async def _eval_run(category, case_ids, tier, repeats, concurrency, model,
         typer.echo("No eval cases matched.")
         raise SystemExit(2)
     cfg = RunConfig(model=model, effort=effort, judge_model=judge_model,
+                    judge_effort=judge_effort,
                     repeats=max(1, repeats), concurrency=max(1, concurrency),
                     category=category, case_ids=case_ids, tier=tier,
                     skip_judge=skip_judge, notes=notes,
@@ -195,14 +198,16 @@ def eval_judge_calibrate(
     path: Annotated[Optional[Path], typer.Option(
         "--file", help="Labelled set (default ~/data/evals/calibration.jsonl)")] = None,
     judge_model: Annotated[Optional[str], typer.Option("--judge-model")] = None,
+    judge_effort: Annotated[Optional[str], typer.Option("--judge-effort")] = None,
     show: Annotated[bool, typer.Option("--show", help="Print disagreements")] = True,
 ) -> None:
     """Judge agreement with hand labels (overall + per item, Cohen's κ)."""
     import asyncio
-    asyncio.run(_calibrate(path, judge_model, show))
+    asyncio.run(_calibrate(path, judge_model, judge_effort, show))
 
 
-async def _calibrate(path: Path | None, judge_model: str | None, show: bool) -> None:
+async def _calibrate(path: Path | None, judge_model: str | None,
+                     judge_effort: str | None, show: bool) -> None:
     from server.evals.calibration import calibrate, default_path, load
     from server.evals.runner import open_store
     settings = Settings.from_env()
@@ -214,7 +219,8 @@ async def _calibrate(path: Path | None, judge_model: str | None, show: bool) -> 
     db, ctx = await open_store(settings)
     try:
         typer.echo(await calibrate(ctx, entries, judge_model=judge_model,
-                                   show=show, progress=lambda s: typer.echo(s)))
+                                   judge_effort=judge_effort, show=show,
+                                   progress=lambda s: typer.echo(s)))
     finally:
         await db.close()
 

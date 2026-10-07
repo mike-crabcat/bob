@@ -56,7 +56,8 @@ def kappa(pairs: list[tuple[bool, bool]]) -> float | None:
 
 
 async def calibrate(ctx: Any, entries: list[dict[str, Any]], *,
-                    judge_model: str | None = None, show: bool = True,
+                    judge_model: str | None = None, judge_effort: str | None = None,
+                    show: bool = True,
                     progress: Callable[[str], None] | None = None) -> str:
     from server.evals.judge import judge
 
@@ -70,7 +71,8 @@ async def calibrate(ctx: Any, entries: list[dict[str, Any]], *,
                         description=e.get("description", ""), run=_noop,
                         rubric=e["rubric"], context=e.get("context", ""))
         res = await judge(ctx, case, transcript=e["transcript"],
-                          response=e.get("response", ""), judge_model=judge_model)
+                          response=e.get("response", ""), judge_model=judge_model,
+                          judge_effort=judge_effort)
         if res.error:
             errors += 1
             say(f"  [{i}/{len(entries)}] {e.get('id')}: judge error {res.error}")
@@ -98,7 +100,8 @@ async def calibrate(ctx: Any, entries: list[dict[str, Any]], *,
     fn = sum(a and (not b) for a, b in overall)
     k = kappa(overall)
     lines = [
-        f"judge={judge_model or 'default'} · {n} entries ({errors} judge errors)",
+        f"judge={judge_model or 'default'}{'@' + judge_effort if judge_effort else ''}"
+        f" · {n} entries ({errors} judge errors)",
         f"overall agreement {agree}/{n} = {agree / n:.0%} · Cohen's κ = "
         f"{'n/a' if k is None else f'{k:.2f}'}",
         f"confusion (human→judge): pass→pass {tp}, fail→fail {tn}, "

@@ -46,11 +46,22 @@ class HarnessError(RuntimeError):
     """The world/case broke, not the model."""
 
 
+class RunAborted(RuntimeError):
+    """Something run-wide is broken (judge out of credit) — stop rather
+    than record a run of harness errors."""
+
+
+_FATAL_JUDGE = re.compile(r"no credits|insufficient_quota|credit_balance|"
+                          r"billing|invalid_api_key|exceeded your current quota", re.I)
+_FATAL_AFTER = 3
+
+
 @dataclass
 class RunConfig:
     model: str | None = None
     effort: str | None = None
     judge_model: str | None = None
+    judge_effort: str | None = None
     repeats: int = 3
     concurrency: int = 3
     category: str | None = None
@@ -123,8 +134,10 @@ class EvalRunner:
         meta = {
             "model": cfg.model or self.settings.openai.default_model,
             "provider_pin": provider_pin(self.settings),
-            "effort": cfg.effort, "judge_model": cfg.judge_model
-            or judging.DEFAULT_JUDGE_MODEL, "git_sha": sha,
+            "effort": cfg.effort,
+            "judge_model": (cfg.judge_model or judging.DEFAULT_JUDGE_MODEL)
+            + (f"@{cfg.judge_effort}" if cfg.judge_effort else ""),
+            "git_sha": sha,
             "git_dirty": None if dirty is None else int(dirty),
             "persona_hash": template.persona_hash, "repeats": cfg.repeats,
             "tier": cfg.tier,
@@ -139,10 +152,18 @@ class EvalRunner:
         sem = asyncio.Semaphore(max(1, cfg.concurrency))
         trials: list[Trial] = []
         work = [(c, r) for r in range(cfg.repeats) for c in cases]
+        fatal: list[str] = []
 
         async def one(case: EvalCase, rep: int) -> None:
             async with sem:
+                if len(fatal) >= _FATAL_AFTER:
+                    return
                 trial = await self._trial(case, rep, template, cfg, store_ctx)
+                if trial.error and _FATAL_JUDGE.search(trial.error):
+                    fatal.append(trial.error)
+                    if len(fatal) >= _FATAL_AFTER:
+                        say(f"ABORTING: judge failing run-wide — {trial.error[:200]}")
+                    return            # not recorded: not a fact about the model
                 trials.append(trial)
                 await store.record_trial(run_id, _trial_row(trial))
                 mark = "PASS" if trial.passed else f"FAIL[{trial.failure_class}]"
@@ -150,6 +171,8 @@ class EvalRunner:
 
         try:
             await asyncio.gather(*(one(c, r) for c, r in work))
+            if len(fatal) >= _FATAL_AFTER:
+                raise RunAborted(fatal[-1][:500])
             tokens = sum(t.prompt_tokens + t.completion_tokens for t in trials)
             costs = [t.cost_usd for t in trials if t.cost_usd is not None]
             await store.complete_run(
@@ -200,7 +223,8 @@ class EvalRunner:
             if checks_ok and case.rubric and not cfg.skip_judge:
                 trial.judge = await judging.judge(
                     store_ctx, case, transcript=trial.transcript,
-                    response=trial.response, judge_model=cfg.judge_model)
+                    response=trial.response, judge_model=cfg.judge_model,
+                    judge_effort=cfg.judge_effort)
             trial.passed = checks_ok and (trial.judge is None or trial.judge.passed)
             if trial.judge is not None and trial.judge.error:
                 trial.failure_class = "harness_error"
