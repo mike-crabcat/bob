@@ -293,6 +293,7 @@ class World:
         self.attention_real = False
         self.attention_windows: dict[str, Any] = {}
         self.attention_dispatching: set[str] = set()
+        self.dispatch_locks: dict[str, asyncio.Lock] = {}
         self.claude_runs: list[dict[str, Any]] = []
         self.claude_reply = ("Done — changes made in the workspace and "
                              "verified; summary in the session log.")

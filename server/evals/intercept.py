@@ -417,6 +417,10 @@ def _install_misc_fakes() -> None:
                                             "attention_windows")
     AttentionCoordinator._dispatching = _Routed(AttentionCoordinator._dispatching,
                                                 "attention_dispatching")
+    # Per-session dispatch locks are class-level too: without routing,
+    # concurrent worlds serialise on the cast's shared session keys.
+    from server.services.session_dispatch_gate import SessionDispatchGate
+    SessionDispatchGate._locks = _Routed(SessionDispatchGate._locks, "dispatch_locks")
 
     V, H, A = VoiceDispatchService, HomeAssistantClient, AttentionCoordinator
     V.dispatch_contact_call = _world_only(V.dispatch_contact_call, dispatch_contact_call)  # type: ignore[method-assign]
