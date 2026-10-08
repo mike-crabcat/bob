@@ -25,6 +25,7 @@ SHIP=(
   google-places
   videogen
   bambu-x2d-prep
+  bom-weather
 )
 
 # Per-skill excludes beyond the universal ones (samples, scratch, secrets).
