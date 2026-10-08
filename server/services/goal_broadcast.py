@@ -100,6 +100,11 @@ async def resolve_groups(ctx: AppContext, refs: list[str]) -> tuple[list[dict[st
         hits = [(g, n) for g, n in by_gid.items() if needle in (n or "").casefold()]
         exact = [(g, n) for g, n in hits if (n or "").casefold() == needle]
         hits = exact or hits
+        if not hits:
+            from server.services.group_tools import groups_by_alias
+            hits = [(_gid(a["whatsapp_jid"]), by_gid[_gid(a["whatsapp_jid"])])
+                    for a in await groups_by_alias(ctx.db, ref)
+                    if _gid(a["whatsapp_jid"]) in by_gid]
         if len(hits) == 1:
             out.append({"gid": hits[0][0], "name": hits[0][1]})
         elif not hits:

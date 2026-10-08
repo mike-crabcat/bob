@@ -51,7 +51,15 @@ class _Groups:
 async def test_resolve_groups(monkeypatch):
     import server.repositories.groups as groups_mod
     monkeypatch.setattr(groups_mod, "GroupRepository", _Groups)
+    import server.services.group_tools as gt
+
+    async def _no_alias(db, name):
+        return [{"name": "Bob Law", "whatsapp_jid": "333333333333@g.us"}] \
+            if name == "Weeming Law" else []
+    monkeypatch.setattr(gt, "groups_by_alias", _no_alias)
     ctx = type("C", (), {"db": None})()
+    ok, _ = await gb.resolve_groups(ctx, ["Weeming Law"])
+    assert [g["gid"] for g in ok] == ["333333333333"]
     ok, errs = await gb.resolve_groups(ctx, ["AI doom", "222222222222@g.us", "ai doom"])
     assert [g["gid"] for g in ok] == ["111111111111", "222222222222"]
     assert errs == []

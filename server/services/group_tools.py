@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from server.services.tools import Tool
 
@@ -64,6 +64,15 @@ def make_group_tools(ctx: AppContext, *, session_key: str) -> list[Tool]:
     ]
 
 
+async def groups_by_alias(db: Any, name: str) -> list[dict[str, Any]]:
+    """WhatsApp groups (name, whatsapp_jid) whose memory entity carries
+    ``name`` as an alias — the fallback when the live title doesn't match."""
+    from server.repositories.groups import GroupRepository
+    from server.services.memory.entity_resolver import group_entities_by_alias
+    return await GroupRepository(db).by_memory_entities(
+        await group_entities_by_alias(db, name))
+
+
 def make_group_lookup_tools(
     ctx: AppContext, *, is_trusted: bool = False,
     contact_id: str | None = None, session_key: str | None = None,
@@ -98,6 +107,11 @@ def make_group_lookup_tools(
             exact = [g for g in name_hits if g["name"].lower() == q.lower()]
             # search_by_name returns (jid, name) only — re-fetch full rows
             for g in (exact or name_hits)[:6]:
+                full = await groups.get_by_jid(g["whatsapp_jid"])
+                if full:
+                    candidates.append(full)
+        if not candidates:
+            for g in (await groups_by_alias(db, q))[:6]:
                 full = await groups.get_by_jid(g["whatsapp_jid"])
                 if full:
                     candidates.append(full)

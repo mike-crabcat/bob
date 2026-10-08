@@ -110,6 +110,25 @@ def load_aliases(memory_dir: Path) -> dict[str, str]:
     return raw
 
 
+async def group_entities_by_alias(db: Any, name: str) -> list[str]:
+    """Group entity ids whose remembered alias or display name matches
+    ``name`` (case-insensitive substring). Lets roster lookups resolve the
+    names people actually use — 2026-10-09: 'Weeming Boys' (the group's
+    in-joke name, stored as an alias) didn't resolve to WhatsApp's
+    'Leeming Boys 🤘', so a census missed the group by its own name."""
+    q = f"%{(name or '').strip()}%"
+    if len(q) < 5:
+        return []
+    rows = await db.fetch_all(
+        "SELECT DISTINCT subject_id AS eid FROM memory_claims "
+        "WHERE status = 'active' AND claim_type_key IN ('alias', 'name') "
+        "AND subject_id LIKE 'group-%' AND value LIKE ? COLLATE NOCASE "
+        "UNION SELECT entity_id AS eid FROM memory_entities "
+        "WHERE entity_type = 'group' AND display_name LIKE ? COLLATE NOCASE",
+        (q, q))
+    return [r["eid"] for r in rows] if rows else []
+
+
 async def load_aliases_db(db: Any) -> dict[str, str]:
     """Load aliases from the memory_aliases table."""
     rows = await db.fetch_all("SELECT alias, entity_id FROM memory_aliases")

@@ -597,6 +597,9 @@ async def _resolve_group_key(ctx: AppContext, name: str) -> str | None:
     if not rows:
         slug = re.sub(r"[-_]+", "%", name.strip())
         rows = await g_repo.search_by_name(f"%{slug}%")
+    if not rows:
+        from server.services.group_tools import groups_by_alias
+        rows = await groups_by_alias(ctx.db, name)
     if len(rows or []) == 1:
         jid = rows[0]["whatsapp_jid"]
         gid = jid.split("@")[0]

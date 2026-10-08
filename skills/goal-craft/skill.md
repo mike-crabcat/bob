@@ -39,7 +39,25 @@ Answer, in the objective or state block:
   X" → negotiate; "sell/earn $N from ..." → sales_target (bias to action,
   parallel branches, group pushes requested via the origin); an event →
   event_plan.
-- Deadline real? Only set one when the world imposes it.
+- Deadline real? Only set one when the world imposes it. **A time the
+  requester names is a hard due time** — "broadcast at 12pm" means the
+  post goes out at 12:00, so its next_action is due 12:00, not "12:30 to
+  be safe" (2026-10-09 Night Watch planned the noon post for 12:30).
+- **Can each delivery actually happen?** For every step that reaches
+  people — posts, DMs, on-air ads — name the tool that will do it AND
+  confirm the conversation that will run it carries that tool, BEFORE
+  saying it's "scheduled". Routines post only to their own chat; a goal
+  room reaches other groups only through an owner broadcast grant
+  (authorize_goal_broadcast → goal_broadcast). If no path exists, say so
+  now — never report an undeliverable step as set up.
+- **Broadcasts to several groups: show the list.** Resolve the audience
+  ("all groups active this week" → list_groups(active_since=…)) and name
+  the groups back to the requester in your ack, so they can strike one —
+  especially other people's groups. Then authorize_goal_broadcast for
+  exactly that list.
+- **One worker.** Once add_goal returns, the room owns the work: ack and
+  stop. Anything you still set up yourself (a routine, a bg job) takes
+  goal_id= so the room can see it.
 - WHO owns it? The goal room acts with its owner's reach — their trust
   scopes what the room may see (e.g. group rosters). In a DM the owner is
   the person you're talking to (automatic). In a GROUP, ask who owns the

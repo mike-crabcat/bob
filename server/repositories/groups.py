@@ -80,6 +80,16 @@ class GroupRepository:
             "UPDATE whatsappgroups SET memory_entity_id = ? WHERE id = ?",
             (entity_id, group_id))
 
+    async def by_memory_entities(self, entity_ids: list[str]) -> list[dict[str, Any]]:
+        if not entity_ids:
+            return []
+        marks = ",".join("?" * len(entity_ids))
+        rows = await self.db.fetch_all(
+            f"SELECT name, whatsapp_jid FROM whatsappgroups "
+            f"WHERE memory_entity_id IN ({marks}) AND deleted_at IS NULL",
+            tuple(entity_ids))
+        return [dict(r) for r in rows] if rows else []
+
     async def memory_entity_id(self, whatsapp_jid: str) -> str | None:
         row = await self.db.fetch_one(
             "SELECT memory_entity_id FROM whatsappgroups WHERE whatsapp_jid = ? AND deleted_at IS NULL",
