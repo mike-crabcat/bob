@@ -626,6 +626,30 @@ class GoalRepository:
             (goal_id,),
         )
 
+    async def set_payload_key(self, goal_id: str, key: str, value: Any) -> bool:
+        """Merge one key into payload_json (``value=None`` removes it).
+        System-owned keys only (e.g. broadcast_grant) — no version bump:
+        the payload is not part of the room's CAS-protected state."""
+        import json as _json
+        row = await self.db.fetch_one(
+            "SELECT payload_json FROM goals WHERE id = ?", (goal_id,))
+        if row is None:
+            return False
+        try:
+            payload = _json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {"legacy": payload}
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+        count = await self.db.execute(
+            "UPDATE goals SET payload_json = ?, updated_at = ? WHERE id = ?",
+            (_json.dumps(payload, ensure_ascii=False), _now_iso(), goal_id))
+        return bool(count)
+
     # -- goal loop (docs/goal-execution-plan.md): system-owned runtime state
 
     async def set_loop_state(self, goal_id: str, state: dict[str, Any]) -> None:

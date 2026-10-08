@@ -1295,6 +1295,14 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 tools.extend(make_steering_tools(
                     self.ctx, session_key, contact_id, flight=flight))
 
+        # Goal broadcast grants (2026-10-09): the owner's explicit "post this
+        # to those groups later" becomes a grant the goal's room acts on —
+        # the only autonomous path into other groups. The tool itself
+        # re-checks the owner; attach it on human owner-capable turns.
+        if is_trusted and contact_id and human_initiated:
+            from server.services.goal_broadcast import make_grant_tools
+            tools.extend(make_grant_tools(self.ctx, session_key, str(contact_id)))
+
         # MCP administration (2026-09-14): register/attach MCP servers at a
         # trusted contact's request — owner direct, other trusted contacts
         # via owner approval (services/mcp_admin_tools.py). Untrusted or

@@ -238,6 +238,22 @@ async def _generic_wake_dispatch(
             from server.services.goal_rooms import room_turn_tools
             utility_tools = list(utility_tools) + room_turn_tools(
                 ctx, session_key)
+            # Owner-approved broadcast (services/goal_broadcast.py): the
+            # room may post to exactly the granted groups while the grant
+            # lives; the charter names them so the room plans with it.
+            try:
+                from server.services.goal_broadcast import (
+                    active_grant, make_broadcast_tools, render_grant,
+                )
+                from server.services.goal_rooms import goal_for_room
+                grant = active_grant(await goal_for_room(ctx, session_key))
+                if grant:
+                    utility_tools = list(utility_tools) + make_broadcast_tools(
+                        ctx, session_key)
+                    charter_block = f"{charter_block}\n\n{render_grant(grant)}"
+            except Exception:
+                logger.warning("wake: broadcast grant check failed for %s",
+                               session_key, exc_info=True)
             # Creator-scoped capabilities (2026-09-25): the room inherits its
             # creator's principal — roster lookup with the creator's own
             # trust, so a member's goal room sees only what the member

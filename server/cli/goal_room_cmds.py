@@ -80,3 +80,57 @@ def adopt(
 ) -> None:
     """Give an existing ACTIVE goal a room (charter, subscriptions, check-ins)."""
     raise typer.Exit(asyncio.run(_adopt(goal_id)))
+
+
+async def _grant(goal_id: str, groups: list[str], until: str, revoke: bool) -> int:
+    from pathlib import Path
+
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
+    from server.repositories.contacts import ContactRepository
+    from server.services.goal_broadcast import grant_broadcast, revoke_broadcast
+
+    settings = Settings.from_env()
+    db = Database(settings.db_path or Path("bob.db"),
+                  Path(__file__).parent.parent / "schemas")
+    await db.connect()
+    ctx = AppContext(settings=settings, db=db)
+    try:
+        if revoke:
+            ok = await revoke_broadcast(ctx, goal_id)
+            typer.echo("revoked" if ok else "no such goal")
+            return 0 if ok else 1
+        owner = await ContactRepository(db).get_default()
+        result = await grant_broadcast(
+            ctx, goal_id, groups,
+            granted_by=str(owner["id"]) if owner else "operator", until=until,
+            note="operator CLI (bob goal-rooms grant-broadcast)")
+    finally:
+        await db.close()
+    if not result.get("ok"):
+        typer.echo(f"grant failed: {result.get('error')}")
+        return 1
+    typer.echo(f"granted until {result['expires_at']}:")
+    for g in result["groups"]:
+        typer.echo(f"  {g['name']} ({g['gid']})")
+    return 0
+
+
+@app.command("grant-broadcast")
+def grant_broadcast_cmd(
+    goal_id: str = typer.Argument(..., help="active goal id"),
+    groups: list[str] = typer.Argument(..., help="group names or JIDs Bob is in"),
+    until: str = typer.Option("", "--until", help="ISO instant the grant lapses "
+                              "(default: goal deadline + 2h, else 48h)"),
+) -> None:
+    """Owner-approve a goal to post into these groups (goal_broadcast in its room)."""
+    raise typer.Exit(asyncio.run(_grant(goal_id, groups, until, False)))
+
+
+@app.command("revoke-broadcast")
+def revoke_broadcast_cmd(
+    goal_id: str = typer.Argument(..., help="goal id"),
+) -> None:
+    """Remove a goal's broadcast grant."""
+    raise typer.Exit(asyncio.run(_grant(goal_id, [], "", True)))
