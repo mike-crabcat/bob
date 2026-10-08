@@ -237,6 +237,7 @@ async def settle_goal(
     wake_content: str | None = None,
     wake_category: str | None = None,
     wake_provenance: str = "wake_nudge",
+    closer_session: str | None = None,
 ) -> bool:
     """Terminal transition (completed/failed/cancelled). Exactly one settler
     wins the CAS; the winner cancels wakeups, appends the goal event, and
@@ -311,6 +312,14 @@ async def settle_goal(
         return True
 
     origin = goal["origin_conversation_id"]
+    if wake_origin and origin and closer_session:
+        # The origin closed it itself (2026-10-09: a group turn closing its
+        # own just-created goal got a "## Goal failed" nudge about its own
+        # action) — nothing to tell it.
+        from server.repositories.conversations import ConversationRepository
+        conv = ConversationRepository(ctx.db)
+        if await conv.resolve_cid(closer_session) == await conv.resolve_cid(origin):
+            wake_origin = False
     if wake_origin and origin and origin != goal["conversation_id"]:
         from server.services.wake_service import wake_conversation
 
@@ -516,6 +525,8 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
         if goal is None or goal["status"] != "active":
             return False  # settled since armed; no series to keep
         payload = json.loads(wakeup.get("payload_json") or "{}")
+        if await goal_loop.defer_opening_round(ctx, goal, payload):
+            return False  # origin turn still working — slot re-armed
         content = await goal_loop.handle_continue_wakeup(ctx, goal, payload)
         await wake_conversation(
             ctx, goal["conversation_id"], content,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -137,6 +139,9 @@ def register_whatsapp_executors(fallback: "WhatsAppBridgeService | None" = None)
         b = getattr(ctx, "whatsapp_bridge", None)
         if b is not None and hasattr(b, "send_message"):
             return b
+        scoped = _DELIVERY_BRIDGE.get()
+        if scoped is not None:
+            return scoped
         if _FALLBACK_BRIDGE is not None:
             return _FALLBACK_BRIDGE
         raise RuntimeError("no WhatsApp bridge on this context")
@@ -162,6 +167,20 @@ def register_whatsapp_executors(fallback: "WhatsAppBridgeService | None" = None)
 
 
 _FALLBACK_BRIDGE: Any = None
+_DELIVERY_BRIDGE: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
+    "whatsapp_delivery_bridge", default=None)
+
+
+@contextlib.contextmanager
+def delivering_via(bridge: Any):
+    """Inline outbox deliveries inside this block use ``bridge`` when the
+    context carries none — tools handed an explicit bridge (outreach, group
+    send, voice link) deliver through the bridge they were given."""
+    token = _DELIVERY_BRIDGE.set(bridge)
+    try:
+        yield
+    finally:
+        _DELIVERY_BRIDGE.reset(token)
 
 
 def _outbound_text(text: str) -> str:

@@ -79,10 +79,15 @@ def make_voice_outreach_tools(
         if wa_service and wa_service.connected:
             try:
                 from server.services.effects import emit_and_deliver
-                sent = await emit_and_deliver(
-                    ctx, kind="whatsapp_send",
-                    idempotency_key=f"voice_link:{session_key}:{url}",
-                    payload={"chat_id": chat_id, "text": f"Tap to talk to me: {url}"})
+                from server.services.whatsapp_bridge_service._service import (
+                    delivering_via,
+                )
+                with delivering_via(wa_service):
+                    sent = await emit_and_deliver(
+                        ctx, kind="whatsapp_send",
+                        idempotency_key=f"voice_link:{session_key}:{url}",
+                        payload={"chat_id": chat_id,
+                                 "text": f"Tap to talk to me: {url}"})
                 if not sent.get("ok"):
                     raise RuntimeError(sent.get("error", "delivery failed"))
             except Exception as e:

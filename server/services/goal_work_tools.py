@@ -40,7 +40,7 @@ from server.services.tools import Tool, tool
 logger = logging.getLogger(__name__)
 
 ACCESS_LEVELS = ("full", "create", "none")
-_CLOSE_STATUSES = ("completed", "failed", "cancelled")
+_CLOSE_STATUSES = ("completed", "failed", "cancelled", "superseded")
 
 
 def _parse_children(children: str) -> tuple[list[dict[str, Any]], str | None]:
@@ -221,13 +221,29 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
                     waiter=waiter, source_goal_id=goal_id))
             created["children"] = kids
         created["profile"] = "outcome"
+        if goal_id and not session_key.startswith("agent:goal-"):
+            from server.repositories.goals import GoalRepository
+            g = await GoalRepository(ctx.db).get(goal_id)
+            if g and str(g.get("conversation_id") or "").startswith("agent:goal-"):
+                # One worker per goal (2026-10-09 Night Watch: this turn and
+                # the room both built the campaign — duplicate scripts, two
+                # ad mechanisms, routines the room never knew about).
+                created["handoff"] = (
+                    "The goal's room owns the work now and starts its first "
+                    "round when THIS turn ends. In this turn: reply to the "
+                    "requester (what will happen, and when) and stop — don't "
+                    "run the steps here too. If the request needs a broadcast "
+                    "to other groups, call authorize_goal_broadcast now.")
         return json.dumps(created)
 
     @tool
     async def close_goal(goal_id: str, outcome: str = "completed",
                          result: str = "") -> str:
-        """Close a goal: outcome = completed | failed | cancelled, with the
-        result (what was achieved, or why it failed / was withdrawn). Works
+        """Close a goal: outcome = completed | failed | cancelled |
+        superseded, with the result (what was achieved, or why it failed /
+        was withdrawn). ``superseded`` = replaced by another goal (name it in
+        the result) — it is not a failure; prefer update_goal(objective=…)
+        to fix a goal's scope instead of replacing it. Works
         for promises (yours, or ones you were asked to complete — e.g.
         prm-a3f2 or just a3f2) and for outcome goals. Closing something
         already closed is a harmless no-op — never retry it.
@@ -236,6 +252,9 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         what the work needs (a tool, a channel, a contact) — that reroutes
         it; never substitute a different channel."""
         outcome = (outcome or "completed").strip().lower()
+        superseded = outcome == "superseded"
+        if superseded:
+            outcome, result = "cancelled", f"superseded: {result or 'replaced by another goal'}"
         if outcome not in _CLOSE_STATUSES:
             return json.dumps({"ok": False, "error":
                 f"outcome must be one of {', '.join(_CLOSE_STATUSES)}"})
@@ -298,7 +317,9 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
                 goal_id=goal["id"], result=result)
         from server.services.goal_service import settle_goal
         moved = await settle_goal(ctx, goal["id"], status=outcome,
-                                  result=result or outcome)
+                                  result=result or outcome,
+                                  note="superseded" if superseded else None,
+                                  closer_session=session_key)
         return json.dumps({"ok": bool(moved), "goal_id": goal["id"],
                            "status": outcome})
 

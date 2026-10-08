@@ -573,3 +573,18 @@ def test_target_session_mismatch_detects_foreign_group_id():
         f"report to {crypto_gid}") is None
     # no group id at all (phones are ~12 digits) -> quiet
     assert _target_session_mismatch(radio, "call Blair on 61401589328") is None
+
+
+async def test_write_routine_tool_rejects_tools_routines_lack(svc, session_key):
+    """2026-10-09 Night Watch: a noon routine told to share_to_group into
+    five groups could never run — refuse at write time, point at goals."""
+    from server.services.routine_tools import make_routine_tools
+
+    tools = make_routine_tools(svc.ctx, session_key=session_key)
+    write_tool = next(t for t in tools if t.name == "write_routine")
+    result = await write_tool.handler(routine_yaml=(
+        "name: noon-broadcast\n"
+        "schedule: '0 12 9 10 *'\n"
+        "prompt: For each group call share_to_group with the poster.\n"))
+    assert "share_to_group" in result and "goal_broadcast" in result
+    assert await svc.get_routine(session_key, "noon-broadcast") is None

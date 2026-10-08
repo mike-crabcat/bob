@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 from uuid import uuid4
 
 from server.context import AppContext
@@ -260,24 +261,49 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
     @tool
     async def update_goal(
         goal_id: str,
-        progress: str,
+        progress: str = "",
         expected_version: int = -1,
+        objective: str = "",
     ) -> str:
         """Record progress on an active goal. expected_version (from
         list_goals) is optional — pass it to reject a stale update; omitted,
-        the goal's current version is used."""
+        the goal's current version is used. To fix a goal's SCOPE (wrong
+        audience, wrong time, missing proof), pass the corrected
+        ``objective`` — edit it in place; never close a goal as failed just
+        to re-create it with better wording."""
         from server.services.effects import emit_and_deliver
 
+        if not progress.strip() and not objective.strip():
+            return json.dumps({"ok": False, "error": "pass progress and/or objective"})
         expected_version = await _version_or_current(goal_id, expected_version)
         if expected_version is None:
             return json.dumps({"ok": False, "error": f"no goal {goal_id}"})
+        payload: dict[str, Any] = {"goal_id": goal_id,
+                                   "expected_version": expected_version}
+        if progress.strip():
+            payload["progress"] = progress
+        if objective.strip():
+            payload["objective"] = objective.strip()
         result = await emit_and_deliver(
             ctx, kind="goal_revise",
             idempotency_key=f"goal_revise:{goal_id}:{expected_version}",
-            payload={"goal_id": goal_id, "progress": progress,
-                     "expected_version": expected_version})
+            payload=payload)
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "failed")})
+        if objective.strip():
+            # The room's charter quotes the objective — re-stamp it.
+            try:
+                from server.repositories.goals import GoalRepository
+                from server.services import goal_rooms
+                g = await GoalRepository(ctx.db).get(goal_id)
+                if g and goal_rooms.is_room_session(g["conversation_id"]):
+                    await goal_rooms.ensure_room(
+                        ctx, goal_id=g["id"], objective=g["objective"],
+                        kind=g.get("kind") or "task", deadline=g.get("deadline"),
+                        origin_session=g.get("origin_conversation_id") or "")
+            except Exception:
+                logger.warning("goal %s: charter refresh after objective edit "
+                               "failed", goal_id, exc_info=True)
         return json.dumps({"ok": True, "goal_id": goal_id})
 
     @tool

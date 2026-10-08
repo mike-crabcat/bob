@@ -100,6 +100,18 @@ def _routine_to_yaml(routine: dict) -> str:
     return yaml.dump(payload, default_flow_style=False)
 
 
+# Tools a routine run does NOT carry (2026-10-09 Night Watch: a noon
+# routine told to share_to_group into five groups — routines post only to
+# their own chat, so it could never have worked, and nothing said so at
+# write time). Routine runs get the common tool set + send_whatsapp_message
+# (their own chat) + MCP; these live on human turns, rooms or wakes only.
+_NON_ROUTINE_TOOLS = (
+    "share_to_group", "steer_conversation", "send_whatsapp_group_message",
+    "send_whatsapp_to_contact", "goal_broadcast", "authorize_goal_broadcast",
+)
+_NON_ROUTINE_TOOL_RE = re.compile(r"\b(" + "|".join(_NON_ROUTINE_TOOLS) + r")\b")
+
+
 def make_routine_tools(
     ctx: AppContext,
     *,
@@ -141,6 +153,14 @@ def make_routine_tools(
         """Create or update a routine for this session. Accepts YAML with fields: name, schedule (cron), prompt, enabled.
         The prompt must contain ONLY the action to perform — never include schedule/timing language
         (e.g. "At 9am each day", "Every Monday"). The schedule is handled by the separate schedule field.
+
+        A run carries the common tools plus send_whatsapp_message, which posts
+        ONLY to this chat. It cannot post to other groups or DM people
+        (share_to_group, steer_conversation, send_whatsapp_group_message,
+        send_whatsapp_to_contact are not available — prompts naming them are
+        refused). For a scheduled post into other groups, create a goal and,
+        when the owner asked for it, authorize_goal_broadcast — the goal's
+        room posts with goal_broadcast.
 
         The prompt is an operational instruction addressed to the future run, not the user's
         request restated: rewrite it as concrete steps that run can perform on its own. Do not
@@ -194,6 +214,17 @@ def make_routine_tools(
                     "facts (like who has replied) should be looked up at run time rather than "
                     "stated in the prompt."
                 ),
+            })
+
+        missing = sorted(set(_NON_ROUTINE_TOOL_RE.findall(str(prompt))))
+        if missing:
+            return json.dumps({
+                "error": (
+                    f"Routine runs don't have {', '.join(missing)} — a routine posts only "
+                    "to its own chat (send_whatsapp_message). For a scheduled post into "
+                    "other groups use a goal: the owner's request becomes a broadcast "
+                    "grant (authorize_goal_broadcast) and the goal's room posts with "
+                    "goal_broadcast at the requested time."),
             })
 
         if timezone is not None:

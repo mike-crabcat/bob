@@ -178,6 +178,17 @@ class TurnRepository:
                ORDER BY started_at LIMIT ?""", (limit,))
         return [dict(r) for r in rows] if rows else []
 
+    async def has_live_turn(self, conversation_id: str) -> bool:
+        """True while the conversation has a pending/running turn whose
+        lease hasn't expired (a zombie with a dead lease doesn't count)."""
+        row = await self.db.fetch_one(
+            """SELECT 1 FROM turns
+               WHERE conversation_id = ? AND status IN ('pending', 'running')
+                 AND (lease_expires_at IS NULL
+                      OR lease_expires_at > ?) LIMIT 1""",
+            (conversation_id, _iso(_utcnow())))
+        return row is not None
+
     async def recent_for_conversation(
         self, conversation_id: str, *, limit: int = 100,
     ) -> list[dict[str, Any]]:

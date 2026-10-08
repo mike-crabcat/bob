@@ -270,12 +270,18 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
         "Fold this into whatever you were waiting on. If it contradicts "
         "what you have on record, say so and check — don't assume it "
         "replaces the record.")
+    # Self-settled (the waiter closed its own promise — 2026-10-09 a group
+    # turn cancelling a placeholder it had just made got a "## Promise
+    # CANCELLED" nudge about its own action): nothing to deliver.
+    self_settled = (task.get("completed_by") or "").removeprefix(
+        "conversation:") == (task.get("waiter_session") or "")
     try:
-        await wake_conversation(
-            ctx, task["waiter_session"], content,
-            call_category=f"task_{task['status']}",
-            metadata={"task_id": task["id"],
-                      "settled_by": task.get("completed_by")})
+        if not self_settled:
+            await wake_conversation(
+                ctx, task["waiter_session"], content,
+                call_category=f"task_{task['status']}",
+                metadata={"task_id": task["id"],
+                          "settled_by": task.get("completed_by")})
     except Exception:
         logger.exception("task %s: waiter wake failed", task_id)
         return False

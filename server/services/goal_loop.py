@@ -163,6 +163,39 @@ async def schedule_slot(
         payload={"frame": frame, "note": note[:400]})
 
 
+OPENING_DEFER_SECONDS = 60
+OPENING_DEFER_MAX = timedelta(minutes=30)
+
+
+async def defer_opening_round(ctx: AppContext, goal: dict[str, Any],
+                              payload: dict[str, Any]) -> bool:
+    """One worker per goal (2026-10-09 Night Watch): the room's opening
+    round fired 2 minutes after add_goal while the creating group turn was
+    still mid-build — both fetched the same tracks, rendered the scripts
+    twice, built two ad mechanisms, and raced the state block. While the
+    origin conversation still has a live turn, the opening slot re-arms a
+    minute later instead (bounded: 30 min after creation the room starts
+    regardless). Returns True when deferred."""
+    from server.repositories.turns import TurnRepository
+
+    if (goal.get("loop_state_json") and
+            json.loads(goal["loop_state_json"] or "{}").get("budget_spent", 0) > 0):
+        return False
+    origin = goal.get("origin_conversation_id")
+    if not origin or origin == goal.get("conversation_id"):
+        return False
+    created = _parse(goal.get("created_at"))
+    if created is not None and _now() - created > OPENING_DEFER_MAX:
+        return False
+    if not await TurnRepository(ctx.db).has_live_turn(origin):
+        return False
+    logger.info("goal loop: opening round for %s deferred — origin %s "
+                "turn still live", goal["id"][:8], origin)
+    await schedule_slot(ctx, goal, _now() + timedelta(seconds=OPENING_DEFER_SECONDS),
+                        payload.get("frame") or FRAME_CARRY, payload.get("note") or "")
+    return True
+
+
 async def pending_slot(ctx: AppContext, goal_id: str) -> dict[str, Any] | None:
     from server.repositories.wakeups import WakeupRepository
     return await WakeupRepository(ctx.db).pending_of_kind(goal_id, CONTINUE_KIND)

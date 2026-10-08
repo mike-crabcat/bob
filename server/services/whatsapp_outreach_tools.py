@@ -196,13 +196,15 @@ def make_group_send_tools(
 
         from server.services.backburner import active_bg_id
         bg = active_bg_id(flight)
-        result = await _deliver_group_send(
-            ctx, group_key=group_key, group_id=group_id, message=message,
-            origin_session_key=current_session_key,
-            idempotency_key=f"whatsapp_group_send:{group_key}:{uuid4().hex[:8]}",
-            provenance={"goal_id": goal_id or None,
-                        **({"bg_task": bg} if bg else {})}, now=now,
-            media_path=media_path)
+        from server.services.whatsapp_bridge_service._service import delivering_via
+        with delivering_via(wa_service):
+            result = await _deliver_group_send(
+                ctx, group_key=group_key, group_id=group_id, message=message,
+                origin_session_key=current_session_key,
+                idempotency_key=f"whatsapp_group_send:{group_key}:{uuid4().hex[:8]}",
+                provenance={"goal_id": goal_id or None,
+                            **({"bg_task": bg} if bg else {})}, now=now,
+                media_path=media_path)
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "delivery failed")})
 
@@ -308,9 +310,11 @@ def make_whatsapp_outreach_tools(
             kind, payload = "whatsapp_send", {"chat_id": jid, "text": message}
         # Through the effects outbox like every turn send (2026-10-08).
         from server.services.effects import emit_and_deliver
-        sent = await emit_and_deliver(
-            ctx, kind=kind, idempotency_key=f"outreach:{uuid4()}",
-            payload=payload)
+        from server.services.whatsapp_bridge_service._service import delivering_via
+        with delivering_via(wa_service):
+            sent = await emit_and_deliver(
+                ctx, kind=kind, idempotency_key=f"outreach:{uuid4()}",
+                payload=payload)
         if not sent.get("ok"):
             return json.dumps({"ok": False, "error": (
                 f"send failed: {sent.get('error', 'delivery failed')}")})
