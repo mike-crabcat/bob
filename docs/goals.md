@@ -95,6 +95,23 @@ strategies tree (hypotheses with verdicts — pruned branches stay), and
 the artefact registry (`goal_artefact(path, what)`). Files go in
 `goals/<id8>/` in the workspace.
 
+**One worker.** The turn that creates the goal hands off: `add_goal`'s
+result tells it to acknowledge and stop, and the room's opening round
+waits (re-armed every minute, up to 30) while the creating conversation
+still has a live turn — otherwise both build the same thing (2026-10-09
+Night Watch: duplicate scripts, two ad mechanisms). Routines and
+background jobs set up for a goal take `goal_id=` (implicit inside the
+room) and land in the state's known-list as `[mechanism] …` lines, so the
+room sees everything running on its behalf. A state write with a `plan`
+also rewrites `goals.progress` from it — one status, not two.
+
+**Scope fixes and supersession.** Fix a goal's scope with
+`update_goal(goal_id, objective=…)` (edits in place, re-stamps the room
+charter) — don't close it and re-create it. When a goal really is
+replaced, `close_goal(outcome="superseded")` records it as cancelled with
+a `superseded:` result, not as a failure. A conversation that closes its
+own goal or promise is never woken with a notice about its own action.
+
 **The loop.** Every room turn ends with a continuation declaration:
 `goal_continue_now(reason)` (capped), `goal_wait(minutes|until, reason)`,
 nothing when children are pending (their closes wake the room), or
@@ -126,6 +143,22 @@ outreach. **Withheld**, because rooms run on timers with nobody watching:
 `email_send`, `write_routine`, `delete_routine`, `create_contact` — ask
 via `delegate_goal` or `request_approval` instead.
 
+**Broadcasts to other groups (owner-approved).** Nothing autonomous can
+post into other groups by default — routines reach only their own chat
+(`write_routine` refuses prompts naming `share_to_group`, steer,
+group-send or contact DMs), rooms have no group-send, and the policy-gated
+`send_whatsapp_group_message` is off for most groups. When the **owner**
+asks for a scheduled broadcast ("12pm post to all groups active this
+week"), the turn resolves the audience (`list_groups(active_since=…)`),
+names the groups back, and calls `authorize_goal_broadcast(goal_id,
+groups, until)`. The grant lives on the goal
+(`payload_json.broadcast_grant`: group JIDs, granter, expiry — default
+deadline + 2h, else 48h), is rendered into the room's charter each turn,
+and gives the room `goal_broadcast(group, message, media_path)`: granted
+groups Bob is still bound to only, once per (group, content), rate-limited,
+mirrored into the group's history. Operators: `bob goal-rooms
+grant-broadcast <goal> <group…> [--until]` / `revoke-broadcast <goal>`.
+
 **Channel rules.**
 - Per-person work (offers, chases, confirmations) happens in **that
   person's DM** — a promise whose completer is the DM. Never chase
@@ -156,6 +189,12 @@ via `delegate_goal` or `request_approval` instead.
   `BOB_GOAL_LOOP=off` (fixed check-ins instead of the loop),
   `BOB_GOAL_LOOP_*` (budgets, caps, dead-man interval),
   `BOB_GOAL_ROOM_MAX_CHILDREN` / `_MAX_DEPTH`, `BOB_OUTREACH_VIA_TASKS`.
+- **Broadcast grants:** `bob goal-rooms grant-broadcast` /
+  `revoke-broadcast` (see "Broadcasts to other groups").
+- **Routines:** a routine past `valid_until` retires itself (disabled,
+  wakeups cancelled; an hourly sweep catches the rest). Date-pinned
+  schedules (fixed day + month) get `valid_until` = that day unless the
+  YAML says `yearly: true`.
 - **Scripts closing promises:** `BOB_TASK_TOKEN` authenticates the script
   completion endpoint.
 - **Data model:** `docs/datamodel.md` → Goals.
