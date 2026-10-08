@@ -122,5 +122,28 @@ def iteration_view(
         return messages
     head = messages[:1] if messages and messages[0].get("role") == "system" \
         else []
-    return head + messages[max(0, base_len - history_keep):base_len] \
-        + messages[base_len:]
+    transcript = messages[base_len:]
+    history = _whole_tool_pairs(
+        messages[max(0, base_len - history_keep):base_len], transcript)
+    return head + history + transcript
+
+
+def _whole_tool_pairs(items: list[dict[str, Any]],
+                      rest: list[dict[str, Any]] = ()) -> list[dict[str, Any]]:
+    """Drop tool calls/results whose partner fell outside the slice.
+
+    A fixed-position cut can land between a replayed function_call and its
+    function_call_output. GLM endpoints tolerate the orphan; OpenAI rejects
+    the whole request ("No tool call found for function call output") —
+    2026-10-08, Bob's Pirate Radio on gpt-6-luna: two of Mike's questions
+    got no reply. Only the history slice is filtered; the live transcript
+    is always complete."""
+    wire = [*items, *rest]       # partners may sit just past the cut
+    calls = {m.get("call_id") for m in wire if m.get("type") == "function_call"}
+    outputs = {m.get("call_id") for m in wire
+               if m.get("type") == "function_call_output"}
+    return [m for m in items
+            if not (m.get("type") == "function_call_output"
+                    and m.get("call_id") not in calls)
+            and not (m.get("type") == "function_call"
+                     and m.get("call_id") not in outputs)]

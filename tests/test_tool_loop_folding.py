@@ -223,3 +223,33 @@ async def test_loop_small_turn_untouched(ctx):
     for sent in fake.sent:
         assert sent is messages or sent == messages
     assert not any(tlf.ELISION_TAG in str(m) for m in messages)
+
+
+def test_view_never_orphans_a_tool_pair():
+    """2026-10-08 Pirate Radio on gpt-6-luna: the 20-item cut landed between
+    a replayed function_call and its output; OpenAI 400'd the turn ("No tool
+    call found for function call output") and Mike got no reply."""
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "s"}]
+    msgs += [{"role": "user", "content": f"m{i}"} for i in range(30)]
+    msgs.append({"type": "function_call", "call_id": "c1", "name": "bash",
+                 "arguments": "{}"})
+    msgs.append({"type": "function_call_output", "call_id": "c1", "output": "x"})
+    msgs += [{"role": "user", "content": f"n{i}"} for i in range(19)]
+    base_len = len(msgs)
+    msgs.append(_result_item("t", "tool"))       # live transcript
+    # history_keep=20 starts exactly on the output (the incident's shape)
+    view = tlf.iteration_view(msgs, base_len, history_keep=20)
+    hist = view[1:-1]
+    assert not any(m.get("call_id") == "c1" for m in hist)   # orphan dropped
+    assert view[-1]["call_id"] == "t"                         # transcript intact
+    # one wider and the pair is kept whole
+    view = tlf.iteration_view(msgs, base_len, history_keep=21)
+    assert [m.get("type") for m in view[1:3]] == ["function_call",
+                                                  "function_call_output"]
+    # a call whose output is cut off the END of history goes too
+    msgs2 = [{"role": "system", "content": "s"}]
+    msgs2 += [{"role": "user", "content": f"m{i}"} for i in range(30)]
+    msgs2.append({"type": "function_call", "call_id": "c2", "name": "bash",
+                  "arguments": "{}"})
+    hist2 = tlf.iteration_view(msgs2, len(msgs2), history_keep=20)[1:]
+    assert not any(m.get("call_id") == "c2" for m in hist2)
