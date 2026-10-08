@@ -173,11 +173,32 @@ _INLINE_SLEEP_RE = _re.compile(
     r"(?:^|&&|;|\|\|)\s*sleep\s+([0-9]+(?:\.[0-9]+)?)", _re.MULTILINE)
 
 
+_HEREDOC_RE = _re.compile(
+    r"^(?P<head>.*?)<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)[^\n]*\n"
+    r"(?P<body>.*?)^\s*(?P=tag)\s*$", _re.MULTILINE | _re.DOTALL)
+_SHELL_HEAD_RE = _re.compile(r"(?:^|[\s;&|(])(?:ba|z|da)?sh(?:\s+-[a-z]+)*\s*$")
+
+
+def _strip_file_heredocs(command: str) -> str:
+    """Drop heredoc bodies that are DATA (cat > file <<EOF …) — a script
+    written to disk doesn't sleep now (2026-10-09: writing an hourly-ads
+    script that contained `sleep 3600` was refused twice, and Bob escaped
+    the guard with printf). Bodies fed to a shell (bash <<EOF) still run
+    inline, so they stay in."""
+    def _drop(m: "_re.Match[str]") -> str:
+        last_line = m.group("head").splitlines()[-1] if m.group("head") else ""
+        if _SHELL_HEAD_RE.search(last_line.strip()):
+            return m.group(0)
+        return m.group("head") + "\n"
+    return _HEREDOC_RE.sub(_drop, command or "")
+
+
 def _inline_sleep_seconds(command: str) -> float | None:
     """Longest top-level `sleep N` in a command, or None. Best-effort:
     sleeps inside subshells/scripts are the sleep tool's job to catch,
-    this catches the habitual plain form."""
-    hits = _INLINE_SLEEP_RE.findall(command or "")
+    this catches the habitual plain form. Heredoc bodies written to files
+    are data, not commands, and are ignored."""
+    hits = _INLINE_SLEEP_RE.findall(_strip_file_heredocs(command or ""))
     if not hits:
         return None
     try:

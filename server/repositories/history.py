@@ -322,6 +322,25 @@ class HistoryRepository:
             (session_key,))
         return row["sender_id"] if row else None
 
+    async def human_activity(
+        self, conversation_ids: list[str], *, since_iso: str = "",
+    ) -> dict[str, dict[str, Any]]:
+        """Per conversation: last raw human message (NULL provenance, sender
+        set) and how many since ``since_iso``. Feeds list_groups."""
+        if not conversation_ids:
+            return {}
+        marks = ",".join("?" * len(conversation_ids))
+        rows = await self.db.fetch_all(
+            f"SELECT conversation_id, MAX(created_at) AS last_at, "
+            f"SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS n_since "
+            f"FROM messages WHERE conversation_id IN ({marks}) "
+            "AND role = 'user' AND provenance IS NULL AND sender_id IS NOT NULL "
+            "AND sender_id != '' GROUP BY conversation_id",
+            (since_iso or "9999", *conversation_ids))
+        return {r["conversation_id"]: {"last_at": r["last_at"],
+                                       "n_since": r["n_since"] or 0}
+                for r in rows} if rows else {}
+
     async def recent_with_sender_names(
         self, session_key: str, *, limit: int, before_utc: str | None = None
     ) -> list[dict]:

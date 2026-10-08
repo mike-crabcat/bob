@@ -127,7 +127,96 @@ def make_group_lookup_tools(
 
         return await _render_roster(groups, target)
 
+    async def _list_groups(active_since: str = "") -> str:
+        """Every WhatsApp group Bob is currently in, with last human activity."""
+        import re as _re
+        from datetime import UTC, datetime, timedelta
+
+        from server.repositories.conversations import ConversationRepository
+        from server.repositories.groups import GroupRepository
+        from server.repositories.history import HistoryRepository
+        from server.services.base import local_iso
+        from server.services.steering import owner_contact
+
+        since_dt = None
+        spec = (active_since or "").strip().lower()
+        if spec:
+            m = _re.fullmatch(r"(\d+)\s*d(ays?)?", spec)
+            if m:
+                since_dt = datetime.now(UTC) - timedelta(days=int(m.group(1)))
+            else:
+                try:
+                    since_dt = datetime.fromisoformat(spec.replace("z", "+00:00"))
+                except ValueError:
+                    return ("Error: active_since must be an ISO date/datetime "
+                            "(local midnight Monday = start of 'this week') or 'Nd'.")
+                if since_dt.tzinfo is None:  # naive = server-local wall clock
+                    since_dt = since_dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        since_iso = (since_dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+                     if since_dt else "")
+
+        groups = GroupRepository(db)
+        bound = await groups.actively_bound_groups()
+        if not is_trusted:
+            allowed = {g["whatsapp_jid"] for g in
+                       await groups.groups_for_contact(contact_id)} if contact_id else set()
+            bound = [g for g in bound if g["whatsapp_jid"] in allowed]
+        conv = ConversationRepository(db)
+        keys = {g["whatsapp_jid"]: f"agent:main:whatsapp:group:{g['whatsapp_jid'].split('@')[0]}"
+                for g in bound}
+        cids = {jid: await conv.resolve_cid(k) for jid, k in keys.items()}
+        activity = await HistoryRepository(db).human_activity(
+            list(cids.values()), since_iso=since_iso)
+        owner = await owner_contact(ctx)
+        rows = []
+        for g in bound:
+            jid = g["whatsapp_jid"]
+            act = activity.get(cids[jid], {})
+            if since_iso and not act.get("n_since"):
+                continue
+            members = await groups.member_contact_ids(jid)
+            policy = await conv.get_policy(keys[jid])
+            rows.append((act.get("last_at") or "", g["name"], jid, keys[jid],
+                         act.get("n_since", 0), len(members),
+                         bool(owner and str(owner["id"]) in {str(m) for m in members}),
+                         bool(policy.get("group_outbound_enabled"))))
+        rows.sort(key=lambda r: r[0], reverse=True)
+        if not rows:
+            return "No groups match." if since_iso else "Bob is in no groups."
+        head = (f"{len(rows)} group(s) Bob is in"
+                + (f" with human messages since {local_iso(since_dt.isoformat())}" if since_dt else "")
+                + " (newest activity first):")
+        lines = [head]
+        for last_at, name, jid, key, n, members, owner_in, outbound in rows:
+            last = local_iso(last_at) if last_at else "never"
+            lines.append(
+                f"- {name} — {jid} ({key}) · last human msg {last}"
+                + (f" · {n} since" if since_iso else "")
+                + f" · {members} members · owner {'in' if owner_in else 'NOT in'}"
+                + f" · autonomous group-send {'on' if outbound else 'off'}")
+        return "\n".join(lines)
+
     return [
+        Tool(
+            name="list_groups",
+            description=(
+                "Every WhatsApp group Bob is currently a member of, in ONE call: "
+                "name, JID, session key, last human message time, member count, "
+                "whether the owner is in it, and whether autonomous group-send is "
+                "on. `active_since` (ISO date/datetime, local time, or 'Nd') keeps "
+                "only groups with human messages since then — e.g. 'all groups "
+                "active this week' = active_since=<Monday's date>. Use this "
+                "instead of probing find_session / get_session_messages per group."
+            ),
+            parameters={
+                "active_since": {
+                    "type": "string",
+                    "description": "Optional ISO date/datetime (local) or 'Nd' (e.g. '7d')",
+                },
+            },
+            required=[],
+            handler=_list_groups,
+        ),
         Tool(
             name="group_participants",
             description=(

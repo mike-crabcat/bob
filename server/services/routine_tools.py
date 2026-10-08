@@ -176,6 +176,8 @@ def make_routine_tools(
                       Routine will not fire before this time. Inclusive.
           valid_until: ISO date or datetime. Date-only bounds include the entire day in
                        the routine's timezone. Inclusive.
+          goal_id: the goal this routine serves (implicit inside a goal room) — the
+                   goal's state then lists it, so its room doesn't build a duplicate.
 
         Example:
           name: morning-digest
@@ -257,6 +259,15 @@ def make_routine_tools(
             valid_until=valid_until,
         )
         out = _routine_to_yaml(routine)
+        from server.services.goal_links import link_mechanism
+        link = await link_mechanism(
+            ctx, session_key, str(parsed.get("goal_id") or ""),
+            f"routine {name} in {session_key} ({schedule}"
+            f"{', ' + str(timezone) if timezone else ''}"
+            f"{', until ' + str(valid_until) if valid_until else ''}"
+            f"{'' if enabled else ', disabled'}): {str(prompt)[:160]}")
+        if link:
+            out += f"\n# goal link:{link}"
         mismatch = _target_session_mismatch(session_key, str(prompt))
         if mismatch:
             out += (

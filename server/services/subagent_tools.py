@@ -112,7 +112,8 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         return json.dumps(result)
 
     @tool
-    async def run_bg_process(command: str, name: str = "", description: str = "") -> str:
+    async def run_bg_process(command: str, name: str = "", description: str = "",
+                             goal_id: str = "") -> str:
         """Run a shell COMMAND as a supervised background process and return
         its handle immediately. Optional name= gives the job a stable
         lowercase handle (letters/digits/dash/underscore; default job-<id>)
@@ -134,12 +135,22 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         artifacts to files via the script's own --output flags instead.
         If you find yourself writing a PROSE BRIEF here, stop: you want
         create_subagent(agent_type='claude'). Never run slow commands with
-        the bash tool — it freezes the whole conversation."""
+        the bash tool — it freezes the whole conversation. goal_id= links
+        the job to the goal it serves (implicit inside a goal room) so the
+        goal's state lists it."""
         from server.services.process_tools import start_bg_job
 
         result = await start_bg_job(
             ctx, session_key, command, is_trusted=is_trusted,
             name=name, description=description)
+        if result.get("ok"):
+            from server.services.goal_links import link_mechanism
+            note = await link_mechanism(
+                ctx, session_key, goal_id,
+                f"bg job {result.get('name')} (job {result.get('job_id')}): "
+                f"{description or command[:120]}")
+            if note:
+                result["goal_link"] = note.strip(" ()")
         return json.dumps(result)
 
     @tool

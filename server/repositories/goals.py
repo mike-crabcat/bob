@@ -34,6 +34,19 @@ _EVAL_SESSION = ("({col} LIKE 'eval:%' OR {col} LIKE 'agent:goal-eval-%' "
                  "OR {col} LIKE 'agent:goal-eg%')")
 
 
+def _progress_from_state(strategy_json: str) -> str | None:
+    import json as _json
+    try:
+        state = _json.loads(strategy_json or "{}")
+    except (TypeError, ValueError):
+        return None
+    plan = state.get("plan") if isinstance(state, dict) else None
+    if not isinstance(plan, str) or not plan.strip():
+        return None
+    plan = plan.strip()
+    return plan if len(plan) <= 600 else plan[:597] + "..."
+
+
 class GoalRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -384,7 +397,14 @@ class GoalRepository:
         deadline: str | None = None,
     ) -> bool:
         """CAS revision: applies only if the version matches (stale-strategy
-        protection). Bumps version on success."""
+        protection). Bumps version on success.
+
+        One status field (2026-10-09): a state write carrying a ``plan``
+        also rewrites ``progress`` from it unless the caller passes progress
+        explicitly — the Night Watch goal's progress said "not yet booked"
+        for hours after its plan said "READY + SCHEDULED"."""
+        if progress is None and strategy_json is not None:
+            progress = _progress_from_state(strategy_json)
         sets = ["version = version + 1", "updated_at = ?"]
         params: list[Any] = [_now_iso()]
         for col, val in (("objective", objective), ("strategy_json", strategy_json),

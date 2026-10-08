@@ -211,13 +211,16 @@ async def _spawn_systemd(
     cmd += ["bash", "-c", inner]
 
     rc, out = await _run_cmd(cmd)
-    if rc != 0 and "already exists" in out:
+    if rc != 0 and _unit_name_taken(out):
         # A just-died unit may not be garbage-collected yet (--collect is
-        # prompt but not instant). Clear the failed state and retry once.
-        await _run_cmd(["systemctl", "--user", "reset-failed", unit])
-        rc, out = await _run_cmd(cmd)
+        # prompt but not instant), or a RemainAfterExit unit is parked in
+        # active(exited) after an immediate exit (2026-10-09: a failed
+        # start left bg-nightwatch-hourly-ads "already loaded" and the name
+        # unusable). Clear it — only if nothing is actually running.
+        if await _clear_dead_unit(unit):
+            rc, out = await _run_cmd(cmd)
     if rc != 0:
-        if "already exists" in out:
+        if _unit_name_taken(out):
             raise _SpawnError(
                 f"unit {unit} already exists and refuses to clear — "
                 f"systemctl --user stop {unit} then retry"
@@ -234,10 +237,29 @@ async def _spawn_systemd(
         "systemctl", "--user", "is-active", "--quiet", unit,
     ])
     if rc_active != 0 or not _pid_alive(pid):
+        await _clear_dead_unit(unit)  # don't leave the name occupied
         raise _SpawnError(
             f"process exited immediately. Log tail:\n{_tail_file(log, 15)}"
         )
     return pid
+
+
+def _unit_name_taken(out: str) -> bool:
+    return any(s in (out or "") for s in (
+        "already exists", "already loaded", "has a fragment file"))
+
+
+async def _clear_dead_unit(unit: str) -> bool:
+    """Stop + reset-failed a unit whose process is gone (SubState exited /
+    failed / dead). Returns False — and touches nothing — while it runs."""
+    _, sub_state = await _run_cmd(
+        ["systemctl", "--user", "show", unit, "-p", "SubState", "--value"])
+    if sub_state.strip() in ("running", "start", "start-pre", "start-post",
+                             "reload", "auto-restart"):
+        return False
+    await _run_cmd(["systemctl", "--user", "stop", unit])
+    await _run_cmd(["systemctl", "--user", "reset-failed", unit])
+    return True
 
 
 async def _spawn_setsid(ctx: AppContext, name: str, command: str, log: Path) -> int:
@@ -677,6 +699,7 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
         description: str = "",
         wake: bool = False,
         ttl: int = 0,
+        goal_id: str = "",
     ) -> str:
         """Start a background process (server, watcher, daemon — or a one-shot
         job) that keeps running across tool calls AND bob-server restarts.
@@ -694,12 +717,20 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
         at the cap the job is killed and reported as timed out. 0 = no cap.
 
         Example: bg_start(name="bob-fm", command="python3 skills/radio/station.py")
-        Example: bg_start(name="render", command="python skills/…", wake=True)"""
+        Example: bg_start(name="render", command="python skills/…", wake=True)
+
+        goal_id= links the process to the goal it serves (implicit inside a
+        goal room) so the goal's state lists it."""
         job_id, message = await _start_core(
             ctx, name=name, command=command, description=description,
             wake=wake, ttl_seconds=ttl, parent_session_key=session_key,
             source="bg_start",
         )
+        if job_id:
+            from server.services.goal_links import link_mechanism
+            message += await link_mechanism(
+                ctx, session_key, goal_id,
+                f"bg process {name} (job {job_id}): {description or command[:120]}")
         return message
 
     @tool

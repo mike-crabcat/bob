@@ -100,3 +100,36 @@ async def test_self_settled_promise_does_not_wake_its_waiter(ctx):
     wake.assert_not_called()
     from server.repositories.tasks import TaskRepository
     assert (await TaskRepository(ctx.db).get(tid))["delivered_at"]
+
+
+async def test_state_write_rewrites_progress_from_plan(ctx):
+    goal = await _goal(ctx)
+    repo = GoalRepository(ctx.db)
+    await repo.revise(goal["id"], expected_version=goal["version"],
+                      progress="not yet booked")
+    g = await repo.get(goal["id"])
+    await repo.revise(g["id"], expected_version=g["version"],
+                      strategy_json=json.dumps({"v": 2, "plan": "READY + SCHEDULED 21:00"}))
+    assert (await repo.get(goal["id"]))["progress"] == "READY + SCHEDULED 21:00"
+
+
+async def test_routine_written_in_a_room_is_listed_on_the_goal(ctx):
+    from server.services.routine_tools import make_routine_tools
+    goal = await _goal(ctx)
+    room = goal["conversation_id"]
+    write = next(t for t in make_routine_tools(ctx, session_key=room)
+                 if t.name == "write_routine")
+    out = await write.handler(routine_yaml=(
+        "name: hourly-ads\nschedule: '45 12-20 * * *'\n"
+        "prompt: Queue the promo with radio.py feature promote.\n"))
+    assert "goal link" in out
+    state = json.loads((await GoalRepository(ctx.db).get(goal["id"]))["strategy_json"])
+    assert any("[mechanism] routine hourly-ads" in k for k in state["known"])
+
+
+async def test_explicit_goal_link_from_origin(ctx):
+    from server.services.goal_links import link_mechanism
+    goal = await _goal(ctx)
+    note = await link_mechanism(ctx, ORIGIN, goal["id"], "bg job ads (job 1): promo loop")
+    assert "linked" in note
+    assert await link_mechanism(ctx, ORIGIN, "", "x") == ""
