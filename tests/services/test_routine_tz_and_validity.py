@@ -293,10 +293,11 @@ async def test_disable_and_delete_cancel_wakeup(svc, session_key):
     assert not [w for w in await repo.list_scheduled(session_key) if w["kind"] == "routine"]
 
 
-async def test_fire_wakeup_skips_expired_routine_but_keeps_series(svc, session_key, monkeypatch):
-    # Validity window is enforced at fire time: an expired routine's slot is
-    # skipped (no dispatch) but returns True so recurrence bookkeeping stays
-    # uniform; a deleted/disabled routine ends the series (False).
+async def test_fire_wakeup_retires_expired_routine(svc, session_key, monkeypatch):
+    # Validity window is enforced at fire time. Past valid_until the window
+    # can never reopen, so the routine is RETIRED (disabled, series ends —
+    # 2026-10-09: 20 expired routines were still enabled); a not-yet-open
+    # window (valid_from ahead) still skips and keeps the series.
     from server.services import goal_service, routine_service
 
     fired = []
@@ -311,8 +312,9 @@ async def test_fire_wakeup_skips_expired_routine_but_keeps_series(svc, session_k
     )
     wakeup = {"kind": "routine", "not_before": "2020-01-01T00:00:00+00:00",
               "payload_json": '{"routine_id": "%s"}' % expired["id"]}
-    assert await goal_service.fire_wakeup(svc.ctx, wakeup) is True
+    assert await goal_service.fire_wakeup(svc.ctx, wakeup) is False
     assert fired == []
+    assert not (await svc.get_routine(session_key, "expired"))["enabled"]
 
     active = await svc.upsert_routine(
         session_key=session_key, name="active", schedule="* * * * *",
@@ -588,3 +590,37 @@ async def test_write_routine_tool_rejects_tools_routines_lack(svc, session_key):
         "prompt: For each group call share_to_group with the poster.\n"))
     assert "share_to_group" in result and "goal_broadcast" in result
     assert await svc.get_routine(session_key, "noon-broadcast") is None
+
+
+async def test_expired_routines_are_retired_with_their_wakeups(svc, session_key):
+    from server.repositories.wakeups import WakeupRepository
+    from server.services import routine_service as rs
+
+    r = await svc.upsert_routine(
+        session_key, "old-one", "0 7 * * *", "x", next_run_at="2030-01-01T00:00:00+00:00",
+        timezone="Australia/Perth", valid_until="2026-01-01")
+    assert rs._expired(r)
+    rs._LAST_SWEEP["at"] = 0.0
+    assert await rs.retire_expired_routines(svc.ctx) == 1
+    r = await svc.get_routine(session_key, "old-one")
+    assert not r["enabled"]
+    rows = await svc.db.fetch_all(
+        "SELECT 1 FROM wakeups WHERE status = 'scheduled' AND payload_json LIKE ?",
+        (f"%{r['id']}%",))
+    assert not rows
+
+
+async def test_date_pinned_cron_gets_one_shot_window_unless_yearly(svc, session_key):
+    from server.services.routine_tools import make_routine_tools
+
+    write = next(t for t in make_routine_tools(svc.ctx, session_key=session_key)
+                 if t.name == "write_routine")
+    out = await write.handler(routine_yaml=(
+        "name: pinned\nschedule: '0 12 9 10 *'\nprompt: post the promo\n"
+        "timezone: Australia/Perth\n"))
+    assert "valid_until set to" in out
+    assert (await svc.get_routine(session_key, "pinned"))["valid_until"]
+    await write.handler(routine_yaml=(
+        "name: birthday\nschedule: '0 9 14 3 *'\nprompt: happy birthday\n"
+        "yearly: true\n"))
+    assert not (await svc.get_routine(session_key, "birthday"))["valid_until"]

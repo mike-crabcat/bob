@@ -176,6 +176,8 @@ def make_routine_tools(
                       Routine will not fire before this time. Inclusive.
           valid_until: ISO date or datetime. Date-only bounds include the entire day in
                        the routine's timezone. Inclusive.
+          yearly: true keeps a date-pinned schedule (fixed day + month) recurring every
+                  year; without it such a routine fires once (valid_until = that date).
           goal_id: the goal this routine serves (implicit inside a goal room) — the
                    goal's state then lists it, so its room doesn't build a duplicate.
 
@@ -245,7 +247,19 @@ def make_routine_tools(
         except ValueError as e:
             return json.dumps({"error": f"Invalid cron expression: {e}"})
 
-        next_at = next_cron_occurrence(schedule, timezone=timezone).astimezone(UTC).isoformat()
+        next_dt = next_cron_occurrence(schedule, timezone=timezone)
+        next_at = next_dt.astimezone(UTC).isoformat()
+        # Date-pinned crons ('0 12 9 10 *') are one-shots in practice but
+        # recur every year: 2026-10-09 found ~30 such routines still enabled
+        # with 2027 wakeups. Pin valid_until to that day unless the routine
+        # says it's annual (yearly: true).
+        auto_note = ""
+        fields = str(schedule).split()
+        if (valid_until is None and not parsed.get("yearly")
+                and len(fields) == 5 and fields[2].isdigit() and fields[3].isdigit()):
+            valid_until = next_dt.date().isoformat()
+            auto_note = (f"\n# valid_until set to {valid_until}: a date-pinned schedule "
+                         "fires once (add `yearly: true` for an annual routine).")
 
         routine = await svc.upsert_routine(
             session_key=session_key,
@@ -258,7 +272,7 @@ def make_routine_tools(
             valid_from=valid_from,
             valid_until=valid_until,
         )
-        out = _routine_to_yaml(routine)
+        out = _routine_to_yaml(routine) + auto_note
         from server.services.goal_links import link_mechanism
         link = await link_mechanism(
             ctx, session_key, str(parsed.get("goal_id") or ""),

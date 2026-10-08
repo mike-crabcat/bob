@@ -461,6 +461,13 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
             payload.get("routine_id", ""))
         if not routine or not routine["enabled"]:
             return False  # definition gone/disabled: series ends
+        try:
+            await routines.retire_expired_routines(ctx)
+        except Exception:
+            logger.warning("routine expiry sweep failed", exc_info=True)
+        if routines._expired(routine):
+            await routines.RoutineService(ctx).set_enabled(routine, False)
+            return False  # window closed for good: retire, end the series
         # Keep the routines-row next_run_at mirror in step with the wakeup
         # series (both compute from now) — the routine tools echo it as
         # next_fire, and a stale mirror reads as a past fire date.

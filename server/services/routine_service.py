@@ -123,7 +123,58 @@ def _outside_validity_window(row: dict[str, Any]) -> bool:
     return False
 
 
+def _expired(row: dict[str, Any]) -> bool:
+    """Past valid_until (in the routine's tz) — the window can never reopen."""
+    valid_until = row.get("valid_until")
+    if not valid_until:
+        return False
+    tz = _routine_tz(row)
+    bound = _parse_bound(str(valid_until), tz)
+    if bound is None:
+        return False
+    if "T" not in str(valid_until) and " " not in str(valid_until).strip():
+        bound = bound + timedelta(days=1)
+    return datetime.now(tz) >= bound
+
+
+_LAST_SWEEP: dict[str, float] = {"at": 0.0}
+
+
+async def retire_expired_routines(ctx: Any, *, min_interval_s: float = 3600) -> int:
+    """Disable enabled routines whose valid_until has passed (and cancel
+    their wakeups) — 2026-10-09: 20 expired routines were still enabled,
+    their series waking only to be skipped. Throttled; returns count."""
+    import time
+    now = time.monotonic()
+    if _LAST_SWEEP["at"] and now - _LAST_SWEEP["at"] < min_interval_s:
+        return 0
+    _LAST_SWEEP["at"] = now
+    svc = RoutineService(ctx)
+    rows = await ctx.db.fetch_all(
+        f"SELECT {_ROUTINE_COLUMNS} FROM routines "
+        "WHERE enabled = 1 AND valid_until IS NOT NULL AND valid_until != ''")
+    n = 0
+    for row in rows or []:
+        r = dict(row)
+        if _expired(r):
+            await svc.set_enabled(r, False)
+            n += 1
+    if n:
+        logger.info("routines: retired %d expired routine(s)", n)
+    return n
+
+
 class RoutineService(BaseService):
+    async def set_enabled(self, routine: dict[str, Any], enabled: bool) -> None:
+        """Flip enabled and keep the wakeup series in step."""
+        now = datetime.now().astimezone().isoformat()
+        await self.db.execute(
+            "UPDATE routines SET enabled = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), now, routine["id"]))
+        fresh = await self.get_by_id(routine["id"])
+        if fresh:
+            await self._sync_wakeup(fresh)
+
     async def list_routines(self, session_key: str) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
             f"SELECT {_ROUTINE_COLUMNS} FROM routines WHERE session_key = ? ORDER BY name",
