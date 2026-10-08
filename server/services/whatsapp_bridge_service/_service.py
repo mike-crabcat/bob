@@ -121,6 +121,59 @@ async def _resolve_wake_category(db: Any, session_key: str,
     return "wakeup"
 
 
+def register_whatsapp_executors(fallback: "WhatsAppBridgeService | None" = None) -> None:
+    """Executors for the WhatsApp effect kinds (Bob3 Phase IV outbox).
+    They deliver through the CONTEXT's bridge (the one the effect was
+    emitted under — the live service in production), else the most
+    recently constructed instance. Registered at import too: every
+    WhatsApp post rides the outbox now (2026-10-08), so delivery can't
+    depend on a bridge instance having been constructed first."""
+    from server.services import effects as effects_svc
+    global _FALLBACK_BRIDGE
+    if fallback is not None:
+        _FALLBACK_BRIDGE = fallback
+
+    def _bridge(ctx: Any) -> Any:
+        b = getattr(ctx, "whatsapp_bridge", None)
+        if b is not None and hasattr(b, "send_message"):
+            return b
+        if _FALLBACK_BRIDGE is not None:
+            return _FALLBACK_BRIDGE
+        raise RuntimeError("no WhatsApp bridge on this context")
+
+    async def _exec_send(ctx: Any, payload: dict[str, Any]) -> str:
+        kw = {"reply_to": payload["reply_to"]} if payload.get("reply_to") else {}
+        return await _bridge(ctx).send_message(
+            payload["chat_id"], payload["text"], **kw)
+
+    async def _exec_media(ctx: Any, payload: dict[str, Any]) -> str:
+        return await _bridge(ctx).send_media(
+            payload["chat_id"], payload["file_path"],
+            caption=payload.get("caption", ""))
+
+    async def _exec_react(ctx: Any, payload: dict[str, Any]) -> str:
+        return await _bridge(ctx).send_reaction(
+            payload["chat_id"], payload["target_message_id"],
+            payload.get("target_sender_jid", ""), payload["emoji"])
+
+    effects_svc.register_executor("whatsapp_send", _exec_send)
+    effects_svc.register_executor("whatsapp_send_media", _exec_media)
+    effects_svc.register_executor("whatsapp_react", _exec_react)
+
+
+_FALLBACK_BRIDGE: Any = None
+
+
+def _outbound_text(text: str) -> str:
+    """Hygiene for ANY text leaving for WhatsApp: leaked tool-call markup
+    and OpenAI web_search citation markers removed (both no-ops on clean
+    text, so system strings pass untouched)."""
+    from server.services.openai_service import (
+        strip_citation_markers, strip_leaked_tool_xml,
+    )
+    return strip_citation_markers(strip_leaked_tool_xml(text))
+
+
 class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, ReactionsMixin):
     """WebSocket client connecting to the whatsappbridge Go companion service."""
 
@@ -169,29 +222,9 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 exc_info=True)
 
     def _register_send_executors(self) -> None:
-        """Bind this instance as the executor for WhatsApp send effects
-        (Bob3 Phase IV outbox). Last-constructed instance wins — there is
-        one live bridge per process."""
-        from server.services import effects as effects_svc
-
-        async def _exec_send(ctx: Any, payload: dict[str, Any]) -> str:
-            return await self.send_message(
-                payload["chat_id"], payload["text"],
-                reply_to=payload.get("reply_to"))
-
-        async def _exec_media(ctx: Any, payload: dict[str, Any]) -> str:
-            return await self.send_media(
-                payload["chat_id"], payload["file_path"],
-                caption=payload.get("caption", ""))
-
-        async def _exec_react(ctx: Any, payload: dict[str, Any]) -> str:
-            return await self.send_reaction(
-                payload["chat_id"], payload["target_message_id"],
-                payload.get("target_sender_jid", ""), payload["emoji"])
-
-        effects_svc.register_executor("whatsapp_send", _exec_send)
-        effects_svc.register_executor("whatsapp_send_media", _exec_media)
-        effects_svc.register_executor("whatsapp_react", _exec_react)
+        """(Re)register the WhatsApp send executors — see
+        register_whatsapp_executors; kept as the construction hook."""
+        register_whatsapp_executors(fallback=self)
 
     # In-flight sends are bounded by turn volume; past this the oldest
     # entries are dropped (their rows just stay unstamped — the reaction
@@ -317,12 +350,15 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         # (outreach/cross-session sends, steering relays). Every WhatsApp text
         # funnels through here — strip leaked markup once, centrally. Pure
         # markup with no surviving text is refused loudly.
-        from server.services.openai_service import strip_leaked_tool_xml
-        cleaned = strip_leaked_tool_xml(text or "")
+        # Citation markers too (2026-10-08): OpenAI web_search's inline
+        # cite markers reached AI Doom through a routine send that skipped
+        # the send-tool cleanup — every path is cleaned here now.
+        cleaned = _outbound_text(text or "")
         if not cleaned.strip():
             logger.warning(
                 "send_message refused markup-only text to %s (%d chars of "
-                "tool-call tags, no content)", chat_id, len(text or ""))
+                "tool-call tags / citation markers, no content)",
+                chat_id, len(text or ""))
             return "refused: markup-only text"
         text = cleaned
         request_id = str(uuid4())
@@ -376,6 +412,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         """
         import mimetypes
 
+        caption = _outbound_text(caption or "")
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         request_id = str(uuid4())
         upload_id = await self._upload_media(file_path, mime, caption)
@@ -1563,3 +1600,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             return await DispatchRunner(self.ctx).run(s)
 
         await AttentionCoordinator(self.ctx).resume_pending(session_key, _run_dispatch)
+
+
+register_whatsapp_executors()

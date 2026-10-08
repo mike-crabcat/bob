@@ -302,9 +302,19 @@ def make_whatsapp_outreach_tools(
             prepared = await _prepare_media(str(resolved))
             if prepared is None:
                 return json.dumps({"ok": False, "error": "Failed to prepare media for sending"})
-            request_id = await wa_service.send_media(jid, prepared, caption=message)
+            kind, payload = "whatsapp_send_media", {
+                "chat_id": jid, "file_path": prepared, "caption": message}
         else:
-            request_id = await wa_service.send_message(jid, message)
+            kind, payload = "whatsapp_send", {"chat_id": jid, "text": message}
+        # Through the effects outbox like every turn send (2026-10-08).
+        from server.services.effects import emit_and_deliver
+        sent = await emit_and_deliver(
+            ctx, kind=kind, idempotency_key=f"outreach:{uuid4()}",
+            payload=payload)
+        if not sent.get("ok"):
+            return json.dumps({"ok": False, "error": (
+                f"send failed: {sent.get('error', 'delivery failed')}")})
+        request_id = sent.get("external_result_id") or sent.get("effect_id")
 
         # Derive session key for the target contact
         phone_digits = re.sub(r"\D", "", phone)

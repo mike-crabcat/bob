@@ -89,10 +89,7 @@ class AnnounceService(BaseService):
                     continue
 
             message = await self._compose(session_key, plans)
-            try:
-                await bridge.send_message(chat_id, message)
-            except Exception:
-                logger.exception("dream announce: send failed to %s", chat_id)
+            if not await self._deliver(chat_id, message, plans):
                 continue
 
             await self._record(session_key, message, plans)
@@ -158,10 +155,7 @@ class AnnounceService(BaseService):
                     continue
                 plan = remaining[0]
             message = await self._compose(session_key, [plan], follow_up=True)
-            try:
-                await bridge.send_message(chat_id, message)
-            except Exception:
-                logger.exception("dream reannounce: send failed to %s", chat_id)
+            if not await self._deliver(chat_id, message, [plan], follow_up=True):
                 continue
             await self._record(session_key, message, [plan])
             sent += 1
@@ -254,6 +248,28 @@ class AnnounceService(BaseService):
             temperature=0.6,
         )
         return (response or "").strip()[:1500] or "Quick nudge — still happy to help with that thing we mentioned?"
+
+    async def _deliver(self, chat_id: str, message: str, plans: list[dict],
+                       *, follow_up: bool = False) -> bool:
+        """Send through the effects outbox (2026-10-08: direct bridge sends
+        skipped the durable record and retries). Keyed on the plans, so a
+        re-run never double-posts the same announcement."""
+        from server.services.effects import emit_and_deliver
+        ids = ",".join(sorted(str(p["id"]) for p in plans))
+        try:
+            result = await emit_and_deliver(
+                self.ctx, kind="whatsapp_send",
+                idempotency_key=(f"dream_{'reannounce' if follow_up else 'announce'}"
+                                 f":{chat_id}:{ids}"),
+                payload={"chat_id": chat_id, "text": message})
+        except Exception:
+            logger.exception("dream announce: send failed to %s", chat_id)
+            return False
+        if not result.get("ok"):
+            logger.warning("dream announce: delivery failed to %s: %s",
+                           chat_id, result.get("error"))
+            return False
+        return True
 
     async def _record(self, session_key: str, message: str, plans: list[dict]) -> None:
         """Record the announcement so future dreams can find it and extraction skips it."""

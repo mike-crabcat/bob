@@ -336,12 +336,19 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         # Add channel-specific delivery tools
         wa_bridge = ctx.whatsapp_bridge
         chat_id = session_key_to_chat_id(session_key)
-        sent: dict[str, bool] = {"ok": False}
+        sent: dict[str, Any] = {"ok": False, "texts": [], "seq": 0}
+        routine_dispatch_id = str(uuid4())
         if chat_id and wa_bridge and wa_bridge.connected:
             async def _send_whatsapp_message(text: str, media_path: str = "") -> str:
+                # Through the effects outbox like every turn send (2026-10-08):
+                # durable record, idempotency, pump retries — and the
+                # delivered text lands in history (routine rows were empty,
+                # so Bob couldn't see what he'd posted).
+                from server.services.effects import emit_and_deliver
                 if is_no_reply(text):
                     return "No reply sent."
-                sent["ok"] = True
+                seq = sent["seq"]
+                sent["seq"] += 1
                 if media_path:
                     from server.services.whatsapp_bridge_service._media import (
                         _prepare_media,
@@ -355,11 +362,25 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
                     prepared = await _prepare_media(str(resolved))
                     if prepared is None:
                         return "Error: failed to prepare media for sending"
-                    request_id = await wa_bridge.send_media(
-                        chat_id, prepared, caption=text)
-                    return f"Media sent (request_id={request_id})"
-                request_id = await wa_bridge.send_message(chat_id, text)
-                return f"Message sent (request_id={request_id})"
+                    result = await emit_and_deliver(
+                        ctx, kind="whatsapp_send_media",
+                        idempotency_key=f"routine_media:{routine_dispatch_id}:{seq}",
+                        payload={"chat_id": chat_id, "file_path": prepared,
+                                 "caption": text})
+                    if not result.get("ok"):
+                        return f"Error sending media: {result.get('error', 'delivery failed')}"
+                    sent["ok"] = True
+                    sent["texts"].append(f"[Image: {text}]" if text else f"[Image: {resolved.name}]")
+                    return f"Media sent (request_id={result.get('external_result_id')})"
+                result = await emit_and_deliver(
+                    ctx, kind="whatsapp_send",
+                    idempotency_key=f"routine_send:{routine_dispatch_id}:{seq}",
+                    payload={"chat_id": chat_id, "text": text})
+                if not result.get("ok"):
+                    return f"Error sending message: {result.get('error', 'delivery failed')}"
+                sent["ok"] = True
+                sent["texts"].append(text)
+                return f"Message sent (request_id={result.get('external_result_id')})"
 
             tools.append(Tool(
                 name="send_whatsapp_message",
@@ -390,7 +411,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
         if mcp_note:
             workspace_prompt += "\n\n" + mcp_note
 
-        dispatch_id = str(uuid4())
+        dispatch_id = routine_dispatch_id
         budget: dict[str, bool] = {}
         response = await LLMDispatchService(ctx).run_turn(
             messages, tools,
@@ -415,10 +436,15 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
                 and delivery_intent
                 and response.strip() and not is_no_reply(response)):
             try:
-                await wa_bridge.send_message(
-                    chat_id,
-                    "(auto-delivered — routine hit its time budget mid-turn)\n"
-                    + response)
+                from server.services.effects import emit_and_deliver
+                rescue_text = ("(auto-delivered — routine hit its time budget "
+                               "mid-turn)\n" + response)
+                result = await emit_and_deliver(
+                    ctx, kind="whatsapp_send",
+                    idempotency_key=f"routine_rescue:{dispatch_id}",
+                    payload={"chat_id": chat_id, "text": rescue_text})
+                if result.get("ok"):
+                    sent["texts"].append(rescue_text)
                 logger.warning(
                     "routine cutoff rescue: delivered un-sent routine output "
                     "after budget cutoff (routine=%s, session=%s, "
@@ -429,7 +455,10 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
                     "routine cutoff rescue failed (routine=%s, session=%s)",
                     name, session_key)
 
-        await session_svc.add_message(session_key, "assistant", response, channel="routine", dispatch_id=dispatch_id, provenance="routine")
+        # What the chat SAW is the record when the routine posted; the
+        # internal final text stays the record otherwise (session-only runs).
+        record = "\n\n".join(sent["texts"]) if sent["texts"] else response
+        await session_svc.add_message(session_key, "assistant", record, channel="routine", dispatch_id=dispatch_id, provenance="routine")
 
         await RoutineService(ctx).mark_run(routine["id"])
 
