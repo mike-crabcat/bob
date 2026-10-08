@@ -396,15 +396,20 @@ def _install_misc_fakes() -> None:
         AttentionCoordinator.submit, AttentionCoordinator.resume_pending)
     real_typing = AttentionCoordinator.notify_typing
 
+    # The bypass dispatches at once but on its OWN task, as the real window
+    # does: a wake raised inside a turn (closing a promise wakes its
+    # waiter — often the same conversation) must not run inline while that
+    # turn still holds the session lock (2026-10-08: deadlocked close_goal).
+    # The task inherits the world context, so settle() waits for it.
     async def submit(self, session_key, dispatch_fn, **kwargs):
         if world().attention_real:
             return await real_submit(self, session_key, dispatch_fn, **kwargs)
-        await dispatch_fn()
+        asyncio.ensure_future(dispatch_fn())
 
     async def resume_pending(self, session_key, dispatch_fn, *a, **kwargs):
         if world().attention_real:
             return await real_resume(self, session_key, dispatch_fn, *a, **kwargs)
-        await dispatch_fn()
+        asyncio.ensure_future(dispatch_fn())
 
     def notify_typing(self, *a, **k):
         if world().attention_real:
