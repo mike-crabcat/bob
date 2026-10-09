@@ -528,10 +528,21 @@ async def _deliver_exit_wake(ctx: AppContext, row: dict) -> bool:
     ws = ctx.settings.harness.workspace_dir.expanduser().resolve()
     tail = _tail_file(ws / row["log"], 40) if row.get("log") else ""
     content = _wake_content(row, tail)
+    # A human chat must HEAR how its job went: the wake speaks like a task
+    # relay (final text posted; NO_REPLY stays silent). As wake_nudge the
+    # reply was dropped as bookkeeping — 2026-10-09 Mike's DM: the AI Doom
+    # hat mockup was finished and described, and never reached him.
+    speaks = parent.startswith(("agent:main:whatsapp:", "agent:main:email:"))
+    if speaks:
+        content += ("\n\nYour final text is POSTED to this chat. Images or "
+                    "files must go out with send_whatsapp_message(media_path=…) "
+                    "— text alone can't attach anything, so never say "
+                    "'attached' without sending it.")
     try:
         return await wake_conversation(
             ctx, parent, content,
-            call_category="subagent_result", provenance="wake_nudge",
+            call_category="subagent_result",
+            provenance="task_relay" if speaks else "wake_nudge",
             metadata={"bg_job_id": row["id"], "bg_job_name": row["name"]},
         )
     except Exception:
