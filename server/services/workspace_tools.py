@@ -213,6 +213,9 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
     If session_key is provided, also includes an update_agenda tool.
     """
 
+    _image_reads: dict[str, int] = {}
+    _IMAGE_REREAD_LIMIT = 2
+
     @tool
     async def sleep(seconds: float, reason: str = "") -> str:
         """Wait before your next action. Sleeps of 10 seconds or less run
@@ -342,10 +345,20 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
     async def read_image(
         path: str,
     ) -> ImageInjection:
-        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP; for MP4/MOV/M4V videos the first frame is shown. Path can be absolute (within workspace) or relative to workspace root."""
+        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP; for MP4/MOV/M4V videos the first frame is shown. Path can be absolute (within workspace) or relative to workspace root. When comparing several images, note what each shows as you view it — older images in a long turn are elided from context."""
         resolved = _resolve_path(ctx, path)
         if not resolved.is_file():
             return ImageInjection(text=f"Error: '{path}' is not a file", data_url="")
+        # Loop guard (2026-10-09: a 5-photo comparison re-read the same
+        # photos 46 times in one turn as each read evicted another).
+        key = str(resolved)
+        _image_reads[key] = _image_reads.get(key, 0) + 1
+        if _image_reads[key] > _IMAGE_REREAD_LIMIT:
+            return ImageInjection(
+                text=(f"Not re-loaded: you have already viewed {path} "
+                      f"{_image_reads[key] - 1} times this turn. Work from what "
+                      "you observed; answer now rather than re-reading."),
+                data_url="")
 
         suffix = resolved.suffix.lower()
         _MIME_MAP = {

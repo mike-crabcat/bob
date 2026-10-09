@@ -1046,7 +1046,7 @@ class OpenAIService(BaseService):
 
                 if tl is not None and tl.folding_enabled:
                     tool_loop_folding.fold_aged_image_outputs(
-                        messages, keep_last=3)
+                        messages, keep_last=tool_loop_folding.IMAGE_KEEP_LAST)
                     dropped = tool_loop_folding.fold_aged_tool_outputs(
                         messages,
                         keep_last=tl.fold_keep_last,

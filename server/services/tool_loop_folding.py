@@ -38,8 +38,14 @@ def _foldable(m: dict[str, Any]) -> bool:
             and isinstance(m.get("output"), str))
 
 
-IMAGE_ELISION = "[image elided — it is from an earlier tool round in this " \
-                "turn; re-read it with read_image if you need to see it again]"
+IMAGE_ELISION = ("[image elided to save context — you ALREADY viewed it "
+                 "earlier in this turn. Work from what you observed then; "
+                 "re-read it only for a specific detail you didn't note.]")
+
+# Inline images kept per turn. 3 looped a 5-photo comparison (2026-10-09
+# Leeming beer re-judge: every re-read evicted another photo — 46 reads,
+# nothing posted); 8 holds a typical "compare these" set.
+IMAGE_KEEP_LAST = 8
 
 
 def fold_aged_image_outputs(
