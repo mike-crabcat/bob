@@ -5,7 +5,7 @@ something (paths dropped, dashboard exposed, Twilio webhooks unreachable).
 This is the canonical snapshot + rebuild commands + rules. **Re-read it
 before touching `tailscale serve`, and update it after every change.**
 
-Snapshot date: **2026-10-02** (tailscale 1.86.2 — **the serve/funnel CLI
+Snapshot date: **2026-10-09** (tailscale 1.86.2 — **the serve/funnel CLI
 syntax changed in 1.86**; the rebuild commands below are the new
 `--set-path` form, verified live). Re-capture the live truth any time with:
 
@@ -44,6 +44,7 @@ line is load-bearing for a live integration:
 | `/aus-legal/cite` | `http://127.0.0.1:8017/cite` | `bg-aus-legal.service` | Citation lookup — bearer-gated (added 2026-10-02) |
 | `/blackline` | `http://127.0.0.1:8788` | `bg-blackline.service` (`skills/blackline/blackline.py`) | Document-sanitisation UI (Helen's tool) — app-level password gate on ALL routes + 5-fail/10-min login lockout (added 2026-09-23 with the public mount); holds sensitive case data |
 | `/radiotranscript` | `http://127.0.0.1:8011/radiotranscript` | radio transcript host (python, 8011) | Live radio transcript feed |
+| `/share/d` | `http://127.0.0.1:8787/d` | `bg-share-files.service` (`skills/share-files/server.py`) | Bob's self-hosted expiring file links (share-files skill) — download path ONLY; upload/admin API (`/api/*`) stays loopback. Links are 256-bit unguessable, 5 min–7 day expiry, revocable (added 2026-10-09, Mike-approved public; replaced onlyfiles.com) |
 
 Removed 2026-09-23: the three `/figurine/*` paths (upstream 8777) and
 `/gnome` (upstream 8778, added 2026-09-22 by Bob for the smith-gnome share
@@ -52,8 +53,9 @@ file sharing moved to the `share-files` skill (onlyfiles.com links; see
 2026-09-23 changelog). The paths 502'd from the moment their servers died;
 removal syntax that worked: `tailscale serve --https=443
 --set-path=<path> --yes off` (note: `serve clear <svc:…>` is for service
-proxies, not paths). Large-file sharing now goes through the skill, so no
-funnel file paths should be re-added ad hoc.
+proxies, not paths). Large-file sharing goes through the share-files skill
+(self-hosted since 2026-10-09: `/share/d` above), so no other funnel file
+paths should be re-added ad hoc.
 
 ## Vhost: 8443 — **tailnet only (NOT funnelled)**
 
@@ -93,7 +95,10 @@ is the point.**
    After EVERY serve change on 443, re-apply the funnel root mount:
    `tailscale funnel --bg --https=443 --set-path=/ --yes http://127.0.0.1:8420`
    and confirm `tailscale funnel status` shows **Funnel on** before walking
-   away. Old-syntax commands (`tailscale funnel 443 on`,
+   away. Adding a public path directly with `tailscale funnel --bg
+   --https=443 --set-path=/x --yes <target>` (instead of `serve`) keeps the
+   funnel on — verified 2026-10-09 adding `/share/d` (diff of `serve status`
+   before/after = exactly the one new line, Funnel on throughout). Old-syntax commands (`tailscale funnel 443 on`,
    `tailscale serve --bg --https=443 /path target`) now error out.
 
 ## Rebuild from scratch
@@ -116,6 +121,7 @@ tailscale serve --bg --https=443 --set-path=/aus-legal/pdf   --yes http://127.0.
 tailscale serve --bg --https=443 --set-path=/aus-legal/search --yes http://127.0.0.1:8017/search
 tailscale serve --bg --https=443 --set-path=/aus-legal/cite  --yes http://127.0.0.1:8017/cite
 tailscale serve --bg --https=443 --set-path=/blackline   --yes http://127.0.0.1:8788
+tailscale serve --bg --https=443 --set-path=/share/d     --yes http://127.0.0.1:8787/d
 
 # turn the whole 443 vhost public (the only funnel step — mounts above are tailnet-only until this runs)
 tailscale funnel --bg --https=443 --set-path=/ --yes http://127.0.0.1:8420
