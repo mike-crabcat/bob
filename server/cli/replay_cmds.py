@@ -220,7 +220,7 @@ async def _export_probe_candidates(limit: int, out: Path | None) -> None:
 @app.command("probe-matrix")
 def probe_matrix(
     golden: Annotated[Optional[Path], typer.Option("--golden", "-g", help="Golden labels JSON")] = None,
-    model: Annotated[str, typer.Option("--model", "-m")] = "gpt-5.6-luna",
+    model: Annotated[str, typer.Option("--model", "-m", help="default: the configured probe model (models.yaml roles.attention_probe)")] = "",
 ) -> None:
     """Score the Tier 2 probe against golden labels: confusion matrix +
     accuracy. Runs live LLM calls (needs API credits). Use before deploying
@@ -247,6 +247,11 @@ async def _probe_matrix(golden: Path | None, model: str) -> None:
     db = Database(db_path=settings.db_path, schema_dir=None, pool_size=1)
     await db.connect()
     ctx = AppContext(db=db, settings=settings)
+    if not model:
+        from server.services.attention.tier2 import probe_model_for
+        model = probe_model_for(ctx, settings.patience.model
+                                or settings.openai.get_memory_model())
+        typer.echo(f"probe model: {model}")
     labels = ("ACT", "WAIT", "STAND_DOWN")
     matrix = {g: {p: 0 for p in labels} for g in labels}
     failures = []

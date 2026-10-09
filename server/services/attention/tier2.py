@@ -177,8 +177,23 @@ async def probe_actionability(
                        session_key, exc_info=True)
         return {"decision": "ACT", "react": None, "reason": "context-build failure"}
 
-    return await probe_decide(ctx, context_text, bot_name=bot_name, model=model,
+    return await probe_decide(ctx, context_text, bot_name=bot_name,
+                              model=probe_model_for(ctx, model),
                               session_key=session_key)
+
+
+def probe_model_for(ctx: Any, fallback: str = "") -> str:
+    """The probe's model: models.yaml ``roles.attention_probe`` (hot-
+    reloaded) wins, else ``fallback`` (BOB_PATIENCE_MODEL → memory model,
+    resolved at bridge start). Resolved per call so a models.yaml edit
+    takes effect on the next probe."""
+    try:
+        from server.services import model_registry
+        pinned = model_registry.role_model(ctx.settings.config_dir, "attention_probe")
+    except Exception:
+        logger.warning("tier2: probe role lookup failed", exc_info=True)
+        pinned = None
+    return pinned or fallback
 
 
 async def probe_decide(
@@ -206,9 +221,10 @@ async def probe_decide(
             temperature=0.0,
             # Headroom for low-effort reasoning — the verdict JSON is ~40
             # tokens, but thinking models spend reasoning from the same
-            # budget (claim_router probe hit this at 60). Empty model
+            # budget (claim_router probe hit this at 60; gpt-6-luna spent
+            # all of 300 once in the 2026-10-09 bench). Empty model
             # resolves through llm_dispatch to the configured default.
-            max_tokens=300,
+            max_tokens=600,
             reasoning_effort="low",
             call_category="attention_probe",
             session_key=session_key,

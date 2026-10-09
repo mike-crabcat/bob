@@ -135,6 +135,20 @@ def supports_video(config_dir: Path, model: str) -> bool:
     return raw.get(model) is True
 
 
+def role_model(config_dir: Path, role: str) -> str | None:
+    """Model pinned to a background ROLE in models.yaml ``roles:`` (alias-
+    resolved), or None. Roles make a call site independently selectable —
+    hot-reloaded like aliases, no restart. Known roles: attention_probe
+    (2026-10-09: the group-chat probe stopped riding the memory model)."""
+    raw = _load_models(config_dir).get("roles") or {}
+    if not isinstance(raw, dict):
+        return None
+    val = raw.get(role)
+    if not isinstance(val, str) or not val.strip():
+        return None
+    return resolve(val, config_dir)
+
+
 def resolve(name: str, config_dir: Path) -> str:
     """Resolve an alias (case-insensitive) to its slug; unknown names pass
     through unchanged so callers can pass already-resolved slugs."""
