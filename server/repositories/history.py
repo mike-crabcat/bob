@@ -355,7 +355,8 @@ class HistoryRepository:
             params.append(before_utc)
         params.append(limit)
         rows = await self.db.fetch_all(
-            f"""SELECT sm.role, sm.content, sm.channel, sm.created_at, c.name AS sender_name
+            f"""SELECT sm.role, sm.content, sm.channel, sm.created_at, sm.metadata,
+                      c.name AS sender_name
                FROM messages sm
                LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
                WHERE {where}
@@ -381,7 +382,7 @@ class HistoryRepository:
         params.append(limit)
         rows = await self.db.fetch_all(
             f"""SELECT sm.conversation_id, sm.role, sm.content, sm.channel,
-                       sm.created_at, c.name AS sender_name
+                       sm.created_at, sm.metadata, c.name AS sender_name
                FROM messages sm
                LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
                WHERE {where}

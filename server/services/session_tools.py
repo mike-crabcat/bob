@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 _MAX_MESSAGE_CHARS = 2000
 
 
+
+def _media_note(metadata_raw) -> str:
+    """The same media pointer the chat history carries ('(image file at …
+    — view it with read_image)'). The history tools returned bare text, so
+    a photo paged back via get_session_messages read as '[Image]' or just
+    its caption — 2026-10-09 Leeming beer judging: Bob concluded he
+    couldn't see Ryan's photo and refused to score it."""
+    import os
+    try:
+        meta = json.loads(metadata_raw) if isinstance(metadata_raw, str) else (metadata_raw or {})
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(meta, dict):
+        return ""
+    img = meta.get("image_path")
+    if img and os.path.isfile(img):
+        return f" (image file at {img} — view it with read_image)"
+    vid = meta.get("video_path")
+    if vid and os.path.isfile(vid):
+        return f" (video file at {vid} — view its first frame with read_image)"
+    return ""
+
 def _normalise_before(before: str) -> str | None:
     """Parse a paging cursor into canonical DB UTC ("YYYY-MM-DD HH:MM:SS"),
     exclusive. Accepts what local_iso returns ("2026-09-13 07:28:51+08:00"),
@@ -197,7 +219,8 @@ def make_session_tools(
                     "role": m["role"],
                     "sender": m["sender_name"],
                     "channel": m["channel"],
-                    "content": (m["content"] or "")[:_MAX_MESSAGE_CHARS],
+                    "content": (m["content"] or "")[:_MAX_MESSAGE_CHARS]
+                               + _media_note(m.get("metadata")),
                     "created_at": local_iso(m["created_at"]),
                 }
                 for m in messages
@@ -269,7 +292,8 @@ def make_session_tools(
                     "role": m["role"],
                     "sender": m["sender_name"],
                     "created_at": local_iso(m["created_at"]),
-                    "snippet": _snippet(m["content"] or "", q),
+                    "snippet": _snippet(m["content"] or "", q)
+                               + _media_note(m.get("metadata")),
                 }
                 for m in matches
             ],
