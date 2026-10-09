@@ -179,7 +179,8 @@ async def probe_actionability(
 
     return await probe_decide(ctx, context_text, bot_name=bot_name,
                               model=probe_model_for(ctx, model),
-                              session_key=session_key)
+                              session_key=session_key,
+                              fallback_model=probe_fallback_for(ctx, model))
 
 
 def probe_model_for(ctx: Any, fallback: str = "") -> str:
@@ -196,6 +197,18 @@ def probe_model_for(ctx: Any, fallback: str = "") -> str:
     return pinned or fallback
 
 
+def probe_fallback_for(ctx: Any, fallback: str = "") -> str:
+    """Chat model used when a DECISIONS probe model errors or is unsure:
+    models.yaml ``roles.attention_probe_fallback``, else ``fallback``."""
+    try:
+        from server.services import model_registry
+        pinned = model_registry.role_model(ctx.settings.config_dir,
+                                           "attention_probe_fallback")
+    except Exception:
+        pinned = None
+    return pinned or fallback
+
+
 async def probe_decide(
     ctx: Any,
     context_text: str,
@@ -203,13 +216,26 @@ async def probe_decide(
     bot_name: str = "Bob",
     model: str = "",
     session_key: str = "",
+    fallback_model: str = "",
 ) -> dict:
     """Run the Tier 2 probe on an already-built context. Shared by the live
     path (probe_actionability) and the offline confusion-matrix eval
     (``bob replay probe-matrix``) so both score the exact same prompt,
     parameters, and parsing. Returns ``{"decision", "react", "reason"}``;
     ``react`` (a REACTION_CLIPS key) is set only on STAND_DOWN with the
-    reaction tier enabled."""
+    reaction tier enabled.
+
+    A DECISIONS model (services/attention/decisions.py) is tried first; on
+    error, refusal or low confidence the chat probe runs on
+    ``fallback_model``."""
+    from server.services.attention.decisions import decide, is_decisions_model
+    if is_decisions_model(model):
+        res = await decide(ctx, model, context_text, bot_name=bot_name,
+                           session_key=session_key)
+        if res is not None:
+            res.pop("confidence", None)
+            return res
+        model = fallback_model if not is_decisions_model(fallback_model) else ""
     try:
         from server.services.llm_dispatch import LLMDispatchService
 

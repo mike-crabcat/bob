@@ -252,6 +252,9 @@ async def _probe_matrix(golden: Path | None, model: str) -> None:
         model = probe_model_for(ctx, settings.patience.model
                                 or settings.openai.get_memory_model())
         typer.echo(f"probe model: {model}")
+    from server.services.attention.tier2 import probe_fallback_for
+    fallback = probe_fallback_for(ctx, settings.patience.model
+                                  or settings.openai.get_memory_model())
     labels = ("ACT", "WAIT", "STAND_DOWN")
     matrix = {g: {p: 0 for p in labels} for g in labels}
     failures = []
@@ -259,7 +262,8 @@ async def _probe_matrix(golden: Path | None, model: str) -> None:
         for case in cases:
             predicted = (await probe_decide(
                 ctx, case["context"], bot_name=bot_name, model=model,
-                session_key=f"eval:{case['name']}"))["decision"]
+                session_key=f"eval:{case['name']}",
+                fallback_model=fallback))["decision"]
             gold = case["label"].upper()
             matrix[gold][predicted] += 1
             mark = "ok " if predicted == gold else "MISS"
