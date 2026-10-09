@@ -270,6 +270,18 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
         "Fold this into whatever you were waiting on. If it contradicts "
         "what you have on record, say so and check — don't assume it "
         "replaces the record.")
+    # Machine work done for a human chat (a subagent or script finishing
+    # what someone asked for) must be TOLD to them: the wake speaks like a
+    # background-task relay (final text delivered; NO_REPLY stays silent).
+    # 2026-10-09 AI Doom: Mike's file-sharing skill finished, Bob wrote the
+    # summary as final text on a plain wake_nudge, and it was dropped.
+    relay = (str(task.get("completed_by") or "").startswith(("subagent:", "script"))
+             and str(task.get("waiter_session") or "").startswith(
+                 ("agent:main:whatsapp:", "agent:main:email:")))
+    if relay:
+        content += ("\n\nThis is the result of work someone here asked for: "
+                    "your final text is POSTED to this chat — tell them "
+                    "what was done and anything they must decide or do next.")
     # Self-settled (the waiter closed its own promise — 2026-10-09 a group
     # turn cancelling a placeholder it had just made got a "## Promise
     # CANCELLED" nudge about its own action): nothing to deliver.
@@ -281,7 +293,8 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
                 ctx, task["waiter_session"], content,
                 call_category=f"task_{task['status']}",
                 metadata={"task_id": task["id"],
-                          "settled_by": task.get("completed_by")})
+                          "settled_by": task.get("completed_by")},
+                provenance="task_relay" if relay else "wake_nudge")
     except Exception:
         logger.exception("task %s: waiter wake failed", task_id)
         return False

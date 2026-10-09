@@ -133,3 +133,29 @@ async def test_explicit_goal_link_from_origin(ctx):
     note = await link_mechanism(ctx, ORIGIN, goal["id"], "bg job ads (job 1): promo loop")
     assert "linked" in note
     assert await link_mechanism(ctx, ORIGIN, "", "x") == ""
+
+
+async def test_subagent_settled_promise_wakes_human_chat_as_relay(ctx):
+    from server.services import tasks as task_svc
+    with patch("server.services.wake_service.wake_conversation",
+               new=AsyncMock()) as wake:
+        t = await task_svc.register_task(ctx, waiter_session=ORIGIN,
+                                         title="subagent claude: build share skill")
+        tid = t.get("task_id") or t.get("id") or t.get("goal_id")
+        await task_svc.settle_task(ctx, tid, to_status="completed",
+                                   result="built it", completed_by="subagent:e4b70123")
+        await task_svc.deliver_settlement(ctx, tid)
+    assert wake.await_args.kwargs["provenance"] == "task_relay"
+    assert "POSTED to this chat" in wake.await_args.args[2]
+
+
+async def test_conversation_settled_promise_stays_a_quiet_fold(ctx):
+    from server.services import tasks as task_svc
+    with patch("server.services.wake_service.wake_conversation",
+               new=AsyncMock()) as wake:
+        t = await task_svc.register_task(ctx, waiter_session=ORIGIN, title="ask Sean")
+        tid = t.get("task_id") or t.get("id") or t.get("goal_id")
+        await task_svc.settle_task(ctx, tid, to_status="completed", result="Thursday",
+                                   completed_by="conversation:agent:main:whatsapp:dm:61480346372")
+        await task_svc.deliver_settlement(ctx, tid)
+    assert wake.await_args.kwargs["provenance"] == "wake_nudge"
