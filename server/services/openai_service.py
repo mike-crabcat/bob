@@ -896,6 +896,25 @@ class OpenAIService(BaseService):
                             "session_key=%s iteration=%d",
                             dispatch_id, session_key, iteration, exc_info=True)
 
+                # Hosted tools (OpenAI-native web_search) run server-side and
+                # never pass through our handlers — report each one through
+                # on_tool_call so the turn's tool ledger sees it (2026-10-09:
+                # a luna answer that DID search the web was stamped
+                # "UNVERIFIED: this turn ran no tools" in AI Doom).
+                if on_tool_call:
+                    for item in response.output:
+                        if getattr(item, "type", None) != "web_search_call":
+                            continue
+                        action = getattr(item, "action", None)
+                        query = getattr(action, "query", None) if action is not None else None
+                        try:
+                            await on_tool_call(
+                                "web_search", {"query": query or ""},
+                                f"hosted web_search ({getattr(item, 'status', '') or 'done'})")
+                        except Exception:
+                            logger.warning("on_tool_call failed for hosted web_search",
+                                           exc_info=True)
+
                 # Check for function calls in output
                 function_calls = [
                     item for item in response.output

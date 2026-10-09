@@ -379,6 +379,10 @@ def _transcript_tool_names(messages_json: str | None) -> list[str]:
         if (isinstance(it, dict) and it.get("type") == "function_call"
                 and isinstance(it.get("name"), str) and it["name"] not in names):
             names.append(it["name"])
+        elif (isinstance(it, dict) and it.get("type") == "web_search_call"
+                and "web_search" not in names):
+            # OpenAI-native hosted search: real work, no function_call item
+            names.append("web_search")
     return names
 
 
