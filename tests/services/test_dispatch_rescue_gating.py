@@ -434,3 +434,62 @@ async def test_email_turn_final_text_never_auto_sends(
     await DispatchRunner(ctx).run(spec)
 
     assert send_tool.delivered == []
+
+
+# ---------------------------------------------------------------------------
+# Speak-expected wakes under their REAL categories (2026-10-09). The test
+# above runs task_relay under whatsapp_incoming; live relays use
+# goal_result and reports use wakeup — where final text was dropped
+# silently (the AI Doom card-game reveal, 2026-10-07).
+# ---------------------------------------------------------------------------
+
+def _wake_spec(key: str, send_tool: _FakeSendTool, category: str) -> DispatchSpec:
+    spec = _spec(key, send_tool)
+    spec.call_category = category
+    return spec
+
+
+async def test_report_wake_final_text_is_posted(ctx, db, stub_llm, stub_history):
+    key = "test:rescue:report"
+    await SessionService(ctx).add_message(
+        key, "user", "[Report from agent:goal-x:utility]\nDeck built. Order it?",
+        dispatched=0, provenance="report")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "Card game's built — PDF + print files here. Order the prototype?"
+    await DispatchRunner(ctx).run(_wake_spec(key, send_tool, "wakeup"))
+    assert send_tool.delivered == [stub_llm["reply"]]
+
+
+async def test_report_wake_no_reply_stays_silent(ctx, db, stub_llm, stub_history):
+    key = "test:rescue:report-silent"
+    await SessionService(ctx).add_message(
+        key, "user", "[Report from agent:frigate-watch:utility]\ncat on porch",
+        dispatched=0, provenance="report")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "NO_REPLY"
+    await DispatchRunner(ctx).run(_wake_spec(key, send_tool, "wakeup"))
+    assert send_tool.delivered == []
+
+
+async def test_task_relay_under_goal_result_category_is_posted(
+        ctx, db, stub_llm, stub_history):
+    key = "test:rescue:relay-goal-result"
+    await SessionService(ctx).add_message(
+        key, "user", "[Background task abcd1234] render done: out.png",
+        dispatched=0, provenance="task_relay")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "Render's done — here it is."
+    await DispatchRunner(ctx).run(_wake_spec(key, send_tool, "goal_result"))
+    assert send_tool.delivered == [stub_llm["reply"]]
+
+
+async def test_wake_nudge_drop_is_logged(ctx, db, stub_llm, stub_history, caplog):
+    key = "test:rescue:nudge-logged"
+    await SessionService(ctx).add_message(
+        key, "user", "## Goal progress\nfold", dispatched=0, provenance="wake_nudge")
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    stub_llm["reply"] = "x" * 250
+    with caplog.at_level("WARNING"):
+        await DispatchRunner(ctx).run(_wake_spec(key, send_tool, "wakeup"))
+    assert send_tool.delivered == []
+    assert any("dropped 250 chars" in r.getMessage() for r in caplog.records)

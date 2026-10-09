@@ -155,6 +155,15 @@ async def _is_stimulus_echo(
 # the intent signal: a steer turn that wants to report calls it explicitly.
 _SILENCE_OK_PROVENANCES = {"wake_nudge", "steer", "steer_relay", "wa_reaction"}
 
+# Wakes that EXIST to be spoken to the chat: background-task relays and
+# goal-room / utility reports (send_report). Their final text is delivered
+# like a reply (NO_REPLY stays silent). Without this, final-text delivery
+# only fired for human-message turns, and both kinds were dropped silently
+# — 2026-10-07 the AI Doom card-game reveal (prototype go/no-go for Mike)
+# was written as final text on a report wake and never posted; the room
+# waited two days for an answer to a question nobody saw.
+_SPEAK_PROVENANCES = {"task_relay", "report"}
+
 # Backburner (docs/backburner-plan.md): only turns with a HUMAN stimulus
 # detach. Turns claimed solely by system nudges (goal folds, background-task
 # relays) or routine deliveries aren't conversations — a holding ack for
@@ -163,7 +172,7 @@ _SILENCE_OK_PROVENANCES = {"wake_nudge", "steer", "steer_relay", "wa_reaction"}
 # detached task → relay nudge → … (observed in the AI doom group, 2026-08-30).
 # task_relay rides here too: relays must not detach, but — unlike wake_nudge
 # — they stay rescue-eligible (see _SILENCE_OK_PROVENANCES).
-_DETACH_QUIET_PROVENANCES = {"wake_nudge", "routine", "task_relay"}
+_DETACH_QUIET_PROVENANCES = {"wake_nudge", "routine", "task_relay", "report"}
 
 _LEASE_OWNER: str | None = None
 
@@ -293,8 +302,10 @@ class DispatchRunner:
             # WhatsApp only: email keeps its explicit email_reply contract —
             # an email final text must never auto-send.
             delivers_final = (spec.call_category in _SEND_RESCUE_CATEGORIES
-                              or ("" in provenances and spec.send_tool_name
-                                  == "send_whatsapp_message"))
+                              or (spec.send_tool_name == "send_whatsapp_message"
+                                  and ("" in provenances
+                                       or any(p in _SPEAK_PROVENANCES
+                                              for p in provenances))))
             human_stimulus = any(p not in _DETACH_QUIET_PROVENANCES for p in provenances)
             # Steer-only turns detach SILENTLY (2026-09-06): a holding ack
             # ("give me a sec") answers nobody — the wake was machine-initiated.
@@ -579,9 +590,9 @@ class DispatchRunner:
                     "final-text delivery suppressed echo/marker-leak reply "
                     "(session=%s, dispatch=%s, head=%r)",
                     session_key, spec.dispatch_id, result.strip()[:120])
-            elif (delivers_final
-                    and not spec.message_was_sent[0] and result.strip()
-                    and not is_no_reply(result) and not expect_send):
+            elif (not spec.message_was_sent[0] and result.strip()
+                    and not is_no_reply(result)
+                    and not (delivers_final and expect_send)):
                 # Internal by policy — but a substantial un-sent reply that
                 # nobody will ever see is worth a trace in the journal: the
                 # 2026-08-30 relay drop was invisible at debug level.

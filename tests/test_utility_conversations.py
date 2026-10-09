@@ -342,8 +342,11 @@ async def test_send_report_wakes_target(fake_wake):
     out = json.loads(await tools["send_report"].handler(
         "Unknown person at the side gate, 23:41, clip 1735512345 — "
         "no face match, high confidence it is not household."))
-    assert out["ok"] and out["delivered_to"] == \
+    # "woke", not "delivered" (2026-10-09): the room recorded a report as
+    # "posted" when the woken turn had in fact dropped it.
+    assert out["ok"] and out["woke"] == \
         "agent:main:whatsapp:group:120363411751991047"
+    assert "delivered_to" not in out
     assert len(fake_wake) == 1
     target, content = fake_wake[0]
     assert target == "agent:main:whatsapp:group:120363411751991047"

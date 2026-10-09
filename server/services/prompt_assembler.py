@@ -888,7 +888,7 @@ def _ends_with_assistant_side(messages: list[dict[str, Any]]) -> bool:
 
 
 _BOOKKEEPING_PROVENANCES = {
-    "bg_placeholder", "task_relay", "wake_nudge", "steer",
+    "bg_placeholder", "task_relay", "report", "wake_nudge", "steer",
     "bg_send", "probe_reaction", "collapsed_bookkeeping",
 }
 

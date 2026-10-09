@@ -72,15 +72,21 @@ def make_report_to_tool(ctx: AppContext, session_key: str,
     async def send_report(text: str) -> str:
         """Send this report/alert to this behavior's report destination
         (one wake of that conversation). Call ONLY when the charter's
-        alert/report condition is met — it wakes a turn there. Keep it one
-        compact factual message: who/what/where/when, evidence references
-        (clip/snapshot ids), and your confidence."""
+        alert/report condition is met — it wakes a turn there, and THAT
+        turn decides what the people there see (it posts its reply, or
+        stays silent). Keep it one compact factual message: who/what/where/
+        when, evidence references (clip/snapshot ids), your confidence —
+        and any question the humans must answer, stated plainly."""
         from server.services.wake_service import wake_conversation
         try:
             armed = await wake_conversation(
                 ctx, report_to,
-                f"[Report from {session_key}]\n{text}",
-                call_category="wakeup")
+                f"[Report from {session_key}]\n{text}\n\n"
+                "(This report is for the people in this chat: your final "
+                "text is POSTED here — pass on what they need to know or "
+                "decide, in your own words. Reply exactly NO_REPLY only if "
+                "it genuinely shouldn't reach them.)",
+                call_category="wakeup", provenance="report")
         except Exception:
             logger.exception("send_report delivery failed for %s", session_key)
             return json.dumps({"ok": False, "error":
@@ -90,7 +96,11 @@ def make_report_to_tool(ctx: AppContext, session_key: str,
             return json.dumps({"ok": False, "error":
                                "target conversation could not be dispatched "
                                "(logged); note it in your reply"})
-        return json.dumps({"ok": True, "delivered_to": report_to})
+        return json.dumps({
+            "ok": True, "woke": report_to,
+            "note": "the report woke that chat; its turn decides what to post. "
+                    "Don't record this as 'posted' — the reply there is the "
+                    "evidence, if you need it."})
 
     return [send_report]
 
