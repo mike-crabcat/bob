@@ -42,7 +42,7 @@ expected gain is real but unproven: measure everything.
 
 ## Phases
 
-### Phase 1 — measurement first: merge the eval v2 suite  ☐
+### Phase 1 — measurement first: merge the eval v2 suite  ◐ (merged; baselines running)
 - Merge branch `eval-redesign` (worktree `~/bob-evals`, 15 commits, unmerged
   since 2026-10-08) into `commitments`: worlds, single interception boundary,
   repeats + Wilson CIs, checklist judge, calibration, compare, capability tier,
@@ -62,6 +62,43 @@ expected gain is real but unproven: measure everything.
 - Gate: response-discipline battery + eval v2 discipline tier vs Phase 1
   baseline; no regression beyond CI.
 
+### Phase 2b — curated self-model (nightly) + in-day delta  ☐
+Problem (2026-10-11 review of the 198 self claims): the self-brief renders
+newest-first under a 4k-char cap — ~5 of 147 practices and 0 of 16 limits
+ever reach the prompt; states eat the budget; several claims are stale or
+wrong (no list_groups, "GLM default", share-files "not deployed", the
+image-placeholder practice, "probe posts as Mike"); tool how-tos pose as
+standing practices.
+- **Self-curation dream stage**, once per night (first dream after ~02:00
+  Perth), one call on a strong model (glm-5.3 or astra).
+  - Inputs: ALL active self claims (incl. feedback/incident/capability),
+    the day's corrections/incidents, the persona files (no restating), and
+    GROUND TRUTH — live tool names, skills list, models.yaml roles.
+  - Output (structured → rendered ≤ ~3k chars): Current state (≤6, verified),
+    How I work (≤12 practices, merged, ranked by importance/frequency, not
+    date), Known limits (≤6, guaranteed slot), Watch-outs this week (≤4).
+  - Housekeeping, reversible + logged (provenance `dream_curation`): retire
+    stale/contradicted claims with the reason; list tool how-tos to move into
+    skill docs (proposed, not auto-applied).
+  - Versioned in the DB (NOT under self/bob — the boot heal prunes extras);
+    morning one-line digest to Mike for the first weeks.
+- **In-day delta** "Since last night": newest key claims (practice, limit,
+  self_state, feedback) created after the curated version — first sentence,
+  ≤8 items / ~800 chars; folded in (and cleared) by the next curation.
+- Placement: curated block in the stable prompt part (changes daily —
+  cache-friendly); delta rides the volatile tail (→ Phase 3 turn brief).
+- Fallback: curation failed or >48h old → today's raw renderer. Kill switch.
+- **Social read (experimental sub-section, own flag, off by default):**
+  ≤3 bullets, per GROUP never per person, each tied to observed signals
+  (reactions, insults/praise, corrections, ignored posts — dated) and ending
+  in a calibration ("show the photo evidence before verdicts"), not a
+  feeling. Optional one-line "tone today", fenced: colours tone only, never
+  effort/helpfulness/accuracy; never mentioned unless asked. Two eval cases
+  gate it: full helpfulness after being insulted; no unprompted
+  mood/meta-commentary.
+- Gate: eval A/B raw brief vs curated (and curated vs curated+social read)
+  against the Phase 1 baseline; no regression beyond CI.
+
 ### Phase 3 — turn-brief experiment (the main lever)  ☐
 - Behind `BOB_PROMPT_LAYOUT=v2`: volatile blocks (clock, model, Work/owed,
   situation line) + the HARD RULES move into a short trailing developer
@@ -79,3 +116,12 @@ expected gain is real but unproven: measure everything.
 ## Log
 
 - 2026-10-11 — plan written; avatar canon already relocated (c16c4dc1).
+- 2026-10-11 — Phase 1: `eval-redesign` merged into `commitments` (00e3728b;
+  one conflict in repositories/goals.py — kept `_progress_from_state`, dropped
+  the retired `_EVAL_SESSION`); pytest 1395 green. Snapshot refreshed
+  (198 self claims, 38 skill docs). Baselines started: all 57 cases, n=3,
+  judge `z-ai/glm-5.3@low` (calibration κ0.94 vs astra 0.73), models
+  gpt-6-luna then glm-5.3-flash. Run ids: _pending_.
+- 2026-10-11 — Phase 2b added (Mike): nightly self-curation + in-day delta,
+  with an experimental per-group "social read" (not "mood" — calibration
+  from observed signals, fenced from effort/accuracy).
