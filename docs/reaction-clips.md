@@ -6,9 +6,10 @@ recommend one short avatar clip — "a decoration of silence", for the rare
 perfect beat (a win, a glorious failure, real drama). A clip never rides
 ACT/WAIT and never substitutes for a reply. Live since 2026-09-03.
 
-Adding a new clip touches **three places that must stay in sync** — miss one
-and the clip either never gets offered or gets refused at send time. Ship
-them in one commit.
+Adding a new clip touches **two things, shipped in one commit**: the asset
+and its registry entry. (Since 2026-10-11 the registry is a single file read
+by both the probe and Bob's `avatar` skill — the old hard-coded
+`REACTION_CLIPS` dict and the identity.md manifest are gone.)
 
 ## 1. The asset — `self/bob/avatar/reactions/<name>.mp4`
 
@@ -29,40 +30,28 @@ them in one commit.
   copy is an *extra* and will be pruned at the next boot — it must land in
   the repo to be permanent.
 
-## 2. The registry — `REACTION_CLIPS` in `server/services/attention/tier2.py`
+## 2. The registry — `self/bob/avatar/reactions/clips.yaml`
 
-```python
-REACTION_CLIPS: dict[str, str] = {
-    ...
-    "bob-new-reaction": "one-line cue the probe matches moments against",
-}
+```yaml
+bob-new-reaction:
+  cue: one-line moment description the probe matches against
+  from: who commissioned it, date        # provenance; the probe never sees it
 ```
 
 The key must equal the file's slug (minus `.mp4`), and the cue is load
 bearing: the probe model sees exactly `- bob-new-reaction — <cue>` and fires
 the clip only when the moment genuinely hits the cue. Write the cue as a
 moment description, not a label — "something failed, epically", not "fail".
-
-## 3. The persona manifest — `self/bob/identity.md`
-
-Mirror the clip in the reaction-clips list there (path + cue), same wording:
-
-```
-- self/bob/avatar/reactions/bob-new-reaction.mp4 — one-line cue ...
-```
-
-The tier2 comment names identity.md as the sync point; the probe prompt
-renders the registry, Bob's self-model renders the manifest — they must not
-disagree about who he is.
+`server/services/attention/tier2.py` loads it into `REACTION_CLIPS` at
+import; the `avatar` skill tells Bob to read the same file — so the probe and
+Bob's own clip posts can't disagree.
 
 ## Enforcement (why the three places matter)
 
 - The probe prompt offers only registry entries (`_reactions_block` in
   tier2.py) — an unregistered clip can never be recommended.
-- `test_attention_reactions.py::test_registry_matches_manifest_names` pins
-  the registry to a hardcoded name set — adding a clip fails it until the
-  expected set gains the name too (a deliberate-change speed bump, so
-  effectively a fourth place to touch).
+- `test_attention_reactions.py::test_registry_matches_clip_files` requires
+  registry entries and `.mp4` files to match exactly, each with a cue.
 - `_send_probe_reaction` refuses any name not in `REACTION_CLIPS`, then
   requires the `.mp4` to exist on disk, then applies the per-chat cooldown
   (default 180 min, `BOB_PROBE_REACTION_COOLDOWN_MIN`) — so a stale prompt
@@ -88,6 +77,5 @@ disagree about who he is.
 
 ## Replacing or retiring a clip
 
-Same three places, reversed. Retiring only the file leaves the probe
-offering a clip that logs "missing" on every hit — always retire the
-registry entry and manifest line together with the file.
+Both places, reversed: remove the `.mp4` and its `clips.yaml` entry in the
+same commit (the registry test fails if only one goes).

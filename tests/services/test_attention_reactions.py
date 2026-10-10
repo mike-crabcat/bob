@@ -290,13 +290,10 @@ async def test_missing_clip_file_never_breaks_the_gate(ctx, db, tmp_path, monkey
     assert row and row["dispatched"] == 1, "messages still flushed on stand-down"
 
 
-def test_registry_matches_manifest_names():
-    assert set(REACTION_CLIPS) == {
-        "bob-celebrate", "bob-patience-v2", "bob-this-is-fine",
-        "bob-popcorn-cinema", "bob-awkward-standing", "bob-typing-desk-fire",
-        "bob-typing-desk-fire-closeup", "bob-fail", "bob-coffee-shower",
-        "bob-thumbs-up", "bob-typing-furiously", "bob-gatsby-toast",
-        "bob-smug-clap", "bob-do-it",
-        "bob-rasta", "bob-friday-beers", "bob-report-window-jump",
-        "bob-koolaid-break",
-    }
+def test_registry_matches_clip_files():
+    """One registry (self/bob/avatar/reactions/clips.yaml, 2026-10-11): every
+    entry has its .mp4 and every .mp4 is registered, each with a cue."""
+    from server.services.attention.tier2 import CLIPS_FILE
+    files = {p.stem for p in CLIPS_FILE.parent.glob("*.mp4")}
+    assert REACTION_CLIPS and set(REACTION_CLIPS) == files
+    assert all(cue for cue in REACTION_CLIPS.values())

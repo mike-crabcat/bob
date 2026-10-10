@@ -31,6 +31,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from server.services.dispatch_runner import is_no_reply
@@ -39,46 +40,27 @@ logger = logging.getLogger(__name__)
 
 VALID = ("ACT", "WAIT", "STAND_DOWN")
 
-# Reaction clips the probe may recommend (name → what it means). Keep in
-# sync with the manifest in self/bob/identity.md — files live at
-# self/bob/avatar/reactions/<name>.mp4 in the workspace (healed from the
-# repo bundle at boot, so the list is stable across instances).
-# Adding a clip: docs/reaction-clips.md (asset + registry + manifest, the
-# gates, and the ffmpeg conversion line).
-REACTION_CLIPS: dict[str, str] = {
-    "bob-celebrate": "something finally worked — a win landed",
-    "bob-patience-v2": "deadpan waiting, eye twitch",
-    "bob-this-is-fine": "it is not fine",
-    "bob-popcorn-cinema": "watching drama unfold",
-    "bob-awkward-standing": "nothing to add here",
-    "bob-typing-desk-fire": "inbox on fire",
-    "bob-typing-desk-fire-closeup": "inbox on fire, closer",
-    "bob-fail": "something failed, epically",
-    "bob-coffee-shower": "tired, exhausted, running on fumes — applies "
-                         "caffeine directly to the problem",
-    "bob-thumbs-up": "dry, deadpan approval — a grudging okay, this will do",
-    "bob-typing-furiously": "typing flat-out, kermit-flailing energy — all "
-                            "hands on deck right now",
-    "bob-gatsby-toast": "raising a glass, gatsby-suave in the suit — a "
-                        "moment worth savouring",
-    "bob-smug-clap": "slow smug clap in the blue suit — savouring a "
-                     "spectacular win or someone else's glorious failure",
-    "bob-do-it": "green-suit, finger-pointing menace — someone's deliberating "
-                 "and the answer is obvious: stop stalling, just DO IT",
-    # 2026-09-28: three manifest+asset clips that never made it into the
-    # registry (added below the probe's offer list since 2026-09-09/11) —
-    # cues mirror identity.md — plus the new Kool-Aid clip commissioned in
-    # Bob-management 2026-09-25 (plain wall → break-through → smug
-    # "was I mentioned?" nod).
-    "bob-rasta": "one love; irie acceptance of things beyond control",
-    "bob-friday-beers": "Friday arvo with the crew; one cold amber pint, "
-                        "no worries",
-    "bob-report-window-jump": "report reviewed, report disagreed with, "
-                              "career decision made",
-    "bob-koolaid-break": "Kool-Aid wall-break, OH YEAH — chatter brushed "
-                         "right past something Bob-shaped without addressing "
-                         "him; the urge to burst in and ask 'was I mentioned?'",
-}
+# Reaction clips the probe may recommend (name → when it fits). ONE
+# registry (2026-10-11): self/bob/avatar/reactions/clips.yaml in the persona
+# bundle, next to the .mp4 files (healed into the workspace at boot). The
+# avatar skill reads the same file. Adding a clip: docs/reaction-clips.md.
+CLIPS_FILE = (Path(__file__).resolve().parents[3]
+              / "self" / "bob" / "avatar" / "reactions" / "clips.yaml")
+
+
+def _load_reaction_clips(path: Path = CLIPS_FILE) -> dict[str, str]:
+    try:
+        import yaml
+        raw = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        logger.warning("tier2: reaction clip registry unreadable at %s — "
+                       "probe reactions offer no clips", path, exc_info=True)
+        return {}
+    return {str(name): str((entry or {}).get("cue") or "").strip()
+            for name, entry in raw.items() if isinstance(entry, dict)}
+
+
+REACTION_CLIPS: dict[str, str] = _load_reaction_clips()
 
 
 def reactions_enabled() -> bool:

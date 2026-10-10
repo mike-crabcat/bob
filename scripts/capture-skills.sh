@@ -26,6 +26,7 @@ SHIP=(
   videogen
   bambu-x2d-prep
   bom-weather
+  avatar
 )
 
 # Per-skill excludes beyond the universal ones (samples, scratch, secrets).

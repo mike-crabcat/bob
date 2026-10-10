@@ -152,5 +152,8 @@ def test_render_persona_falls_back_to_the_repo_bundle(tmp_path):
     render still works from the bundle — this checkout has self/bob."""
     rendered = render_persona(tmp_path / "nonexistent-workspace")
     assert "# Your Soul" in rendered
-    assert "My Face" in rendered  # the avatar manifest rides the identity
-    assert "self/bob/avatar/reactions/bob-celebrate.mp4" in rendered
+    assert "My Face" in rendered  # the avatar stub rides the identity
+    # 2026-10-11: canon refs + clip list moved to the avatar skill; the
+    # persona keeps only the look and the pointer.
+    assert 'use_skill("avatar")' in rendered
+    assert "bob-celebrate.mp4" not in rendered
