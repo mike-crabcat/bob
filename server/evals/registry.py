@@ -1,4 +1,4 @@
-"""Eval case registry and @eval_case decorator."""
+"""Eval case registry and the @eval_case decorator."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from server.evals.case import EvalCase, JudgeCriteria, StructuralCheck
+from server.evals.case import Check, EvalCase
 
 logger = logging.getLogger(__name__)
 
 _REGISTERED: list[EvalCase] = []
+_DISCOVERED = False
 
 
 def eval_case(
@@ -19,54 +20,56 @@ def eval_case(
     id: str,
     category: str,
     description: str,
-    structural_checks: list[StructuralCheck] | None = None,
-    judge_criteria: JudgeCriteria | None = None,
-    timeout_seconds: float = 120.0,
+    checks: list[Check] | None = None,
+    rubric: list[str] | None = None,
+    context: str = "",
+    tier: str = "discipline",
+    timeout_seconds: float = 300.0,
+    expects_turn: bool = True,
 ) -> Any:
-    """Decorator that registers an eval case.
-
-    The decorated async function receives (ctx) and must return
-    a dict with at minimum {"response": str}.
-    """
+    """Register ``async def case(world)`` as an eval case."""
     def decorator(func: Any) -> Any:
-        case = EvalCase(
-            id=id,
-            category=category,
-            description=description,
-            run=func,
-            structural_checks=structural_checks or [],
-            judge_criteria=judge_criteria or JudgeCriteria(),
-            timeout_seconds=timeout_seconds,
-        )
-        _REGISTERED.append(case)
+        if any(c.id == id for c in _REGISTERED):
+            raise ValueError(f"duplicate eval case id {id!r}")
+        _REGISTERED.append(EvalCase(
+            id=id, category=category, description=description, run=func,
+            checks=checks or [], rubric=rubric or [], context=context,
+            tier=tier, timeout_seconds=timeout_seconds,
+            expects_turn=expects_turn))
         return func
     return decorator
 
 
 def _discover() -> None:
-    """Import all Python files in the cases/ directory."""
-    cases_dir = Path(__file__).parent / "cases"
-    if not cases_dir.is_dir():
-        return
-    for py_file in sorted(cases_dir.glob("*.py")):
-        if py_file.name.startswith("_"):
+    global _DISCOVERED
+    _DISCOVERED = True
+    for sub in ("cases", "scenarios"):
+        d = Path(__file__).parent / sub
+        if not d.is_dir():
             continue
-        module_name = f"server.evals.cases.{py_file.stem}"
-        try:
-            importlib.import_module(module_name)
-        except Exception:
-            logger.warning("Failed to load eval cases from %s", py_file, exc_info=True)
+        for py_file in sorted(d.glob("*.py")):
+            if py_file.name.startswith("_"):
+                continue
+            importlib.import_module(f"server.evals.{sub}.{py_file.stem}")
 
 
 def get_all_cases() -> list[EvalCase]:
-    if not _REGISTERED:
+    if not _DISCOVERED:
         _discover()
     return list(_REGISTERED)
 
 
-def get_cases_by_category(category: str) -> list[EvalCase]:
-    return [c for c in get_all_cases() if c.category == category]
-
-
-def get_case_by_id(case_id: str) -> EvalCase | None:
-    return next((c for c in get_all_cases() if c.id == case_id), None)
+def select(*, category: str | None = None, case_ids: list[str] | None = None,
+           tier: str | None = None) -> list[EvalCase]:
+    cases = get_all_cases()
+    if case_ids:
+        wanted = set(case_ids)
+        unknown = wanted - {c.id for c in cases}
+        if unknown:
+            raise KeyError(f"unknown case id(s): {sorted(unknown)}")
+        return [c for c in cases if c.id in wanted]
+    if category:
+        cases = [c for c in cases if c.category == category]
+    if tier:
+        cases = [c for c in cases if c.tier == tier]
+    return cases

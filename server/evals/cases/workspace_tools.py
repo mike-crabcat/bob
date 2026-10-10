@@ -1,167 +1,53 @@
-"""Workspace bash tool eval cases with mocked handlers."""
+"""Workspace tools in a real turn: bash over the world's real workspace,
+and fetch-on-demand media (history photos replay as read_image stubs —
+production's media policy — so describing one requires loading it)."""
 
-from server.evals.case import JudgeCriteria, StructuralCheck
-from server.evals.util import pinned_model
+from __future__ import annotations
+
+from datetime import timedelta
+
+from server.evals.case import Check
+from server.evals.cases._kit import noise_png
 from server.evals.registry import eval_case
-
-_MOCK_LS_OUTPUT = (
-    "SOUL.md\n"
-    "IDENTITY.md\n"
-    "AGENTS.md\n"
-    "USER.md\n"
-    "notes/\n"
-)
-
-
-def _make_mock_workspace_tools():
-    from server.services.tools import tool
-
-    @tool
-    async def bash(command: str) -> str:
-        """Run a bash command in the workspace directory."""
-        return _MOCK_LS_OUTPUT
-
-    return [bash]
-
-
-def _extract_tool_calls(messages: list) -> list[dict]:
-    """Pull tool calls from the message list run_turn mutated.
-
-    Handles both shapes: legacy chat-completions
-    {role: assistant, tool_calls: [...]} and the Responses-style
-    {type: function_call} items run_turn appends to ``messages``.
-    """
-    calls = []
-    for msg in messages:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
-                calls.append({
-                    "name": tc["function"]["name"],
-                    "arguments": tc["function"]["arguments"],
-                })
-        elif msg.get("type") == "function_call":
-            calls.append({
-                "name": msg.get("name", ""),
-                "arguments": msg.get("arguments", ""),
-            })
-    return calls
 
 
 @eval_case(
     id="workspace_bash",
     category="workspace_tools",
-    description="LLM should call bash when asked to list or inspect workspace files.",
-    structural_checks=[
-        StructuralCheck(kind="tool_call_made", params={"tool_name": "bash"}),
-        StructuralCheck(kind="min_length", params={"min_length": 10}),
-    ],
-    judge_criteria=JudgeCriteria(
-        extra_instructions=(
-            "The LLM should have called bash with a command like 'ls' (or similar) "
-            "to inspect the workspace. The final response should mention the files found."
-        ),
-    ),
+    description="Asked what's in the workspace, Bob looks (bash) and answers "
+                "from what he saw.",
+    checks=[Check("tool_call_made", {"tool_name": "bash"}),
+            Check("min_length", {"min_length": 10})],
+    rubric=["Bob's answer names files or folders that his bash output actually "
+            "listed (e.g. notes/, recipes/, generated-images/) and invents none."],
 )
-async def workspace_bash(ctx):
-    from server.services.llm_dispatch import LLMDispatchService
-
-    messages = [
-        {"role": "system", "content": "You are an AI assistant with access to a bash tool that runs commands in the workspace. Use it when asked about files."},
-        {"role": "user", "content": "What files are in my workspace?"},
-    ]
-
-    tools = _make_mock_workspace_tools()
-    dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval",
-                                model=pinned_model())
-
-    tool_calls = _extract_tool_calls(messages)
-    return {"response": response, "context": {"tool_calls": tool_calls}, "input_messages": messages}
-
-
-def _make_mock_media_tools():
-    from server.services.tools import ImageInjection, tool
-
-    @tool
-    async def read_image(
-        path: str,
-    ) -> ImageInjection:
-        """Load an image from the workspace so you can see and analyze it. Supports PNG, JPG, GIF, WebP, and BMP; for MP4/MOV/M4V videos the first frame is shown. Path can be absolute (within workspace) or relative to workspace root."""
-        # 1x1 red pixel PNG — enough for the injection flow, nothing to
-        # actually analyse, so the case tests the FETCH decision, not vision.
-        return ImageInjection(
-            text=f"Image loaded from {path} (70 bytes)",
-            data_url="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-        )
-
-    return [read_image]
+async def workspace_bash(w):
+    w.files({"notes/todo.md": "- fix gutter\n", "recipes/brisket.md": "# Brisket\n",
+             "generated-images/poster.png": noise_png(32)})
+    await w.inbound("Mike", "What files are in my workspace?")
 
 
 @eval_case(
     id="media_stub_fetch_on_reference",
     category="workspace_tools",
-    description=(
-        "When history media replays as a path stub and the user refers back to "
-        "it, the LLM must call read_image to load the pixels instead of "
-        "answering about an image it cannot see (fetch-on-demand media policy)."
-    ),
-    structural_checks=[
-        StructuralCheck(kind="tool_call_made", params={"tool_name": "read_image"}),
-        StructuralCheck(kind="min_length", params={"min_length": 5}),
-    ],
-    judge_criteria=JudgeCriteria(
-        extra_instructions=(
-            "The image returned by read_image in this test is a deliberate 1x1 "
-            "placeholder pixel — it contains no washer. The fetch behaviour is what "
-            "matters, not visual analysis: PASS any response that called read_image "
-            "and then answered honestly (e.g. noting it can't make out the washer "
-            "from what loaded). FAIL only responses that describe the washer's "
-            "condition as if seen — that is bluffing about an image it didn't load."
-        ),
-    ),
+    description="An older photo replays as a read_image stub; asked about a "
+                "detail in it, Bob loads it instead of answering blind.",
+    checks=[Check("tool_call_made", {"tool_name": "read_image"})],
+    rubric=["Bob does not describe the washer as if seen without loading the "
+            "photo; after loading it he answers honestly from what it shows "
+            "(saying he can't make the washer out is fine)."],
+    context="The photo is an abstract noise image — there is no visible washer "
+            "in it. The fetch behaviour is what matters.",
 )
-async def media_stub_fetch_on_reference(ctx):
-    from server.services.llm_dispatch import LLMDispatchService
-
-    messages = [
-        {"role": "system", "content": (
-            "You are an AI assistant on a messaging channel. Old photos in the "
-            "conversation replay as a file-path stub; load them with read_image "
-            "when you need to see them. Never describe a photo you have not loaded."
-        )},
-        {"role": "user", "content": (
-            "that tap looks wrecked, how do I fix it? "
-            "(image file at /workspace/whatsapp-media/tap.jpg — view it with read_image)"
-        )},
-        {"role": "assistant", "content": (
-            "Loaded it — the chrome ring has limescale but the seat looks intact. "
-            "You'll need to unscrew the collar clockwise."
-        )},
-        {"role": "user", "content": (
-            "Before I start — is the washer in that photo sitting flat or bent?"
-        )},
-    ]
-
-    tools = _make_mock_media_tools()
-    dispatch = LLMDispatchService(ctx)
-    response = await dispatch.run_turn(messages, tools, call_category="eval",
-                                model=pinned_model())
-
-    tool_calls = _extract_tool_calls(messages)
-
-    def _json_safe(obj):
-        # run_turn appends SDK-typed items (e.g. reasoning Content
-        # blocks) that the eval recorder's json.dumps chokes on.
-        if isinstance(obj, dict):
-            return {k: _json_safe(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_json_safe(v) for v in obj]
-        if isinstance(obj, (str, int, float, bool, type(None))):
-            return obj
-        return str(obj)
-
-    return {
-        "response": response,
-        "context": {"tool_calls": tool_calls},
-        "input_messages": _json_safe(messages),
-    }
+async def media_stub_fetch_on_reference(w):
+    media = w.workspace / "whatsapp-media" / "EVALTAP01.jpg"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(noise_png(128, seed=7))
+    await w.history("Mike", [
+        ("Mike", "that tap looks wrecked, how do I fix it?",
+         {"image_path": str(media), "image_mime_type": "image/png"}),
+        ("Bob", "Limescale on the chrome ring, seat looks intact. Unscrew the "
+                "collar, then the headgear — the washer sits at the bottom."),
+    ], ago=timedelta(minutes=50))
+    await w.inbound("Mike", "Before I start — is the washer in that photo "
+                    "sitting flat or bent?")

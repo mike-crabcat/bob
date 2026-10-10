@@ -198,15 +198,3 @@ class TaskRepository:
             f"updated_at = ? WHERE id = ? AND {_PROMISE} AND status = 'pending'",
             (waiter_session, waiter_session, _now_iso(), task_id))
 
-    async def delete_for_waiter(self, waiter_session: str) -> int:
-        """Eval-fixture cleanup (goal_behavior G3 seeds real task rows via
-        task_register); SQL lives here per the ownership rule."""
-        return await self.db.execute(
-            f"DELETE FROM goals WHERE {_PROMISE} AND origin_conversation_id = ?",
-            (waiter_session,))
-
-    async def latest_for_waiter(self, waiter_session: str) -> dict | None:
-        """Newest task row for a waiter (eval context flag)."""
-        return await self.db.fetch_one(
-            f"{_SELECT} WHERE {_PROMISE} AND origin_conversation_id = ? "
-            "ORDER BY created_at DESC LIMIT 1", (waiter_session,))

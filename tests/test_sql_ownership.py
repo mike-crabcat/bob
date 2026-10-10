@@ -98,7 +98,6 @@ READ_ALLOWLIST = {
     ("effects", "cli/replay_cmds.py"),
     ("event_log", "cli/replay_cmds.py"),
     ("turns", "cli/replay_cmds.py"),
-    ("eval_runs", "cli/eval_cmds.py"),
     # heartbeat: daily attention-shadow agreement telemetry (Phase III soak).
     ("attention_shadow", "heartbeat.py"),
     # email_store is a domain store (not under repositories/) — its thread

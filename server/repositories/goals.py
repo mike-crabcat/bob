@@ -28,12 +28,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Eval sessions and eval-goal rooms (eval ids: 'eval-goal…', 'eg…' —
-# never hex, so production room keys can't match).
-_EVAL_SESSION = ("({col} LIKE 'eval:%' OR {col} LIKE 'agent:goal-eval-%' "
-                 "OR {col} LIKE 'agent:goal-eg%')")
-
-
 def _progress_from_state(strategy_json: str) -> str | None:
     import json as _json
     try:
@@ -113,24 +107,6 @@ class GoalRepository:
             (goal_id, conversation_id, role, _now_iso()),
         )
 
-    async def delete_for_conversation(self, conversation_id: str) -> list[str]:
-        """Eval cleanup for model-created goals (G3's create_goal path):
-        auto-generated ids carry no eval prefix, so delete by conversation.
-        Cancels each goal's wakeups first; returns the removed goal ids."""
-        rows = await self.db.fetch_all(
-            "SELECT id FROM goals WHERE conversation_id = ?", (conversation_id,))
-        ids = [r["id"] for r in rows]
-        if not ids:
-            return ids
-        marks = ",".join("?" for _ in ids)
-        await self.db.execute(
-            f"DELETE FROM goal_transitions WHERE goal_id IN ({marks})", tuple(ids))
-        await self.db.execute(
-            f"DELETE FROM goal_conversations WHERE goal_id IN ({marks})", tuple(ids))
-        await self.db.execute(
-            f"DELETE FROM goals WHERE id IN ({marks})", tuple(ids))
-        return ids
-
     # -- suggestions (commitments plan Phase 4) ------------------------------
     # A dream offer awaiting an answer: kind 'suggestion', status
     # 'suggested' → accepted | declined | expired. Never 'active', so no goal
@@ -206,46 +182,6 @@ class GoalRepository:
             f"WHERE kind = 'promise' AND source_goal_id IN ({marks})",
             tuple(goal_ids))
         return [dict(r) for r in rows] if rows else []
-
-    async def delete_tree(self, goal_id: str) -> list[str]:
-        """Eval cleanup: a goal, every descendant outcome (parent_goal_id,
-        deepest first so the FK holds) and every promise registered under
-        any of them (source_goal_id). Returns the removed ids."""
-        tree = await self.tree_ids(goal_id)
-        marks = ",".join("?" for _ in tree)
-        await self.db.execute(
-            f"DELETE FROM goals WHERE kind = 'promise' AND source_goal_id IN ({marks})",
-            tuple(tree))
-        for gid in reversed(tree):
-            await self.db.execute(
-                "DELETE FROM goal_transitions WHERE goal_id = ?", (gid,))
-            await self.db.execute(
-                "DELETE FROM goal_conversations WHERE goal_id = ?", (gid,))
-            await self.db.execute("DELETE FROM goals WHERE id = ?", (gid,))
-        return tree
-
-    async def delete_eval_goals(self, prefix: str = "eval-goal") -> list[str]:
-        """Eval-fixture removal (goal_behavior cases): the goals, their
-        holder links, and transition rows. Eval-owned IDs carry the
-        prefix; production goals never do. Tree-aware: children the model
-        created under an eval goal (parent_goal_id FK) go first."""
-        # Model-created goals carry production-shaped ids (create_goal mints
-        # a uuid) — catch them by their eval origin too, roots only (the
-        # tree delete takes the children). Leak found 2026-10-05: a room
-        # goal born in eval:commit:* lived on and woke on the live pump.
-        rows = await self.db.fetch_all(
-            "SELECT id FROM goals WHERE id LIKE ? OR ((" + _EVAL_SESSION.format(
-                col="conversation_id") + " OR " + _EVAL_SESSION.format(
-                col="origin_conversation_id") + ") AND "
-            "(parent_goal_id IS NULL OR parent_goal_id NOT IN "
-            "(SELECT id FROM goals WHERE origin_conversation_id LIKE 'eval:%'"
-            " OR id LIKE ?)))",
-            (f"{prefix}%", f"{prefix}%"))
-        removed: list[str] = []
-        for row in rows or []:
-            if row["id"] not in removed:
-                removed.extend(await self.delete_tree(row["id"]))
-        return removed
 
     async def holders_of(self, goal_id: str) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(

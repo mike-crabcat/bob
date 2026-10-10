@@ -55,7 +55,7 @@ def load_skills_index(workspace_dir: Path) -> str:
     if not mtimes:
         return ""
 
-    mtime_hash = tuple(sorted(mtimes.items()))
+    mtime_hash = (str(workspace_dir), tuple(sorted(mtimes.items())))
     if _index_cache is not None and _index_cache[0] == mtime_hash:
         return _index_cache[1]
 
@@ -113,7 +113,7 @@ def load_skills_prompt(workspace_dir: Path) -> str:
     if not mtimes:
         return ""
 
-    mtime_hash = tuple(sorted(mtimes.items()))
+    mtime_hash = (str(workspace_dir), tuple(sorted(mtimes.items())))
     if _skills_cache is not None and _skills_cache[0] == mtime_hash:
         return _skills_cache[1]
 

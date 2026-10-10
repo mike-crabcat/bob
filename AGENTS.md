@@ -66,3 +66,4 @@ Config directory is `/home/bob/config`
 - Deploy (primary): `systemctl --user restart bob.service` — the unit runs `uv run` from this checkout, so a restart picks up the working tree. Run `uv run pytest tests -q` yourself before meaningful changes; nothing gates it automatically
 - Docker instances: see README → "Bob instances (Docker)"
 - Test: `uv run pytest tests -q`
+- Evals: `bob eval run --model <slug> -n 3` / `bob eval compare <a> <b>` — throwaway production-shaped worlds, never the live DB; see `docs/evals.md`
