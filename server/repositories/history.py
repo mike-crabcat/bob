@@ -341,6 +341,21 @@ class HistoryRepository:
                                        "n_since": r["n_since"] or 0}
                 for r in rows} if rows else {}
 
+    async def social_rows(self, session_key: str, *, since_utc: str,
+                          limit: int = 150) -> list[dict]:
+        """Rows since ``since_utc`` (canonical DB format) with provenance,
+        metadata and sender names, oldest first — raw material for the
+        nightly self-curation's social read."""
+        rows = await self.db.fetch_all(
+            """SELECT sm.role, sm.content, sm.provenance, sm.metadata,
+                      sm.created_at, c.name AS sender_name
+               FROM messages sm
+               LEFT JOIN contacts c ON c.id = sm.sender_id AND c.deleted_at IS NULL
+               WHERE sm.conversation_id = ? AND sm.created_at >= ?
+               ORDER BY sm.created_at DESC, sm.rowid DESC LIMIT ?""",
+            (await self._cid(session_key), since_utc, limit))
+        return list(reversed([dict(r) for r in rows or []]))
+
     async def recent_with_sender_names(
         self, session_key: str, *, limit: int, before_utc: str | None = None
     ) -> list[dict]:

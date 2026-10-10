@@ -139,6 +139,9 @@ def stub_env(monkeypatch, ctx):
     ctx.whatsapp_bridge = stub_bridge
     ctx.settings.dream.enabled = True
     ctx.settings.dream.interval_minutes = 0  # never interval-gate in tests
+    # The nightly self-curation stage has its own tests (test_self_model.py);
+    # keep it out of these scripted-LLM runs.
+    monkeypatch.setenv("BOB_SELF_CURATION", "off")
     return stub_llm, stub_bridge
 
 

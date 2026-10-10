@@ -227,6 +227,12 @@ class Template:
                     id=f"claim-self-{abs(hash(c['value'])) % 10**12}",
                     claim_type_key=c["claim_type_key"], subject_id="self-bob",
                     value=c["value"]))
+            sm = self.snapshot.get("self_model")
+            if sm:
+                # Seeded AFTER the self claims so the in-day delta is empty
+                # (production right after a night's curation).
+                from server.services.dream.self_model import seed_version
+                await seed_version(db, sm)
             with no_embedding():
                 await mem.rebuild_fts()
             if embed:

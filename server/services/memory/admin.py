@@ -273,3 +273,42 @@ async def insert_search_log(
         "INSERT INTO memory_search_log (id, query, results_json, session_key, result_count, latency_seconds) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (log_id, query, results_json, session_key, result_count, latency_seconds))
+
+
+async def retire_self_claims(db: Any, items: list[tuple[str, str]], ref: str) -> int:
+    """Retire self-bob claims (status → superseded) with a recorded reason —
+    the nightly self-curation's housekeeping (2026-10-11). Only ACTIVE
+    self-bob rows are touched; reversible by flipping status back.
+    ``items`` = [(claim_id, reason)]. Returns rows retired."""
+    import json as _json
+    n = 0
+    for claim_id, reason in items:
+        count = await db.execute(
+            "UPDATE memory_claims SET status = 'superseded', superseded_by = ? "
+            "WHERE id = ? AND subject_id = 'self-bob' AND status = 'active'",
+            (_json.dumps([f"{ref}: {reason[:300]}"]), claim_id))
+        n += int(bool(count))
+    return n
+
+
+async def self_claims_for_curation(db: Any) -> list[dict]:
+    """Every ACTIVE self-bob claim (all types) for the nightly curation."""
+    rows = await db.fetch_all(
+        "SELECT id, claim_type_key, value, created_at FROM memory_claims "
+        "WHERE subject_id = 'self-bob' AND status = 'active' "
+        "AND COALESCE(value, '') != '' ORDER BY created_at")
+    return [dict(r) for r in rows] if rows else []
+
+
+async def self_claims_since(db: Any, since_iso: str, types: tuple[str, ...],
+                            limit: int = 20) -> list[dict]:
+    """Active self-bob claims of ``types`` created after ``since_iso``,
+    newest first — the self-brief's in-day delta."""
+    marks = ",".join("?" * len(types))
+    rows = await db.fetch_all(
+        f"SELECT id, claim_type_key, value, created_at FROM memory_claims "
+        f"WHERE subject_id = 'self-bob' AND status = 'active' "
+        f"AND claim_type_key IN ({marks}) AND created_at > ? "
+        f"AND COALESCE(value, '') != '' ORDER BY created_at DESC LIMIT ?",
+        (*types, since_iso, limit))
+    return [dict(r) for r in rows] if rows else []

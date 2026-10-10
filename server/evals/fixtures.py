@@ -190,7 +190,11 @@ def load_snapshot(data_dir: Path) -> dict:
     if (snap / "mcp_servers.json").is_file():
         mcp = [s for s in json.loads((snap / "mcp_servers.json").read_text())
                if s.get("tools")]
-    return {"self_claims": claims, "skills_dir": skills, "mcp_servers": mcp}
+    sm = None
+    if (snap / "self_model.json").is_file():
+        sm = json.loads((snap / "self_model.json").read_text())
+    return {"self_claims": claims, "skills_dir": skills, "mcp_servers": mcp,
+            "self_model": sm}
 
 
 def skill_sources(snapshot: dict) -> Path:
@@ -211,5 +215,13 @@ def fingerprint(snapshot: dict) -> str:
         h.update(p.read_bytes())
     h.update(json.dumps(snapshot["self_claims"], sort_keys=True).encode())
     h.update(json.dumps(snapshot.get("mcp_servers"), sort_keys=True).encode())
+    # The curated self-model shapes the prompt only when the brief renders
+    # it — a flag-off run stays comparable with pre-Phase-2b baselines.
+    from server.services.dream.self_model import brief_enabled, social_enabled
+    if brief_enabled() and snapshot.get("self_model"):
+        sm = snapshot["self_model"]
+        h.update((sm.get("rendered") or "").encode())
+        if social_enabled():
+            h.update((sm.get("social_rendered") or "").encode())
     h.update(json.dumps([(p.name, p.phone, p.trusted) for p in CAST]).encode())
     return h.hexdigest()[:12]

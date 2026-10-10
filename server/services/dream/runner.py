@@ -141,6 +141,7 @@ class DreamRunner(BaseService):
             prospective_stats = await self._prospective(run_id)
             stats["prospective"] = prospective_stats
             await self._announce(stats)
+            await self._self_curation(stats)
             await self._journal(run_id, stats)
             await self.store.finish_run(run_id, stats=stats, journal_text=stats.pop("_journal_text", ""))
             logger.info("dream run %s complete", run_id)
@@ -149,6 +150,22 @@ class DreamRunner(BaseService):
             logger.exception("dream run %s failed", run_id)
             await self.store.fail_run(run_id, str(exc))
             raise
+
+    # ---------------------------------------------------------- self-model
+
+    async def _self_curation(self, stats: dict) -> None:
+        """Nightly curated self-model + morning digest (self_model.py). Never
+        fails the dream run."""
+        from server.services.dream import self_model
+        try:
+            row = await self_model.run_if_due(self.ctx)
+            if row is not None:
+                stats["self_model"] = {"id": row.get("id"), "status": row.get("status"),
+                                       "digest": row.get("digest") or row.get("error")}
+            if await self_model.deliver_digest_if_due(self.ctx):
+                stats.setdefault("self_model", {})["digest_sent"] = True
+        except Exception:
+            logger.exception("dream: self-curation stage failed")
 
     # ---------------------------------------------------------- retrospective
 
