@@ -29,9 +29,10 @@ async def test_one_notice_lists_every_overdue_promise(ctx, monkeypatch):
     monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
     monkeypatch.setattr(goal_service, "wake_conversation", wake, raising=False)
     ids = []
-    for who in ("Chris", "Rupert", "Andrew"):
+    for i, who in enumerate(("Chris", "Rupert", "Andrew")):
         t = await register_task(ctx, waiter_session=WAITER,
-                                title=f"Get {who}'s roster", due_minutes=-5)
+                                title=f"Get {who}'s roster", due_minutes=-5,
+                                expected_completer=f"agent:main:whatsapp:dm:6140000001{i}")
         ids.append(t["id"])
     for tid in ids:
         await _fire(ctx, tid)
@@ -65,3 +66,38 @@ def test_due_label_marks_overdue():
     future = (utcnow() + timedelta(hours=2)).isoformat()
     assert due_label(past).startswith("OVERDUE since")
     assert due_label(future).startswith("due ")
+
+
+async def test_self_owed_promise_reads_as_due_now(ctx, monkeypatch):
+    """A promise Bob owes (a reminder) is 'do it now and SEND it', not a
+    chase-the-other-party overdue notice (2026-10-08 eval: the reminder
+    was silenced)."""
+    goal_service._OVERDUE_LAST_WAKE.clear()
+    wake = AsyncMock(return_value=True)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    mine = await register_task(ctx, waiter_session=WAITER, title="Remind Mike: plumber",
+                               instruction="Tell Mike to call the plumber",
+                               due_minutes=-1)
+    theirs = await register_task(ctx, waiter_session=WAITER, title="Get Chris's roster",
+                                 due_minutes=-1,
+                                 expected_completer="agent:main:whatsapp:dm:61400000017")
+    await _fire(ctx, mine["id"])
+    body = wake.await_args.args[2]
+    head, _, rest = body.partition("## Overdue")
+    assert mine["id"] in head and "YOU owe" in head and "SEND" in head
+    assert "Tell Mike to call the plumber" in head
+    assert theirs["id"] in rest and "EVERY item" in rest
+
+
+async def test_triggering_promise_listed_even_if_pump_runs_early(ctx, monkeypatch):
+    """The fired promise is in its own notice even when the pump runs a
+    moment before its due time (eval: 'nothing still pending' for a live
+    reminder)."""
+    goal_service._OVERDUE_LAST_WAKE.clear()
+    wake = AsyncMock(return_value=True)
+    monkeypatch.setattr("server.services.wake_service.wake_conversation", wake)
+    t = await register_task(ctx, waiter_session=WAITER, title="Remind Mike: plumber",
+                            due_minutes=5)            # not yet due on the wall clock
+    await _fire(ctx, t["id"])
+    body = wake.await_args.args[2]
+    assert t["id"] in body and "nothing still pending" not in body

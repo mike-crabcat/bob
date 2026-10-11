@@ -99,11 +99,27 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
 
     async def _register_promise(*, text: str, instruction: str,
                                 completer: str, due_minutes: float,
-                                waiter: str, source_goal_id: str | None) -> dict:
+                                waiter: str, source_goal_id: str | None,
+                                due_at: str | None = None) -> dict:
+        # Models invent "self"/"me" for promises they owe themselves
+        # (2026-10-08 eval) — that's no completer, not a party named "self".
+        if completer.strip().lower() in task_svc.SELF_COMPLETER_ALIASES:
+            completer = ""
+        if completer.strip() and not task_svc.is_completer_ref(completer):
+            # A bare name ('mike') is not a party — models put the person
+            # to REMIND there (2026-10-08 eval), filing Bob's own reminder
+            # as something Mike owes. Reject with the two right shapes.
+            return {"ok": False, "error": (
+                f"completer {completer!r} is not a conversation. For something "
+                "someone else owes, pass their conversation's session key "
+                "(agent:main:whatsapp:dm:<phone> — search_contacts finds it). "
+                "For something YOU owe — including reminding someone — leave "
+                "completer empty.")}
         task = await task_svc.register_task(
             ctx, waiter_session=waiter, title=text, instruction=instruction,
             expected_completer=completer.strip() or None,
-            due_minutes=due_minutes or None, source_goal_id=source_goal_id)
+            due_minutes=due_minutes or None, due_at=due_at,
+            source_goal_id=source_goal_id)
         if not task.get("ok", True):
             return task  # refusal carries its reroute guidance
         out = {"ok": True, "goal_id": task["id"], "profile": "promise",
@@ -138,7 +154,11 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
           ask if unclear) optional.
         - profile="promise" (default when `completer` is given): one thing owed by a single party — you, or
           another conversation (`completer` = its session key, which is
-          also woken with `instruction` now). `due_minutes` defaults to 60.
+          also woken with `instruction` now). When it falls due you are
+          woken with it: set `deadline` (ISO 8601 with offset, e.g.
+          '2026-10-09T09:00:00+08:00') for a specific time — a reminder
+          is a promise you owe, due at the reminder time — or
+          `due_minutes` (default 60).
 
         `children`: JSON array of promises created in the SAME call — one
         per person/item for fan-out work. On a new outcome they hang off
@@ -191,10 +211,26 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
                     "to add children to an existing goal pass its "
                     "parent_goal_id; to create a new goal with children use "
                     "profile='outcome'"})
+            due_at = None
+            if deadline.strip():
+                # 2026-10-08 eval finding: the deadline was silently ignored
+                # for promises (due = now + 60 min), so "remind me tomorrow
+                # at 9am" fired an hour later as an overdue notice and the
+                # 9am reminder never existed.
+                from server.services.base import parse_instant_strict, utcnow
+                try:
+                    when = parse_instant_strict(deadline)
+                except ValueError as exc:
+                    return json.dumps({"ok": False, "error": f"deadline: {exc}"})
+                if when <= utcnow():
+                    return json.dumps({"ok": False, "error": (
+                        f"deadline {deadline!r} is in the past — check the "
+                        "date with get_time")})
+                due_at = when.isoformat()
             return json.dumps(await _register_promise(
                 text=text, instruction=instruction, completer=completer,
                 due_minutes=due_minutes, waiter=session_key,
-                source_goal_id=parent_goal_id.strip() or None))
+                source_goal_id=parent_goal_id.strip() or None, due_at=due_at))
         if profile != "outcome":
             return json.dumps({"ok": False,
                                "error": "profile must be 'outcome' or 'promise'"})
@@ -428,11 +464,41 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         @tool
         async def schedule_goal(goal_id: str, not_before: str,
                                 note: str = "") -> str:
-            """Wake about an outcome goal later: `not_before` is an ISO 8601
-            UTC time (e.g. a reminder before an event). The goal's working
-            conversation is woken with the note and the goal's state. The
-            wakeup is dropped automatically if the goal closes first. (Inside
-            a goal room, continue with goal_continue_now / goal_wait.)"""
+            """Wake about a goal later: `not_before` is ISO 8601 with an
+            offset (e.g. '2026-10-09T09:00:00+08:00'). For an outcome goal
+            its working conversation is woken with the note and the goal's
+            state; for a promise (prm-…) this moves its due time — you are
+            woken with it then. Dropped automatically if the goal closes
+            first. (Inside a goal room, continue with goal_continue_now /
+            goal_wait.)"""
+            from server.repositories.goals import GoalRepository
+            from server.services.base import parse_instant_strict, utcnow
+            try:
+                when = parse_instant_strict(not_before)
+            except ValueError as exc:
+                return json.dumps({"ok": False, "error": f"not_before: {exc}"})
+            if when <= utcnow():
+                return json.dumps({"ok": False, "error": (
+                    f"not_before {not_before!r} is in the past — check the "
+                    "date with get_time")})
+            goal = await GoalRepository(ctx.db).get(goal_id.strip())
+            if goal is None:
+                return json.dumps({"ok": False, "error": f"no goal {goal_id!r}"})
+            if goal["kind"] == "promise":
+                # 2026-10-08 eval finding: promises are 'pending', the wakeup
+                # executor only schedules 'active' goals and treated the rest
+                # as moot — the tool said ok and nothing was scheduled.
+                if goal["status"] != "pending":
+                    return json.dumps({"ok": False, "error": (
+                        f"{goal_id} is {goal['status']} — nothing to schedule")})
+                await task_svc.reschedule_task(ctx, goal["id"], when.isoformat())
+                return json.dumps({"ok": True, "goal_id": goal["id"],
+                                   "due": when.isoformat(),
+                                   "note": "promise due time moved"})
+            if goal["status"] != "active":
+                return json.dumps({"ok": False, "error": (
+                    f"{goal_id} is {goal['status']} — nothing to schedule")})
+            not_before = when.isoformat()
             return await legacy_goal["schedule_goal_wakeup"].handler(
                 goal_id=goal_id, not_before=not_before, note=note)
         tools.append(schedule_goal)

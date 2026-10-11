@@ -193,19 +193,51 @@ _OVERDUE_COALESCE_S = 120.0
 _OVERDUE_LAST_WAKE: dict[str, float] = {}
 
 
-async def _overdue_notice(ctx: AppContext, waiter: str, notice: int) -> str:
-    """One notice listing every overdue promise this conversation waits on."""
+async def _overdue_notice(ctx: AppContext, waiter: str, notice: int,
+                          trigger_task_id: str | None = None) -> str:
+    """One notice listing every due promise this conversation holds — the
+    ones it OWES (reminders, its own follow-ups: do them now) apart from
+    the ones it's WAITING ON (chase or close). 2026-10-08 eval: a
+    self-owed reminder arrived as 'a task you were waiting on is overdue'
+    and was silenced, so the reminder never reached Mike."""
     from server.repositories.tasks import TaskRepository
     from server.services.base import local_minute
     now_iso = utcnow().isoformat()
-    overdue = [t for t in await TaskRepository(ctx.db).list_for_waiter(waiter, limit=50)
-               if t.get("due") and t["due"] <= now_iso]
-    lines = [f"- {t['id']} — {t['title']} (owed by "
-             f"{t.get('expected_completer') or 'you'}; due {local_minute(t['due'])})"
-             for t in overdue] or ["- (none still pending)"]
-    final = ("\nFinal reminder: after this they stay open on the Work page "
-             "until someone closes them." if notice >= _OVERDUE_MAX_NOTICES else "")
-    return (f"## Overdue — {len(overdue)} promise(s) you're waiting on\n"
+    # The promise whose backstop fired is always in the notice while it is
+    # pending — re-filtering it against the wall clock dropped it when the
+    # pump ran a moment early ('nothing still pending' for a live reminder,
+    # 2026-10-08 eval).
+    due = [t for t in await TaskRepository(ctx.db).list_for_waiter(waiter, limit=50)
+           if (t.get("due") and t["due"] <= now_iso) or t["id"] == trigger_task_id]
+
+    from server.services.tasks import SELF_COMPLETER_ALIASES
+
+    def owed_by_me(t: dict) -> bool:
+        c = (t.get("expected_completer") or "").removeprefix("conversation:")
+        return not c or c == waiter or c.strip().lower() in SELF_COMPLETER_ALIASES
+
+    mine = [t for t in due if owed_by_me(t)]
+    theirs = [t for t in due if not owed_by_me(t)]
+    parts: list[str] = []
+    if mine:
+        lines = []
+        for t in mine:
+            instr = (json.loads(t.get("payload_json") or "{}").get("instruction") or "")
+            lines.append(f"- {t['id']} — {t['title']} (due {local_minute(t['due'])})"
+                         + (f"\n    {instr[:300]}" if instr else ""))
+        parts.append(
+            f"## Due now — {len(mine)} thing(s) YOU owe\n" + "\n".join(lines) + "\n\n"
+            "Do each one now. If it's a reminder or anything a person should "
+            "hear, SEND it with the send tool — this turn's final text is not "
+            "delivered to anyone. Then close_goal(goal_id=<id>, result=<what "
+            "you did>). If it can't be done yet, schedule_goal(goal_id=<id>, "
+            "not_before=<when>) to move it.")
+    if theirs:
+        lines = [f"- {t['id']} — {t['title']} (owed by "
+                 f"{t.get('expected_completer')}; due {local_minute(t['due'])})"
+                 for t in theirs]
+        parts.append(
+            f"## Overdue — {len(theirs)} promise(s) you're waiting on\n"
             + "\n".join(lines) + "\n\n"
             "Act on EVERY item above, not just one:\n"
             "- still needed → nudge the same party WITHOUT creating a new "
@@ -215,8 +247,12 @@ async def _overdue_notice(ctx: AppContext, waiter: str, notice: int) -> str:
             "with close_goal(goal_id=<original id>, result=…). (A second "
             "promise for the same answer leaves one dangling.)\n"
             "- already answered elsewhere → close_goal(goal_id=<id>, result=<the answer>)\n"
-            "- no longer needed → close_goal(goal_id=<id>, outcome='cancelled')"
-            + final)
+            "- no longer needed → close_goal(goal_id=<id>, outcome='cancelled')")
+    if not parts:
+        parts.append("## Overdue — nothing still pending (all settled)")
+    final = ("\nFinal reminder: after this they stay open on the Work page "
+             "until someone closes them." if notice >= _OVERDUE_MAX_NOTICES else "")
+    return "\n\n".join(parts) + final
 
 
 async def _wakeup_target(repo: GoalRepository, goal: dict[str, Any]) -> str:
@@ -547,7 +583,8 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
             return False  # a sibling notice this instant already listed it
         _OVERDUE_LAST_WAKE[waiter] = now
         await wake_conversation(
-            ctx, waiter, await _overdue_notice(ctx, waiter, notice),
+            ctx, waiter, await _overdue_notice(ctx, waiter, notice,
+                                               payload.get("task_id")),
             call_category="task_due",
             metadata={"wakeup_id": wakeup["id"],
                       "task_id": payload.get("task_id")},

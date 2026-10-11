@@ -81,6 +81,29 @@ def due_label(due: str | None) -> str:
     return f"{'OVERDUE since' if past else 'due'} {local_minute(due)}"
 
 
+def parse_instant_strict(value: str) -> datetime:
+    """Parse an LLM-written instant at write time: ISO 8601 WITH an offset
+    (or Z) → aware UTC. Bare dates and naive times are rejected, not
+    guessed (2026-09-11: a bare '2026-09-30' wedged the wakeup pump;
+    'naive' would silently mean UTC where Mike means Perth). Raises
+    ValueError with a message the model can act on."""
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("empty time")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00").replace(" ", "T", 1))
+    except ValueError:
+        raise ValueError(f"{raw!r} is not ISO 8601 — use e.g. "
+                         "'2026-10-09T09:00:00+08:00'") from None
+    if "T" not in raw.replace(" ", "T", 1):
+        raise ValueError(f"{raw!r} is a bare date — give a time and offset, "
+                         "e.g. '2026-10-09T09:00:00+08:00'")
+    if dt.tzinfo is None:
+        raise ValueError(f"{raw!r} has no timezone offset — add one "
+                         "(Perth is +08:00), e.g. '2026-10-09T09:00:00+08:00'")
+    return dt.astimezone(UTC)
+
+
 def local_minute(value: str | datetime) -> str:
     """local_iso to the minute, offset kept: '2026-10-06 21:38+08:00'."""
     full = local_iso(value)

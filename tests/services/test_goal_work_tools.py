@@ -211,3 +211,77 @@ async def test_completer_implies_a_promise(ctx):
     r = await _call(t["add_goal"], text="Nudge Andrea for his roster",
                     completer=DM, instruction="one polite nudge")
     assert r["ok"] and r["profile"] == "promise", r
+
+
+# --- reminders (2026-10-08 eval finding: deadline ignored, schedule no-op) ---
+
+async def _backstops(ctx, task_id):
+    from server.repositories.wakeups import WakeupRepository
+    rows = await WakeupRepository(ctx.db).list_all_scheduled(limit=200)
+    return [r for r in rows if r["kind"] == "task_due"
+            and json.loads(r["payload_json"] or "{}").get("task_id") == task_id]
+
+
+async def test_promise_deadline_sets_the_due_time(ctx):
+    from datetime import timedelta
+    from server.services.base import utcnow
+    t = _tools(ctx, DM, "full")
+    when = (utcnow() + timedelta(days=1)).replace(microsecond=0)
+    r = await _call(t["add_goal"], text="Remind Mike: plumber", profile="promise",
+                    deadline=when.astimezone().isoformat())
+    assert r["ok"], r
+    assert r["due"].startswith(when.isoformat()[:16])
+    rows = await _backstops(ctx, r["goal_id"])
+    assert len(rows) == 1 and rows[0]["not_before"].startswith(when.isoformat()[:16])
+
+
+async def test_promise_deadline_is_validated(ctx):
+    t = _tools(ctx, DM, "full")
+    for bad, why in (("2026-10-09", "bare date"), ("2026-10-09T09:00", "offset"),
+                     ("tomorrow 9am", "ISO"), ("2020-01-01T09:00:00+08:00", "past")):
+        r = await _call(t["add_goal"], text="x", profile="promise", deadline=bad)
+        assert not r["ok"] and why in r["error"], (bad, r)
+
+
+async def test_schedule_goal_moves_a_promise(ctx):
+    from datetime import timedelta
+    from server.services.base import utcnow
+    t = _tools(ctx, DM, "full")
+    r = await _call(t["add_goal"], text="Remind Mike: plumber", profile="promise")
+    when = (utcnow() + timedelta(hours=30)).replace(microsecond=0)
+    s = await _call(t["schedule_goal"], goal_id=r["goal_id"],
+                    not_before=when.isoformat())
+    assert s["ok"] and s["due"].startswith(when.isoformat()[:16]), s
+    rows = await _backstops(ctx, r["goal_id"])
+    assert len(rows) == 1 and rows[0]["not_before"].startswith(when.isoformat()[:16])
+
+
+async def test_schedule_goal_refuses_settled_goals_and_bad_times(ctx):
+    t = _tools(ctx, DM, "full")
+    r = await _call(t["add_goal"], text="done thing", profile="promise")
+    await _call(t["close_goal"], goal_id=r["goal_id"], result="done")
+    s = await _call(t["schedule_goal"], goal_id=r["goal_id"],
+                    not_before="2099-01-01T09:00:00+08:00")
+    assert not s["ok"]
+    s = await _call(t["schedule_goal"], goal_id=r["goal_id"], not_before="next week")
+    assert not s["ok"] and "ISO" in s["error"]
+
+
+async def test_self_completer_alias_means_owed_by_me(ctx):
+    t = _tools(ctx, DM, "full")
+    r = await _call(t["add_goal"], text="Remind Mike: plumber", profile="promise",
+                    completer="self")
+    assert r["ok"] and "warning" not in r
+    from server.repositories.tasks import TaskRepository
+    row = await TaskRepository(ctx.db).get(r["goal_id"])
+    assert not row["expected_completer"]
+
+
+async def test_bare_name_completer_rejected_with_guidance(ctx):
+    t = _tools(ctx, DM, "full")
+    r = await _call(t["add_goal"], text="Remind Mike: plumber", profile="promise",
+                    completer="mike")
+    assert not r["ok"] and "leave completer empty" in r["error"]
+    ok = await _call(t["add_goal"], text="Sam sends the deck", profile="promise",
+                     completer="agent:main:whatsapp:dm:61400000002")
+    assert ok["ok"], ok
