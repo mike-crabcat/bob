@@ -532,6 +532,19 @@ async def build_chat_messages(
     voice_instructions are both empty; include_time=False restores the
     pre-clock shape exactly.
     """
+    # Prompt layout v2 (docs/prompt-layout-plan.md Phase 3): on WhatsApp
+    # dispatch turns the volatile, act-now parts — Work block, self-brief
+    # delta, clock, model line and the HARD RULES — move out of the system
+    # message into a TURN BRIEF appended after the history, the real last
+    # thing the model reads before generating. Static parts stay first.
+    v2 = (os.environ.get("BOB_PROMPT_LAYOUT", "").strip().lower() == "v2"
+          and ":whatsapp:" in session_key and claimed_ids is not None)
+    brief_parts: list[str] = []
+    if v2 and system_content:
+        system_content, work = _take_section(system_content, "## Work")
+        system_content, delta = _take_block(
+            system_content, "Since last night (new, not yet curated):")
+        brief_parts += [p for p in (work, delta) if p]
     system_parts: list[str] = []
     if system_content:
         system_parts.append(system_content)
@@ -542,11 +555,11 @@ async def build_chat_messages(
     # prefix every turn. The "Local time now:" substring guard keeps the
     # injection idempotent for callers that already carry the line.
     if include_time and not any("Local time now:" in p for p in system_parts):
-        system_parts.append(local_now_prompt_line())
+        (brief_parts if v2 else system_parts).append(local_now_prompt_line())
     # Same appended-last slot, same idempotency guard pattern: the model can
     # change turn-to-turn (/model), so it must never sit in the stable prefix.
     if current_model and not any("Model serving this turn:" in p for p in system_parts):
-        system_parts.append(model_serving_prompt_line(
+        (brief_parts if v2 else system_parts).append(model_serving_prompt_line(
             current_model, override=current_model_override))
     # Reply-length guidance for WhatsApp turns (2026-09-05 A/B against
     # glm-5.3-flash on a real AI-doom turn, 5 samples/variant): a soft rule
@@ -561,7 +574,8 @@ async def build_chat_messages(
             "## Reply length" in p for p in system_parts):
         kind = "group chat" if ":group:" in session_key else "chat"
         system_parts.insert(0, _REPLY_LENGTH_HEAD.format(kind=kind))
-        system_parts.append(_TERMINAL_CONTRACT_TAIL)
+        if not v2:
+            system_parts.append(_TERMINAL_CONTRACT_TAIL)
 
     messages: list[dict[str, Any]] = []
     if system_parts:
@@ -874,7 +888,66 @@ async def build_chat_messages(
                 "content": _NUDGE_ONLY_DIRECTIVE.format(
                     send_tool=send_tool_name or "your send tool"),
             })
+    if v2:
+        messages.append({"role": "system", "content": _turn_brief(
+            session_key, lifted, nudge_claimed, brief_parts)})
     return messages
+
+
+_TURN_BRIEF_REFS = (
+    "Reference (above, by header): persona — '# Your Soul', '# Your Identity', "
+    "'# Your Agents'; rules — 'Grounding Rules', 'Record discipline', "
+    "'Modifying Skills and Code — Propose First', 'Who Runs What', "
+    "'Getting It Right'; self-knowledge — 'Self-Brief'.")
+
+
+def _turn_brief(session_key: str, lifted: list[str], nudge_only: bool,
+                parts: list[str]) -> str:
+    """The v2 turn brief: situation, what's owed here, clock/model, then the
+    HARD RULES — the last instruction before generation."""
+    kind = "group chat" if ":group:" in session_key else "DM"
+    if lifted:
+        first = " ".join(lifted[0].replace(NEW_MARKER, "").split())[:160]
+        more = f" (+{len(lifted) - 1} more)" if len(lifted) > 1 else ""
+        situation = (f"Situation: WhatsApp {kind}. You're answering the message(s) "
+                     f"marked [NEW] above — first: {first}{more}")
+    elif nudge_only:
+        situation = (f"Situation: WhatsApp {kind}. This turn was woken by a system "
+                     "notification, not a person.")
+    else:
+        situation = f"Situation: WhatsApp {kind}."
+    body = ["# Turn brief", situation, *parts, _TERMINAL_CONTRACT_TAIL, _TURN_BRIEF_REFS]
+    return "\n\n".join(p for p in body if p)
+
+
+def _take_section(text: str, header: str) -> tuple[str, str]:
+    """Remove a '## '-level section (header line through the next '## '
+    header or end) from ``text``. Returns (text_without, section)."""
+    start = text.find("\n" + header + "\n")
+    if start < 0 and text.startswith(header + "\n"):
+        start = 0
+    elif start < 0:
+        return text, ""
+    else:
+        start += 1
+    nxt = text.find("\n## ", start + len(header))
+    end = nxt + 1 if nxt >= 0 else len(text)
+    return (text[:start] + text[end:]).rstrip() + ("\n" if nxt >= 0 else ""), \
+        text[start:end].strip()
+
+
+def _take_block(text: str, first_line: str) -> tuple[str, str]:
+    """Remove a block that starts with ``first_line`` and continues over
+    following '- ' bullet lines. Returns (text_without, block)."""
+    i = text.find(first_line)
+    if i < 0:
+        return text, ""
+    lines = text[i:].split("\n")
+    n = 1
+    while n < len(lines) and lines[n].startswith("- "):
+        n += 1
+    block = "\n".join(lines[:n])
+    return text[:i] + "\n".join(lines[n:]), block.strip()
 
 
 def _ends_with_assistant_side(messages: list[dict[str, Any]]) -> bool:
