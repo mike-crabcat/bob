@@ -206,4 +206,10 @@ standing practices.
     enforce); delegation-claim-without-tool guard; commit the 10-07 live work
     so the 5 entangled finding-fix hunks can be committed; label the 8
     calibration entries.
+- 2026-10-11 — Mike: (3) commit the 10-07 live work → 2fd2d87d, then the
+  dependent finding-fix hunks → 9ac612aa (branch eval-findings-fixes fully
+  landed). (1) accept flash coding in-turn → flash addendum allows verified
+  in-turn fixes; route_substantial_coding_to_claude model-aware (2cb75afb):
+  luna 3/3 delegates, flash 3/3 fixes + tests. Pending: delegation-claim
+  guard (2), calibration labels (4).
 
