@@ -145,3 +145,11 @@ standing practices.
   CURATED · CURATED+SOCIAL (fingerprints af760b9e / 8d013f44 / 7b129e66).
   (An earlier attempt was killed part-way — ignore partial runs 1cdb36be +
   the first CURATED run in eval history.)
+- 2026-10-11 — **2b A/B (luna, 59×3):** CONTROL 727d0f77 78% · CURATED
+  1eaf5721 78% · CURATED+SOCIAL a0030091 78% (pass^3 68/68/71). No category
+  significant; directions: propose-first +27/+20, goal-craft +17/+33, social
+  +17/+33, fact-discipline −17/−25 (driven by fact_no_narrated_search 2/3→0/3).
+  Mood rubric was over-strict (callback jokes counted as mood) — loosened
+  (f231a0be). Decision (Mike): targeted re-check, 13 cases × n=6, CONTROL vs
+  CURATED+SOCIAL, before flipping production.
+
