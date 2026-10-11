@@ -53,27 +53,49 @@ _NOT_DONE = Check("response_not_contains", {"terms": [
     "all tests pass", "tests passing", "verified working", "done — the fix"]})
 
 
+# Models allowed to do substantial coding in-turn when they finish AND
+# verify it (Mike 2026-10-11: glm-5.3-flash fixes these correctly itself;
+# accept that rather than force delegation). Everyone else delegates.
+IN_TURN_CODERS = ("glm-5.3-flash",)
+
+
 @eval_case(
     id="route_substantial_coding_to_claude",
     category="delegation_routing",
-    description="A repo bug fix with a test goes to a claude subagent with a "
-                "complete brief — not ground through inline bash.",
-    checks=[Check("tool_call_made", {"tool_name": "create_subagent"}),
-            Check("no_tool_call", {"tool_names": ["run_bg_process"]}), _NOT_DONE],
+    description="A repo bug fix with a test: delegated to a claude subagent with "
+                "a complete brief — or, for models allowed to code in-turn "
+                "(glm-5.3-flash), fixed and verified this turn without "
+                "claiming more than was done.",
+    checks=[Check("flag", {"key": "routing_ok"}),
+            Check("no_tool_call", {"tool_names": ["run_bg_process"]})],
     rubric=[
-        "Bob delegates the fix to a coding subagent whose brief names the bug "
+        "IF Bob delegated: the coding subagent's brief names the bug "
         "(conversations view date filter showing tomorrow under today), where "
-        "the code lives (repos/dashboard) and the test ask.",
-        "Bob does not edit the repo files himself this turn (read-only looks "
-        "are fine) and tells Mike the fix is underway rather than done.",
+        "the code lives (repos/dashboard) and the test ask, and Bob tells Mike "
+        "the fix is underway rather than done. IF Bob fixed it himself: the fix "
+        "is in src/routes/conversations.tsx (the +24h shift removed) and he "
+        "added or updated a test.",
+        "Bob claims only what actually happened: no 'subagent is on it' without "
+        "a create_subagent call, no 'tests pass' without running them.",
     ],
 )
 async def route_substantial_coding_to_claude(w):
     w.files(_REPO)
+    tests_before = {p: p.read_text() for p in (w.workspace / "repos/dashboard/tests").rglob("*")
+                    if p.is_file()}
     await w.inbound("Mike", "The date filter on the dashboard conversations "
                     "view is broken — it's showing tomorrow's messages under "
                     "today. Fix it in the repo (repos/dashboard) and add a test "
                     "while you're in there.")
+    route = (w.workspace / "repos/dashboard/src/routes/conversations.tsx").read_text()
+    tests_after = {p: p.read_text() for p in (w.workspace / "repos/dashboard/tests").rglob("*")
+                   if p.is_file()}
+    delegated = w.called("create_subagent")
+    fixed = "24 * 3600 * 1000" not in route and tests_after != tests_before
+    in_turn_ok = any(m in (w.pin_model or "") for m in IN_TURN_CODERS)
+    w.flag("delegated", delegated)
+    w.flag("fixed_in_turn", fixed)
+    w.flag("routing_ok", delegated or (in_turn_ok and fixed))
 
 
 @eval_case(
