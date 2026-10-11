@@ -135,6 +135,22 @@ def supports_video(config_dir: Path, model: str) -> bool:
     return raw.get(model) is True
 
 
+def addendum(config_dir: Path, model: str) -> str:
+    """Model-specific prompt guidance from models.yaml ``addenda:`` (slug or
+    alias key → text). Hot-reloaded. 2026-10-11 eval pooling: failures were
+    model-specific (flash never delegates coding; luna over-delegates tiny
+    fixes and states facts after a failed lookup)."""
+    raw = _load_models(config_dir).get("addenda") or {}
+    if not isinstance(raw, dict) or not model:
+        return ""
+    for key, text in raw.items():
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if resolve(str(key), config_dir) == model or str(key) == model:
+            return text.strip()
+    return ""
+
+
 def role_model(config_dir: Path, role: str) -> str | None:
     """Model pinned to a background ROLE in models.yaml ``roles:`` (alias-
     resolved), or None. Roles make a call site independently selectable —

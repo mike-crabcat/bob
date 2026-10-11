@@ -323,6 +323,31 @@ def _extract_from_messages(
     return system_prompt, user_message
 
 
+_ADDENDUM_HEADER = "## Notes for this model"
+
+
+def _apply_model_addendum(messages: list[dict[str, Any]], model: str,
+                          settings: Any) -> None:
+    """Append the serving model's models.yaml addendum to the system message
+    (once — re-flights reuse the list). Applied where the model is FINAL
+    (after /model, eval pins), so it always matches the model that runs."""
+    import os
+    if os.environ.get("BOB_MODEL_ADDENDA", "off").strip().lower() not in ("on", "1", "true"):
+        return  # inert until the eval A/B passes (docs/prompt-layout-plan.md)
+    if not messages or messages[0].get("role") != "system":
+        return
+    content = messages[0].get("content")
+    if not isinstance(content, str) or _ADDENDUM_HEADER in content:
+        return
+    try:
+        text = model_registry.addendum(settings.config_dir, model)
+    except Exception:
+        logger.warning("model addendum lookup failed", exc_info=True)
+        return
+    if text:
+        messages[0]["content"] = f"{content}\n\n{_ADDENDUM_HEADER} ({model})\n{text}"
+
+
 async def _record_log(
     db: Any,
     *,
@@ -722,6 +747,7 @@ class LLMDispatchService(BaseService):
         provider = model_registry.provider_for(resolved_model)
         quota_gate.check(provider)
         service = self._get_service()
+        _apply_model_addendum(messages, resolved_model, self._get_settings())
 
         system_prompt, user_message = _extract_from_messages(messages)
 
