@@ -99,7 +99,7 @@ standing practices.
 - Gate: eval A/B raw brief vs curated (and curated vs curated+social read)
   against the Phase 1 baseline; no regression beyond CI.
 
-### Phase 3 — turn-brief experiment (the main lever)  ☐
+### Phase 3 — turn-brief experiment (the main lever)  ◐ (built 3c84591a, A/B running)
 - Behind `BOB_PROMPT_LAYOUT=v2`: volatile blocks (clock, model, Work/owed,
   situation line) + the HARD RULES move into a short trailing developer
   message AFTER the history/stimulus, pointing back to sections by header.
@@ -167,4 +167,11 @@ standing practices.
 - 2026-10-11 — Phase 2 gate: f35d0b5e 80% vs a0030091 78% (+2, CI −7..+10);
   skill_delegation 0→33, capability flat; record_discipline_search_before_denying
   3/3→1/3 (noise at n=3 — watch). Deployed. **Phase 3 next** (turn brief).
+- 2026-10-11 — Phase 3 built (3c84591a, `BOB_PROMPT_LAYOUT=v2`, off in prod):
+  Work block, self-brief delta, clock, model line and HARD RULES move into a
+  final "# Turn brief" system item after the history (situation line +
+  section-header references). A/B: luna v2 vs f35d0b5e (v1, identical prompt
+  with flag off); flash v1 vs flash v2 (no prior flash control with 2b on).
+  Note: the layout flag isn't in the eval persona fingerprint — compare runs
+  by notes/sha.
 
