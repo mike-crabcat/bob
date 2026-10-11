@@ -69,6 +69,18 @@ def iso_utc(value: str | datetime | None = None) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def due_label(due: str | None) -> str:
+    """'due 2026-10-08 21:40+08:00', or 'OVERDUE since …' once past —
+    an overdue promise must look different from a pending one."""
+    if not due:
+        return "due —"
+    try:
+        past = _parse_ts(due) <= utcnow()
+    except Exception:
+        past = False
+    return f"{'OVERDUE since' if past else 'due'} {local_minute(due)}"
+
+
 def local_minute(value: str | datetime) -> str:
     """local_iso to the minute, offset kept: '2026-10-06 21:38+08:00'."""
     full = local_iso(value)

@@ -115,7 +115,7 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
     @tool
     async def add_goal(
         text: str = "",
-        profile: str = "outcome",
+        profile: str = "",
         label: str = "",
         completer: str = "",
         instruction: str = "",
@@ -130,13 +130,13 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         promise to do something ("I'll…", "rebuilding it now"): later turns
         only know what is recorded. Two profiles:
 
-        - profile="outcome" (default): a multi-step objective. It gets its
+        - profile="outcome" (default without a completer): a multi-step objective. It gets its
           own room and runs in rounds. `text` must name the artefact AND
           the proof it's done (see the goal-craft skill). `label` is a
           short free description (research, build, event_plan…).
           `deadline` (ISO 8601 UTC) or `owner` (in a GROUP: who it's for —
           ask if unclear) optional.
-        - profile="promise": one thing owed by a single party — you, or
+        - profile="promise" (default when `completer` is given): one thing owed by a single party — you, or
           another conversation (`completer` = its session key, which is
           also woken with `instruction` now). `due_minutes` defaults to 60.
 
@@ -152,7 +152,10 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         exact question + quote>) — their answer wakes you; only then close
         the approval child. Children default to due in 24h.
         """
-        profile = (profile or "outcome").strip().lower()
+        # A completer means one party owes one thing — a promise. Defaulting
+        # to outcome opened a whole goal room for a one-line chase
+        # (2026-10-06, Andrea's roster nudge).
+        profile = (profile or ("promise" if completer.strip() else "outcome")).strip().lower()
         child_specs, bad = _parse_children(children)
         if bad:
             return json.dumps({"ok": False, "error": bad})
@@ -264,16 +267,20 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         if promise is not None:
             owed_by = (promise.get("expected_completer") or "").removeprefix(
                 "conversation:")
+            waiter = promise.get("waiter_session") or ""
             if (outcome == "completed" and promise["status"] == "pending"
                     and owed_by.startswith(("agent:", "eval:"))
-                    and not await _same_conversation(owed_by, session_key)):
-                # Only the party it's owed BY can complete it — a room must
-                # not tick off "Mike approves…" itself (2026-10-06).
+                    and not await _same_conversation(owed_by, session_key)
+                    and not await _same_conversation(waiter, session_key)):
+                # Completing is for the two parties to it: the one it's owed
+                # BY (they did it) or the one it's owed TO (they got the
+                # answer some other way — 2026-10-07, rosters already on
+                # record). A third party can't. Rooms self-approving their
+                # checkpoints are stopped by the approval guard below.
                 return json.dumps({"ok": False, "goal_id": promise["id"], "error": (
-                    f"{promise['id']} is owed by {owed_by} — only that "
-                    "conversation can complete it (it closes when they "
-                    "answer). You can cancel it (outcome='cancelled') if "
-                    "it's no longer needed.")})
+                    f"{promise['id']} is between {owed_by} and {waiter} — "
+                    "only they can complete it. You can cancel it "
+                    "(outcome='cancelled') if it's no longer needed.")})
             if (outcome == "completed" and promise["status"] == "pending"
                     and session_key.startswith("agent:goal-")
                     and _APPROVAL_RE.search(promise.get("title") or "")

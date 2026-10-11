@@ -19,6 +19,7 @@ from server.context import AppContext
 from server.database import Database
 from server.exceptions import ServiceError
 from server.heartbeat import (
+    BridgeHealthTask,
     CallCleanupTask,
     DreamTask,
     EmailPollingTask,
@@ -232,6 +233,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.register(TaskReconcileTask())
         runner.register(StimulusRouterTask())
         runner.register(OpenRouterAttributionTask())
+        runner.register(BridgeHealthTask())
         runner.register(DeletionPropagationTask())
         runner.register(GrowthMonitoringTask())
         runner.register(SessionIdleSummaryTask())

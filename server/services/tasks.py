@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from server.context import AppContext
-from server.services.base import BaseService, iso_utc, local_minute
+from server.services.base import BaseService, due_label, iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +381,7 @@ async def tasks_block_lines(session_key: str, db) -> str:
     for t in pending:
         instruction = (json.loads(t["payload_json"] or "{}")
                        .get("instruction") or "")
-        lines.append(f"- {t['id']} (due {local_minute(t['due'])}): {t['title']}")
+        lines.append(f"- {t['id']} ({due_label(t['due'])}): {t['title']}")
         if instruction:
             lines.append(f"    {instruction[:220]}")
     return "\n".join(lines)
@@ -395,7 +395,7 @@ async def pending_tasks_lines(db, waiter_session: str) -> list[str]:
     from server.repositories.tasks import TaskRepository
     rows = await TaskRepository(db).list_for_waiter(waiter_session)
     return [
-        f"- {t['id']} (due {local_minute(t['due'])}) [{t['expected_completer'] or 'open'}]"
+        f"- {t['id']} ({due_label(t['due'])}) [{t['expected_completer'] or 'open'}]"
         f" {t['title']}"
         for t in rows
     ]

@@ -756,3 +756,117 @@ class OpenRouterAttributionTask:
                 await asyncio.sleep(0.3)  # polite: one lookup at a time
         if attributed:
             logger.info("openrouter attribution: %d call(s) resolved", attributed)
+
+
+class BridgeHealthTask:
+    """Alarm on a prolonged WhatsApp-bridge disconnect (2026-10-06 incident).
+
+    The bridge process can stay green for hours with its WhatsApp socket
+    down — during the 6.4h wedge every human message sat on WhatsApp's
+    servers and nothing surfaced it, because all the evening's apparent
+    activity was synthetic wake rows. This task polls the bridge /health
+    endpoint once a minute; once the socket has been down for ALERT_AFTER
+    it emails the owner once per outage (WhatsApp is the broken channel, so
+    the alert rides email) and logs ERROR each tick while it lasts.
+    Recovery clears the state so the next outage alerts again. The bridge
+    process itself being unreachable counts as down too. Kill switch:
+    BOB_BRIDGE_HEALTH_ALERTS=off."""
+
+    name = "bridge_health"
+    _THROTTLE = timedelta(seconds=60)
+    _ALERT_AFTER = timedelta(minutes=15)
+
+    _last: datetime | None = None
+    _down_since: datetime | None = None
+    _alerted = False
+
+    async def run(self, ctx: AppContext) -> None:
+        import os as _os
+        if _os.getenv("BOB_BRIDGE_HEALTH_ALERTS", "on").strip().lower() in (
+                "0", "false", "no", "off"):
+            return
+        wa = getattr(ctx.settings, "whatsapp_bridge", None)
+        if wa is None or not wa.enabled:
+            return
+        now = datetime.now(timezone.utc)
+        if BridgeHealthTask._last and (now - BridgeHealthTask._last) < self._THROTTLE:
+            return
+        BridgeHealthTask._last = now
+
+        healthy, reason = await self._probe(wa)
+        if healthy:
+            if BridgeHealthTask._down_since is not None:
+                logger.warning(
+                    "bridge health: WhatsApp reconnected after %s (down since %s)",
+                    now - BridgeHealthTask._down_since,
+                    BridgeHealthTask._down_since.astimezone().strftime("%H:%M:%S"))
+                BridgeHealthTask._down_since = None
+                BridgeHealthTask._alerted = False
+            return
+
+        if BridgeHealthTask._down_since is None:
+            BridgeHealthTask._down_since = now
+            logger.warning("bridge health: WhatsApp socket down (%s)", reason)
+            return
+        down_for = now - BridgeHealthTask._down_since
+        if down_for < self._ALERT_AFTER:
+            return
+        if not BridgeHealthTask._alerted:
+            logger.error(
+                "bridge health: WhatsApp socket down for %s — alerting owner",
+                down_for)
+            try:
+                await self._alert_owner(ctx, down_for, reason)
+            except Exception:
+                logger.exception("bridge health: owner alert failed")
+            BridgeHealthTask._alerted = True
+        else:
+            logger.error(
+                "bridge health: WhatsApp socket still down (%s, %s)",
+                reason, down_for)
+
+    async def _probe(self, wa) -> tuple[bool, str]:
+        """Hit the bridge's HTTP /health. No auth on that route (the token
+        gates the WS endpoint)."""
+        import httpx
+        from urllib.parse import urlsplit
+        parts = urlsplit(wa.url)
+        base = f"http://{parts.hostname}:{parts.port or 80}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{base}/health")
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return False, f"bridge health endpoint unreachable: {exc}"
+        if not data.get("whatsapp_connected"):
+            return False, "bridge reports whatsapp_connected=false"
+        return True, ""
+
+    async def _alert_owner(self, ctx: AppContext, down_for: timedelta, reason: str) -> None:
+        from server.repositories.contacts import ContactRepository
+        from server.services.base import local_iso
+        from server.services.email_delivery_service import EmailDeliveryService
+        from server.services.email_store import EmailStore
+
+        owner = await ContactRepository(ctx.db).get_default()
+        owner_email = (owner or {}).get("email")
+        if not owner_email:
+            logger.error(
+                "bridge health: default contact has no email — cannot alert owner")
+            return
+        inbox = await EmailStore(ctx.db).first_active_inbox()
+        if inbox is None:
+            logger.error("bridge health: no active email inbox — cannot alert owner")
+            return
+        text = (
+            f"Bob's WhatsApp bridge has been disconnected for "
+            f"{int(down_for.total_seconds() // 60)} minutes "
+            f"(down since {local_iso(BridgeHealthTask._down_since)} local).\n"
+            f"Reason: {reason}\n\n"
+            "Inbound WhatsApp messages are NOT reaching Bob.\n"
+            "Check: journalctl --user -u whatsappbridge.service")
+        await EmailDeliveryService(ctx).send_new_email(
+            inbox_id=inbox["id"], to=owner_email,
+            subject="[bob] WhatsApp bridge disconnected",
+            text=text)

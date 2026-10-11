@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"io"
 	"log/slog"
@@ -79,10 +81,8 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 }
 
 func (b *Bridge) Run(ctx context.Context) error {
-	// Start WhatsApp connection
-	if err := b.wa.Connect(); err != nil {
-		b.log.Warn("initial whatsapp connect failed, will retry", "error", err)
-	}
+	// Start WhatsApp connection under supervision
+	go b.connectLoop(ctx)
 
 	// Drain any queued incoming messages on startup
 	b.drainIncoming()
@@ -113,6 +113,52 @@ func (b *Bridge) Run(ctx context.Context) error {
 
 	// Start server (blocks until ctx cancelled)
 	return b.srv.Start(ctx)
+}
+
+// connectLoop owns the WhatsApp socket: it performs the initial connect and
+// retries whenever the client reports disconnected. whatsmeow's
+// EnableAutoReconnect only engages after an established session drops, so a
+// failed initial dial used to wedge the bridge forever — on 2026-10-06 a DNS
+// blip at boot logged "will retry" and then sat silent for 6.4 hours while
+// inbound messages queued on WhatsApp's servers. Backoff doubles to a cap
+// and resets after a healthy spell; every failed attempt is logged so a
+// future wedge is visible in the log instead of silent.
+func (b *Bridge) connectLoop(ctx context.Context) {
+	const (
+		baseDelay = 5 * time.Second
+		maxDelay  = 60 * time.Second
+		idlePoll  = 10 * time.Second
+	)
+	delay := baseDelay
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if b.wa.IsConnected() {
+			delay = baseDelay
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(idlePoll):
+			}
+			continue
+		}
+		err := b.wa.Connect()
+		if err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+			b.log.Warn("whatsapp connect failed; retrying",
+				"error", err, "next_delay", delay.String())
+		}
+		// Success ("whatsapp connected") is logged by the Connected event
+		// handler; nil and already-connected both count as healthy.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if delay < maxDelay {
+			delay *= 2
+		}
+	}
 }
 
 func (b *Bridge) handlePairingHTTP(w http.ResponseWriter, r *http.Request) {

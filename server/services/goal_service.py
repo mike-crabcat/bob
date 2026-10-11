@@ -9,9 +9,12 @@ from __future__ import annotations
 
 
 import json
+import time
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+
+from server.services.base import utcnow
 from typing import Any
 from uuid import uuid4
 
@@ -183,6 +186,37 @@ async def create_goal(
         )
     await _append_goal_event(ctx, goal, "goal.created")
     return goal
+
+
+_OVERDUE_MAX_NOTICES = 3
+_OVERDUE_COALESCE_S = 120.0
+_OVERDUE_LAST_WAKE: dict[str, float] = {}
+
+
+async def _overdue_notice(ctx: AppContext, waiter: str, notice: int) -> str:
+    """One notice listing every overdue promise this conversation waits on."""
+    from server.repositories.tasks import TaskRepository
+    from server.services.base import local_minute
+    now_iso = utcnow().isoformat()
+    overdue = [t for t in await TaskRepository(ctx.db).list_for_waiter(waiter, limit=50)
+               if t.get("due") and t["due"] <= now_iso]
+    lines = [f"- {t['id']} — {t['title']} (owed by "
+             f"{t.get('expected_completer') or 'you'}; due {local_minute(t['due'])})"
+             for t in overdue] or ["- (none still pending)"]
+    final = ("\nFinal reminder: after this they stay open on the Work page "
+             "until someone closes them." if notice >= _OVERDUE_MAX_NOTICES else "")
+    return (f"## Overdue — {len(overdue)} promise(s) you're waiting on\n"
+            + "\n".join(lines) + "\n\n"
+            "Act on EVERY item above, not just one:\n"
+            "- still needed → nudge the same party WITHOUT creating a new "
+            "promise — the original already tracks the answer: for a person, "
+            "send_whatsapp_to_contact with NO objective; for a chat, "
+            "steer_conversation. When the answer arrives, close the ORIGINAL "
+            "with close_goal(goal_id=<original id>, result=…). (A second "
+            "promise for the same answer leaves one dangling.)\n"
+            "- already answered elsewhere → close_goal(goal_id=<id>, result=<the answer>)\n"
+            "- no longer needed → close_goal(goal_id=<id>, outcome='cancelled')"
+            + final)
 
 
 async def _wakeup_target(repo: GoalRepository, goal: dict[str, Any]) -> str:
@@ -485,30 +519,40 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
             return True  # goal already settled; wakeup is moot
 
     if wakeup.get("kind") == "task_due":
-        # Task-registry backstop (docs/task-registry-plan.md): completion
-        # didn't arrive by the due time — wake the WAITER so it decides
-        # (chase, re-register, or cancel). The settle effect cancels this
-        # series' future when the task resolves.
-        from server.services import tasks as task_svc
+        # Promise backstop: completion didn't arrive by the due time. The
+        # waiter is woken with EVERY overdue promise it holds (2026-10-06:
+        # four notices fired together and Bob acted on one), and the
+        # series re-arms daily up to _OVERDUE_MAX_NOTICES — a one-shot
+        # backstop let promises sit silently overdue for 12 days.
+        from server.repositories.tasks import TaskRepository
         payload = json.loads(wakeup.get("payload_json") or "{}")
         task = None
         if payload.get("task_id"):
-            from server.repositories.tasks import TaskRepository
             task = await TaskRepository(ctx.db).get(payload["task_id"])
         if task is not None and task["status"] != "pending":
             return False  # settled between arm and fire; series ends
-        label = (f" ({task['title']})" if task else "")
+        notice = int(payload.get("notice") or 1)
+        if task is not None and notice < _OVERDUE_MAX_NOTICES:
+            from server.repositories.wakeups import WakeupRepository
+            await WakeupRepository(ctx.db).schedule(
+                conversation_id=wakeup["conversation_id"],
+                not_before=(utcnow() + timedelta(hours=24)).isoformat(),
+                kind="task_due",
+                payload={"task_id": task["id"], "notice": notice + 1,
+                         "note": "task due backstop (repeat)"})
+        waiter = wakeup["conversation_id"]
+        now = time.monotonic()
+        last = _OVERDUE_LAST_WAKE.get(waiter)
+        if last is not None and now - last < _OVERDUE_COALESCE_S:
+            return False  # a sibling notice this instant already listed it
+        _OVERDUE_LAST_WAKE[waiter] = now
         await wake_conversation(
-            ctx, wakeup["conversation_id"],
-            f"## Task overdue{label}\n"
-            f"A task you were waiting on passed its due time without "
-            f"settling. list_goals to see it; chase the completer, "
-            f"re-register, or close_goal(outcome='cancelled') it.",
+            ctx, waiter, await _overdue_notice(ctx, waiter, notice),
             call_category="task_due",
             metadata={"wakeup_id": wakeup["id"],
                       "task_id": payload.get("task_id")},
         )
-        return False  # one-shot backstop per registration
+        return False
 
     if wakeup.get("kind") == "goal_checkin":
         # Room check-in: the room renders its own brief (state + digest +

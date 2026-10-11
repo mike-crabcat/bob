@@ -179,13 +179,16 @@ async def test_room_cannot_approve_its_own_checkpoint(ctx):
     assert (await _call(room["close_goal"], goal_id=approval, result="Mike approved"))["ok"]
 
 
-async def test_only_the_completer_completes_a_promise(ctx):
+async def test_only_the_parties_complete_a_promise(ctx):
+    """The waiter (got the answer elsewhere) and the completer (did it) may
+    complete; a third conversation may only cancel."""
     t = _tools(ctx, DM, "full")
     d = await _call(t["delegate_goal"], text="Get Sam's address", to=GROUP)
-    r = await _call(t["close_goal"], goal_id=d["goal_id"], result="done")
-    assert not r["ok"] and "only that conversation" in r["error"]
-    assert (await _call(t["close_goal"], goal_id=d["goal_id"], outcome="cancelled",
-                        result="not needed"))["ok"]
+    other = _tools(ctx, "agent:main:whatsapp:dm:61499999999", "full")
+    r = await _call(other["close_goal"], goal_id=d["goal_id"], result="done")
+    assert not r["ok"] and "only they can complete it" in r["error"]
+    r = await _call(t["close_goal"], goal_id=d["goal_id"], result="Sam's address was in his email")
+    assert r["ok"], "the waiter may complete with an answer it found elsewhere"
 
 
 async def test_goal_creator_defaults_to_the_person_talking(ctx):
@@ -199,3 +202,12 @@ async def test_goal_creator_defaults_to_the_person_talking(ctx):
     r = await _call(t["add_goal"], text="Build the game; proof: doc", label="build")
     assert r["ok"], r
     assert (await GoalRepository(ctx.db).get(r["goal_id"]))["creator_contact_id"] == "c-mike"
+
+
+async def test_completer_implies_a_promise(ctx):
+    """2026-10-06: add_goal(completer=…) without a profile opened a whole
+    outcome room for a one-line chase. A completer means a promise."""
+    t = _tools(ctx, GROUP, "full")
+    r = await _call(t["add_goal"], text="Nudge Andrea for his roster",
+                    completer=DM, instruction="one polite nudge")
+    assert r["ok"] and r["profile"] == "promise", r

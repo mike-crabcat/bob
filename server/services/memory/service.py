@@ -384,7 +384,6 @@ class MemoryService(BaseService):
         # uses SQLite's datetime('now'), so we use the same format).
         turn_start_ts = utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-        result_text = ""
         async with SessionDispatchGate.get_lock(session_key):
             # Re-check under the lock: another heartbeat may have run a turn
             # while we were waiting.
@@ -452,7 +451,7 @@ class MemoryService(BaseService):
                 {"role": "user", "content": instruction},
             ]
             llm = LLMDispatchService(self.ctx)
-            result_text = await llm.run_turn(
+            await llm.run_turn(
                 messages, tools,
                 model=llm.memory_model,
                 max_iterations=25,
@@ -507,11 +506,12 @@ class MemoryService(BaseService):
 
             entities_created = len(new_entity_rows)
 
-            # The model often ends with empty text after its tool calls; store a
-            # meaningful summary rather than a misleading placeholder.
-            if result_text and result_text.strip():
-                content = result_text
-            elif claims_created:
+            # The marker row is machine bookkeeping that claims' source_messages
+            # reference — never a chat reply. Storing the model's final text
+            # here put extractor prose ("Recorded: task to remind Mike…") into
+            # history surfaces as if Bob had said it (2026-10-06); the model's
+            # text stays in llm_call_log for observability.
+            if claims_created:
                 content = f"[Silent extraction turn: recorded {claims_created} claim(s)]"
             else:
                 content = "[Silent extraction turn: nothing memory-worthy]"

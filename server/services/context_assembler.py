@@ -228,7 +228,7 @@ class ContextAssembler:
     async def _work_block(self, session_key: str, goals: list[dict],
                           background: str) -> str:
         from server.repositories.tasks import TaskRepository
-        from server.services.base import local_minute
+        from server.services.base import due_label
         from server.services.tasks import tasks_block_lines
 
         sections: list[str] = []
@@ -242,7 +242,7 @@ class ContextAssembler:
             logger.warning("work block: waiter promises failed", exc_info=True)
             owed = []
         if owed:
-            lines = [f"- {t['id']} (due {local_minute(t['due']) if t['due'] else '—'}) "
+            lines = [f"- {t['id']} ({due_label(t['due'])}) "
                      f"[{t.get('expected_completer') or 'you'}] {t['title']}"
                      for t in owed]
             sections.append(
