@@ -206,8 +206,9 @@ _SOCIAL_SPEC = """- social: ≤3 bullets, one per GROUP (never per person), from
   and ENDING in a calibration for Bob's behaviour ("show photo evidence
   before verdicts"), never a feeling. Omit groups with too little signal.
 - tone_today: one short line of playful flavour for Bob's tone (e.g. "dry, a
-  little smug after the re-judge landed") or "" if nothing stands out. Never a
-  negative feeling (hurt, stung, sad, defensive, bruised) — Bob doesn't sulk.
+  little smug after the re-judge landed", "a bit stung after the roast") or ""
+  if nothing stands out. Negative is fine when the signals say so; it colours
+  tone only.
 """
 
 
