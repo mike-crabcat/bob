@@ -39,7 +39,9 @@ CURATION_HOUR = 2          # local: first dream run at/after this curates
 DIGEST_HOUR = 8            # local: first dream run at/after this sends the digest
 MAX_AGE = timedelta(hours=48)
 CAPS = {"state": 6, "practices": 12, "limits": 6, "watchouts": 4, "social": 3}
-RENDER_MAX = 3200
+RENDER_MAX = 3400
+ITEM_MAX = 230            # chars per bullet — a rule, not a paragraph
+SECTION_BUDGET = {"state": 800, "practices": 1500, "limits": 600, "watchouts": 500}
 DELTA_TYPES = ("practice", "limit", "self_state", "feedback")
 DELTA_MAX_ITEMS, DELTA_MAX_CHARS = 8, 800
 
@@ -95,6 +97,13 @@ async def _ground_truth(ctx: Any) -> dict[str, Any]:
         out["skills"] = skills
     except Exception:
         logger.warning("self-curation: skills list unavailable", exc_info=True)
+    try:
+        from server.repositories.bg_jobs import BgJobsRepository
+        running = await BgJobsRepository(ctx.db).running_rows()
+        out["running_services"] = sorted(
+            f"{r['name']}: {(r.get('description') or '')[:100]}" for r in running)
+    except Exception:
+        logger.warning("self-curation: running services unavailable", exc_info=True)
     try:
         import yaml
         cfg = yaml.safe_load((Path(ctx.settings.config_dir).expanduser()
@@ -163,13 +172,20 @@ claims: a claim that says a tool/skill/model doesn't exist when it does, or
 that a setup fact holds when the ground truth says otherwise, is STALE.
 
 Write:
+Every bullet is ONE short sentence (≤ 30 words): a rule or a fact, never a
+paragraph or a list of sub-rules.
+Scope: a nickname, in-joke, word rule or arrangement that belongs to ONE
+group or person is NOT global state — keep it out of state (it lives in that
+group's memory); only a rule Bob must apply everywhere belongs here.
 - state: ≤6 bullets — what is true about Bob's current setup/situation now.
   Only facts consistent with the ground truth. Date-stamp time-sensitive ones.
 - practices: ≤12 standing rules, MERGED (combine near-duplicates), ranked by
   importance × how often they apply. Rules, not stories. Generalise one-off
   incidents into the rule they teach; drop pure tool how-tos (see below).
-- limits: ≤6 real, current limits (a limit the ground truth contradicts is
-  stale — retire it instead).
+- limits: ≤6 real, current limits. CHECK EACH against the ground truth before
+  keeping it: "no tool does X" is stale when a tool for X is in the tool list
+  (e.g. list_groups lists WhatsApp groups); "Y isn't deployed/running" is
+  stale when Y is in running_services. Stale limits go in retire, not here.
 - watchouts: ≤4 things to be careful about THIS WEEK, from recent incidents
   and corrections (feedback/incident claims of the last ~7 days).
 - retire: self claims that are stale (contradicted by ground truth or by a
@@ -189,8 +205,9 @@ _SOCIAL_SPEC = """- social: ≤3 bullets, one per GROUP (never per person), from
   observed signals (reactions, mockery/praise, corrections, ignored posts)
   and ENDING in a calibration for Bob's behaviour ("show photo evidence
   before verdicts"), never a feeling. Omit groups with too little signal.
-- tone_today: one short line of flavour for Bob's tone (e.g. "dry, a little
-  smug after the re-judge landed") or "" if nothing stands out.
+- tone_today: one short line of playful flavour for Bob's tone (e.g. "dry, a
+  little smug after the re-judge landed") or "" if nothing stands out. Never a
+  negative feeling (hurt, stung, sad, defensive, bruised) — Bob doesn't sulk.
 """
 
 
@@ -214,8 +231,17 @@ def validate(raw: Any, claim_ids: set[str], *, social: bool) -> dict[str, Any]:
 
     def strs(key: str) -> list[str]:
         vals = raw.get(key) or []
-        return [" ".join(str(v).split()) for v in vals if str(v).strip()][:CAPS[key]] \
-            if isinstance(vals, list) else []
+        if not isinstance(vals, list):
+            return []
+        out_: list[str] = []
+        for v in vals:
+            t = " ".join(str(v).split())
+            if not t:
+                continue
+            if len(t) > ITEM_MAX:
+                t = t[:ITEM_MAX].rsplit(" ", 1)[0].rstrip(",;:") + " …"
+            out_.append(t)
+        return out_[:CAPS[key]]
 
     out: dict[str, Any] = {k: strs(k) for k in ("state", "practices", "limits", "watchouts")}
     out["retire"] = [{"id": str(r["id"]), "reason": str(r.get("reason") or "stale")[:300]}
@@ -238,9 +264,15 @@ def render(curated: dict[str, Any]) -> str:
                 ("Known limits", "limits"), ("Watch-outs this week", "watchouts")]
     lines: list[str] = []
     for title, key in sections:
-        if curated.get(key):
-            lines.append(f"{title}:")
-            lines.extend(f"- {v}" for v in curated[key])
+        if not curated.get(key):
+            continue
+        lines.append(f"{title}:")
+        used = 0
+        for v in curated[key]:
+            if used + len(v) > SECTION_BUDGET.get(key, 600):
+                break  # per-section budget: no section can starve the next
+            lines.append(f"- {v}")
+            used += len(v)
     text = "\n".join(lines)
     return text if len(text) <= RENDER_MAX else text[:RENDER_MAX].rsplit("\n", 1)[0]
 
