@@ -135,3 +135,13 @@ standing practices.
   running services as ground truth, scope rule, limit-vs-tools check, no
   negative tone. Stale share-files claim corrected by operator. Curation held
   OFF (`BOB_SELF_CURATION=off` in ~/config/.env) pending Mike's review.
+- 2026-10-11 — Mike: nightly curation ON; Bob = "Bob", he/him (Boya/they-them
+  claims retired, persona states it); negative tone allowed. First live
+  curation over-retired (54 "merged" → restored; retire now = stale-with-reason
+  or named duplicate, ≤10/night). Social read was [] on one live run → prompt
+  now requires it when signals exist; fresh version sm-bb75e193cdd6.
+- 2026-10-11 — 2 social-calibration guard cases added (59 cases). A/B started
+  on gpt-6-luna, n=3, judge glm-5.3@low, snapshot sm-bb75: CONTROL (raw) ·
+  CURATED · CURATED+SOCIAL (fingerprints af760b9e / 8d013f44 / 7b129e66).
+  (An earlier attempt was killed part-way — ignore partial runs 1cdb36be +
+  the first CURATED run in eval history.)
