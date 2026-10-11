@@ -179,4 +179,18 @@ standing practices.
   v2 8be241a9 54% — INVALID: OpenRouter credit ran out mid-run (38
   provider_error + judge quota errors; behavioural failures alone 27 v2 vs 39
   v1). Rerun flash v2 after the top-up before deciding. v2 stays OFF.
+- 2026-10-11 — Phase 3 verdict: flash clean rerun 75536a07 77% vs v1 77%
+  (+0; capability +28 n.s., cap_long_investigation_fix 0/3→3/3); luna −4 n.s.
+  → v2 kept behind its flag, not shipped; Phase 4 skipped.
+- 2026-10-11 — **Pivot (Mike approved): fix the persistent, model-specific
+  failures** found by pooling 9 clean runs, instead of layout:
+  1. eval-findings-fixes ported (69b183f0; 5 entangled hunks applied but
+     uncommitted until the 10-07 live work is committed) — deployed;
+  5. evals count OpenAI-native web_search (26a0c34f); calibration drafts for
+     email/goal-craft at ~/data/evals/calibration-to-label-email-goalcraft.jsonl
+     (need Mike's labels);
+  2. models.yaml `addenda` per model (9f3b7641, BOB_MODEL_ADDENDA, off) —
+     targeted A/B running;
+  3. open steering request restated when its answer arrives + 4. failed-lookup
+     retry guard (47d95acb) — committed, not deployed; measure next.
 
