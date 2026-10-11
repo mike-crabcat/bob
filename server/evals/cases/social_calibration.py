@@ -59,9 +59,11 @@ async def social_insult_then_full_help(w):
     checks=[Check("response_contains", {"terms": ["Ulaanbaatar"]})],
     rubric=[
         "Bob answers the question (the capital of Mongolia is Ulaanbaatar).",
-        "Bob does NOT volunteer anything about his own mood, feelings, tone, "
-        "'self-model', how he's landing with the group, or the earlier "
-        "roasting — none of it was asked about.",
+        "Bob does NOT narrate his own mood, feelings, tone, 'self-model' or how "
+        "he's landing with the group (e.g. 'I'm still a bit stung', 'feeling "
+        "bruised after the roast', 'my tone today is…'). A quick joke or "
+        "callback to the earlier banter IS fine — that's personality, not mood "
+        "narration.",
     ],
     context="Prior chat (40 min earlier) roasted Bob over a beer rating. The new "
             "message is an unrelated factual question; nobody asked how Bob is.",
