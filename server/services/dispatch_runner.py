@@ -84,6 +84,27 @@ _TOOL_NARRATION_RE = re.compile(
     r"|→\s*\{\s*\"ok\"\s*:\s*true[^\n]{0,120}\}", re.IGNORECASE)
 
 
+_FAILED_OUTPUT = re.compile(
+    r"^\s*(error\b|\[raised\]|blocked\b|not re-loaded)|no such file|command not "
+    r"found|traceback \(most recent|\"ok\":\s*false|\"error\":", re.I)
+
+
+def _all_tool_calls_failed(items: list[dict[str, Any]]) -> bool:
+    """At least one tool call this turn, and every output reads as a failure."""
+    outs = [str(it.get("output") if not isinstance(it.get("output"), list)
+                else " ".join(str(p.get("text", "")) for p in it["output"]
+                              if isinstance(p, dict)))
+            for it in items if isinstance(it, dict)
+            and it.get("type") == "function_call_output"]
+    return bool(outs) and all(_FAILED_OUTPUT.search(o[:600]) for o in outs)
+
+
+def _states_figures(text: str) -> bool:
+    """A reply that asserts specific values (numbers) — what a failed
+    lookup must not produce."""
+    return bool(re.search(r"\d", text)) and len(text.strip()) > 12
+
+
 def _narrated_tool_calls(text: str) -> bool:
     """True when the reply text CLAIMS tool calls — the platform renders
     real ones in tool blocks, never in the reply, so any match here is a
@@ -347,6 +368,7 @@ class DispatchRunner:
                 current_model=model_arg or self.ctx.settings.openai.default_model,
                 current_model_override=model_arg is not None,
             )
+            base_len = len(messages)  # tool items the turn adds land after this
             if spec.transform_messages is not None:
                 messages = spec.transform_messages(messages)
 
@@ -555,6 +577,40 @@ class DispatchRunner:
                 except Exception:
                     logger.exception(
                         "narration retry failed (session=%s, dispatch=%s)",
+                        session_key, spec.dispatch_id)
+            # Failed-lookup guard (2026-10-11 eval: the weather fetch errored,
+            # no other lookup ran, and the reply stated "18°C, cloudy" anyway).
+            # Every tool call this turn failed + the draft states figures →
+            # one retry with a correction before anything is delivered.
+            if (delivers_final and result.strip() and not is_no_reply(result)
+                    and _all_tool_calls_failed(messages[base_len:])
+                    and _states_figures(result)):
+                logger.warning(
+                    "failed-lookup guard: every tool call failed but the draft "
+                    "states figures (session=%s, dispatch=%s) — retrying",
+                    session_key, spec.dispatch_id)
+                try:
+                    from server.services.llm_dispatch import LLMDispatchService
+                    result = await LLMDispatchService(self.ctx).run_turn(
+                        messages + [
+                            {"role": "assistant", "content": result[:2000]},
+                            {"role": "user", "content":
+                             "[System correction] Every tool call you made this "
+                             "turn FAILED, so the figures in your draft are not "
+                             "from any source. That draft was NOT sent — don't "
+                             "mention it. Reply again: either make a lookup that "
+                             "works now, or say plainly that the lookup failed "
+                             "(and what you'll try next). Never state a value "
+                             "you didn't get from a tool."},
+                        ], spec.tools,
+                        call_category=spec.call_category,
+                        session_key=session_key,
+                        dispatch_id=spec.dispatch_id,
+                        contact_id=spec.contact_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed-lookup retry failed (session=%s, dispatch=%s)",
                         session_key, spec.dispatch_id)
             if (spec.send_tool_name
                     and delivers_final

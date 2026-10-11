@@ -493,3 +493,43 @@ async def test_wake_nudge_drop_is_logged(ctx, db, stub_llm, stub_history, caplog
         await DispatchRunner(ctx).run(_wake_spec(key, send_tool, "wakeup"))
     assert send_tool.delivered == []
     assert any("dropped 250 chars" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Failed-lookup guard (2026-10-11: weather fetch errored, reply said 18°C)
+# ---------------------------------------------------------------------------
+
+def test_failed_lookup_helpers():
+    from server.services.dispatch_runner import _all_tool_calls_failed, _states_figures
+    fail = [{"type": "function_call_output", "output": "Error (exit code 2): python3: can't "
+             "open file 'skills/bom/bom_fetcher.py': [Errno 2] No such file or directory"}]
+    ok = [{"type": "function_call_output", "output": "Perth: 22°C sunny"}]
+    assert _all_tool_calls_failed(fail)
+    assert not _all_tool_calls_failed(fail + ok)
+    assert not _all_tool_calls_failed([])           # no tools → not this guard's case
+    assert _states_figures("Perth's around 18°C with cloud.")
+    assert not _states_figures("Lookup failed — try later.")
+
+
+async def test_failed_lookup_triggers_one_retry(ctx, db, monkeypatch, stub_history):
+    from server.services.llm_dispatch import LLMDispatchService
+    replies = iter(["Perth's around 18°C, some cloud.",
+                    "The weather lookup failed — I'll try the BOM site next."])
+    calls = []
+
+    async def _run_turn(self, messages, tools, **kwargs):
+        calls.append(len(messages))
+        if len(calls) == 1:
+            messages.append({"type": "function_call", "name": "bash", "call_id": "c1",
+                             "arguments": "{}"})
+            messages.append({"type": "function_call_output", "call_id": "c1",
+                             "output": "Error (exit code 2): No such file or directory"})
+        return next(replies)
+
+    monkeypatch.setattr(LLMDispatchService, "run_turn", _run_turn)
+    key = "test:guard:failed-lookup"
+    await SessionService(ctx).add_message(key, "user", "weather in Perth?", dispatched=0)
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    await DispatchRunner(ctx).run(_spec(key, send_tool))
+    assert len(calls) == 2
+    assert send_tool.delivered == ["The weather lookup failed — I'll try the BOM site next."]

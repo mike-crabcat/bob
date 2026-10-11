@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -587,6 +587,7 @@ async def build_chat_messages(
     lifted: list[str] = []
     nudge_claimed = False
     group_event_claimed = False
+    open_steers: list[str] = []   # earlier steering requests still in view
 
     if session_key and db is not None:
         is_group = ":group:" in session_key
@@ -720,6 +721,9 @@ async def build_chat_messages(
                     # so they never read as someone speaking in this chat.
                     # Claimed rows fall through to the NEW marker below — a
                     # steer IS this turn's stimulus, not a fold-silently nudge.
+                    if not is_claimed and (len(rows) - i) <= 8 and _within_hours(
+                            row.get("created_at"), 24):
+                        open_steers.append(str(row.get("content") or ""))
                     content = STEER_MARKER + content
                 if is_claimed and prov != "wake_nudge":
                     content = NEW_MARKER + content
@@ -882,7 +886,21 @@ async def build_chat_messages(
                     f"{group_event_hint}"
                 ),
             })
-        elif nudge_claimed and not lifted:
+        if lifted and open_steers:
+            # An earlier steering request in this chat may be waiting on
+            # exactly this reply (2026-10-11 eval: Mike asked Bob to ask
+            # Sylvain his WFH day and tell Doom Club; Sylvain answered in his
+            # DM and Bob replied only there, 1/18 on luna). Restate it at the
+            # end so the relay half isn't lost in the history.
+            req = " ".join(open_steers[-1].split())[:500]
+            messages.append({"role": "system", "content": (
+                "Open request in this chat (an earlier steering request):\n"
+                f"{req}\n\nIf the new message answers or completes it, finish "
+                "the WHOLE request now — including telling another chat or "
+                "group when it asks you to (use a tool aimed at that chat; "
+                "your final text here only reaches this chat). If it's "
+                "unrelated, ignore this note.")})
+        if nudge_claimed and not lifted:
             messages.append({
                 "role": "system",
                 "content": _NUDGE_ONLY_DIRECTIVE.format(
@@ -948,6 +966,18 @@ def _take_block(text: str, first_line: str) -> tuple[str, str]:
         n += 1
     block = "\n".join(lines[:n])
     return text[:i] + "\n".join(lines[n:]), block.strip()
+
+
+def _within_hours(created_at: Any, hours: float) -> bool:
+    if not created_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00").replace(" ", "T"))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)   # message rows store naive UTC
+    return datetime.now(timezone.utc) - dt <= timedelta(hours=hours)
 
 
 def _ends_with_assistant_side(messages: list[dict[str, Any]]) -> bool:
