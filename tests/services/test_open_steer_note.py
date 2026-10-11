@@ -6,7 +6,8 @@ from server.services.session_service import SessionService
 DM = "agent:main:whatsapp:dm:61400000014"
 
 
-async def test_open_steer_restated_for_the_answer(ctx, db):
+async def test_open_steer_restated_for_the_answer(ctx, db, monkeypatch):
+    monkeypatch.setenv("BOB_OPEN_STEER_NOTE", "on")
     svc = SessionService(ctx)
     await svc.add_message(DM, "user", "[Steering request — Mike] Ask Sylvain his WFH "
                           "day; when he answers, tell the Doom Club group.",

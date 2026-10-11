@@ -507,11 +507,18 @@ def test_failed_lookup_helpers():
     assert _all_tool_calls_failed(fail)
     assert not _all_tool_calls_failed(fail + ok)
     assert not _all_tool_calls_failed([])           # no tools → not this guard's case
+    helper_ok = [{"type": "function_call", "call_id": "u", "name": "use_skill"},
+                 {"type": "function_call_output", "call_id": "u", "output": "Skill: bom-weather"},
+                 {"type": "function_call", "call_id": "b", "name": "bash"},
+                 {"type": "function_call_output", "call_id": "b",
+                  "output": "Error (exit code 2): No such file or directory"}]
+    assert _all_tool_calls_failed(helper_ok)        # helper success doesn't mask it
     assert _states_figures("Perth's around 18°C with cloud.")
     assert not _states_figures("Lookup failed — try later.")
 
 
 async def test_failed_lookup_triggers_one_retry(ctx, db, monkeypatch, stub_history):
+    monkeypatch.setenv("BOB_FAILED_LOOKUP_GUARD", "on")
     from server.services.llm_dispatch import LLMDispatchService
     replies = iter(["Perth's around 18°C, some cloud.",
                     "The weather lookup failed — I'll try the BOM site next."])

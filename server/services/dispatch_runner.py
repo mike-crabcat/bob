@@ -89,13 +89,25 @@ _FAILED_OUTPUT = re.compile(
     r"found|traceback \(most recent|\"ok\":\s*false|\"error\":", re.I)
 
 
+# Calls that fetch data a reply could state; helpers (use_skill loads
+# instructions, get_time, agenda/goal bookkeeping) don't count either way —
+# 2026-10-11: use_skill succeeded, the fetch failed, and the guard missed.
+_DATA_TOOL = re.compile(r"bash|search|fetch|web|read|http|browse|^mcp_|recall|find|lookup", re.I)
+
+
 def _all_tool_calls_failed(items: list[dict[str, Any]]) -> bool:
-    """At least one tool call this turn, and every output reads as a failure."""
-    outs = [str(it.get("output") if not isinstance(it.get("output"), list)
-                else " ".join(str(p.get("text", "")) for p in it["output"]
-                              if isinstance(p, dict)))
-            for it in items if isinstance(it, dict)
-            and it.get("type") == "function_call_output"]
+    """At least one DATA-fetching call this turn, and every one failed."""
+    names = {it.get("call_id"): str(it.get("name") or "") for it in items
+             if isinstance(it, dict) and it.get("type") == "function_call"}
+    outs = []
+    for it in items:
+        if not (isinstance(it, dict) and it.get("type") == "function_call_output"):
+            continue
+        if not _DATA_TOOL.search(names.get(it.get("call_id"), "bash")):
+            continue
+        out = it.get("output")
+        outs.append(str(out) if not isinstance(out, list) else " ".join(
+            str(p.get("text", "")) for p in out if isinstance(p, dict)))
     return bool(outs) and all(_FAILED_OUTPUT.search(o[:600]) for o in outs)
 
 
@@ -582,7 +594,9 @@ class DispatchRunner:
             # no other lookup ran, and the reply stated "18°C, cloudy" anyway).
             # Every tool call this turn failed + the draft states figures →
             # one retry with a correction before anything is delivered.
-            if (delivers_final and result.strip() and not is_no_reply(result)
+            import os as _os
+            if (_os.environ.get("BOB_FAILED_LOOKUP_GUARD", "off").strip().lower() == "on"
+                    and delivers_final and result.strip() and not is_no_reply(result)
                     and _all_tool_calls_failed(messages[base_len:])
                     and _states_figures(result)):
                 logger.warning(

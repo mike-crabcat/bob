@@ -886,7 +886,8 @@ async def build_chat_messages(
                     f"{group_event_hint}"
                 ),
             })
-        if lifted and open_steers:
+        if lifted and open_steers and os.environ.get(
+                "BOB_OPEN_STEER_NOTE", "off").strip().lower() == "on":
             # An earlier steering request in this chat may be waiting on
             # exactly this reply (2026-10-11 eval: Mike asked Bob to ask
             # Sylvain his WFH day and tell Doom Club; Sylvain answered in his
@@ -897,9 +898,11 @@ async def build_chat_messages(
                 "Open request in this chat (an earlier steering request):\n"
                 f"{req}\n\nIf the new message answers or completes it, finish "
                 "the WHOLE request now — including telling another chat or "
-                "group when it asks you to (use a tool aimed at that chat; "
-                "your final text here only reaches this chat). If it's "
-                "unrelated, ignore this note.")})
+                "group when it asks you to (use a tool aimed at that chat). "
+                "Your final text reaches only THIS chat and the person in it: "
+                "speak to them (e.g. thanks), never a third-person update "
+                "about them — that update goes to the other chat only. If "
+                "it's unrelated, ignore this note.")})
         if nudge_claimed and not lifted:
             messages.append({
                 "role": "system",
