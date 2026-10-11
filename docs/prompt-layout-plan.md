@@ -62,7 +62,7 @@ expected gain is real but unproven: measure everything.
 - Gate: response-discipline battery + eval v2 discipline tier vs Phase 1
   baseline; no regression beyond CI.
 
-### Phase 2b — curated self-model (nightly) + in-day delta  ◐ (built + merged; curation held off pending Mike's review of the dry run; brief off until A/B)
+### Phase 2b — curated self-model (nightly) + in-day delta  ☑ (live 2026-10-11)
 Problem (2026-10-11 review of the 198 self claims): the self-brief renders
 newest-first under a 4k-char cap — ~5 of 147 practices and 0 of 16 limits
 ever reach the prompt; states eat the budget; several claims are stale or
@@ -152,4 +152,11 @@ standing practices.
   Mood rubric was over-strict (callback jokes counted as mood) — loosened
   (f231a0be). Decision (Mike): targeted re-check, 13 cases × n=6, CONTROL vs
   CURATED+SOCIAL, before flipping production.
+- 2026-10-11 — **Targeted re-check (13 cases × n=6):** CONTROL 36574bb9 63% vs
+  CURATED+SOCIAL 5302ed3f 67% (+4, CI −11..+18); fact-discipline drop did NOT
+  replicate (+12); goal-craft +25; propose-first −10 (n.s.); social 100/100.
+  Gate passed → `BOB_SELF_MODEL_BRIEF=on` + `BOB_SELF_MODEL_SOCIAL=on` in
+  ~/config/.env (backup env.2026-10-11b). Phase 2b DONE. Note:
+  fact_no_narrated_search fails in both arms (0–1/6) — a standing weakness,
+  not a 2b effect. Next: Phase 2 cheap fixes.
 
