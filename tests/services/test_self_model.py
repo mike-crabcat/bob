@@ -113,6 +113,7 @@ async def test_run_if_due_once_per_night(ctx, monkeypatch):
 
 
 async def test_curated_brief_delta_and_staleness(ctx, monkeypatch):
+    monkeypatch.setenv("BOB_SELF_MODEL_SOCIAL", "off")
     await _seeded(ctx)
     with patch("server.services.llm_dispatch.LLMDispatchService.prompt",
                new=AsyncMock(return_value=json.dumps(CURATED))), \

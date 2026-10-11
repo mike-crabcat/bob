@@ -349,9 +349,10 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
     # last-instruction slot (2026-10-03); this block keeps the
     # channel-neutral and email contracts.
     parts.append(
-        "## CRITICAL: How to Respond\n"
-        "On email: call email_reply to send your reply, email_skip to stay silent.\n"
-        "Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
+        "## How to Respond (per channel)\n"
+        "- Use as many tools as you need before replying — memory, files, docs, contacts, scripts.\n"
+        "- WhatsApp: your final text is the reply — see 'Before you finish — HARD RULES' at the end.\n"
+        "- Email: call email_reply to send your reply, email_skip to stay silent.\n"
     )
     parts.append(GROUNDING_RULES)
     parts.append(

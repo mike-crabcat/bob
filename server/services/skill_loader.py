@@ -46,6 +46,25 @@ def _scan_skills(workspace_dir: Path) -> dict[str, float]:
     return mtimes
 
 
+_CLIP_CHARS = 170
+
+
+def _clip(text: str) -> str:
+    """First clause(s) of a trigger/description, ≤ _CLIP_CHARS, cut at a
+    clause boundary where possible."""
+    t = " ".join(str(text).split())
+    if t.lower().startswith("when "):
+        t = t[0].upper() + t[1:]
+    if len(t) <= _CLIP_CHARS:
+        return t
+    cut = t[:_CLIP_CHARS]
+    for sep in ("; ", " — ", ". ", ", or ", " (", ", "):
+        i = cut.rfind(sep)
+        if i > 60:
+            return cut[:i].rstrip(",;:— (") + " …"
+    return cut.rsplit(" ", 1)[0] + " …"
+
+
 def load_skills_index(workspace_dir: Path) -> str:
     """Return a compact skill index (name, path, description, trigger) for the system prompt."""
     global _index_cache
@@ -62,8 +81,9 @@ def load_skills_index(workspace_dir: Path) -> str:
     skills_dir = workspace_dir / "skills"
     lines: list[str] = []
     lines.append(
-        "When a skill trigger matches the user's request, call the `use_skill` tool "
-        "with the skill name to load the full instructions and script paths.\n"
+        "Each line says when the skill applies. When one matches the request, call "
+        "`use_skill` with its name — that loads the full instructions, script "
+        "paths and gotchas (never guess them from this list).\n"
         "\n"
         "SLOW SCRIPTS: if a skill script is expected to take more than ~10 seconds "
         "(image generation, browser automation, PDF/video rendering), do NOT run it "
@@ -81,9 +101,11 @@ def load_skills_index(workspace_dir: Path) -> str:
         fm = _parse_frontmatter(content)
         desc = fm.get("description", "")
         trigger = fm.get("trigger", "")
-        lines.append(f"- **{skill_name}** (skills/{skill_name}/): {desc}")
-        if trigger:
-            lines.append(f"  Trigger: {trigger}")
+        # One line per skill (prompt layout plan Phase 2, 2026-10-11): WHEN
+        # to use it is what selection needs; the full description, trigger
+        # and instructions arrive with use_skill. 14.6k → ~6k chars.
+        when = _clip(trigger or desc)
+        lines.append(f"- **{skill_name}** — {when}")
 
     combined = "\n".join(lines)
     _index_cache = (mtime_hash, combined)
