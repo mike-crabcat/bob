@@ -98,6 +98,7 @@ async def test_bad_llm_output_records_failure(ctx):
 
 
 async def test_run_if_due_once_per_night(ctx, monkeypatch):
+    monkeypatch.setenv("BOB_SELF_CURATION", "on")
     await _seeded(ctx)
     calls = AsyncMock(return_value=json.dumps(CURATED))
     monkeypatch.setattr(sm, "_social_signals", AsyncMock(return_value=""))
@@ -128,6 +129,7 @@ async def test_curated_brief_delta_and_staleness(ctx, monkeypatch):
 
 
 async def test_self_brief_block_respects_flag(ctx, monkeypatch):
+    monkeypatch.delenv("BOB_SELF_MODEL_BRIEF", raising=False)
     from server.services.memory.self_brief import reset_cache, self_brief_block
     await _seeded(ctx)
     with patch("server.services.llm_dispatch.LLMDispatchService.prompt",
@@ -142,6 +144,8 @@ async def test_self_brief_block_respects_flag(ctx, monkeypatch):
 
 
 async def test_digest_sent_once_after_8(ctx, monkeypatch):
+    monkeypatch.setenv("BOB_SELF_CURATION", "on")
+    monkeypatch.setenv("BOB_SELF_MODEL_DIGEST", "on")
     await _seeded(ctx)
     monkeypatch.setattr(sm, "_social_signals", AsyncMock(return_value=""))
     monkeypatch.setattr(sm, "_now", lambda: datetime(2026, 10, 12, 3, 0))
