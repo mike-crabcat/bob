@@ -115,6 +115,39 @@ def _wrap_tool(w: "World", tool: Any, turn: Any) -> Any:
     return dataclasses.replace(tool, handler=handler)
 
 
+# The world turn the current LLM call belongs to — lets the OpenAIService
+# layer record server-side (hosted) tool use, which never passes a handler.
+_CURRENT_TURN: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "bob_eval_current_turn", default=None)
+
+
+def _install_hosted_tool_probe() -> None:
+    """OpenAI-native web_search runs inside the model call; run_turn reports
+    it through on_tool_call with a 'hosted …' summary. Record it on the
+    world turn so tool checks see it (2026-10-11: luna searched natively and
+    failed 'web_search was called' checks 0/18)."""
+    from server.services.openai_service import OpenAIService
+
+    original = OpenAIService.run_turn
+    if getattr(original, "_bob_eval_hosted", False):
+        return
+
+    async def run_turn(self, *args, **kwargs):
+        turn = _CURRENT_TURN.get()
+        inner_cb = kwargs.get("on_tool_call")
+        if turn is not None:
+            async def cb(name, tool_args, summary):
+                if str(summary).startswith("hosted "):
+                    turn.record_tool(name, tool_args, summary)
+                if inner_cb is not None:
+                    await inner_cb(name, tool_args, summary)
+            kwargs["on_tool_call"] = cb
+        return await original(self, *args, **kwargs)
+
+    run_turn._bob_eval_hosted = True  # type: ignore[attr-defined]
+    OpenAIService.run_turn = run_turn  # type: ignore[method-assign]
+
+
 def _install_probe() -> None:
     from server.services.llm_dispatch import LLMDispatchService
 
@@ -138,11 +171,14 @@ def _install_probe() -> None:
             messages=messages, tools=[t.name for t in tools],
             background=background)
         wrapped = [_wrap_tool(w, t, turn) for t in tools]
+        token = _CURRENT_TURN.set(turn)
         try:
             result = await original(self, messages, wrapped, **kwargs)
         except BaseException as exc:
             turn.finish(error=exc)
             raise
+        finally:
+            _CURRENT_TURN.reset(token)
         turn.finish(result=result)
         return result
 
@@ -748,6 +784,7 @@ def install() -> None:
         _install_task_tracker()
         return
     _install_probe()
+    _install_hosted_tool_probe()
     _install_effect_executors()
     _install_process_fakes()
     _install_misc_fakes()

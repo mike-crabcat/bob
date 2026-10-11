@@ -113,6 +113,12 @@ class Turn:
                     fn = tc.get("function", {})
                     out.append({"name": fn.get("name", ""),
                                 "arguments": fn.get("arguments", "")})
+        # Server-side (hosted) tools leave no function_call item — e.g.
+        # OpenAI-native web_search; intercept records them as tool events.
+        for ev in self.tool_events:
+            if str(ev.get("output", "")).startswith("hosted "):
+                out.append({"name": ev["name"], "arguments": json.dumps(ev["args"]),
+                            "hosted": True})
         return out
 
 

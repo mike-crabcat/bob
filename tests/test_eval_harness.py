@@ -440,3 +440,16 @@ async def test_seeding_makes_no_embedding_calls(template, monkeypatch):
         assert await embedding.embed_text("hello") is None
         assert await embedding.embed_batch(["a", "b"]) == [None, None]
     assert not calls and real is None
+
+
+def test_hosted_tool_events_count_as_tool_calls():
+    """OpenAI-native web_search leaves no function_call item; the world's
+    turn must still list it (2026-10-11: luna 'never searched' 0/18)."""
+    from server.evals.world import Turn
+    t = Turn.__new__(Turn)
+    t.messages = [{"role": "user", "content": "q"}]
+    t.tool_events = [{"name": "web_search", "args": {"query": "serong"},
+                      "output": "hosted web_search (completed)"},
+                     {"name": "bash", "args": {}, "output": "ok"}]
+    calls = t.tool_calls
+    assert [c["name"] for c in calls] == ["web_search"] and calls[0]["hosted"]

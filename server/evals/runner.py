@@ -278,6 +278,8 @@ def _classify(w: World, trial: Trial) -> str:
     tools_offered = set().union(*(set(t.tools) for t in turns)) if turns else set()
     for t in turns:
         for c in t.tool_calls:
+            if c.get("hosted"):
+                continue  # server-side tool (web_search) — never in the offered list
             if tools_offered and c["name"] not in tools_offered:
                 return "tool_format"
             args = c.get("arguments")
