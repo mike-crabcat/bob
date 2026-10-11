@@ -734,6 +734,14 @@ class HistoryRepository:
                 "AND role = ? ORDER BY created_at DESC LIMIT 1", (cid, role))
         return row["created_at"] if row else None
 
+    async def last_assistant_message(self, session_key: str) -> dict | None:
+        """The room's most recent words (goal dashboard activity strip)."""
+        cid = await self._cid(session_key)
+        return await self.db.fetch_one(
+            "SELECT content, created_at FROM messages "
+            "WHERE conversation_id = ? AND role = 'assistant' "
+            "ORDER BY created_at DESC LIMIT 1", (cid,))
+
     async def recent_messages(self, session_key: str, *, limit: int = 25) -> list[dict]:
         """Newest-first slice — the goal dashboard's timeline view (the
         legacy ``messages`` is oldest-first with LIMIT at the old end)."""

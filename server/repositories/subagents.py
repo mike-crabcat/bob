@@ -67,6 +67,18 @@ class SubagentRepository:
         rows = await self.db.fetch_all(query, tuple(params))
         return [dict(r) for r in rows] if rows else []
 
+    async def list_inflight_for_parent(
+        self, parent_session_key: str, *, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Children still working (goal dashboard activity strip)."""
+        rows = await self.db.fetch_all(
+            "SELECT id, status, substr(task, 1, 120) AS task, created_at "
+            "FROM subagents WHERE parent_session_key = ? "
+            "AND status IN ('created', 'running', 'waiting_for_parent') "
+            "ORDER BY created_at DESC LIMIT ?",
+            (parent_session_key, limit))
+        return [dict(r) for r in rows] if rows else []
+
     async def recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
             "SELECT * FROM subagents ORDER BY created_at DESC LIMIT ?", (limit,))

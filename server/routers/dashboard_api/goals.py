@@ -220,6 +220,20 @@ async def goal_detail(goal_id: str, request: Request) -> dict[str, Any]:
             goal["conversation_id"], limit=25)
     ]
 
+    # Live activity (2026-10-11): the page had every static fact but no
+    # sense of motion — a running room turn rendered identically to idle
+    # and in-flight subagents were invisible. The room's own narration
+    # was also dropped from the timeline (assistant rows became bare
+    # "room turn" labels).
+    from server.repositories.llm_call_log import LlmCallLogRepository
+    from server.repositories.subagents import SubagentRepository
+    running_call = await LlmCallLogRepository(db).running_for_session(
+        goal["conversation_id"])
+    inflight = await SubagentRepository(db).list_inflight_for_parent(
+        goal["conversation_id"])
+    last_room = await HistoryRepository(db).last_assistant_message(
+        goal["conversation_id"])
+
     return {
         "goal": {
             "id": goal["id"], "kind": goal["kind"],
@@ -268,6 +282,23 @@ async def goal_detail(goal_id: str, request: Request) -> dict[str, Any]:
             "content": (t["content"] or "")[:400],
             "created_at": _utc(t["created_at"]),
         } for t in turns],
+        "activity": {
+            "room_call": {
+                "started_at": _utc(running_call["created_at"]),
+                "category": running_call["call_category"],
+            } if running_call else None,
+            "inflight_subagents": [{
+                "id": s["id"],
+                "task": (s["task"] or "")[:120],
+                "status": s["status"],
+                "created_at": _utc(s["created_at"]),
+            } for s in inflight],
+            "last_room_message": {
+                "content": (last_room["content"] or "")[:200]
+                             if last_room else "",
+                "created_at": _utc(last_room["created_at"]) if last_room else None,
+            } if last_room else None,
+        },
     }
 
 

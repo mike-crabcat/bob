@@ -263,6 +263,14 @@ class LlmCallLogRepository:
                FROM llm_call_log GROUP BY model, provider, call_category""")
         return [dict(r) for r in rows] if rows else []
 
+    async def running_for_session(self, session_key: str) -> dict | None:
+        """The session's in-flight LLM call, if any (goal dashboard activity)."""
+        row = await self.db.fetch_one(
+            "SELECT created_at, call_category FROM llm_call_log "
+            "WHERE session_key = ? AND status = 'running' "
+            "ORDER BY created_at DESC LIMIT 1", (session_key,))
+        return dict(row) if row else None
+
     async def recent_for_transcript(
         self, session_key: str, *, limit: int,
     ) -> list[dict[str, Any]]:

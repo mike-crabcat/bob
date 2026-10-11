@@ -56,6 +56,11 @@ interface GoalDetail {
   }[];
   wakes: { id: string; kind: string; at: string | null; status: string; created_at: string | null }[];
   turns: { role: string; provenance: string | null; content: string; created_at: string | null }[];
+  activity: {
+    room_call: { started_at: string; category: string } | null;
+    inflight_subagents: { id: string; task: string; status: string; created_at: string }[];
+    last_room_message: { content: string; created_at: string | null } | null;
+  };
 }
 
 const STRATEGY_MARK: Record<string, string> = {
@@ -67,6 +72,15 @@ function fmtTs(ts: string | null | undefined): string {
   return parseTs(ts).toLocaleString(undefined, {
     month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
+}
+
+function fmtElapsed(ts: string | null | undefined): string {
+  if (!ts) return "";
+  const s = Math.max(0, Math.round((Date.now() - parseTs(ts).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -108,7 +122,7 @@ function GoalDetailPage() {
   if (error || !data || "error" in (data as object))
     return <div className="p-4 text-red-400 text-xs">goal not found</div>;
 
-  const { goal, state, loop, promises, wakes, turns } = data;
+  const { goal, state, loop, promises, wakes, turns, activity } = data;
   const budgetPct =
     loop.budget_total && loop.budget_spent != null
       ? Math.min(100, Math.round((loop.budget_spent / loop.budget_total) * 100))
@@ -128,7 +142,7 @@ function GoalDetailPage() {
         kind: t.role === "assistant" ? ("turn" as const) : ("stimulus" as const),
         label:
           t.role === "assistant"
-            ? `room turn${t.provenance ? ` (${t.provenance})` : ""}`
+            ? `${t.provenance || "turn"}: ${t.content.slice(0, 90) || "(no text)"}`
             : `${t.provenance || "user"}: ${t.content.slice(0, 80)}`,
       })),
   ]
@@ -161,6 +175,44 @@ function GoalDetailPage() {
             <span>origin: <span className="break-all">{goal.origin_conversation_id}</span></span>
           )}
           <span>created {fmtTs(goal.created_at)}</span>
+        </div>
+
+        {/* live activity — the goal in motion right now */}
+        <div className="border border-border p-2 flex flex-col gap-1 text-[11px]">
+          {activity.room_call ? (
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
+              <span className="text-text">
+                room turn running · {fmtElapsed(activity.room_call.started_at)}
+              </span>
+              <span className="text-muted">({activity.room_call.category})</span>
+            </div>
+          ) : activity.inflight_subagents.length > 0 ? (
+            <div className="flex flex-col gap-0.5">
+              <div className="flex items-center gap-2">
+                <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                <span className="text-text">
+                  {activity.inflight_subagents.length} subagent
+                  {activity.inflight_subagents.length > 1 ? "s" : ""} in flight — room wakes as each lands
+                </span>
+              </div>
+              {activity.inflight_subagents.map((s) => (
+                <div key={s.id} className="text-[10px] text-muted break-words pl-4">
+                  · {s.task} <span className="text-muted/70">({fmtElapsed(s.created_at)})</span>
+                </div>
+              ))}
+            </div>
+          ) : activity.last_room_message ? (
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="inline-block w-2 h-2 rounded-full bg-border shrink-0" />
+              <span className="text-muted shrink-0">
+                last room word {fmtElapsed(activity.last_room_message.created_at)} ago:
+              </span>
+              <span className="text-text/80 truncate">{activity.last_room_message.content}</span>
+            </div>
+          ) : (
+            <div className="text-muted">no activity yet</div>
+          )}
         </div>
 
         {loop.on && (
