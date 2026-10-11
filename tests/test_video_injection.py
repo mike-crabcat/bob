@@ -173,9 +173,20 @@ async def test_read_video_missing_file(ctx, tmp_path):
     assert isinstance(result, str) and "is not a file" in result
 
 
+def _real_clip(path: Path) -> None:
+    """A real 1s H.264 clip (read_video decodes the first frame now)."""
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=size=64x64:rate=8:duration=1", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", str(path)], check=True, timeout=60)
+
+
 async def test_read_video_returns_injection_with_path(ctx, tmp_path):
     ctx.settings.harness.workspace_dir = tmp_path
-    (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    _real_clip(tmp_path / "clip.mp4")
     tools = {t.name: t for t in make_workspace_tools(ctx)}
     result = await tools["read_video"].handler(path="clip.mp4")
     assert isinstance(result, VideoInjection)
@@ -187,7 +198,7 @@ async def test_read_video_one_per_tool_set(ctx, tmp_path):
     """Second video in the same tool set is rejected — native video is one
     per turn by design."""
     ctx.settings.harness.workspace_dir = tmp_path
-    (tmp_path / "a.mp4").write_bytes(b"fakeA")
+    _real_clip(tmp_path / "a.mp4")
     (tmp_path / "b.mp4").write_bytes(b"fakeB")
     tools = {t.name: t for t in make_workspace_tools(ctx)}
     first = await tools["read_video"].handler(path="a.mp4")
@@ -227,3 +238,23 @@ def test_wire_guard_wraps_bare_string_parts():
     assert clean[0]["output"][1] == {"type": "input_text", "text": "[image elided]"}
     assert all(isinstance(p, dict) for p in clean[0]["output"])
     assert isinstance(items[0]["output"][1], str), "input list not mutated"
+
+
+async def test_read_video_rejects_undecodable(ctx, tmp_path):
+    """2026-10-08 eval finding: an undecodable clip went to the provider,
+    which 400'd and killed the whole turn. Now it's a tool error."""
+    import shutil
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    ctx.settings.harness.workspace_dir = tmp_path
+    (tmp_path / "broken.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + bytes(4096))
+    tools = {t.name: t for t in make_workspace_tools(ctx)}
+    result = await tools["read_video"].handler(path="broken.mp4")
+    assert isinstance(result, str) and "not a decodable video" in result
+
+
+async def test_video_check_fails_open_without_ffmpeg(tmp_path, monkeypatch):
+    from server.services import workspace_tools
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    (tmp_path / "x.mp4").write_bytes(b"whatever")
+    assert await workspace_tools.video_decode_error(tmp_path / "x.mp4") is None

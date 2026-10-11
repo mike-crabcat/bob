@@ -337,12 +337,16 @@ async def _generic_wake_dispatch(
                 settings.harness.workspace_dir, db=ctx.db)
             from server.services.context_assembler import ContextAssembler
             goals_prompt = await ContextAssembler(ctx).goals_block(session_key)
+            agenda_prompt = await ContextAssembler(ctx).agenda_block(session_key)
             from server.services.history_tools import HISTORY_DISCIPLINE_NOTE
             system_content = "\n\n".join(
-                p for p in (workspace_prompt, goals_prompt, charter_block,
-                            HISTORY_DISCIPLINE_NOTE, mcp_note) if p)
+                p for p in (workspace_prompt, goals_prompt, agenda_prompt,
+                            charter_block, HISTORY_DISCIPLINE_NOTE, mcp_note) if p)
+            # The stimulus is already in history (wake_conversation stored it
+            # before dispatching); passing it again as user_message showed
+            # every room/utility wake its stimulus twice (2026-10-08 eval).
             messages = await build_chat_messages(
-                content, session_key, db=ctx.db,
+                None, session_key, db=ctx.db,
                 system_content=system_content, max_history=20,
             )
             result = await LLMDispatchService(ctx).run_turn(

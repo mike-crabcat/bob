@@ -48,6 +48,34 @@ def _close_call(task_id: str, outcome: str) -> str:
 # Registration
 # ---------------------------------------------------------------------------
 
+# Completer values meaning "I owe this myself" (models invent these).
+SELF_COMPLETER_ALIASES = frozenset({"self", "me", "myself", "bob", "you", "i"})
+
+
+def is_completer_ref(value: str) -> bool:
+    """A real completer: a conversation/session key or a subagent id."""
+    import re
+    v = (value or "").strip()
+    return ":" in v or bool(re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", v))
+
+
+async def reschedule_task(ctx: AppContext, task_id: str, due: str) -> None:
+    """Move a pending promise's due time: the deadline and its backstop
+    series (notice counter restarts — it's a new due time)."""
+    from server.repositories.tasks import TaskRepository
+    from server.repositories.wakeups import WakeupRepository
+    task = await TaskRepository(ctx.db).get(task_id)
+    if task is None or task["status"] != "pending":
+        return
+    await TaskRepository(ctx.db).set_due(task_id, due)
+    wakes = WakeupRepository(ctx.db)
+    await wakes.cancel_for_task(task_id)
+    await wakes.schedule(
+        conversation_id=task["waiter_session"], not_before=due,
+        kind="task_due", payload={"task_id": task_id,
+                                  "note": "task due backstop (rescheduled)"})
+
+
 async def register_task(
     ctx: AppContext, *, waiter_session: str, title: str,
     instruction: str = "", expected_completer: str | None = None,

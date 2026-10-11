@@ -224,7 +224,8 @@ async def test_task_due_backstop_fires_once_at_waiter(ctx):
         reschedule = await goal_service.fire_wakeup(ctx, claimed[0])
     assert reschedule is False             # one-shot backstop
     assert wakes and wakes[0][0] == WAITER
-    assert "overdue" in wakes[0][1].lower()
+    # no completer = owed by Bob himself → the "due now" notice (2026-10-08)
+    assert "due now" in wakes[0][1].lower()
     # Settled task between arm and fire: no wake, series ends.
     task2 = await _register(ctx)
     await task_svc.settle_task(ctx, task2["id"], to_status="completed",

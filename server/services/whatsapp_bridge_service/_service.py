@@ -1232,6 +1232,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         # The Work block (commitments plan): goals held, promises owed to and
         # asked of this conversation, suggestions, background runs.
         goals_prompt = await assembler.goals_block(session_key)
+        agenda_prompt = await assembler.agenda_block(session_key)
 
         # The turn-start clock is appended by build_chat_messages (2026-09-01
         # fan-out to every channel) — date-relative reasoning ("tomorrow",
@@ -1245,7 +1246,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         jit_note = past_reference_note(
             inbound_text if inbound_text is not None else text_preview)
         system_content = "\n\n".join(
-            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, goals_prompt, HISTORY_DISCIPLINE_NOTE) if p
+            p for p in (workspace_prompt, participants_prompt, person_context, group_memory_hint, memory_roster, goals_prompt, agenda_prompt, HISTORY_DISCIPLINE_NOTE) if p
         )
         # Channel note appended for special wake shapes (reactions): rides
         # after the context blocks so it reads as current-turn guidance.

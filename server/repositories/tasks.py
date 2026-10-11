@@ -63,6 +63,13 @@ class TaskRepository:
              source_goal_id, json.dumps(refs or []), now, now))
         return (await self.get(tid))  # type: ignore[return-value]
 
+    async def set_due(self, task_id: str, due: str) -> int:
+        """Move a pending promise's due time (its deadline column)."""
+        return await self.db.execute(
+            f"UPDATE goals SET deadline = ?, updated_at = ? "
+            f"WHERE id = ? AND {_PROMISE} AND status = 'pending'",
+            (due, _now_iso(), task_id))
+
     async def get(self, task_id: str) -> dict[str, Any] | None:
         return await self.db.fetch_one(
             f"{_SELECT} WHERE id = ? AND {_PROMISE}", (task_id,))

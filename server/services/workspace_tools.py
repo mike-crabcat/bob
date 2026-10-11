@@ -45,6 +45,87 @@ _DB_CLIENT_RE = re.compile(
 _PRIVILEGE_RE = re.compile(r"(^|[\s;&|()`])(sudo|su|pkexec|doas)\b", re.IGNORECASE)
 _DB_TOKEN_RE = re.compile(r"\b(bob\.db|bob_db_path)\b", re.IGNORECASE)
 _TRAVERSAL_RE = re.compile(r"(^|[\s/\"'`=(])\.\.(?=[\s/\"'`)]|$)")
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """The command with heredoc BODIES removed (operators and delimiters
+    kept). A body is data streamed to a command — file contents, code fed
+    to an interpreter — not a path the shell resolves. 2026-10-08 eval
+    finding: writing a TS file whose imports read '../lib/dates' was
+    blocked as traversal, and models burned rounds evading the filter."""
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []          # (delimiter, strip_tabs)
+    for line in command.split("\n"):
+        if pending:
+            delim, tabs = pending[0]
+            if (line.lstrip("\t") if tabs else line) == delim:
+                pending.pop(0)
+                out.append(line)
+            continue                               # body line: dropped
+        out.append(line)
+        for m in _HEREDOC_RE.finditer(line):
+            pending.append((m.group(2), m.group(0).startswith("<<-")))
+    return "\n".join(out)
+
+
+# Commands whose leading argument is a program/pattern, not a path: its
+# '..' is regex or code (sed 's|../lib|../src/lib|', awk '…', grep '../').
+_SCRIPT_ARG_CMDS = {"sed", "awk", "gawk", "grep", "egrep", "fgrep", "rg"}
+# Interpreters whose -c/-e/-pe value is code, not a path.
+_CODE_FLAG_CMDS = {"python", "python3", "perl", "ruby", "node", "bash", "sh"}
+_CODE_FLAGS = {"-c", "-e", "-pe", "-ne", "-E", "--eval"}
+_SHELL_PUNCT = {";", "&&", "||", "|", "&", "(", ")", "|&"}
+_PATH_DOTDOT_RE = re.compile(r"(^|[/=])\.\.(/|$)")
+
+
+def _has_path_traversal(command: str) -> bool:
+    """'..' used as a path component anywhere the shell would treat it as
+    a path. Heredoc bodies, sed/awk/grep scripts and interpreter -c/-e code
+    are data (2026-10-08 eval finding: import-fixing sed expressions and
+    heredoc-written TS files were blocked). Unparseable quoting falls back
+    to the strict regex."""
+    import shlex
+    text = _strip_heredoc_bodies(command)
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        tokens = list(lex)
+    except ValueError:
+        return bool(_TRAVERSAL_RE.search(text))
+    cmd: str | None = None
+    exempt_next = False
+    script_taken = False
+    for tok in tokens:
+        if tok in _SHELL_PUNCT or set(tok) <= set(";&|()<>"):
+            cmd, exempt_next, script_taken = None, False, False
+            continue
+        if exempt_next:
+            exempt_next = False
+            continue
+        if cmd is None:
+            if "=" in tok and not tok.startswith(("-", "/", ".")):
+                if _PATH_DOTDOT_RE.search(tok.split("=", 1)[1]):
+                    return True               # VAR=../x is still a path
+                continue                       # env assignment prefix
+            cmd = tok.rsplit("/", 1)[-1]
+            if _PATH_DOTDOT_RE.search(tok):
+                return True                    # ../bin/x as the command
+            continue
+        if cmd in _CODE_FLAG_CMDS and tok in _CODE_FLAGS:
+            exempt_next = True
+            continue
+        if cmd in _SCRIPT_ARG_CMDS:
+            if tok in ("-e", "--expression", "--regexp"):
+                exempt_next = script_taken = True
+                continue
+            if not tok.startswith("-") and not script_taken:
+                script_taken = True            # the script / pattern
+                continue
+        if _PATH_DOTDOT_RE.search(tok):
+            return True
+    return False
 _SENSITIVE_PATH_RE = re.compile(
     r"(^|[\s\"'`=(])("
     r"/etc(?=[/\s\"'`)]|$)"
@@ -63,6 +144,30 @@ _SENSITIVE_PATH_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+async def video_decode_error(path: Path) -> str | None:
+    """Decode the first frame with ffmpeg; return the error, or None when
+    it decodes. 2026-10-08 eval finding: an undecodable .mp4 went to the
+    provider as video input, the provider's decoder 400'd, and the whole
+    turn died with nothing delivered. A tool error lets the model carry on.
+    Fails open (missing ffmpeg, timeout) — never blocks a good video."""
+    import shutil
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1",
+            "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    text = err.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0 or "Invalid data" in text or "could not find codec" in text.lower():
+        return (text.splitlines()[-1] if text else f"ffmpeg exit {proc.returncode}")[:300]
+    return None
 
 
 async def bash_syntax_check(command: str) -> str | None:
@@ -131,7 +236,9 @@ def _check_command_safety(command: str, *, db_path: Path | None,
             "Stay inside the workspace directory."
         )
 
-    if _TRAVERSAL_RE.search(command):
+    # Traversal is judged on path positions only (see _has_path_traversal);
+    # every other check above still sees the whole command.
+    if _has_path_traversal(command):
         return (
             "BLOCKED: path traversal (..) is not allowed. Stay inside the workspace; "
             "use absolute workspace paths if you need to reach a subdirectory."
@@ -173,7 +280,7 @@ _INLINE_SLEEP_RE = _re.compile(
     r"(?:^|&&|;|\|\|)\s*sleep\s+([0-9]+(?:\.[0-9]+)?)", _re.MULTILINE)
 
 
-_HEREDOC_RE = _re.compile(
+_FILE_HEREDOC_RE = _re.compile(
     r"^(?P<head>.*?)<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)[^\n]*\n"
     r"(?P<body>.*?)^\s*(?P=tag)\s*$", _re.MULTILINE | _re.DOTALL)
 _SHELL_HEAD_RE = _re.compile(r"(?:^|[\s;&|(])(?:ba|z|da)?sh(?:\s+-[a-z]+)*\s*$")
@@ -190,7 +297,7 @@ def _strip_file_heredocs(command: str) -> str:
         if _SHELL_HEAD_RE.search(last_line.strip()):
             return m.group(0)
         return m.group("head") + "\n"
-    return _HEREDOC_RE.sub(_drop, command or "")
+    return _FILE_HEREDOC_RE.sub(_drop, command or "")
 
 
 def _inline_sleep_seconds(command: str) -> float | None:
@@ -429,6 +536,11 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         if video_sent["n"]:
             return ("Error: only one video per turn — one was already loaded. "
                     "read_image individual extracted frames for more detail.")
+        bad = await video_decode_error(resolved)
+        if bad:
+            return (f"Error: '{path}' is not a decodable video ({bad}) — it may "
+                    "be truncated, corrupt or not really video. Check it with "
+                    "ffprobe, or re-render it.")
         video_sent["n"] += 1
         data = resolved.read_bytes()
         b64 = base64.b64encode(data).decode()

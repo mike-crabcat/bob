@@ -168,3 +168,58 @@ async def test_syntax_check_error_mentions_quote():
 
     err = await bash_syntax_check("echo 'unterminated")
     assert err is not None and "`'" in err or err is not None
+
+
+# --- heredoc bodies are data, not paths (2026-10-08 eval finding) ----------
+
+@pytest.mark.parametrize("cmd", [
+    "cat > src/routes/view.tsx <<'EOF'\nimport { f } from '../lib/dates';\nEOF",
+    "python3 - <<EOF\nimport os\nprint(os.path.relpath('a', '../b'))\nEOF\necho done",
+    "cat <<-EOF > t.ts\n\timport x from '../../x';\n\tEOF",
+    "cat > a.py <<'A' && cat > b.py <<'B'\nimport ..x\nA\nfrom .. import y\nB",
+])
+def test_allows_dotdot_inside_heredoc_bodies(cmd: str, paths: dict[str, Path]) -> None:
+    assert _check(cmd, paths) is None, f"should allow: {cmd!r}"
+
+
+@pytest.mark.parametrize("cmd", [
+    # traversal in the command itself is still blocked, heredoc or not
+    "cd .. && cat > x <<'EOF'\nhello\nEOF",
+    "cat <<'EOF' > ../outside.txt\nhello\nEOF",
+    "cat <<'EOF'\nhi\nEOF\ncat ../secret",
+    # an unterminated heredoc hides nothing after its operator line
+    "cat ../secret <<EOF",
+    # here-strings are not heredocs
+    "cat <<< '../x' ../y",
+    # other checks still see heredoc bodies
+    "python3 - <<'EOF'\nopen('/etc/passwd').read()\nEOF",
+])
+def test_heredoc_exemption_is_narrow(cmd: str, paths: dict[str, Path]) -> None:
+    assert _check(cmd, paths) is not None, f"should block: {cmd!r}"
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd repos/dashboard && sed -i \"s|from '../lib/dates'|from '../src/lib/dates'|\" tests/x.ts",
+    "sed -e 's#\\.\\./lib#../src/lib#' -i a.ts",
+    "grep -rn \"from '../\" src/",
+    "awk '/\\.\\.\\//{print}' src/a.ts",
+    "python3 -c \"import os; print(os.path.normpath('a/../b'))\"",
+    "node -e \"require('../x')\"",
+    "perl -pe 's|\\.\\./|./|' -i a.js",
+])
+def test_allows_dotdot_in_scripts_and_patterns(cmd: str, paths: dict[str, Path]) -> None:
+    assert _check(cmd, paths) is None, f"should allow: {cmd!r}"
+
+
+@pytest.mark.parametrize("cmd", [
+    "sed -i 's/a/b/' ../outside.txt",          # the FILE is still a path
+    "grep foo ../secret.txt",
+    "cat \"../x\"",                            # quoted paths are paths
+    "X=../y ls",
+    "../bin/tool --flag",
+    "cp a.txt ../",
+    "tar czf out.tgz --directory=../ .",
+    "cat 'unbalanced ../x",                    # unparseable → strict regex
+])
+def test_path_traversal_still_blocked(cmd: str, paths: dict[str, Path]) -> None:
+    assert _check(cmd, paths) is not None, f"should block: {cmd!r}"

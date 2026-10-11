@@ -158,6 +158,21 @@ class ContextAssembler:
         from server.services.memory.service import build_conversation_roster
         return await build_conversation_roster(self.db, session_key)
 
+    async def agenda_block(self, session_key: str) -> str:
+        """This session's stored agenda ('' when none). update_agenda says
+        the agenda extends the system prompt — but only email turns ever
+        rendered it, so on WhatsApp and in rooms Bob wrote an agenda he
+        could never read back (2026-10-08 eval finding)."""
+        from server.services.session_agenda_service import SessionAgendaService
+        try:
+            agenda = (await SessionAgendaService(self.ctx).get_agenda(session_key) or "").strip()
+        except Exception:
+            return ""
+        if not agenda:
+            return ""
+        return ("## Session agenda (yours — keep it current with update_agenda)\n"
+                + agenda)
+
     async def goals_block(self, session_key: str) -> str:
         """The conversation's work context (commitments plan Phase 3): ONE
         "Work" block — goals held, promises owed TO this conversation,
