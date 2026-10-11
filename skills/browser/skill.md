@@ -75,7 +75,39 @@ Fall back to `js(...)` when the AX tree lacks the element (canvas, exotic widget
 `screenshot` + `read_image` when layout or imagery matters. Tabs marked 🐴 are browser-use's —
 `new_tab`/`switch_tab` work in the background and don't steal focus.
 
-## 4. Rules
+## 4. Working fast — method matters more than tools
+
+Every `browser-use` call costs a full LLM round (~10–20s) plus daemon startup.
+A turn that micro-steps — one DOM probe per call, a screenshot after every
+action — burns 30+ rounds on what a human does in 30 seconds (2026-10-11:
+one Gmail compose took 33 rounds, 7 minutes, and still wasn't sent).
+
+- **One script = one UI transaction.** Navigate, act, and verify in a single
+  heredoc (`js()` → `type_text()` → `wait()` → done). Three batched scripts
+  beat thirty single-step calls every time.
+- **Verify at the end, not every step.** `capture_screenshot` + `read_image`
+  costs two rounds and vision tokens each time. Screenshot once when the
+  transaction is complete — or immediately when something surprising
+  happened, not as routine.
+- **Prefill instead of typing.** For forms, put the data in the URL. Gmail
+  compose deep-link (To/subject/body all prefilled, no typing at all):
+
+  ```
+  https://mail.google.com/mail/?view=cm&fs=1&to=support@printful.com&su=Ticket%205807268&body=<urlencoded body>
+  ```
+
+  Gmail's To field is chip-based — synthetic typing into it fights
+  autocomplete, Chrome autofill ghost chips, and contact matching, and
+  loses. With the deep-link the compose window arrives filled in: verify
+  once, click Send.
+- **More than ~10 rounds on one page = wrong method.** Stop and look for
+  the URL-parameter route, a single batched script, or an API instead.
+- **When budget forces deferral, say that.** If the self-wrap budget ends a
+  flight mid-task, the wrap-up states what is DONE and what the follow-up
+  promise will do ("compose corrupted — clean retry at 12:45"), never
+  "in progress" when nothing is running.
+
+## 5. Rules
 
 - **Login walls: stop and ask.** Never type passwords, passcodes, or MFA codes unprompted.
   Logging into a site under Bob's own profile is fine **when the user has asked for it** and
@@ -88,7 +120,7 @@ Fall back to `js(...)` when the AX tree lacks the element (canvas, exotic widget
   then run the step-1 snippet again.
 - Downloads land in the profile's download dir — prefer scraping text via `js()` instead.
 
-## 5. Diagnostics
+## 6. Diagnostics
 
 - `browser-use doctor` — install/daemon/browser state
 - `BU_CDP_URL=http://127.0.0.1:9223 browser-use --version` — sanity check
