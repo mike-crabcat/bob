@@ -205,3 +205,60 @@ async def _list(kind: str, status: str | None) -> None:
                 typer.echo(f"  {p['id']} [{p['status']}] {p['title']} — {p['proposed_action']}")
     finally:
         await db.close()
+
+
+async def _self_model(curate: bool, dry_run: bool, show_json: bool) -> None:
+    import json as _json
+    from pathlib import Path
+
+    from server.config import Settings
+    from server.context import AppContext
+    from server.database import Database
+    from server.services.dream import self_model
+
+    settings = Settings.from_env()
+    db = Database(settings.db_path or Path("bob.db"), Path(__file__).parent.parent / "schemas")
+    await db.connect()
+    await db.apply_migrations()
+    ctx = AppContext(settings=settings, db=db)
+    try:
+        if curate:
+            row = await self_model.curate(ctx, apply=not dry_run)
+            typer.echo(f"{'DRY RUN — nothing stored or retired. ' if dry_run else ''}"
+                       f"{row.get('id')} [{row.get('status')}] {row.get('digest') or row.get('error')}")
+        else:
+            row = await self_model.latest_ready(db)
+            if not row:
+                typer.echo("No curated self-model yet (bob dream self-model --curate).")
+                return
+            typer.echo(f"{row['id']} · {row['created_at']} · {row['model']}\n{row['digest']}")
+        if row.get("status") == "ready":
+            typer.echo("\n" + (row.get("rendered") or ""))
+            if row.get("social_rendered"):
+                typer.echo("\n" + row["social_rendered"])
+            hk = _json.loads(row.get("housekeeping_json") or "{}")
+            if hk.get("retired"):
+                typer.echo("\nRetire" + (" (proposed)" if dry_run else "d") + ":")
+                for r in hk["retired"]:
+                    typer.echo(f"  {r['id']}: {r['reason']}")
+            if hk.get("move_to_skill"):
+                typer.echo("\nHow-tos proposed for skill docs:")
+                for r in hk["move_to_skill"]:
+                    typer.echo(f"  {r['id']} → {r['skill']}: {r['note']}")
+            if show_json:
+                typer.echo("\n" + (row.get("curated_json") or ""))
+        typer.echo("\nPrompt brief now: " + ("CURATED" if self_model.brief_enabled()
+                                              else "raw (BOB_SELF_MODEL_BRIEF=off)"))
+    finally:
+        await db.close()
+
+
+@app.command("self-model")
+def self_model_cmd(
+    curate: Annotated[bool, typer.Option("--curate", help="Run a curation now")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="With --curate: store nothing, retire nothing")] = False,
+    show_json: Annotated[bool, typer.Option("--json", help="Also print the curated JSON")] = False,
+) -> None:
+    """Show the latest curated self-model, or curate one now."""
+    import asyncio
+    asyncio.run(_self_model(curate, dry_run, show_json))

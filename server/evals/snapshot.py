@@ -44,6 +44,17 @@ async def take_snapshot(settings: Any, *, include_mcp: bool = True) -> str:
         conn.close()
     (tmp / "self_claims.json").write_text(json.dumps(claims, indent=1))
     notes.append(f"{len(claims)} self claim(s)")
+    # The newest curated self-model (Phase 2b) — worlds seed it so a
+    # BOB_SELF_MODEL_BRIEF=on run sees exactly the production brief.
+    from server.services.dream.self_model import export_latest_readonly
+    conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+    try:
+        sm = export_latest_readonly(conn)
+    finally:
+        conn.close()
+    if sm is not None:
+        (tmp / "self_model.json").write_text(json.dumps(sm, indent=1))
+        notes.append(f"self-model {sm['id']}")
 
     ws_skills = Path(settings.harness.workspace_dir).expanduser() / "skills"
     n = 0

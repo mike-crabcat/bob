@@ -125,6 +125,16 @@ async def self_brief_block(db: Any) -> str:
     import os
     if os.getenv("BOB_SELF_BRIEF", "1").strip().lower() in ("0", "false", "no", "off"):
         return ""
+    # Curated self-model (nightly dream stage, docs/prompt-layout-plan.md
+    # Phase 2b) when enabled and fresh; the raw renderer otherwise.
+    try:
+        from server.services.dream import self_model
+        if self_model.brief_enabled():
+            curated = await self_model.curated_brief(db)
+            if curated:
+                return curated
+    except Exception:
+        logger.warning("curated self-brief failed — raw fallback", exc_info=True)
     try:
         return await render_self_brief(db)
     except Exception:
