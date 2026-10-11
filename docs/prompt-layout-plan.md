@@ -193,4 +193,17 @@ standing practices.
      targeted A/B running;
   3. open steering request restated when its answer arrives + 4. failed-lookup
      retry guard (47d95acb) — committed, not deployed; measure next.
+- 2026-10-11 — Results of the pivot:
+  * addenda (targeted n=6): luna 45→55% (propose_trivial 2/6→5/6), flash
+    46→50% (grounding +33; delegation unchanged — flash fixes the bug itself,
+    correctly, and once CLAIMED a subagent it never spawned). ON in prod
+    (BOB_MODEL_ADDENDA=on, restart 2026-10-11).
+  * open-steer note: luna routing 9/18→5/6 in run 1, 4/6 in run 2; flash's
+    DM cleanliness fell. Failed-lookup guard: no measured effect (and can't
+    confirm it fired — eval transcripts omit system notes). Both behind flags,
+    OFF (baf880a1).
+  * Open decisions for Mike: flash delegation policy (accept in-turn fixes vs
+    enforce); delegation-claim-without-tool guard; commit the 10-07 live work
+    so the 5 entangled finding-fix hunks can be committed; label the 8
+    calibration entries.
 
