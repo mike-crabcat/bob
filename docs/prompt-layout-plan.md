@@ -52,7 +52,7 @@ expected gain is real but unproven: measure everything.
   **v1 baseline** run id (record below).
 - Not in scope: `eval-findings-fixes` (separate decision).
 
-### Phase 2 — cheap, low-risk prompt fixes  ◐ (built 32d0d764; gate running)
+### Phase 2 — cheap, low-risk prompt fixes  ☑ (live 2026-10-11)
 - Replace "CRITICAL: How to Respond" with channel-correct text (WhatsApp turns
   get WhatsApp guidance; email keeps its own).
 - Reply length stated once (keep the 2026-09-05 A/B wording verbatim in the
@@ -164,4 +164,7 @@ standing practices.
   skill (14.6k → 5.6k chars). Reply length deliberately NOT de-duplicated —
   the 2026-09-05 A/B found head+tail beats single placement. Gate: full luna
   run (curated+social on) vs a0030091; deploy only if no regression.
+- 2026-10-11 — Phase 2 gate: f35d0b5e 80% vs a0030091 78% (+2, CI −7..+10);
+  skill_delegation 0→33, capability flat; record_discipline_search_before_denying
+  3/3→1/3 (noise at n=3 — watch). Deployed. **Phase 3 next** (turn brief).
 
