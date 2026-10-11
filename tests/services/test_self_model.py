@@ -25,8 +25,9 @@ CURATED = {
                   "Judge photos on what's in them, not the banter."],
     "limits": ["Video understanding is sampled frames only."],
     "watchouts": ["Beer-judging: show the evidence before a verdict."],
-    "retire": [{"id": "c-stale", "reason": "list_groups exists"},
-               {"id": "not-a-claim", "reason": "x"}],
+    "retire": [{"id": "c-stale", "reason": "stale: list_groups exists"},
+               {"id": "not-a-claim", "reason": "stale: x y z"},
+               {"id": "c-keep", "reason": "Merged into practice: verify dates"}],
     "move_to_skill": [{"id": "c-howto", "skill": "openai-image", "note": "flags"}],
     "social": ["Leeming: judging calls get mocked — show photo evidence first."],
     "tone_today": "dry, a little smug",
@@ -161,3 +162,13 @@ async def test_digest_sent_once_after_8(ctx, monkeypatch):
         assert await sm.deliver_digest_if_due(ctx) is True
         assert await sm.deliver_digest_if_due(ctx) is False   # once
     assert send.await_args.kwargs["payload"]["chat_id"] == "61456224867@s.whatsapp.net"
+
+
+def test_retire_reasons_are_restricted():
+    ids = {"a", "b"}
+    assert sm._valid_retire_reason("stale: tool exists now", "a", ids)
+    assert sm._valid_retire_reason("duplicate of b", "a", ids)
+    assert not sm._valid_retire_reason("duplicate of a", "a", ids)      # itself
+    assert not sm._valid_retire_reason("duplicate of zz", "a", ids)     # unknown
+    assert not sm._valid_retire_reason("Merged into practice: x", "a", ids)
+    assert not sm._valid_retire_reason("stale", "a", ids)               # no reason

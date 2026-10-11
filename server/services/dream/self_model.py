@@ -188,10 +188,12 @@ group's memory); only a rule Bob must apply everywhere belongs here.
   stale when Y is in running_services. Stale limits go in retire, not here.
 - watchouts: ≤4 things to be careful about THIS WEEK, from recent incidents
   and corrections (feedback/incident claims of the last ~7 days).
-- retire: self claims that are stale (contradicted by ground truth or by a
-  newer claim) or superseded by a merged practice — [{"id", "reason"}].
-  Be conservative: only retire when clearly stale/duplicated. Never retire
-  self_image claims.
+- retire: ONLY claims that are (a) STALE — contradicted by the ground truth
+  or by a newer claim; reason starts "stale:" — or (b) an exact DUPLICATE
+  of another active claim saying the same thing; reason "duplicate of
+  <that claim's id>". Merging or generalising a claim into the self-model is
+  NOT a reason to retire it — the raw claims stay for recall. Never retire
+  self_image claims. Expect a handful per night, not dozens.
 - move_to_skill: claims that are tool/skill how-tos rather than standing
   practice — [{"id", "skill", "note"}] (proposed only; not applied).
 {social_spec}
@@ -225,6 +227,21 @@ def _user_payload(claims: list[dict], persona: str, truth: dict, social: str) ->
     return "\n".join(parts)
 
 
+MAX_RETIRE = 10   # per night — 2026-10-11 first live run retired 56 as "merged"
+
+
+def _valid_retire_reason(reason: str, cid: str, claim_ids: set[str]) -> bool:
+    """Stale (with a reason) or a duplicate of ANOTHER active claim, named.
+    'Merged into practice' is not a retirement reason (lossy for recall)."""
+    r = reason.strip().lower()
+    if r.startswith("stale") and len(r) > len("stale:") + 5:
+        return True
+    if r.startswith("duplicate of "):
+        other = reason.strip()[len("duplicate of "):].split()[0].rstrip(".,;:")
+        return other in claim_ids and other != cid
+    return False
+
+
 def validate(raw: Any, claim_ids: set[str], *, social: bool) -> dict[str, Any]:
     """Clamp the curator's JSON to the contract; drop unknown claim ids."""
     if not isinstance(raw, dict):
@@ -245,9 +262,11 @@ def validate(raw: Any, claim_ids: set[str], *, social: bool) -> dict[str, Any]:
         return out_[:CAPS[key]]
 
     out: dict[str, Any] = {k: strs(k) for k in ("state", "practices", "limits", "watchouts")}
-    out["retire"] = [{"id": str(r["id"]), "reason": str(r.get("reason") or "stale")[:300]}
+    out["retire"] = [{"id": str(r["id"]), "reason": str(r.get("reason") or "")[:300]}
                      for r in (raw.get("retire") or [])
-                     if isinstance(r, dict) and str(r.get("id")) in claim_ids]
+                     if isinstance(r, dict) and str(r.get("id")) in claim_ids
+                     and _valid_retire_reason(str(r.get("reason") or ""),
+                                              str(r["id"]), claim_ids)][:MAX_RETIRE]
     out["move_to_skill"] = [{"id": str(r["id"]), "skill": str(r.get("skill") or "?"),
                              "note": str(r.get("note") or "")[:200]}
                             for r in (raw.get("move_to_skill") or [])
