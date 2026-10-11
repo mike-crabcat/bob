@@ -106,11 +106,15 @@ function GoalDetailPage() {
     onSettled: () => qc.invalidateQueries({ queryKey: ["goal", goalId] }),
   });
   const nudge = useMutation({
-    mutationFn: () =>
-      postAPI(`/conversations/wake`, {
+    mutationFn: async () => {
+      const res = await postAPI<{ ok?: boolean; error?: string }>(`/conversations/wake`, {
         target: data?.goal.conversation_id,
         instruction: "Operator nudge from the goal dashboard: run one round now.",
-      }),
+      });
+      if (res && typeof res === "object" && "error" in res)
+        throw new Error(res.error || "wake failed");
+      return res;
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ["goal", goalId] }),
   });
   const cancel = useMutation({
@@ -254,6 +258,14 @@ function GoalDetailPage() {
             >
               nudge
             </button>
+            {nudge.isError && (
+              <span className="text-[10px] text-red-400">
+                {(nudge.error as Error | null)?.message || "nudge failed"}
+              </span>
+            )}
+            {nudge.isSuccess && !nudge.isPending && (
+              <span className="text-[10px] text-green-500">nudged — round queued</span>
+            )}
             <button
               onClick={() => pause.mutate()}
               disabled={pause.isPending || !loop.next_run}

@@ -433,8 +433,14 @@ async def post_conversation_wake(request: Request) -> dict[str, Any]:
 
     binding = await conv_repo.active_binding(session_key)
     # "thread" = email conversations (steerable since 2026-09-23: the wake
-    # path dispatches them with the thread's email toolset).
-    if not binding or binding.get("endpoint_kind") not in ("dm", "group", "thread"):
+    # path dispatches them with the thread's email toolset). Utility rooms
+    # (goal rooms carry a NULL endpoint_kind) wake too — the goal
+    # dashboard's NUDGE button targets exactly those (2026-10-11: five
+    # silent no-op clicks before the gate learned about rooms).
+    allowed = binding and (
+        binding.get("endpoint_kind") in ("dm", "group", "thread")
+        or session_key.endswith(":utility"))
+    if not allowed:
         return {"error": f"no active dm/group binding for {session_key}"}
 
     content = build_wake_content(
