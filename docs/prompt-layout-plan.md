@@ -52,7 +52,7 @@ expected gain is real but unproven: measure everything.
   **v1 baseline** run id (record below).
 - Not in scope: `eval-findings-fixes` (separate decision).
 
-### Phase 2 — cheap, low-risk prompt fixes  ☐
+### Phase 2 — cheap, low-risk prompt fixes  ◐ (built 32d0d764; gate running)
 - Replace "CRITICAL: How to Respond" with channel-correct text (WhatsApp turns
   get WhatsApp guidance; email keeps its own).
 - Reply length stated once (keep the 2026-09-05 A/B wording verbatim in the
@@ -159,4 +159,9 @@ standing practices.
   ~/config/.env (backup env.2026-10-11b). Phase 2b DONE. Note:
   fact_no_narrated_search fails in both arms (0–1/6) — a standing weakness,
   not a 2b effect. Next: Phase 2 cheap fixes.
+- 2026-10-11 — Phase 2 built (32d0d764): channel-neutral "How to Respond"
+  (WhatsApp → HARD RULES pointer, email line kept); skills index one line per
+  skill (14.6k → 5.6k chars). Reply length deliberately NOT de-duplicated —
+  the 2026-09-05 A/B found head+tail beats single placement. Gate: full luna
+  run (curated+social on) vs a0030091; deploy only if no regression.
 
