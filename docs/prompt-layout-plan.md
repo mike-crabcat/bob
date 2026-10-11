@@ -42,7 +42,7 @@ expected gain is real but unproven: measure everything.
 
 ## Phases
 
-### Phase 1 — measurement first: merge the eval v2 suite  ◐ (merged; baselines running)
+### Phase 1 — measurement first: merge the eval v2 suite  ☑
 - Merge branch `eval-redesign` (worktree `~/bob-evals`, 15 commits, unmerged
   since 2026-10-08) into `commitments`: worlds, single interception boundary,
   repeats + Wilson CIs, checklist judge, calibration, compare, capability tier,
@@ -62,7 +62,7 @@ expected gain is real but unproven: measure everything.
 - Gate: response-discipline battery + eval v2 discipline tier vs Phase 1
   baseline; no regression beyond CI.
 
-### Phase 2b — curated self-model (nightly) + in-day delta  ☐
+### Phase 2b — curated self-model (nightly) + in-day delta  ◐ (built + merged; curation held off pending Mike's review of the dry run; brief off until A/B)
 Problem (2026-10-11 review of the 198 self claims): the self-brief renders
 newest-first under a 4k-char cap — ~5 of 147 practices and 0 of 16 limits
 ever reach the prompt; states eat the budget; several claims are stale or
@@ -121,7 +121,17 @@ standing practices.
   the retired `_EVAL_SESSION`); pytest 1395 green. Snapshot refreshed
   (198 self claims, 38 skill docs). Baselines started: all 57 cases, n=3,
   judge `z-ai/glm-5.3@low` (calibration κ0.94 vs astra 0.73), models
-  gpt-6-luna then glm-5.3-flash. Run ids: _pending_.
+  gpt-6-luna then glm-5.3-flash.
+- 2026-10-11 — **Baselines (v1 prompt):** luna `418cefdf` 78% [71–83] pass^3 67%;
+  flash `8d24f9e5` 75% [68–81] pass^3 58%. Complementary weak spots — luna:
+  fact discipline 50, propose-first 73, email 50; flash: delegation routing
+  46, record discipline 67, goal behaviour 60. Both: capability ~44–56,
+  goal-craft 50. (Both runs flag "dirty tree" = other uncommitted live work.)
 - 2026-10-11 — Phase 2b added (Mike): nightly self-curation + in-day delta,
   with an experimental per-group "social read" (not "mood" — calibration
   from observed signals, fenced from effort/accuracy).
+- 2026-10-11 — Phase 2b built (branch self-model → merged 6e618d33, fixes
+  3a34c2c6). Live dry runs drove fixes: bullet caps + per-section budgets,
+  running services as ground truth, scope rule, limit-vs-tools check, no
+  negative tone. Stale share-files claim corrected by operator. Curation held
+  OFF (`BOB_SELF_CURATION=off` in ~/config/.env) pending Mike's review.
