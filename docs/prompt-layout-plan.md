@@ -174,4 +174,9 @@ standing practices.
   with flag off); flash v1 vs flash v2 (no prior flash control with 2b on).
   Note: the layout flag isn't in the eval persona fingerprint — compare runs
   by notes/sha.
+- 2026-10-11 — **Phase 3 A/B:** luna v2 3be3998c 76% vs v1 f35d0b5e 80% (−4,
+  CI −13..+5; all failures behavioural) — no gain. Flash v1 9a04190b 77% vs
+  v2 8be241a9 54% — INVALID: OpenRouter credit ran out mid-run (38
+  provider_error + judge quota errors; behavioural failures alone 27 v2 vs 39
+  v1). Rerun flash v2 after the top-up before deciding. v2 stays OFF.
 
