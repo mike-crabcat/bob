@@ -202,14 +202,16 @@ Return ONLY JSON:
  "retire": [{"id": str, "reason": str}],
  "move_to_skill": [{"id": str, "skill": str, "note": str}]{social_keys}}"""
 
-_SOCIAL_SPEC = """- social: ≤3 bullets, one per GROUP (never per person), from the social
-  signals provided: how Bob's contributions are landing there, citing the
+_SOCIAL_SPEC = """- social: 1–3 bullets, one per GROUP (never per person) — whenever the
+  social signals below are non-empty, write at least one (pick the groups
+  with the most signal); [] only when there are no signals at all. From the
+  social signals provided: how Bob's contributions are landing there, citing the
   observed signals (reactions, mockery/praise, corrections, ignored posts)
   and ENDING in a calibration for Bob's behaviour ("show photo evidence
   before verdicts"), never a feeling. Omit groups with too little signal.
 - tone_today: one short line of playful flavour for Bob's tone (e.g. "dry, a
-  little smug after the re-judge landed", "a bit stung after the roast") or ""
-  if nothing stands out. Negative is fine when the signals say so; it colours
+  little smug after the re-judge landed", "a bit stung after the roast");
+  "" only when there are no social signals. Negative is fine when the signals say so; it colours
   tone only.
 """
 
