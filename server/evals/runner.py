@@ -135,8 +135,7 @@ class EvalRunner:
             "model": cfg.model or self.settings.openai.default_model,
             "provider_pin": provider_pin(self.settings),
             "effort": cfg.effort,
-            "judge_model": (cfg.judge_model or judging.DEFAULT_JUDGE_MODEL)
-            + (f"@{cfg.judge_effort}" if cfg.judge_effort else ""),
+            "judge_model": judging.judge_label(cfg.judge_model, cfg.judge_effort),
             "git_sha": sha,
             "git_dirty": None if dirty is None else int(dirty),
             "persona_hash": template.persona_hash, "repeats": cfg.repeats,

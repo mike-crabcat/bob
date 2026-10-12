@@ -228,9 +228,13 @@ loses on `behavioural`.
 
 ## Judge calibration
 
-The judge (default `gpt-6-astra`, temperature 0; override with
-`--judge-model`, `--judge-effort`) is an instrument and gets measured like
-one.
+The judge (default `z-ai/glm-5.3-flash` at low effort, temperature 0;
+override with `--judge-model`, `--judge-effort`) is an instrument and gets
+measured like one. It was switched from `gpt-6-astra` on 2026-10-13. On the
+40-entry calibration set glm-5.3-flash@low agreed 40/40 (κ 1.00),
+glm-5.3@low 98%, and astra and gpt-6-luna@low 88% each (κ 0.73, both
+too strict). Astra cost roughly 10x as much per trial. Re-run
+`judge-calibrate` before trusting a new judge model.
 
 **Circuit breaker.** Three judge failures that look run-wide (no credits,
 quota, billing, bad key) abort the run, and those trials aren't recorded,

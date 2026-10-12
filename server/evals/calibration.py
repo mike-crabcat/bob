@@ -99,8 +99,9 @@ async def calibrate(ctx: Any, entries: list[dict[str, Any]], *,
     fp = sum((not a) and b for a, b in overall)   # judge passed a human fail
     fn = sum(a and (not b) for a, b in overall)
     k = kappa(overall)
+    from server.evals.judge import judge_label
     lines = [
-        f"judge={judge_model or 'default'}{'@' + judge_effort if judge_effort else ''}"
+        f"judge={judge_label(judge_model, judge_effort)}"
         f" · {n} entries ({errors} judge errors)",
         f"overall agreement {agree}/{n} = {agree / n:.0%} · Cohen's κ = "
         f"{'n/a' if k is None else f'{k:.2f}'}",

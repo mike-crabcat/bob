@@ -4,9 +4,11 @@ The old judge averaged correctness/relevance/completeness into one number
 against a prose rubric and cut at 0.7 — a fuzzy score over a buried
 standard. Now every rubric item is a binary statement judged on its own,
 with a reason; the trial passes only if all items pass. The judge model
-defaults to gpt-6-astra (2026-09-28: nano false-negatived verbatim-correct
-quotes) at temperature 0, and its agreement with hand labels is measured
-by ``bob eval judge-calibrate``.
+defaults to glm-5.3-flash at low effort, temperature 0 (2026-10-13: 40/40,
+κ 1.00 on the calibration set vs 88% for gpt-6-astra at ~10x the cost;
+2026-09-28 nano false-negatived verbatim-correct quotes, so re-calibrate
+before going cheaper still). Agreement with hand labels is measured by
+``bob eval judge-calibrate``.
 """
 
 from __future__ import annotations
@@ -20,7 +22,19 @@ from server.evals.case import Check, CheckResult, EvalCase, JudgeResult, RubricV
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "gpt-6-astra"
+DEFAULT_JUDGE_MODEL = "z-ai/glm-5.3-flash"
+DEFAULT_JUDGE_EFFORT = "low"   # applies only when the model is defaulted too
+
+
+def resolve_judge(model: str | None, effort: str | None) -> tuple[str, str | None]:
+    if model:
+        return model, effort
+    return DEFAULT_JUDGE_MODEL, effort or DEFAULT_JUDGE_EFFORT
+
+
+def judge_label(model: str | None, effort: str | None) -> str:
+    m, e = resolve_judge(model, effort)
+    return f"{m}@{e}" if e else m
 
 
 # --------------------------------------------------------------------------
@@ -181,13 +195,13 @@ async def judge(ctx: Any, case: EvalCase, *, transcript: str, response: str,
         transcript=transcript[-60000:],
         response=response or "(empty)",
         items="\n".join(f"{i}. {item}" for i, item in enumerate(items, 1)))
+    judge_model, judge_effort = resolve_judge(judge_model, judge_effort)
     t0 = time.monotonic()
     try:
         raw = await LLMDispatchService(ctx).prompt(
             [{"role": "user", "content": prompt}],
             call_category="eval_judge", temperature=0.0,
-            model=judge_model or DEFAULT_JUDGE_MODEL,
-            reasoning_effort=judge_effort)
+            model=judge_model, reasoning_effort=judge_effort)
         data = _parse_json(raw)
         by_n = {int(v.get("n", 0)): v for v in data.get("items", [])}
         verdicts = []
