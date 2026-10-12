@@ -93,3 +93,18 @@ async def test_kpi_gate_trusted_or_policy(ctx):
     assert "kpi [--days N]" in await untrusted(command="help")   # help stays open
     await ConversationRepository(ctx.db).set_policy(GROUP, {"self_kpi": True})
     assert "isn't enabled" not in await untrusted(command="kpi --days 2")
+
+
+async def test_kpi_out_writes_workspace_file(ctx, tmp_path):
+    ctx.settings.harness.workspace_dir = tmp_path
+    await _msg(ctx.db, "m1", DM, sender="c-mike")
+    run = _tool(ctx)
+    out = await run(command="kpi --days 31 --out routines/kpi.json")
+    assert out.startswith("wrote routines/kpi.json: 31 days")
+    data = json.loads((tmp_path / "routines" / "kpi.json").read_text())
+    assert len(data["days"]) == 31 and data["days"][-1]["active_dms"] == 1
+    for bad in ("kpi --out ../escape.json", "kpi --out /etc/kpi.json",
+                "kpi --out self/bob/kpi.json", "kpi --out"):
+        res = await run(command=bad)
+        assert res.startswith("error:"), bad
+    assert not (tmp_path.parent / "escape.json").exists()

@@ -31,7 +31,8 @@ USAGE = """\
 self <subcommand> [options]
 
   help                      this text
-  kpi [--days N] [--json]   daily KPIs for the last N local days (default 30,
+  kpi [--days N] [--json] [--out FILE]
+                            daily KPIs for the last N local days (default 30,
                             max 365; today is partial):
                               active users      distinct people who messaged Bob
                               active groups     groups where a person spoke
@@ -41,7 +42,10 @@ self <subcommand> [options]
                               llm calls         every LLM call Bob made, incl.
                                                 probes, memory and dream work
                                                 (eval runs excluded)
-                            --json returns the rows for charting."""
+                            --json returns the rows for charting.
+                            --out FILE writes that JSON to a workspace file
+                            (e.g. for a chart script) and returns a summary —
+                            never copy KPI JSON into a command by hand."""
 
 _ALIASES = {"kpis": "kpi", "stats": "kpi", "metrics": "kpi", "engagement": "kpi",
             "--help": "help", "-h": "help"}
@@ -51,8 +55,8 @@ class _UsageError(ValueError):
     pass
 
 
-def _parse_kpi(args: list[str]) -> tuple[int, bool]:
-    days, as_json = 30, False
+def _parse_kpi(args: list[str]) -> tuple[int, bool, str | None]:
+    days, as_json, out = 30, False, None
     i = 0
     while i < len(args):
         a = args[i]
@@ -63,6 +67,13 @@ def _parse_kpi(args: list[str]) -> tuple[int, bool]:
                 raise _UsageError(f"{a} needs a number")
             i += 1
             days = _int(args[i])
+        elif a in ("--out", "-o", "--output"):
+            if i + 1 >= len(args):
+                raise _UsageError(f"{a} needs a workspace file path")
+            i += 1
+            out = args[i]
+        elif a.startswith(("--out=", "--output=")):
+            out = a.split("=", 1)[1]
         elif a.startswith(("--days=", "--last=")):
             days = _int(a.split("=", 1)[1])
         elif a.rstrip("d").isdigit():          # `kpi 14`, `kpi 14d`
@@ -72,7 +83,7 @@ def _parse_kpi(args: list[str]) -> tuple[int, bool]:
         i += 1
     if not 1 <= days <= MAX_DAYS:
         raise _UsageError(f"--days must be 1..{MAX_DAYS}")
-    return days, as_json
+    return days, as_json, out
 
 
 def _int(s: str) -> int:
@@ -115,8 +126,9 @@ def make_self_tools(ctx: Any, *, session_key: str, is_trusted: bool = False) -> 
     @tool
     async def self(command: str = "help") -> str:
         """Bob's own internals as a small CLI. Run `help` for subcommands.
-        `kpi [--days N] [--json]`: daily active users, active groups, active
-        DMs, messages received and LLM calls (counts only)."""
+        `kpi [--days N] [--json] [--out FILE]`: daily active users, active
+        groups, active DMs, messages received and LLM calls (counts only).
+        For scripts, use --out to write the JSON to a workspace file."""
         try:
             argv = shlex.split(command or "help")
         except ValueError as exc:
@@ -130,7 +142,7 @@ def make_self_tools(ctx: Any, *, session_key: str, is_trusted: bool = False) -> 
         if sub != "kpi":
             return f"error: unknown subcommand {sub!r}\n\n{USAGE}"
         try:
-            days, as_json = _parse_kpi(args)
+            days, as_json, out = _parse_kpi(args)
         except _UsageError as exc:
             return f"error: {exc}\n\n{USAGE}"
         if not await _allowed(ctx, session_key, is_trusted):
@@ -140,9 +152,21 @@ def make_self_tools(ctx: Any, *, session_key: str, is_trusted: bool = False) -> 
         repo = KpiRepository(ctx.db)
         rows = await repo.daily(days)
         window_users = await repo.distinct_users(date.fromisoformat(rows[0]["day"]))
+        payload = {"days": rows, "window_distinct_users": window_users,
+                   "today_partial": True}
+        if out:
+            from server.services.workspace_tools import _resolve_writable
+            try:
+                path = _resolve_writable(ctx, out)
+            except ValueError as exc:
+                return f"error: --out {exc}\n\n{USAGE}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=1) + "\n")
+            return (f"wrote {out}: {len(rows)} days {rows[0]['day']}..{rows[-1]['day']} "
+                    f"(last day is today, partial), {window_users} distinct users. "
+                    f"Read the file; don't retype its contents.")
         if as_json:
-            return json.dumps({"days": rows, "window_distinct_users": window_users,
-                               "today_partial": True})
+            return json.dumps(payload)
         return _render(rows, window_users)
 
     return [self]
