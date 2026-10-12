@@ -5,7 +5,7 @@ something (paths dropped, dashboard exposed, Twilio webhooks unreachable).
 This is the canonical snapshot + rebuild commands + rules. **Re-read it
 before touching `tailscale serve`, and update it after every change.**
 
-Snapshot date: **2026-10-09** (tailscale 1.86.2 — **the serve/funnel CLI
+Snapshot date: **2026-10-13** (tailscale 1.86.2 — **the serve/funnel CLI
 syntax changed in 1.86**; the rebuild commands below are the new
 `--set-path` form, verified live). Re-capture the live truth any time with:
 
@@ -25,11 +25,14 @@ tailscale serve status
 ## Vhost: 443 — **FUNNEL ON (public internet)**
 
 Everything under this host is reachable by anyone on the internet. Each
-line is load-bearing for a live integration:
+line is load-bearing for a live integration. **There is deliberately NO
+root (`/`) mount** — removed 2026-10-13: it served the whole :8420 API to
+the internet (GET `/api/v1/contacts` returned the contact list; email,
+call transcripts and `/openapi.json` were open too). Bob's API is public
+only through the named paths below. Unmapped paths 404 at the funnel.
 
 | Path | Upstream | Served by | What it is |
 |---|---|---|---|
-| `/` | `http://127.0.0.1:8420` | `bob.service` | Bob FastAPI root |
 | `/voice` | `http://127.0.0.1:8420/voice` | `bob.service` | Browser realtime voice sessions (`/voice/realtime`) |
 | `/files` | `http://127.0.0.1:8420/files` | `bob.service` | File serving |
 | `/phone/twiml` | `http://127.0.0.1:8420/phone/twiml` | `bob.service` | **Twilio voice webhooks — must stay public** (Twilio POSTs here) |
@@ -92,10 +95,12 @@ is the point.**
 8. **1.86 CLI: any `tailscale serve` mutation on the 443 vhost STRIPS the
    funnel** ("Removing Funnel …:443" in the output — it does not ask).
    Confirmed live 2026-09-20 adding `/aus-legal` (~2 min funnel-off window).
-   After EVERY serve change on 443, re-apply the funnel root mount:
-   `tailscale funnel --bg --https=443 --set-path=/ --yes http://127.0.0.1:8420`
-   and confirm `tailscale funnel status` shows **Funnel on** before walking
-   away. Adding a public path directly with `tailscale funnel --bg
+   After EVERY serve change on 443, re-apply the funnel on a NAMED path —
+   **never re-create the root mount** (it re-opens the whole API):
+   `tailscale funnel --bg --https=443 --set-path=/voice --yes http://127.0.0.1:8420/voice`
+   and confirm `tailscale funnel status` shows **Funnel on** and NO `/`
+   line before walking away (verified 2026-10-13: removing `/` then this
+   command = exactly one line gone from `serve status`, funnel back on). Adding a public path directly with `tailscale funnel --bg
    --https=443 --set-path=/x --yes <target>` (instead of `serve`) keeps the
    funnel on — verified 2026-10-09 adding `/share/d` (diff of `serve status`
    before/after = exactly the one new line, Funnel on throughout). Old-syntax commands (`tailscale funnel 443 on`,
@@ -106,7 +111,6 @@ is the point.**
 New (1.86) syntax, in this order — mounts first, funnel LAST (rule 8):
 
 ```bash
-tailscale serve --bg --https=443 --set-path=/             --yes http://127.0.0.1:8420
 tailscale serve --bg --https=443 --set-path=/voice        --yes http://127.0.0.1:8420/voice
 tailscale serve --bg --https=443 --set-path=/files        --yes http://127.0.0.1:8420/files
 tailscale serve --bg --https=443 --set-path=/phone/twiml  --yes http://127.0.0.1:8420/phone/twiml
@@ -123,8 +127,9 @@ tailscale serve --bg --https=443 --set-path=/aus-legal/cite  --yes http://127.0.
 tailscale serve --bg --https=443 --set-path=/blackline   --yes http://127.0.0.1:8788
 tailscale serve --bg --https=443 --set-path=/share/d     --yes http://127.0.0.1:8787/d
 
-# turn the whole 443 vhost public (the only funnel step — mounts above are tailnet-only until this runs)
-tailscale funnel --bg --https=443 --set-path=/ --yes http://127.0.0.1:8420
+# turn the whole 443 vhost public (the only funnel step — mounts above are
+# tailnet-only until this runs). Anchor on a named path: NO root mount.
+tailscale funnel --bg --https=443 --set-path=/voice --yes http://127.0.0.1:8420/voice
 
 # tailnet-only dashboard on 8443 (serve, NOT funnel)
 tailscale serve --bg --https=8443 --set-path=/ --yes http://127.0.0.1:5173
@@ -134,6 +139,13 @@ tailscale serve --bg --https=8443 --set-path=/ --yes http://127.0.0.1:5173
 changed once, see rule 8.)
 
 ## Pending / planned
+
+- **App-side gates (2026-10-13, defence in depth):** private GETs on :8420
+  (`/api/v1`, `/phone/calls`, `/whatsapp/status`, `/openapi.json`, `/docs`)
+  need the API token; `/voice/realtime` test mode needs the operator token
+  (open the harness as `realtime.html?secret=…`); Twilio signatures on
+  `/phone/twiml|status` are validated — `BOB_TWILIO_SIGNATURE=log` until a
+  live call logs "valid", then flip to `enforce`.
 
 - **aus-legal funnel — OUTSIDE verification still owed (2026-09-20):** the
   `/aus-legal` path is live and bearer-gated (verified 401-no-token /
