@@ -25,6 +25,7 @@ from server.services.subagent_tools import make_subagent_tools
 from server.services.session_tools import make_session_tools
 from server.services.group_tools import make_group_lookup_tools
 from server.services.routine_tools import make_routine_tools
+from server.services.self_tools import make_self_tools
 
 if TYPE_CHECKING:
     from server.context import AppContext
@@ -66,6 +67,8 @@ def build_common_tools(
     _extend(make_memory_tools(ctx, session_key=session_key))
     _extend(make_docs_tools(ctx, session_key=session_key))
     _extend(make_changelog_tools(ctx, session_key=session_key))
+    # `self` CLI onto Bob's internals; kpi gates itself (trusted or policy).
+    _extend(make_self_tools(ctx, session_key=session_key, is_trusted=is_trusted))
     _extend(make_email_send_tools(ctx, session_key=session_key))
     _extend(make_email_thread_tools(ctx, contact_id=contact_id, is_trusted=is_trusted))
     _extend(make_session_tools(
