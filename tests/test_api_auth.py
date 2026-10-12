@@ -213,3 +213,28 @@ def test_dashboard_auth_ignores_stale_cookie_when_url_token_valid(tmp_path: Path
         client.cookies.clear()
         client.cookies.set("bob_dashboard_secret", '"old mangled value"')
         assert client.get("/dashboard/api/auth").status_code == 401
+
+
+def test_private_reads_need_the_token(tmp_path: Path) -> None:
+    """2026-10-12: the public funnel's root mount served the whole API and
+    GETs were never gated — contacts, email and call transcripts were
+    readable from the internet. Private read prefixes now need the token."""
+    settings = make_settings(tmp_path)
+    token = settings.resolved_api_secret
+    with TestClient(create_app(settings)) as client:
+        for path in ("/api/v1/contacts", "/api/v1/email/inboxes",
+                     "/phone/calls", "/whatsapp/status", "/openapi.json",
+                     "/docs"):
+            assert client.get(path).status_code == 401, path
+        ok = client.get("/api/v1/contacts", headers={"X-Dashboard-Secret": token})
+        assert ok.status_code == 200
+        assert client.get("/phone/calls",
+                          headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_public_reads_stay_open(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/health").status_code == 200
+        # prefix matching is by path segment, not substring
+        assert client.get("/api/v1x").status_code != 401

@@ -112,6 +112,28 @@ async def voice_realtime(websocket: WebSocket) -> None:
                 tool_calls=tool_calls, wa_service=wa_service,
             )
     else:
+        # Test mode = an arbitrary prompt on our OpenAI Realtime key PLUS the
+        # realtime tool set (contact lookup included). /voice is on the
+        # public funnel, so it is operator-only (2026-10-12): the API token
+        # via cookie / ?secret= / Authorization, or a "secret" field in the
+        # start frame. Persona/session mode above keeps its own one-shot
+        # session-token auth.
+        import secrets as _secrets
+        from server.api_auth import api_token_valid
+        frame_secret = str(config.get("secret") or "")
+        settings = ctx.settings
+        operator = api_token_valid(settings, websocket) or (
+            bool(frame_secret) and _secrets.compare_digest(
+                frame_secret, settings.resolved_api_secret))
+        if not operator:
+            logger.warning("Realtime test-mode start refused (no API token) from %s", client)
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "test mode needs the operator token (open this page with ?secret=…)"}))
+            except Exception:
+                pass
+            return
         if not config.get("instructions"):
             try:
                 await websocket.send_text(json.dumps({"type": "error", "message": "expected {type:'start', instructions:...} or {type:'start', session_id:...}"}))

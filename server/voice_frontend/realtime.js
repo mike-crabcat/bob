@@ -131,6 +131,9 @@ async function startSession() {
     state.ws.onopen = () => {
       state.ws.send(JSON.stringify({
         type: 'start',
+        // Operator token: test mode is refused without it (the page is on
+        // the public funnel). Open realtime.html?secret=<api token>.
+        secret: new URLSearchParams(location.search).get('secret') || '',
         instructions,
         voice: ui.voice.value,
         max_duration: parseInt(ui.maxdur.value, 10) || 120,

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import logging
 import re
 from typing import Any
@@ -30,7 +31,7 @@ from server.services.voice_dispatch_service import (
 )
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,48 @@ async def _setup_inbound_call(db: Any, settings: Any, call_sid: str, from_number
                 call_sid, phone_number, contact_id, is_trusted)
 
 
+
+def _twilio_signature_mode() -> str:
+    raw = os.getenv("BOB_TWILIO_SIGNATURE", "log").strip().lower()
+    return raw if raw in ("off", "log", "enforce") else "log"
+
+
+def twilio_signature_ok(settings: Any, path: str, query: str,
+                        params: dict[str, str], signature: str) -> bool | None:
+    """Validate X-Twilio-Signature (2026-10-12: the /phone callbacks ride the
+    public funnel and were forgeable — a fake status callback could inject
+    a call outcome into a conversation). Twilio signs the URL WE gave it —
+    the public base + path (+ query) — not the 127.0.0.1 URL the app sees
+    behind the funnel. Returns None when it can't be checked (mode off or
+    no auth token)."""
+    if _twilio_signature_mode() == "off":
+        return None
+    token = settings.phone.twilio_auth_token
+    if not token:
+        return None
+    from twilio.request_validator import RequestValidator
+    base = (settings.phone.base_url or settings.resolved_public_url).rstrip("/")
+    url = f"{base}{path}" + (f"?{query}" if query else "")
+    return RequestValidator(token).validate(url, params, signature or "")
+
+
+async def _reject_forged(request: Request) -> Response | None:
+    """403 for a bad signature in enforce mode; log-only otherwise."""
+    settings = request.app.state.settings
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    ok = twilio_signature_ok(settings, request.url.path, request.url.query,
+                             params, request.headers.get("x-twilio-signature", ""))
+    if ok is None:
+        return None
+    mode = _twilio_signature_mode()
+    logger.info("Twilio signature %s on %s (mode=%s, CallSid=%s)",
+                "valid" if ok else "INVALID", request.url.path, mode,
+                params.get("CallSid", ""))
+    if not ok and mode == "enforce":
+        return Response(status_code=403, content="invalid Twilio signature")
+    return None
+
 @router.post("/call")
 async def initiate_call(request: Request) -> dict:
     """Initiate an outbound phone call via Twilio (Realtime engine)."""
@@ -141,6 +184,8 @@ async def twiml_webhook(request: Request) -> PlainTextResponse:
 
     For inbound calls, also sets up session data, contact resolution, and DB record.
     """
+    if (forged := await _reject_forged(request)) is not None:
+        return forged  # type: ignore[return-value]
     db = request.app.state.db
     settings = request.app.state.settings
 
@@ -253,6 +298,8 @@ async def _append_call_status_event(db: Any, call_sid: str, call_status: str, ca
 @router.post("/status")
 async def call_status(request: Request) -> dict:
     """Handle call status callbacks from Twilio."""
+    if (forged := await _reject_forged(request)) is not None:
+        return forged  # type: ignore[return-value]
     form = await request.form()
     call_sid = form.get("CallSid", "")
     call_status = form.get("CallStatus", "")

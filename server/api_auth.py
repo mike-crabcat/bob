@@ -1,7 +1,13 @@
-"""Default-deny token gate for state-changing HTTP requests.
+"""Default-deny token gate for state-changing HTTP requests — and for reads
+of private data.
 
 Any POST/PUT/PATCH/DELETE must present the API token (see
-``Settings.resolved_api_secret``) or it is rejected with 401. Websocket
+``Settings.resolved_api_secret``) or it is rejected with 401. GET/HEAD are
+open EXCEPT under ``PRIVATE_READ_PREFIXES``: the 2026-10-12 sandbox audit
+found the public funnel's root mount serving the whole :8420 API, and
+reads were never gated — contacts, email messages + attachments and call
+transcripts were readable from the internet. Defence in depth: these stay
+token-gated even if a funnel mount slips again. Websocket
 scopes pass through untouched — WS endpoints keep their own auth
 (``dashboard_ws`` checks ``?secret=``, the voice realtime bridge validates
 session tokens). Exempt POST paths (Twilio callbacks, public voice-page
@@ -28,6 +34,20 @@ PUBLIC_UNAUTHENTICATED: dict[str, frozenset[str]] = {
     "POST": frozenset({"/phone/twiml", "/phone/status", "/voice/log",
                        "/api/v1/stimulus/events"}),
 }
+# GET/HEAD prefixes that serve private data — token required. Every
+# legitimate reader carries it already: the bob CLI sends X-Dashboard-Secret
+# on every call, the dashboard SPA uses /dashboard/api (cookie-gated), and
+# the daemons only POST with their own tokens. /health stays open.
+PRIVATE_READ_PREFIXES: tuple[str, ...] = (
+    "/api/v1", "/phone/calls", "/whatsapp/status", "/whatsapp/bridge-status",
+    "/docs", "/redoc", "/openapi.json",
+)
+
+
+def _private_read(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in PRIVATE_READ_PREFIXES)
+
+
 # Task settle carries its own dedicated bearer (BOB_TASK_TOKEN) checked
 # inside the handler — same limited-blast-radius pattern as stimulus
 # ingest. The path embeds a task id, so it matches by prefix+suffix.
@@ -57,7 +77,8 @@ def api_token_valid(settings: Settings, request: Request) -> bool:
 
 
 class ApiAuthMiddleware:
-    """Deny POST/PUT/PATCH/DELETE unless a valid API token is presented."""
+    """Deny POST/PUT/PATCH/DELETE — and GET/HEAD of private prefixes —
+    unless a valid API token is presented."""
 
     def __init__(self, app, settings: Settings) -> None:
         self.app = app
@@ -69,7 +90,9 @@ class ApiAuthMiddleware:
             return
         method = scope["method"].upper()
         path = scope["path"]
-        if method in SAFE_METHODS or path in PUBLIC_UNAUTHENTICATED.get(method, frozenset()):
+        open_read = method in SAFE_METHODS and not (
+            method != "OPTIONS" and _private_read(path))
+        if open_read or path in PUBLIC_UNAUTHENTICATED.get(method, frozenset()):
             await self.app(scope, receive, send)
             return
         if (method == "POST" and path.startswith(_TASK_SETTLE_PREFIX)
