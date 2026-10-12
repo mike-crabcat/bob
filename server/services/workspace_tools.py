@@ -384,6 +384,8 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         replace, returns a diff) — not sed or a heredoc rewrite of the whole file.
         To read a file you'll edit, or a big one, use read_file (numbered, paged).
 
+        Temp files go in scratch/ (or $TMPDIR) — shared /tmp is not writable.
+
         SANDBOX: The workspace is the only allowed directory. Reaching outside it
         (DB clients, /etc, /home/bob/data, /home/bob/config, ~, .., sudo, secrets)
         is blocked. Use recall/find, contact_*, group_* and docs_* tools for data
@@ -421,12 +423,18 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                 "(e.g. --prompt-file), or use a quoted heredoc.")
         logger.info("bash: %s", command)
         venv_dir = settings.harness.venv_dir.expanduser()
+        # Kernel sandbox (BOB_BASH_SANDBOX=landlock): the child is
+        # Landlock-restricted to the workspace policy; unchanged when off.
+        from server.services import bash_sandbox
         proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", command,
+            *bash_sandbox.bash_argv(command, settings),
             cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
+            env=bash_sandbox.clean_env(
+                build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
+                settings),
         )
         try:
             stdout, stderr = await asyncio.wait_for(

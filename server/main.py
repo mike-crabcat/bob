@@ -116,6 +116,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.warning("self bundle heal failed", exc_info=True)
 
+        # Which bash sandbox is live on this instance (landlock / off /
+        # requested-but-unavailable) — one line per boot, never silent.
+        try:
+            from server.services.bash_sandbox import log_startup_mode
+            log_startup_mode()
+        except Exception:
+            logger.warning("bash sandbox mode check failed", exc_info=True)
+
         # Boot sweep: any 'running' llm_call_log row is a zombie from the
         # previous process — nothing survives a restart. Fail them now so
         # the dashboard never shows dead calls as live.
