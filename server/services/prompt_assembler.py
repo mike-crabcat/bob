@@ -213,12 +213,11 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
             if md.is_file():
                 mtimes[f"skills/{skill_path.name}"] = md.stat().st_mtime
 
-    # Persona files: healed from the repo bundle at boot, and only rewritten
-    # on content change — an mtime move means the persona actually changed.
-    from server.services.persona import persona_file_paths
-    for rel in persona_file_paths():
-        path = workspace_dir / rel
-        mtimes[f"self:{rel}"] = path.stat().st_mtime if path.is_file() else 0.0
+    # Persona files: read straight from the repo bundle (+ workspace
+    # user.md) — an mtime move means the persona actually changed.
+    from server.services.persona import persona_source_paths
+    for path in persona_source_paths(workspace_dir):
+        mtimes[f"self:{path}"] = path.stat().st_mtime if path.is_file() else 0.0
 
     # The directory rides the key too: eval worlds (server/evals) run
     # concurrent workspaces whose files can share mtimes.
@@ -228,8 +227,8 @@ async def load_workspace_prompt(workspace_dir: Path, db: Any = None) -> str:
 
     parts: list[str] = []
 
-    # Persona: rendered from the healed workspace files (self/<name>/*.md +
-    # user.md) — the repo bundle is the source of truth, git the history.
+    # Persona: rendered from the repo bundle (self/<name>/*.md) + the
+    # workspace user.md — never the bash-writable workspace persona copy.
     from server.services.persona import get_persona
     rendered_persona = await get_persona(db, workspace_dir=workspace_dir)
     parts.append(rendered_persona)

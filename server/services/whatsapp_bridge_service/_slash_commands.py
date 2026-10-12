@@ -94,13 +94,13 @@ class SlashCommandsMixin:
         await self.send_message(chat_id, f"Relevance gate {status}{note}")
 
     async def _cmd_who(self, chat_id: str) -> None:
-        """Reply with the persona's provenance. The persona is file-based
-        now (self/bob/*.md healed from the repo bundle at boot) — there is
+        """Reply with the persona's provenance. The persona is file-based:
+        rendered straight from the repo bundle (self/bob/*.md) — there is
         no runtime revision number; git history is the history."""
         await self.send_message(
             chat_id,
-            "persona: workspace/self/bob (files, healed from the repo bundle "
-            "at boot — history is git)")
+            "persona: repo bundle self/bob (read directly; the workspace copy "
+            "is a read-only view — history is git)")
 
     async def _cmd_verbose(self, args: str, session_key: str, chat_id: str) -> None:
         """Toggle verbose memory-extraction notices for this session.
