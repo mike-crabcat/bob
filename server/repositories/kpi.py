@@ -33,7 +33,8 @@ class KpiRepository:
 
     async def daily(self, days: int) -> list[dict[str, Any]]:
         """One row per local day, oldest first, today last (partial).
-        Keys: day, active_users, active_groups, messages_received, llm_calls."""
+        Keys: day, active_users, active_groups, active_dms, messages_received,
+        llm_calls."""
         mod = _local_offset_modifier()
         today = datetime.now().astimezone().date()
         first = today - timedelta(days=days - 1)
@@ -45,6 +46,8 @@ class KpiRepository:
             f"COUNT(DISTINCT sender_id) AS active_users, "
             f"COUNT(DISTINCT CASE WHEN conversation_id LIKE '%:group:%' "
             f"THEN conversation_id END) AS active_groups, "
+            f"COUNT(DISTINCT CASE WHEN conversation_id LIKE '%:dm:%' "
+            f"THEN conversation_id END) AS active_dms, "
             f"COUNT(*) AS messages_received "
             f"FROM messages WHERE {_HUMAN_INBOUND} AND created_at >= ? "
             f"GROUP BY day", (mod, since))
@@ -55,11 +58,12 @@ class KpiRepository:
         for i in range(days):
             d = (first + timedelta(days=i)).isoformat()
             by_day[d] = {"day": d, "active_users": 0, "active_groups": 0,
-                         "messages_received": 0, "llm_calls": 0}
+                         "active_dms": 0, "messages_received": 0, "llm_calls": 0}
         for r in msgs:
             if r["day"] in by_day:
                 by_day[r["day"]].update(
                     active_users=r["active_users"], active_groups=r["active_groups"],
+                    active_dms=r["active_dms"],
                     messages_received=r["messages_received"])
         for r in calls:
             if r["day"] in by_day:

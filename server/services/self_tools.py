@@ -35,6 +35,7 @@ self <subcommand> [options]
                             max 365; today is partial):
                               active users      distinct people who messaged Bob
                               active groups     groups where a person spoke
+                              active dms        DM chats where the person spoke
                               messages received human messages in Bob's chats
                                                 (DMs + every group message)
                               llm calls         every LLM call Bob made, incl.
@@ -82,16 +83,17 @@ def _int(s: str) -> int:
 
 
 def _render(rows: list[dict[str, Any]], window_users: int) -> str:
-    cols = ("active_users", "active_groups", "messages_received", "llm_calls")
-    lines = ["day         users  groups  msgs_in  llm_calls"]
+    cols = ("active_users", "active_groups", "active_dms", "messages_received",
+            "llm_calls")
+    lines = ["day         users  groups  dms  msgs_in  llm_calls"]
     for r in rows:
         lines.append(f"{r['day']}  {r['active_users']:>5}  {r['active_groups']:>6}  "
-                     f"{r['messages_received']:>7}  {r['llm_calls']:>9}")
+                     f"{r['active_dms']:>3}  {r['messages_received']:>7}  {r['llm_calls']:>9}")
     full = rows[:-1] or rows                   # averages skip partial today
     avg = {c: sum(r[c] for r in full) / len(full) for c in cols}
     lines.append(
         f"avg/day     {avg['active_users']:>5.1f}  {avg['active_groups']:>6.1f}  "
-        f"{avg['messages_received']:>7.1f}  {avg['llm_calls']:>9.1f}"
+        f"{avg['active_dms']:>3.1f}  {avg['messages_received']:>7.1f}  {avg['llm_calls']:>9.1f}"
         f"   (full days only)")
     lines.append(
         f"window: {window_users} distinct users, "
@@ -113,8 +115,8 @@ def make_self_tools(ctx: Any, *, session_key: str, is_trusted: bool = False) -> 
     @tool
     async def self(command: str = "help") -> str:
         """Bob's own internals as a small CLI. Run `help` for subcommands.
-        `kpi [--days N] [--json]`: daily active users, active groups,
-        messages received and LLM calls (counts only)."""
+        `kpi [--days N] [--json]`: daily active users, active groups, active
+        DMs, messages received and LLM calls (counts only)."""
         try:
             argv = shlex.split(command or "help")
         except ValueError as exc:

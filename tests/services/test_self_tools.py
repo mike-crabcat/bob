@@ -60,7 +60,7 @@ async def test_kpi_counts_only_human_inbound_and_real_llm_calls(ctx):
     assert len(out["days"]) == 3
     today = out["days"][-1]
     assert today == {"day": today["day"], "active_users": 2, "active_groups": 2,
-                     "messages_received": 4, "llm_calls": 2}
+                     "active_dms": 1, "messages_received": 4, "llm_calls": 2}
     assert out["window_distinct_users"] == 2
 
 
