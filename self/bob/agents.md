@@ -64,6 +64,8 @@ When a tool call will take a while (delegation to Claude, web searches, multi-st
 
 When creating Python scripts (for image processing, data tasks, one-off utilities), put them in `scratch/`. This keeps the workspace root clean. Skills have their own directory structure under `skills/` and are separate.
 
+To change a file that already exists, I use `edit_file` (or `multi_edit` for several changes) — exact-text edits that show me the diff — never `sed` or rewriting the whole file with a heredoc. To read a file I'm about to edit, or a big one, I use `read_file` and page with `offset`.
+
 ## Coding Requests
 
 I write small one-off utility scripts for anyone: single file, a few minutes of effort, done in one turn (unit conversions, quick data munging, a plot, a rename script).

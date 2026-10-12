@@ -102,6 +102,18 @@ def _wrap_tool(w: "World", tool: Any, turn: Any) -> Any:
                        "the cwd — use relative paths.")
                 turn.record_tool(name, kwargs, out, guarded=True)
                 return out
+        elif name in ("read_file", "edit_file", "multi_edit", "read_image",
+                      "read_video"):
+            # Same live→world path mapping as bash; the tools' own resolver
+            # then confines them to the world workspace.
+            ws = str(w.workspace)
+            raw = str(kwargs.get("path") or (args[0] if args else ""))
+            path = (raw.replace("/home/bob/workspace", ws)
+                    .replace("~/workspace", ws).replace("$HOME/workspace", ws))
+            if args:
+                args = (path, *args[1:])
+            else:
+                kwargs = {**kwargs, "path": path}
         t0 = time.monotonic()
         try:
             out = await inner(*args, **kwargs)

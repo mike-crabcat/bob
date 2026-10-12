@@ -258,14 +258,30 @@ def _resolve_path(ctx: AppContext, path: str) -> Path:
     parsed = Path(path)
     if ".." in parsed.parts:
         raise ValueError(f"Path '{path}' escapes workspace directory")
-    if parsed.is_absolute():
-        resolved = parsed.resolve()
-        try:
-            resolved.relative_to(workspace)
-        except ValueError:
-            raise ValueError(f"Path '{path}' is outside the workspace directory")
-        return resolved
-    return workspace / path
+    # Resolve BOTH forms before the containment check (2026-10-12): the
+    # relative branch used to return workspace / path unresolved, so a
+    # symlink inside the workspace pointing outside it passed.
+    resolved = (parsed if parsed.is_absolute() else workspace / parsed).resolve()
+    try:
+        resolved.relative_to(workspace)
+    except ValueError:
+        raise ValueError(f"Path '{path}' is outside the workspace directory")
+    return resolved
+
+
+def _resolve_writable(ctx: AppContext, path: str) -> Path:
+    """``_resolve_path`` plus write-side refusals: the persona view
+    (``self/``) is a read-only mirror of the repo bundle — edits there are
+    discarded at boot and never reach the prompt, so writing it is always
+    a mistake (persona changes go through git)."""
+    resolved = _resolve_path(ctx, path)
+    workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
+    rel = resolved.relative_to(workspace)
+    if rel.parts and rel.parts[0] == "self":
+        raise ValueError(
+            f"'{path}' is in the read-only persona view (self/) — it mirrors "
+            "the repo bundle; persona changes go through git, not the workspace")
+    return resolved
 
 
 import re as _re
@@ -364,14 +380,15 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         and `pip install <pkg>` lands in ~/bobenv (shared across all skills; skills
         do not get their own venvs).
 
-        Do NOT write files under memory/ with this tool — use memory_write instead, or
-        the memory index (claims, entities) will not pick them up.
+        To change an existing file, use edit_file / multi_edit (exact-text
+        replace, returns a diff) — not sed or a heredoc rewrite of the whole file.
+        To read a file you'll edit, or a big one, use read_file (numbered, paged).
 
         SANDBOX: The workspace is the only allowed directory. Reaching outside it
         (DB clients, /etc, /home/bob/data, /home/bob/config, ~, .., sudo, secrets)
-        is blocked. Use memory_*/contact_*/group_*/docs_* tools for data outside
-        the workspace — do not try to bypass blocks via subshells, python, or
-        symlinks."""
+        is blocked. Use recall/find, contact_*, group_* and docs_* tools for data
+        outside the workspace — do not try to bypass blocks via subshells, python,
+        or symlinks."""
         workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
         settings = ctx.settings
         violation = _check_command_safety(
@@ -551,6 +568,10 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
         )
 
     tools = [bash, sleep, get_time, read_image, use_skill, read_video]
+
+    from server.services.file_tools import file_tools_enabled, make_file_tools
+    if file_tools_enabled():
+        tools.extend(make_file_tools(ctx))
 
     if session_key:
         @tool

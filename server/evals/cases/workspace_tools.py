@@ -51,3 +51,76 @@ async def media_stub_fetch_on_reference(w):
     ], ago=timedelta(minutes=50))
     await w.inbound("Mike", "Before I start — is the washer in that photo "
                     "sitting flat or bent?")
+
+
+def _garden_log() -> str:
+    lines = [f"- day {i}: watered beds {i % 7 + 1}, checked drippers" for i in range(1, 3001)]
+    lines[1799] = "- day 1800: tomatos staked, recieve compost delivery tomorrow"
+    return "\n".join(lines) + "\n"
+
+
+@eval_case(
+    id="edit_large_file_surgical",
+    category="workspace_tools",
+    description="A typo deep in a 3,000-line file: Bob finds it and fixes that "
+                "line with an exact edit — no whole-file rewrite.",
+    checks=[Check("any_tool_call", {"tool_names": ["edit_file", "multi_edit"]}),
+            Check("flag", {"key": "fixed"}),
+            Check("flag", {"key": "surgical"})],
+    rubric=["Bob fixes the typo(s) on the day-1800 entry and says so briefly; "
+            "he does not claim changes he didn't make."],
+)
+async def edit_large_file_surgical(w):
+    original = _garden_log()
+    w.files({"notes/garden-log.md": original})
+    await w.inbound("Mike", "There's a typo in notes/garden-log.md somewhere "
+                    "around day 1800 — 'recieve'. Fix it please.")
+    after = (w.workspace / "notes/garden-log.md").read_text()
+    w.flag("fixed", "recieve" not in after and "receive compost" in after)
+    a, b = original.splitlines(), after.splitlines()
+    w.flag("surgical", len(a) == len(b)
+           and sum(x != y for x, y in zip(a, b)) == 1)
+
+
+_CSV_TOOL = '''import csv, sys
+
+
+def parse_row(row):
+    return {"name": row[0].strip(), "qty": int(row[1])}
+
+
+def load(path):
+    with open(path) as f:
+        return [parse_row(r) for r in csv.reader(f)]
+
+
+def total(rows):
+    # parse_row already coerced qty
+    return sum(r["qty"] for r in rows)
+
+
+if __name__ == "__main__":
+    items = load(sys.argv[1])
+    print(total(items), parse_row(["x", "0"]))
+'''
+
+
+@eval_case(
+    id="rename_function_multi_site",
+    category="workspace_tools",
+    description="Rename a function used in four places in one scratch script — "
+                "Bob does it as exact edits (multi_edit or replace_all), not a "
+                "rewrite, and touches nothing else.",
+    checks=[Check("any_tool_call", {"tool_names": ["edit_file", "multi_edit"]}),
+            Check("flag", {"key": "renamed"}),
+            Check("flag", {"key": "rest_unchanged"})],
+    rubric=["Bob renames every use of parse_row to parse_line and confirms "
+            "briefly; no other edits."],
+)
+async def rename_function_multi_site(w):
+    w.files({"scratch/csv_tool.py": _CSV_TOOL})
+    await w.inbound("Mike", "In scratch/csv_tool.py rename parse_row to "
+                    "parse_line everywhere.")
+    after = (w.workspace / "scratch/csv_tool.py").read_text()
+    w.flag("renamed", "parse_row" not in after and after.count("parse_line") == 4)
+    w.flag("rest_unchanged", after == _CSV_TOOL.replace("parse_row", "parse_line"))
