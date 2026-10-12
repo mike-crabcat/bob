@@ -848,11 +848,15 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
             outcome = await _terminate(row)
             await repo.mark_replaced(row["id"], utcnow().isoformat())
         else:
-            rows = [r for r in await repo.list(limit=50) if r["name"] == name]
-            if not rows:
-                return f"Error: no process named {name!r}. bg_status lists registered names."
-            stored_command, stored_desc = rows[0]["command"], rows[0].get("description", "")
-            stored_wake = bool(rows[0]["wake_on_exit"])
+            last = await repo.latest_by_name(name)
+            if last is None:
+                return (f"Error: no process named {name!r} has ever been registered "
+                        "here, so there's no stored command to restart. Start it "
+                        f"with bg_start(name={name!r}, command=...) — if it's a "
+                        "skill's server, use_skill that skill first: its doc has "
+                        "the exact command and health check.")
+            stored_command, stored_desc = last["command"], last.get("description", "")
+            stored_wake = bool(last["wake_on_exit"])
             outcome = "was not running"
         # Re-run the start path with the stored command (bg_start is a Tool
         # instance here, so call through .handler).

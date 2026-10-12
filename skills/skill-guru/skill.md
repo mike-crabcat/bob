@@ -25,7 +25,7 @@ When this skill activates, follow these steps:
    - The exact file paths to create (all under `skills/<skill-name>/`)
    - The content requirements for each file (see File Structure below)
    - That all code must be Python
-   - That the skill directory is `/home/bob/.config/cyborg/harness/skills/<skill-name>/`
+   - That the skill directory is `/home/bob/workspace/skills/<skill-name>/`
    - Any specific APIs, endpoints, or data formats to use
 
 4. **Delegate to Subagent**: Call `create_subagent` with the task description. The subagent (Claude) will:
@@ -53,7 +53,7 @@ If external packages are needed:
 When writing the task for the subagent, include this structure:
 
 ```
-Create a new skill called "<name>" in /home/bob/.config/cyborg/harness/skills/<name>/
+Create a new skill called "<name>" in /home/bob/workspace/skills/<name>/
 
 Purpose: <what the skill does>
 

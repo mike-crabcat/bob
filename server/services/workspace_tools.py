@@ -296,6 +296,26 @@ _INLINE_SLEEP_RE = _re.compile(
     r"(?:^|&&|;|\|\|)\s*sleep\s+([0-9]+(?:\.[0-9]+)?)", _re.MULTILINE)
 
 
+# Service-manager guard (2026-10-13): inside the Landlock sandbox the user
+# systemd bus is unreachable, so systemctl/systemd-run/journalctl fail with
+# an opaque "Failed to connect to bus" — Bob burned five attempts on it
+# restarting aus-legal. Answer with the tools that do work instead.
+_SERVICE_MANAGER_RE = _re.compile(
+    r"(?:^|[;&|(`]|\$\()\s*(?:sudo\s+)?(systemctl|systemd-run|journalctl)\b",
+    _re.MULTILINE)
+
+
+def _service_manager_hint(command: str) -> str | None:
+    m = _SERVICE_MANAGER_RE.search(command)
+    if not m:
+        return None
+    return (f"Error: not run — {m.group(1)} isn't available to you (no access "
+            "to the service manager). Background processes are managed with "
+            "the bg_start / bg_stop / bg_restart / bg_status / bg_logs tools. "
+            "To start or restart a skill's server, use_skill that skill first "
+            "— its doc has the exact bg_start command and health check.")
+
+
 _FILE_HEREDOC_RE = _re.compile(
     r"^(?P<head>.*?)<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)[^\n]*\n"
     r"(?P<body>.*?)^\s*(?P=tag)\s*$", _re.MULTILINE | _re.DOTALL)
@@ -412,6 +432,10 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                 "completion — no sleep timer needed. Register the "
                 f"follow-through first (add_goal(profile='promise') / goal state), then "
                 "END YOUR TURN.")
+        from server.services import bash_sandbox as _bs
+        if _bs.active() and (hint := _service_manager_hint(command)):
+            logger.warning("bash service-manager call redirected: %r", command[:120])
+            return hint
         syntax_error = await bash_syntax_check(command)
         if syntax_error:
             logger.warning("bash blocked by syntax check: %r — %s", command, syntax_error)

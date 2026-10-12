@@ -22,5 +22,5 @@ When a user requests to convert a DOCX file to Markdown:
 
 ```
 # Convert a DOCX file to Markdown
-bash("python skills/docx-to-md/docx_to_md.py /home/bob/.config/cyborg/harness/docs/report.docx /home/bob/.config/cyborg/harness/docs/report.md")
+bash("python skills/docx-to-md/docx_to_md.py scratch/report.docx scratch/report.md")
 ```

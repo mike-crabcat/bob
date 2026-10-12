@@ -123,3 +123,18 @@ async def test_list_filters_by_status(db):
                              systemd_result=None, now_iso=_now())
     running_names = {r["name"] for r in await repo.list(status="running")}
     assert running_names == {"b"}
+
+
+async def test_latest_by_name_finds_old_daemons_beyond_the_list_window(db):
+    """2026-10-13: bg_restart scanned list(limit=50); aus-legal (registered
+    09-20) had fallen out of the window, so restart said 'no process named'."""
+    repo = BgJobsRepository(db)
+    old = await _create(repo, name="aus-legal", command="python old.py")
+    await repo.mark_terminal(old, status="exited", exit_code=0,
+                             systemd_result="success", now_iso=_now())
+    for i in range(60):
+        await _create(repo, name=f"job-{i}", command="true")
+    assert "aus-legal" not in {r["name"] for r in await repo.list(limit=50)}
+    last = await repo.latest_by_name("aus-legal")
+    assert last is not None and last["command"] == "python old.py"
+    assert await repo.latest_by_name("never-registered") is None

@@ -28,10 +28,10 @@ When a user asks you to work with a PDF (download, read, extract text, or summar
 
 ```python
 # Download from URL and extract to scratch/
-bash("python skills/pdf-to-text/pdf_to_text.py https://arxiv.org/abs/2504.13171 --out-dir /home/bob/.config/cyborg/harness/scratch")
+bash("python skills/pdf-to-text/pdf_to_text.py https://arxiv.org/abs/2504.13171 --out-dir scratch")
 
 # Extract from local workspace PDF
-bash("python skills/pdf-to-text/pdf_to_text.py /home/bob/.config/cyborg/harness/docs/paper.pdf --out-dir /home/bob/.config/cyborg/harness/scratch")
+bash("python skills/pdf-to-text/pdf_to_text.py docs/paper.pdf --out-dir scratch")
 ```
 
 ## Error Handling

@@ -15,13 +15,21 @@ interaction, JS rendering, login state, or a screenshot. If a plain fetch alread
 
 ## 1. Ensure the browser is running
 
-Run this before the first browser command in a task (idempotent — takes ~5s when starting):
+Check it's up before the first browser command in a task:
 
 ```bash
-curl -fsS http://127.0.0.1:9223/json/version >/dev/null 2>&1 || setsid nohup /usr/bin/google-chrome --headless=new --remote-debugging-port=9223 --remote-debugging-address=127.0.0.1 --user-data-dir=/home/bob/workspace/browser-profile --no-first-run --disable-dev-shm-usage about:blank >/tmp/bob-chrome.log 2>&1 < /dev/null & sleep 5; curl -fsS http://127.0.0.1:9223/json/version | head -2
+curl -fsS http://127.0.0.1:9223/json/version | head -2
 ```
 
-If the port still doesn't answer after that, check `tail -5 /tmp/bob-chrome.log`.
+If that fails, start Chrome as a **managed background process** (your bash shell can't
+launch Chrome itself — it's sandboxed, and Chrome needs things the sandbox denies):
+
+```
+bg_start(name="bob-chrome",
+         command="/usr/bin/google-chrome --headless=new --remote-debugging-port=9223 --remote-debugging-address=127.0.0.1 --user-data-dir=/home/bob/workspace/browser-profile --no-first-run --disable-dev-shm-usage about:blank")
+```
+
+Wait ~5 s, then re-run the curl. If the port still doesn't answer, `bg_logs(name="bob-chrome")`.
 
 ## 2. Drive it
 
@@ -116,12 +124,12 @@ one Gmail compose took 33 rounds, 7 minutes, and still wasn't sent).
   they bill money and send traffic through Browser Use Cloud. Local browser only.
 - **No recordings** unless the user asks for one.
 - **Tidy up:** `close_tab` tabs you opened once the task is done. Leave Chrome itself running
-  (staying warm is the point); to restart it after a crash: `pkill -f remote-debugging-port=9223`,
-  then run the step-1 snippet again.
+  (staying warm is the point); to restart it after a crash: `bg_restart(name="bob-chrome")` (or `bg_start`
+  as in step 1 if it was never registered).
 - Downloads land in the profile's download dir — prefer scraping text via `js()` instead.
 
 ## 6. Diagnostics
 
 - `browser-use doctor` — install/daemon/browser state
 - `BU_CDP_URL=http://127.0.0.1:9223 browser-use --version` — sanity check
-- Chrome log: `/tmp/bob-chrome.log`; CDP health: `curl -s http://127.0.0.1:9223/json/version`
+- Chrome log: `bg_logs(name="bob-chrome")`; CDP health: `curl -s http://127.0.0.1:9223/json/version`

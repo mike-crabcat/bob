@@ -123,3 +123,21 @@ async def test_unix_socket_connects_are_refused(monkeypatch, world):
         assert "b'x'" in out
     finally:
         srv.close()
+
+
+def test_service_manager_hint_matches_command_positions_only():
+    from server.services.workspace_tools import _service_manager_hint
+    assert _service_manager_hint("systemctl --user start bg-x.service")
+    assert _service_manager_hint("ls; systemd-run --user true")
+    assert _service_manager_hint("journalctl --user -u bob.service | tail")
+    assert "bg_start" in _service_manager_hint("sudo systemctl restart x")
+    # mentions in arguments/files are not calls
+    assert _service_manager_hint("grep systemctl skills/x/skill.md") is None
+    assert _service_manager_hint("echo 'use systemctl'") is None
+
+
+@needs_landlock
+async def test_systemctl_gets_the_bg_tools_hint(monkeypatch, world):
+    monkeypatch.setenv("BOB_BASH_SANDBOX", "landlock")
+    out = await _bash(world.ctx, "systemctl --user start bg-aus-legal.service")
+    assert "bg_start" in out and "use_skill" in out

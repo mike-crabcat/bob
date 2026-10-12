@@ -97,6 +97,15 @@ class BgJobsRepository:
                ORDER BY ended_at""")
         return [dict(r) for r in rows] if rows else []
 
+    async def latest_by_name(self, name: str) -> dict[str, Any] | None:
+        """Most recent row for a name, any status — bg_restart's stored
+        command. (It used to scan list(limit=50); long-lived daemons fell
+        out of that window — aus-legal 2026-10-13.)"""
+        row = await self.db.fetch_one(
+            "SELECT * FROM bg_jobs WHERE name = ? ORDER BY started_at DESC LIMIT 1",
+            (name,))
+        return dict(row) if row else None
+
     async def list(
         self, *, status: str | None = None, limit: int = 50,
     ) -> list[dict[str, Any]]:
