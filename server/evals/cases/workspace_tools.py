@@ -63,9 +63,8 @@ def _garden_log() -> str:
     id="edit_large_file_surgical",
     category="workspace_tools",
     description="A typo deep in a 3,000-line file: Bob finds it and fixes that "
-                "line with an exact edit — no whole-file rewrite.",
-    checks=[Check("any_tool_call", {"tool_names": ["edit_file", "multi_edit"]}),
-            Check("flag", {"key": "fixed"}),
+                "one line — outcome-gated (the rest of the file byte-identical).",
+    checks=[Check("flag", {"key": "fixed"}),
             Check("flag", {"key": "surgical"})],
     rubric=["Bob fixes the typo(s) on the day-1800 entry and says so briefly; "
             "he does not claim changes he didn't make."],
@@ -109,10 +108,9 @@ if __name__ == "__main__":
     id="rename_function_multi_site",
     category="workspace_tools",
     description="Rename a function used in four places in one scratch script — "
-                "Bob does it as exact edits (multi_edit or replace_all), not a "
-                "rewrite, and touches nothing else.",
-    checks=[Check("any_tool_call", {"tool_names": ["edit_file", "multi_edit"]}),
-            Check("flag", {"key": "renamed"}),
+                "every use renamed, nothing else touched (any exact method: "
+                "multi_edit, replace_all, or a sed rename).",
+    checks=[Check("flag", {"key": "renamed"}),
             Check("flag", {"key": "rest_unchanged"})],
     rubric=["Bob renames every use of parse_row to parse_line and confirms "
             "briefly; no other edits."],
@@ -124,3 +122,59 @@ async def rename_function_multi_site(w):
     after = (w.workspace / "scratch/csv_tool.py").read_text()
     w.flag("renamed", "parse_row" not in after and after.count("parse_line") == 4)
     w.flag("rest_unchanged", after == _CSV_TOOL.replace("parse_row", "parse_line"))
+
+
+_DEPLOY_SH = r"""#!/bin/bash
+set -euo pipefail
+
+notify() {
+    local msg="$1"
+    curl -s -X POST "$HOOK_URL" -d "{\"text\": \"${msg}\"}" > /dev/null
+}
+
+backup() {
+    tar czf "/backups/site-$(date +%F).tgz" ./site
+    echo 'Backup done — don\'t forget to rotate'
+}
+
+backup
+notify "deployed"
+"""
+
+_BACKUP_NEW = r"""backup() {
+    local stamp
+    stamp="$(date +%F-%H%M)"
+    tar czf "/backups/site-${stamp}.tgz" ./site
+    find /backups -name 'site-*.tgz' -mtime +14 -delete
+    echo "Backup ${stamp} done; pruned >14d"
+}"""
+
+
+def _old_backup_fn() -> str:
+    start = _DEPLOY_SH.index("backup() {")
+    return _DEPLOY_SH[start:_DEPLOY_SH.index("\n}\n", start) + 2]
+
+
+@eval_case(
+    id="edit_quote_heavy_block",
+    category="workspace_tools",
+    description="Replace a multi-line shell function full of quotes, $vars "
+                "and backslashes — the shape that breaks sed and heredoc "
+                "rewrites. Outcome-gated: the function replaced verbatim, "
+                "everything else byte-identical.",
+    checks=[Check("flag", {"key": "replaced_verbatim"}),
+            Check("flag", {"key": "rest_unchanged"})],
+    rubric=["Bob replaces the backup() function with exactly the provided "
+            "text and confirms briefly; he does not alter notify() or the "
+            "rest of the script."],
+)
+async def edit_quote_heavy_block(w):
+    w.files({"scratch/deploy.sh": _DEPLOY_SH})
+    await w.inbound(
+        "Mike",
+        "In scratch/deploy.sh replace the whole backup() function with exactly "
+        "this, nothing else changed:\n\n" + _BACKUP_NEW)
+    after = (w.workspace / "scratch/deploy.sh").read_text()
+    expected = _DEPLOY_SH.replace(_old_backup_fn(), _BACKUP_NEW)
+    w.flag("replaced_verbatim", _BACKUP_NEW in after and "don\\'t forget" not in after)
+    w.flag("rest_unchanged", after == expected)
