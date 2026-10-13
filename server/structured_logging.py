@@ -22,6 +22,18 @@ from typing import Any
 from server.config import Settings
 
 
+# Credential query params (?secret=, &token=, …) are redacted from every log
+# line (2026-10-13): the dashboard polls /dashboard/api/*?secret=… every 10 s
+# and uvicorn's access log wrote the dashboard secret ~9k times a day.
+_SECRET_PARAM_RE = re.compile(
+    r"([?&](?:secret|token|access_token|api_key|apikey|key|password)=)[^&\s\"']+",
+    re.IGNORECASE)
+
+
+def redact_secrets(text: str) -> str:
+    return _SECRET_PARAM_RE.sub(r"\1[redacted]", text)
+
+
 # Correlation ID context variable (thread-safe for asyncio)
 _correlation_id_context: dict[str, str] = {}
 
@@ -36,7 +48,7 @@ class StructuredFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_secrets(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -51,8 +63,9 @@ class StructuredFormatter(logging.Formatter):
         if record.exc_info:
             log_entry["exception"] = {
                 "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
-                "traceback": self.formatException(record.exc_info),
+                "message": (redact_secrets(str(record.exc_info[1]))
+                            if record.exc_info[1] else None),
+                "traceback": redact_secrets(self.formatException(record.exc_info)),
             }
 
         # Add any extra fields from record
