@@ -154,3 +154,40 @@ def tool(func: Callable[..., Any]) -> Tool:
         required=required,
         handler=func,
     )
+
+
+def argument_error(handler: Callable[..., Any], args: dict[str, Any]) -> str | None:
+    """Explain a call the handler can't accept, or None if it can.
+
+    Models pass arguments a tool doesn't take (``write_routine(valid_from=…)``
+    when the field belongs inside the YAML) or omit required ones; a bare
+    TypeError reads like a crash and was logged as one. This names the
+    offending and the valid arguments so the model can retry correctly.
+    Unknown arguments are rejected, not silently dropped — dropping one can
+    hide what the model meant."""
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return None
+    params = dict(sig.parameters)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        unknown: list[str] = []
+    else:
+        unknown = sorted(k for k in args if k not in params)
+    missing = sorted(
+        n for n, p in params.items()
+        if p.default is inspect.Parameter.empty
+        and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        and n not in args)
+    if not unknown and not missing:
+        return None
+    valid = ", ".join(n for n, p in params.items()
+                      if p.kind not in (inspect.Parameter.VAR_KEYWORD,
+                                        inspect.Parameter.VAR_POSITIONAL)) or "(none)"
+    parts = []
+    if unknown:
+        parts.append(f"no argument{'s' if len(unknown) > 1 else ''} named "
+                     + ", ".join(repr(u) for u in unknown))
+    if missing:
+        parts.append("missing required " + ", ".join(repr(m) for m in missing))
+    return f"{'; '.join(parts)}. Valid arguments: {valid}. Call it again with those."

@@ -1102,6 +1102,10 @@ class RealtimeBridge:
             output = json.dumps({"error": f"unknown tool: {name}"})
         else:
             try:
+                from server.services.tools import argument_error
+                arg_err = argument_error(tool.handler, args)
+                if arg_err:
+                    raise ValueError(f"{name}: {arg_err}")
                 result = await tool.handler(**args)
                 if isinstance(result, ImageInjection):
                     output = result.text

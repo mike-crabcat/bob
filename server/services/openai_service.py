@@ -18,7 +18,7 @@ from server.context import AppContext
 from server.services import model_registry
 from server.services import tool_loop_folding
 from server.services.base import BaseService
-from server.services.tools import ImageInjection, VideoInjection
+from server.services.tools import ImageInjection, VideoInjection, argument_error
 
 try:
     from openai import AsyncOpenAI
@@ -1030,7 +1030,15 @@ class OpenAIService(BaseService):
                     else:
                         try:
                             tool_args = json.loads(fc.arguments)
-                            result = await handler(**tool_args)
+                            arg_err = argument_error(handler, tool_args)
+                            if arg_err:
+                                result = f"Error: {fc.name}: {arg_err}"
+                                logger.warning(
+                                    "Tool call rejected: tool=%s dispatch_id=%s "
+                                    "session_key=%s %s", fc.name, dispatch_id,
+                                    session_key, arg_err)
+                            else:
+                                result = await handler(**tool_args)
                         except Exception as e:
                             result = f"Error: {e}"
                             logger.error(
