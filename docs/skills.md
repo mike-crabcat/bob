@@ -257,6 +257,10 @@ Anything expected to take more than ~10 seconds (image/video generation, browser
 
 **Output handling — do not redirect inside the command.** The job's stdout+stderr are captured automatically to `.bg/logs/<job-<id>.log`, and that file is what the completion wake carries and what `bg_logs <name>` reads. A `> somewhere.log 2>&1` inside the command sends the detail to a place the wake never sees — the job finishes "silently" with an empty log tail (bit a real corpus job on 2026-09-20). Write *artifacts* to files via the script's own flags (`--output path.png`); let ordinary progress output flow to the captured log.
 
+
+### Services a skill depends on → `bg_start(..., keep_alive=True)`
+
+Servers and daemons (radio station, share-files, aus-legal MCP, blackline, frigate-watchd) run under `bg_start`. Pass `keep_alive=True` for anything that must stay up. The exit watcher (`poll_bg_jobs`) then restarts it under the same name and command when it dies, whether it crashed or the machine rebooted (transient units don't survive a reboot). `bg_restart` keeps the flag; `bg_stop` stops it for good. At most 3 starts per name per rolling hour; past that the watcher stops restarting and DMs the owner once with the log tail. Plain `bg_start` without the flag is for one-offs and is never restarted. The flag was added after a reboot on 6 Oct 2026 left frigate-watchd and aus-legal dead for a week unnoticed. `bg_jobs.keep_alive` (migration `022`).
 ---
 
 ## Component Reference

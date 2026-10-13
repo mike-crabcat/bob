@@ -34,19 +34,28 @@ class BgJobsRepository:
         parent_session_key: str,
         log: str,
         now_iso: str,
+        keep_alive: bool = False,
     ) -> int:
         await self.db.execute(
             """INSERT INTO bg_jobs
                (name, unit, mechanism, pid, pid_start_time, command, description,
                 source, status, wake_on_exit, parent_session_key, delivery, log,
-                started_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, '', ?, ?, ?, ?)""",
+                started_at, created_at, updated_at, keep_alive)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, '', ?, ?, ?, ?, ?)""",
             (name, unit, mechanism, pid, pid_start_time, command, description,
              source, int(wake_on_exit), parent_session_key, log,
-             now_iso, now_iso, now_iso))
+             now_iso, now_iso, now_iso, int(keep_alive)))
         row = await self.db.fetch_one(
             "SELECT id FROM bg_jobs WHERE name = ? AND status = 'running'", (name,))
         return int(row["id"]) if row else 0
+
+    async def starts_since(self, name: str, since_iso: str) -> int:
+        """Rows started under ``name`` since ``since_iso`` — the keep-alive
+        restart budget counts these."""
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS n FROM bg_jobs WHERE name = ? AND started_at >= ?",
+            (name, since_iso))
+        return int(row["n"]) if row else 0
 
     async def mark_terminal(
         self, job_id: int, *, status: str, exit_code: int | None,

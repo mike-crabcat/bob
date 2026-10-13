@@ -68,6 +68,9 @@ logger = logging.getLogger(__name__)
 _BG_DIR = ".bg"
 _LOGS_SUBDIR = "logs"
 _MAX_PROCESSES = 24
+# keep-alive daemons: starts per name per rolling hour before the watcher
+# stops restarting and alerts the owner (a crash loop, not a blip).
+_KEEP_ALIVE_MAX_STARTS = 3
 _MAX_LOG_CHARS = 30_000
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _UNIT_PREFIX = "bg-"
@@ -340,6 +343,7 @@ async def _terminate(entry: dict) -> str:
 async def _start_core(
     ctx: AppContext, *, name: str, command: str, description: str,
     wake: bool, ttl_seconds: int, parent_session_key: str, source: str,
+    keep_alive: bool = False,
 ) -> tuple[int | None, str]:
     """Validate + spawn + insert the bg_jobs row. Returns (row_id, message);
     row_id is None on failure with the message explaining why."""
@@ -357,6 +361,9 @@ async def _start_core(
     if violation:
         logger.warning("bg start blocked by sandbox: %r — %s", command, violation)
         return None, f"Error: {violation}"
+    if keep_alive and wake:
+        return None, ("Error: keep_alive is for daemons that should stay up; "
+                      "wake=True is for one-shot jobs that finish. Pick one.")
     if wake and not parent_session_key:
         return None, "Error: wake=True needs a session to wake (no session binding here)."
 
@@ -422,12 +429,15 @@ async def _start_core(
         parent_session_key=parent_session_key,
         log=str(log.relative_to(ws)),
         now_iso=utcnow().isoformat(),
+        keep_alive=keep_alive,
     )
     how = f"unit bg-{name}.service" if mechanism == "systemd" else "setsid"
     tail = (
         " You'll be woken with the output when it finishes; send any artifact then."
         if wake else " bg_status to check, bg_logs for output."
     )
+    if keep_alive:
+        tail += " Keep-alive: restarted automatically if it dies or the machine reboots."
     return job_id, f"Started {name} ({how}, pid {pid}).{tail}"
 
 
@@ -615,12 +625,67 @@ async def poll_bg_jobs(ctx: AppContext) -> None:
             # remains. Both are no-ops on an already-gone unit.
             await _run_cmd(["systemctl", "--user", "stop", row["unit"]])
             await _run_cmd(["systemctl", "--user", "reset-failed", row["unit"]])
+        if row.get("keep_alive") and not row["wake_on_exit"]:
+            await _revive(ctx, row, status=status, result=result)
         if row["wake_on_exit"]:
             await repo.set_delivery(row["id"], "pending", now)
             fresh = await repo.get(row["id"])
             if fresh is not None and await _deliver_exit_wake(ctx, fresh):
                 await repo.set_delivery(row["id"], "delivered", now)
                 logger.info("bg job %s wake delivered", row["name"])
+
+
+async def _revive(ctx: AppContext, row: dict, *, status: str | None,
+                  result: str | None) -> None:
+    """Restart a dead keep-alive daemon under the same name and command —
+    after a crash or a reboot (its transient unit is gone). At most
+    _KEEP_ALIVE_MAX_STARTS starts per name per hour: past that it's a crash
+    loop, so stop restarting and tell the owner once (no running row is
+    left, so the watcher doesn't revisit it)."""
+    repo = BgJobsRepository(ctx.db)
+    name = row["name"]
+    since = (utcnow() - _dt.timedelta(hours=1)).isoformat()
+    starts = await repo.starts_since(name, since)
+    why = f"{status or 'exited'}: {result or 'unknown'}"
+    if starts >= _KEEP_ALIVE_MAX_STARTS:
+        logger.warning("bg keep-alive: %s died again (%s) — %d starts in the last "
+                       "hour, giving up", name, why, starts)
+        await _alert_owner(ctx, row, f"{name} keeps dying ({starts} starts in the "
+                           f"last hour, last {why}). I've stopped restarting it.")
+        return
+    job_id, message = await _start_core(
+        ctx, name=name, command=row["command"],
+        description=row.get("description") or "", wake=False, ttl_seconds=0,
+        parent_session_key=row.get("parent_session_key") or "",
+        source=row.get("source") or "bg_start", keep_alive=True)
+    if job_id is None:
+        logger.warning("bg keep-alive: restart of %s failed: %s", name, message)
+        await _alert_owner(ctx, row, f"{name} died ({why}) and the automatic "
+                           f"restart failed: {message.removeprefix('Error: ')}")
+        return
+    logger.warning("bg keep-alive: %s died (%s) — restarted (job %s)", name, why, job_id)
+
+
+async def _alert_owner(ctx: AppContext, row: dict, headline: str) -> None:
+    from server.services.effects import emit_and_deliver
+    from server.services.steering import owner_contact
+    try:
+        owner = await owner_contact(ctx)
+        phone = "".join(ch for ch in str((owner or {}).get("phone_number") or "")
+                        if ch.isdigit())
+        if not phone:
+            logger.warning("bg keep-alive alert for %s: no owner phone", row["name"])
+            return
+        ws = ctx.settings.harness.workspace_dir.expanduser().resolve()
+        tail = _tail_file(ws / row["log"], 8) if row.get("log") else ""
+        text = f"⚠️ Background service down: {headline}"
+        if tail:
+            text += f"\n\nLast log lines:\n{tail[-1200:]}"
+        await emit_and_deliver(
+            ctx, kind="whatsapp_send", idempotency_key=f"bg_keep_alive:{row['id']}",
+            payload={"chat_id": f"{phone}@s.whatsapp.net", "text": text})
+    except Exception:
+        logger.exception("bg keep-alive alert failed for %s", row["name"])
 
 
 async def bg_wake_loop(ctx: AppContext, stop_event: asyncio.Event) -> None:
@@ -711,6 +776,7 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
         wake: bool = False,
         ttl: int = 0,
         goal_id: str = "",
+        keep_alive: bool = False,
     ) -> str:
         """Start a background process (server, watcher, daemon — or a one-shot
         job) that keeps running across tool calls AND bob-server restarts.
@@ -730,12 +796,17 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
         Example: bg_start(name="bob-fm", command="python3 skills/radio/station.py")
         Example: bg_start(name="render", command="python skills/…", wake=True)
 
+        keep_alive=True for a SERVICE that must stay up (servers, watchers,
+        daemons a skill depends on): if it dies or the machine reboots it is
+        restarted automatically, and Mike is alerted if it keeps dying.
+        bg_stop still stops it for good. Not for one-shot jobs.
+
         goal_id= links the process to the goal it serves (implicit inside a
         goal room) so the goal's state lists it."""
         job_id, message = await _start_core(
             ctx, name=name, command=command, description=description,
             wake=wake, ttl_seconds=ttl, parent_session_key=session_key,
-            source="bg_start",
+            source="bg_start", keep_alive=keep_alive,
         )
         if job_id:
             from server.services.goal_links import link_mechanism
@@ -784,6 +855,8 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
                 extras.append(f"exit {r['exit_code']}")
             if r.get("wake_on_exit") and r["status"] == "running":
                 extras.append("wake-on-exit")
+            if r.get("keep_alive"):
+                extras.append("keep-alive")
             if r.get("delivery") == "pending":
                 extras.append("WAKE OWED")
             up = ""
@@ -842,9 +915,11 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
         repo = BgJobsRepository(ctx.db)
         row = await repo.get_running_by_name(name)
         stored_command = stored_desc = stored_wake = None
+        stored_keep = False
         if row is not None:
             stored_command, stored_desc = row["command"], row.get("description", "")
             stored_wake = bool(row["wake_on_exit"])
+            stored_keep = bool(row.get("keep_alive"))
             outcome = await _terminate(row)
             await repo.mark_replaced(row["id"], utcnow().isoformat())
         else:
@@ -857,10 +932,12 @@ def make_process_tools(ctx: AppContext, session_key: str = ""):
                         "the exact command and health check.")
             stored_command, stored_desc = last["command"], last.get("description", "")
             stored_wake = bool(last["wake_on_exit"])
+            stored_keep = bool(last.get("keep_alive"))
             outcome = "was not running"
         # Re-run the start path with the stored command (bg_start is a Tool
         # instance here, so call through .handler).
-        result = await bg_start.handler(name, stored_command, stored_desc, stored_wake, 0)
+        result = await bg_start.handler(name, stored_command, stored_desc, stored_wake, 0,
+                                        keep_alive=stored_keep)
         return f"stopped ({outcome}); {result}"
 
     return [bg_start, bg_status, bg_logs, bg_stop, bg_restart]
