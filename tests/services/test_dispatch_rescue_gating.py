@@ -540,3 +540,23 @@ async def test_failed_lookup_triggers_one_retry(ctx, db, monkeypatch, stub_histo
     await DispatchRunner(ctx).run(_spec(key, send_tool))
     assert len(calls) == 2
     assert send_tool.delivered == ["The weather lookup failed — I'll try the BOM site next."]
+
+
+async def test_caption_restated_as_final_text_not_delivered(
+        ctx, db, stub_llm, stub_history):
+    """Media captions are recorded as "[Image: caption]"; a final text that
+    restates a caption verbatim is a repeat (2026-10-13 guard channel)."""
+    key = "test:final:caption-repeat"
+    svc = SessionService(ctx)
+    await svc.add_message(key, "user", "show a pic", dispatched=0)
+    caption = "21:30 garage — the guy beside the car with the bag (reads as you)"
+    send_tool = _FakeSendTool("send_whatsapp_message")
+    spec = _spec(key, send_tool)
+    spec.message_was_sent[0] = True
+    spec.sent_texts.append(f"[Image: {caption}]")
+    stub_llm["reply"] = caption + " — plus the 21:09 side-passage shot, a blur in IR."
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == [], "a restated caption is not a new reply"
+

@@ -30,6 +30,9 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+_MEDIA_WRAPPER_RE = re.compile(r"\[Image: (.*)\]", re.DOTALL)
+
+
 def _norm_repeat(final_norm: str, sent: str) -> bool:
     """Transition duplicate guard (2026-10-01): True when the turn's final
     text is a verbatim repeat of a text it already sent through the tool —
@@ -37,6 +40,12 @@ def _norm_repeat(final_norm: str, sent: str) -> bool:
     everything). Paraphrased repeats deliberately pass; the battery and
     the watch list own those."""
     sent_norm = " ".join((sent or "").split())
+    # Media sends are recorded as "[Image: <caption>]" — compare the caption
+    # itself (2026-10-13 guard channel: the final text restated a caption
+    # verbatim and the bracket wrapper defeated containment).
+    m = _MEDIA_WRAPPER_RE.fullmatch(sent_norm)
+    if m:
+        sent_norm = m.group(1).strip()
     if len(sent_norm) < 40 or len(final_norm) < 40:
         return False
     return final_norm in sent_norm or sent_norm in final_norm

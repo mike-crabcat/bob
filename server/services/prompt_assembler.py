@@ -1074,18 +1074,27 @@ async def _conversational_window(
 
 def _collapse_run(run: list[dict]) -> list[dict]:
     """Newest bookkeeping row kept verbatim; the rest of the run becomes a
-    single count marker (id-less synthetic row)."""
+    single count marker (id-less synthetic row).
+
+    Assistant rows (a detached turn's bg_send) are never folded: they are
+    what Bob actually said in the chat. 2026-10-13 guard channel: a
+    placeholder + the delivered picture + a camera report formed a run of
+    three, the picture folded into the marker, and the report's turn saw
+    Mike's "Show a pic" unanswered and sent the pictures again."""
     if len(run) <= 2:
         return run
-    head = run[-1:]
+    keep = [r for r in run[:-1] if r.get("role") == "assistant"] + run[-1:]
+    folded = [r for r in run[:-1] if r.get("role") != "assistant"]
+    if len(folded) <= 1:
+        return run
     kinds = ", ".join(sorted({
-        (r.get("provenance") or "notice") for r in run[:-1]}))
+        (r.get("provenance") or "notice") for r in folded}))
     marker = {
-        "id": f"collapsed-{run[0]['id'][:8]}",
+        "id": f"collapsed-{folded[0]['id'][:8]}",
         "role": "user",
-        "content": (f"[{len(run) - 1} earlier bookkeeping event(s) collapsed: "
+        "content": (f"[{len(folded)} earlier bookkeeping event(s) collapsed: "
                     f"{kinds} — full rows remain in the record]"),
-        "created_at": run[0]["created_at"],
+        "created_at": folded[0]["created_at"],
         "provenance": "collapsed_bookkeeping",
         "metadata": None, "dispatched": 1, "synthetic": 1,
         # Shape parity with real rows: the marker has role "user", so the
@@ -1093,5 +1102,5 @@ def _collapse_run(run: list[dict]) -> list[dict]:
         # every group dispatch with a collapsed run crashed).
         "sender_id": None, "tool_blocks_json": None,
     }
-    return [marker] + head
+    return [marker] + keep
 
