@@ -1570,8 +1570,18 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         rows = await HistoryRepository(self.db).undispatched_conversations(
             channel="whatsapp")
         resumed = 0
+        from server.repositories.conversations import ConversationRepository
         for session_key in rows:
             try:
+                route = await ConversationRepository(self.db).route_for(session_key)
+                if not route or not route["is_active"]:
+                    # Undeliverable forever (no address) — retire, don't re-warn
+                    # at every boot (2026-10-13: a 16 Sep goal-room report to a
+                    # mistyped DM key warned on each restart for four weeks).
+                    n = await HistoryRepository(self.db).retire_undispatched(session_key)
+                    logger.warning("recovery: %s has no active route — retired %s "
+                                   "undeliverable pending row(s)", session_key, n)
+                    continue
                 await self.wake_session(session_key)
                 resumed += 1
                 logger.info("recovery: re-armed dispatch for %s", session_key)

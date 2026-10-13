@@ -516,6 +516,16 @@ class HistoryRepository:
             f"UPDATE messages SET dispatched = 0 WHERE id IN ({placeholders})",
             tuple(message_ids))
 
+    async def retire_undispatched(self, session_key: str) -> int:
+        """Mark a session's pending user rows dispatched without a turn —
+        crash recovery for sessions with no route (e.g. a wake addressed to
+        a mistyped DM key), whose rows could otherwise never be claimed and
+        re-warn at every boot."""
+        return await self.db.execute(
+            "UPDATE messages SET dispatched = 1 "
+            "WHERE role = 'user' AND dispatched = 0 AND conversation_id = ?",
+            (session_key,))
+
     async def restore_messages_for_turn(self, turn_id: str) -> int:
         """Restore dispatch claims held by a (zombie) turn so a retry has
         something to claim. Joins turn_events/event_log read-only to find
