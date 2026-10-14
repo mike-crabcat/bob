@@ -307,7 +307,6 @@ def memory_cleanup_contacts(
 
 async def _memory_cleanup_contacts(dry_run: bool) -> None:
     from server.config import Settings
-    from server.context import AppContext
     from server.database import Database
     from server.services.memory.cleanup import run_cleanup, build_renaming_map
     from server.services.memory.contact_directory import ContactDirectory
@@ -319,8 +318,6 @@ async def _memory_cleanup_contacts(dry_run: bool) -> None:
     await db.connect()
 
     try:
-        workspace = settings.harness.workspace_dir
-        memory_dir = workspace / "memory"
         directory = await ContactDirectory.load(db)
 
         typer.echo(f"Loaded {len(directory.all_canonical_ids())} contacts from DB")

@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from server.context import AppContext
 from server.services.base import BaseService, utcnow
 
 logger = logging.getLogger(__name__)
@@ -269,7 +268,6 @@ class SkillDeveloperService(BaseService):
         await self._publish_event(delegation_id, "completed")
 
         # Clear skill loader cache so new skills appear
-        from server.services.skill_loader import _skills_cache
         import server.services.skill_loader as sl
         sl._skills_cache = None
 

@@ -13,7 +13,6 @@ from typing import Any
 from uuid import uuid4
 
 from server.context import AppContext
-from server.database import Database
 from server.services.base import BaseService, json_dumps, json_loads, utcnow
 
 
@@ -245,12 +244,11 @@ class WebhookService(BaseService):
     async def delete_config(self, config_id: str) -> bool:
         """Soft-delete a webhook configuration."""
         now = utcnow().isoformat()
-        result = await self.db.execute(
+        await self.db.execute(
             "UPDATE webhook_configs SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
             (now, now, config_id),
         )
-        # Note: aiosqlite execute doesn't return rowcount directly
-        # We check if the config still exists
+        # execute() returns no rowcount; confirm via a re-read.
         row = await self.db.fetch_one(
             "SELECT id FROM webhook_configs WHERE id = ? AND deleted_at IS NULL",
             (config_id,),

@@ -281,8 +281,8 @@ def _unwrapped(fn: Any) -> Any:
 def _install_effect_executors() -> None:
     # Import the modules that register real executors at import time FIRST,
     # so ours are registered last and win.
-    import server.services.email_tools  # noqa: F401
-    import server.services.subagent_service  # noqa: F401
+    import server.services.email_tools  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    import server.services.subagent_service  # noqa: F401  # pyright: ignore[reportUnusedImport]
     from server.services import effects as effects_svc
 
     def real(kind: str) -> Any:

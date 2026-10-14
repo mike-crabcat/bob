@@ -9,8 +9,6 @@ from datetime import datetime
 from typing import Any
 
 from server.services.memory.claim_types import (
-    get_all_keys,
-    build_extraction_prompt_section,
     ENTITY_TYPE_REGISTRY,
     render_entity,
 )
@@ -300,11 +298,6 @@ def _row_to_claim(row: dict) -> Claim:
     )
 
 
-def _name_to_slug(name: str) -> str:
-    """Convert a person name to a slug: lowercase, hyphens, alphanumeric only."""
-    return re.sub(r"[^a-z0-9\-]", "", name.strip().lower().replace(" ", "-"))
-
-
 # Values that are never valid as file_path — too vague to locate a real file
 _INVALID_PATH_VALUES: frozenset[str] = frozenset({
     "", "workspace", "project", "root", "project root", "workspace root",
@@ -369,7 +362,7 @@ def _is_valid_file_path(path: str) -> bool:
     return False
 
 
-def _invalid_file_entities(
+def invalid_file_entities(
     missing_path_ids: set[str],
     path_values: dict[str, str],
 ) -> set[str]:
@@ -381,52 +374,6 @@ def _invalid_file_entities(
     return invalid
 
 _ENTITY_TYPE_PREFIXES = tuple(ENTITY_TYPE_REGISTRY.keys())
-_ENTITY_COLON_RE = re.compile(r"^(" + "|".join(_ENTITY_TYPE_PREFIXES) + r"):(.+)$")
-
-
-def _normalize_one_entity_id(val: str) -> str:
-    """Fix colon-separated entity IDs to use hyphens: file:foo -> file-foo."""
-    # Fix double prefixes: person-person-xxx -> person-xxx
-    for prefix in _ENTITY_TYPE_PREFIXES:
-        double = f"{prefix}-{prefix}-"
-        if val.startswith(double):
-            new_id = val[len(prefix) + 1:]
-            logger.info("Fixing double prefix: %s -> %s", val, new_id)
-            return new_id
-
-    m = _ENTITY_COLON_RE.match(val)
-    if m:
-        prefix = m.group(1)
-        rest = m.group(2).strip()
-        if prefix == "person":
-            if rest.startswith("new:"):
-                return val  # Let _resolve_new_persons handle person:new:Name
-            slug = _name_to_slug(rest)
-            new_id = f"person-{slug}"
-            logger.info("Normalizing entity ID: %s -> %s", val, new_id)
-            return new_id
-        rest = rest.lower().replace(" ", "-")
-        if rest.startswith("new:"):
-            rest = rest[4:]
-        rest = re.sub(r"[^a-z0-9\-]", "", rest)
-        new_id = f"{prefix}-{rest}"
-        logger.info("Normalizing entity ID: %s -> %s", val, new_id)
-        return new_id
-    return val
-
-
-def _normalize_entity_ids(claims: list[Claim]) -> None:
-    """Normalize non-canonical entity IDs (colon-based, :new: prefixes, double prefixes)."""
-    for claim in claims:
-        for attr in ("subject_id", "object_id"):
-            val = getattr(claim, attr)
-            if not isinstance(val, str):
-                continue
-            normalized = _normalize_one_entity_id(val)
-            if normalized != val:
-                setattr(claim, attr, normalized)
-
-
 _NON_PERSON_WORDS = frozenset({
     "subagent", "bot", "assistant", "agent", "ai", "claude", "gpt", "llm", "bob",
     "system", "tool", "service", "whatsapp", "telegram", "slack", "email", "sms",
@@ -439,54 +386,6 @@ _NON_PERSON_WORDS = frozenset({
     "someone", "skill", "call", "outbound", "phone", "system", "setup",
     "test", "fresh", "agents", "instructions", "generated-images",
 })
-
-
-def _looks_like_person(name: str) -> bool:
-    """Heuristic check: does this name look like a real human person?"""
-    name = name.strip()
-    if not name or len(name) < 2:
-        return False
-    if not re.search(r"[a-zA-Z]", name):
-        return False
-    if any(c in name for c in ("/", "\\", "http", ".com", ".org", ".io", "_", "://")):
-        return False
-    if len(name) > 40:
-        return False
-    if len(name.split()) > 4:
-        return False
-    words = name.lower().split()
-    if any(w in _NON_PERSON_WORDS for w in words):
-        return False
-    if re.match(r"^\+?\d{5,}$", name):
-        return False
-    if re.match(r"^.*@.*\.\w+$", name):
-        return False
-    if len(words) >= 3 and name == name.lower():
-        return False
-    return True
-
-
-def _resolve_new_persons(claims: list[Claim]) -> None:
-    """Resolve person:new:{Name} markers to slug-based person IDs."""
-    for claim in claims:
-        for attr in ("subject_id", "object_id"):
-            val = getattr(claim, attr)
-            if not isinstance(val, str) or not val.startswith(("person-", "person:")):
-                continue
-
-            m = _NEW_PERSON_RE.match(val)
-            if not m:
-                m = _NEW_PERSON_ALT_RE.match(val)
-            if m:
-                name = m.group(1).strip()
-                if not _looks_like_person(name):
-                    logger.warning("Skipping non-person name: %s", name)
-                    setattr(claim, attr, None)
-                    continue
-                slug = _name_to_slug(name)
-                new_id = f"person-{slug}"
-                logger.info("Resolving new person: %s -> %s", val, new_id)
-                setattr(claim, attr, new_id)
 
 
 async def update_entity_fts(db: Any, entity_id: str) -> None:

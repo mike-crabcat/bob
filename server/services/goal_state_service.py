@@ -23,15 +23,12 @@ wake instead of dropping the stimulus.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from server.context import AppContext
 
 logger = logging.getLogger(__name__)
 

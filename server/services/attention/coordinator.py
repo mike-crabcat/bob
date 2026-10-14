@@ -328,8 +328,8 @@ class AttentionCoordinator:
             if not path.is_file():
                 logger.info("attention: reaction clip missing: %s", path)
                 return
-            from server.services.whatsapp_bridge_service._media import _prepare_media
-            prepared = await _prepare_media(str(path))
+            from server.services.whatsapp_bridge_service._media import prepare_media
+            prepared = await prepare_media(str(path))
             if prepared is None:
                 logger.warning("attention: reaction prep failed for %s", clip)
                 return

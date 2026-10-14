@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 
 from server.database import Database
-from server.services.base import iso_utc
 
 logger = logging.getLogger(__name__)
 

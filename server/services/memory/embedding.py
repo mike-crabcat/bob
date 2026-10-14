@@ -66,7 +66,7 @@ def _pack_embedding(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-def _unpack_embedding(blob: bytes) -> list[float]:
+def unpack_embedding(blob: bytes) -> list[float]:
     """Unpack bytes back to float vector."""
     count = len(blob) // 4
     return list(struct.unpack(f"{count}f", blob))

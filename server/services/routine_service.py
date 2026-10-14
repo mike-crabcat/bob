@@ -96,7 +96,7 @@ def _format_routine_now(row: dict[str, Any]) -> str:
     return f"[Routine local time: {now_local.strftime('%A %d %B %Y, %H:%M')} {tz_label}]"
 
 
-def _outside_validity_window(row: dict[str, Any]) -> bool:
+def outside_validity_window(row: dict[str, Any]) -> bool:
     """True if 'now' in the routine's tz falls outside [valid_from, valid_until].
 
     Bounds are inclusive. Date-only upper bounds extend to end-of-day in the
@@ -402,7 +402,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
                 sent["seq"] += 1
                 if media_path:
                     from server.services.whatsapp_bridge_service._media import (
-                        _prepare_media,
+                        prepare_media,
                         resolve_sendable_media,
                     )
 
@@ -410,7 +410,7 @@ async def fire_routine(ctx: Any, routine: dict[str, Any]) -> None:
                         settings.harness.workspace_dir, media_path)
                     if isinstance(resolved, str):
                         return resolved
-                    prepared = await _prepare_media(str(resolved))
+                    prepared = await prepare_media(str(resolved))
                     if prepared is None:
                         return "Error: failed to prepare media for sending"
                     result = await emit_and_deliver(

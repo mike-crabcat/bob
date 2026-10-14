@@ -472,7 +472,7 @@ async def _unit_state(unit: str) -> dict[str, str]:
     canonical order, not request order — parse the Prop=value lines by key,
     never by position (the positional version read ExecMainStatus as Result
     and called clean exits failed)."""
-    rc, out = await _run_cmd([
+    _, out = await _run_cmd([
         "systemctl", "--user", "show", unit,
         "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
         "-p", "Result", "-p", "ExecMainStatus",

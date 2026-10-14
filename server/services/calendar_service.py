@@ -8,7 +8,6 @@ from uuid import uuid4
 from aiosqlite import Connection
 
 from server.context import AppContext
-from server.database import Database
 from server.exceptions import NotFoundError
 from server.models import (
     CalendarCreate,

@@ -30,14 +30,11 @@ batches recorded while it is off are not routed later.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any
-from uuid import uuid4
 
 from server.context import AppContext
-from server.services.llm_json import parse_llm_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -287,41 +284,6 @@ async def person_entity_for_name(db: Any, display_name: str) -> str | None:
 # Candidate matching + delivery (plan §2.3)
 # ---------------------------------------------------------------------------
 
-async def _candidate_goals(
-    db: Any, cid: str, entity_ids: list[str],
-) -> list[tuple[str, str]]:
-    """(goal_id, match_type) candidates. Strong matches (ref, mention) skip
-    the probe; participant overlap is weak and probed. The originating
-    conversation is excluded from holder-based matching (echo suppression).
-    Cross-domain reads go through the owning repositories."""
-    from server.repositories.goals import GoalRepository
-
-    repo = GoalRepository(db)
-    candidates: dict[str, str] = {}
-
-    if entity_ids:
-        for gid in await repo.active_goal_ids_referencing_entities(entity_ids):
-            candidates[gid] = "ref"
-
-        # Conversations that discussed these entities (memory-owned index),
-        # then goals held by them.
-        marks = ",".join("?" for _ in entity_ids)
-        mention_rows = await db.fetch_all(
-            f"SELECT DISTINCT conversation_id FROM memory_entity_mentions "
-            f"WHERE entity_id IN ({marks})", tuple(entity_ids))
-        mention_convs = [r["conversation_id"] for r in mention_rows or []]
-        for gid in await repo.active_goal_ids_held_by_conversations(
-                mention_convs, exclude_conversation_id=cid):
-            candidates.setdefault(gid, "mention")
-
-    overlap_convs = await _participant_overlapping_conversations(db, cid)
-    for gid in await repo.active_goal_ids_held_by_conversations(
-            overlap_convs, exclude_conversation_id=cid):
-        candidates.setdefault(gid, "participant")
-
-    return list(candidates.items())
-
-
 _PROBE_SYSTEM = """\
 You decide whether newly extracted memory facts are relevant to an active plan.
 Given the plan's objective and current state, and the new facts, answer
@@ -330,76 +292,6 @@ actions (attendance, availability, preferences, cancellations, venue facts,
 sizes, approvals…). Answer IGNORE only if the facts are clearly unrelated to
 the plan. When unsure, answer RELEVANT — a wrong IGNORE loses information
 silently. Respond with ONLY a JSON object: {"verdict": "RELEVANT"|"IGNORE"}"""
-
-
-async def _probe_relevance(ctx: AppContext, goal: dict[str, Any],
-                           facts: str) -> str:
-    """Cheap relevance gate for claim→goal delivery (all match tiers since
-    2026-09-10). Fails open to 'relevant' on any error (plan §2.3
-    asymmetry)."""
-    try:
-        from server.services.llm_dispatch import LLMDispatchService
-        from server.services.goal_state_service import parse_strategy, render_strategy
-
-        state_summary = render_strategy(parse_strategy(goal))
-        result = await LLMDispatchService(ctx).prompt(
-            [{"role": "system", "content": _PROBE_SYSTEM},
-             {"role": "user", "content":
-              f"# Plan\n{goal['objective']}\n\n# Current state\n"
-              f"{state_summary or '(none)'}\n\n# New facts\n{facts}"}],
-            model=ctx.settings.goals.reviser_model
-                or ctx.settings.openai.get_memory_model(),
-            temperature=0.0,
-            # Headroom for low-effort reasoning — the verdict itself is ~16
-            # tokens, but thinking models spend reasoning from the same
-            # budget and 60 left none (empty output, fail-open).
-            max_tokens=300,
-            reasoning_effort="low",
-            call_category="claim_router_probe",
-            session_key=goal["conversation_id"],
-        )
-        # GLM intermittently answers with prose or truncated JSON instead of
-        # the requested bare object — rescue-parse before failing open.
-        verdict = parse_llm_verdict(result, {"RELEVANT": "relevant", "IGNORE": "ignore"})
-        return verdict or "relevant"
-    except Exception:
-        logger.warning("claim router probe failed; failing open to relevant",
-                       exc_info=True)
-        return "error"  # caller treats error as relevant (fail open), logged distinctly
-
-
-async def _render_stimulus(
-    db: Any, session_key: str, cid: str, batch: dict[str, Any],
-) -> str:
-    from server.repositories.conversations import ConversationRepository
-    lines = [f"New memory extracted from conversation `{session_key}`:"]
-    display = await _entity_display_names(db, batch["entity_ids"])
-    for c in batch["claims"]:
-        if c["object_id"]:
-            val = f"→ {c['object_id']}" + (
-                f" ({display[c['object_id']]})" if display.get(c["object_id"]) else "")
-        else:
-            val = f"= {c['value']}"
-        subj = c["subject_id"] + (
-            f" ({display[c['subject_id']]})" if display.get(c["subject_id"]) else "")
-        lines.append(f"- {subj}: {c['claim_type_key']} {val}")
-
-    conv = await ConversationRepository(db).get(cid)
-    if conv and conv.get("kind") == "dm":
-        lines.append(
-            "Note: these facts were said in a private DM — mark them "
-            "private_source and never repeat them verbatim into group messages.")
-    return "\n".join(lines)
-
-
-async def _entity_display_names(db: Any, entity_ids: list[str]) -> dict[str, str]:
-    if not entity_ids:
-        return {}
-    marks = ",".join("?" for _ in entity_ids)
-    rows = await db.fetch_all(
-        f"SELECT entity_id, display_name FROM memory_entities "
-        f"WHERE entity_id IN ({marks})", tuple(entity_ids))
-    return {r["entity_id"]: r["display_name"] for r in rows or []}
 
 
 async def recent_routing_log(db: Any, *, limit: int = 50) -> list[dict[str, Any]]:

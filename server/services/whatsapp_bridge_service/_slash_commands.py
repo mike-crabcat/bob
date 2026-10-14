@@ -6,11 +6,8 @@ and other instance state from the host class.
 
 from __future__ import annotations
 
-import json
 import logging
 
-from server.services.base import utcnow
-from server.services.whatsapp_bridge_service._media import _format_created_at  # noqa: F401 — re-exported via __init__
 
 
 logger = logging.getLogger(__name__)

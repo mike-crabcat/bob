@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
 from uuid import uuid4
 
 from server.services.base import utcnow
 from server.services.dispatch_runner import is_no_reply
-from server.services.whatsapp_bridge_service._media import _jid_to_phone
+from server.services.whatsapp_bridge_service._media import jid_to_phone
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +51,7 @@ class GroupEventsMixin:
         seen_contact_ids: set[str] = set()
         for p in participants:
             p_jid = p.get("jid", "")
-            phone_number = _jid_to_phone(p_jid)
+            phone_number = jid_to_phone(p_jid)
             display_name = p.get("display_name", "")
             is_admin = 1 if p.get("is_admin") else 0
             is_super_admin = 1 if p.get("is_super_admin") else 0
@@ -77,7 +76,7 @@ class GroupEventsMixin:
         participants_repo = ParticipantRepository(self.db)
         for p in participants:
             p_jid = p.get("jid", "")
-            phone_number = _jid_to_phone(p_jid)
+            phone_number = jid_to_phone(p_jid)
             display_name = p.get("display_name", "")
             contact = await self._contacts().get_by_phone(phone_number)
             if not contact:
@@ -122,7 +121,7 @@ class GroupEventsMixin:
 
         join_names: list[str] = []
         for jid in joined_jids:
-            phone_number = _jid_to_phone(jid)
+            phone_number = jid_to_phone(jid)
             # Try to get a display name from existing participants or contacts
             display_name = ""
             existing = await self._contacts().get_by_phone(phone_number)
@@ -148,7 +147,7 @@ class GroupEventsMixin:
 
         leave_names: list[str] = []
         for jid in left_jids:
-            phone_number = _jid_to_phone(jid)
+            phone_number = jid_to_phone(jid)
             existing_contact = await self._contacts().get_by_phone(phone_number)
             if existing_contact:
                 leave_names.append(existing_contact["name"] or phone_number)
@@ -157,7 +156,7 @@ class GroupEventsMixin:
                 leave_names.append(phone_number)
 
         # Update member count
-        member_count = await groups.refresh_member_count(group_id, now_iso)
+        await groups.refresh_member_count(group_id, now_iso)
 
         # Build notification text
         notification_parts = []
@@ -170,7 +169,7 @@ class GroupEventsMixin:
         # Resolve sender name
         sender_name = ""
         if sender_jid:
-            sender_phone = _jid_to_phone(sender_jid)
+            sender_phone = jid_to_phone(sender_jid)
             sender_contact = await self._contacts().get_by_phone(sender_phone)
             if sender_contact:
                 sender_name = sender_contact["name"]
@@ -240,7 +239,6 @@ class GroupEventsMixin:
         )
 
         # Build tools
-        from server.services.llm_dispatch import LLMDispatchService
         from server.services.tools import Tool
         from server.services.tool_registry import build_common_tools
         from server.services.group_tools import make_group_tools
@@ -248,7 +246,6 @@ class GroupEventsMixin:
         tools = build_common_tools(self.ctx, session_key=session_key, is_trusted=is_trusted, contact_id=route["contact_id"] if route else None)
         tools.extend(make_group_tools(self.ctx, session_key=session_key))
 
-        wa_service = self
         chat_id = group_jid
         message_was_sent = [False]
         sent_texts: list[str] = []
@@ -269,7 +266,7 @@ class GroupEventsMixin:
             send_seq[0] += 1
             if media_path:
                 from server.services.whatsapp_bridge_service._media import (
-                    _prepare_media,
+                    prepare_media,
                     resolve_sendable_media,
                 )
 
@@ -277,7 +274,7 @@ class GroupEventsMixin:
                     settings.harness.workspace_dir, media_path)
                 if isinstance(resolved, str):
                     return resolved
-                prepared = await _prepare_media(str(resolved))
+                prepared = await prepare_media(str(resolved))
                 if prepared is None:
                     return "Error: failed to prepare media for sending"
                 result = await emit_and_deliver(

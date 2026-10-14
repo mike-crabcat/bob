@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -11,7 +10,6 @@ from uuid import uuid4
 
 from server.services.base import local_iso
 from server.services.tools import tool
-from server.services.openai_service import strip_citation_markers
 
 if TYPE_CHECKING:
     from server.context import AppContext
@@ -33,7 +31,6 @@ _group_send_times: dict[str, list[float]] = {}
 
 
 def _group_send_allowed(group_key: str, now: float) -> bool:
-    import time
 
     recent = [t for t in _group_send_times.get(group_key, [])
               if now - t < _GROUP_SEND_HOURS * 3600]
@@ -67,13 +64,13 @@ async def _deliver_group_send(
     prepared_media: str | None = None
     if media_path:
         from server.services.whatsapp_bridge_service._media import (
-            _prepare_media, resolve_sendable_media,
+            prepare_media, resolve_sendable_media,
         )
         resolved = resolve_sendable_media(
             ctx.settings.harness.workspace_dir, media_path)
         if isinstance(resolved, str):
             return {"ok": False, "error": resolved}
-        prepared_media = await _prepare_media(str(resolved))
+        prepared_media = await prepare_media(str(resolved))
         if prepared_media is None:
             return {"ok": False, "error": "failed to prepare media for sending"}
 
@@ -294,14 +291,14 @@ def make_whatsapp_outreach_tools(
         # Convert phone to JID and send
         jid = _phone_to_jid(phone)
         if media_path:
-            from server.services.whatsapp_bridge_service import _prepare_media
+            from server.services.whatsapp_bridge_service import prepare_media
             workspace = ctx.settings.harness.workspace_dir.expanduser().resolve()
             resolved = (workspace / media_path).resolve()
             if not str(resolved).startswith(str(workspace)):
                 return json.dumps({"ok": False, "error": "Media path escapes workspace"})
             if not resolved.is_file():
                 return json.dumps({"ok": False, "error": f"Media file not found: {media_path}"})
-            prepared = await _prepare_media(str(resolved))
+            prepared = await prepare_media(str(resolved))
             if prepared is None:
                 return json.dumps({"ok": False, "error": "Failed to prepare media for sending"})
             kind, payload = "whatsapp_send_media", {
@@ -348,7 +345,6 @@ def make_whatsapp_outreach_tools(
         # seeding) rides register_task's steer. 24h due = the outreach
         # resurface cadence (task default is 1h; humans answer slower).
         # BOB_OUTREACH_VIA_TASKS=off = legacy outreach-goal path.
-        goal_id = None
         import os as _os
         via_tasks = _os.getenv("BOB_OUTREACH_VIA_TASKS", "on").strip().lower() \
             not in ("off", "0", "false", "no")
@@ -380,7 +376,7 @@ def make_whatsapp_outreach_tools(
                     "two-sided question is easy to misread. Achieve this "
                     "objective through the conversation with "
                     f"{contact['name']}.")
-                task = await register_task(
+                await register_task(
                     ctx, waiter_session=current_session_key,
                     title=f"Outreach: {objective[:120]}",
                     instruction=instruction,
@@ -391,7 +387,6 @@ def make_whatsapp_outreach_tools(
                         "contact_id": contact["id"],
                         "requestor": requestor_name,
                         "message": message[:1000]}})
-                goal_id = task["id"]  # downstream logging/return shape
             except Exception:
                 logger.warning("outreach task registration failed",
                                exc_info=True)
@@ -410,7 +405,7 @@ def make_whatsapp_outreach_tools(
                         refs = parse_strategy(parent).refs.entities
                         if refs:
                             strategy["refs"] = {"entities": list(refs), "claims": []}
-                goal = await create_goal(
+                await create_goal(
                     ctx,
                     conversation_id=f"agent:main:whatsapp:dm:{phone_digits_g}",
                     objective=objective,
@@ -420,7 +415,6 @@ def make_whatsapp_outreach_tools(
                     deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
                     parent_goal_id=parent_goal,
                 )
-                goal_id = goal["id"]
             except Exception:
                 logger.warning("failed to create outreach goal", exc_info=True)
 
@@ -550,20 +544,6 @@ def make_whatsapp_outreach_tools(
         })
 
     return [send_whatsapp_to_contact, get_contact_session_messages]
-
-
-def _session_key_to_chat_id(session_key: str) -> str | None:
-    """Derive a WhatsApp chat_id (JID) from a session key."""
-    parts = session_key.split(":")
-    if len(parts) < 5 or parts[2] != "whatsapp":
-        return None
-    kind = parts[3]
-    ident = parts[4]
-    if kind == "dm":
-        return f"{ident}@s.whatsapp.net"
-    if kind == "group":
-        return f"{ident}@g.us"
-    return None
 
 
 def make_outreach_reply_tools(

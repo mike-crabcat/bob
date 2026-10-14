@@ -18,7 +18,6 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from server.services.base import utcnow
 from server.services.voice_dispatch_service import (
     build_inbound_instructions,
     call_agendas,

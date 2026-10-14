@@ -32,7 +32,7 @@ from typing import Any
 
 from server.context import AppContext
 from server.services.goal_service import normalise_goal_kind
-from server.services.tools import Tool, tool
+from server.services.tools import tool
 
 logger = logging.getLogger(__name__)
 
@@ -492,7 +492,6 @@ async def handle_deadman_wakeup(ctx: AppContext, goal: dict[str, Any]) -> str | 
 def make_loop_tools(ctx: AppContext, session_key: str) -> list:
     """Loop tools for a goal room. Room-only by construction (the goal is
     resolved from the session); returns [] for non-rooms."""
-    import asyncio
 
     async def _goal() -> dict[str, Any] | None:
         return await _room_goal(ctx, session_key)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -44,7 +44,6 @@ async def create_contact(
 ) -> ContactResponse:
     """Create a new contact."""
     contact_id = uuid4()
-    now = datetime.now(timezone.utc).isoformat()
     normalized_phone = normalize_phone(payload.phone_number) if payload.phone_number else None
     if payload.phone_number and normalized_phone is None:
         raise HTTPException(

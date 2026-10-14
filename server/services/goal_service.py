@@ -542,7 +542,7 @@ async def fire_wakeup(ctx: AppContext, wakeup: dict[str, Any]) -> bool:
         # series (both compute from now) — the routine tools echo it as
         # next_fire, and a stale mirror reads as a past fire date.
         await routines.RoutineService(ctx).advance_next_run(routine)
-        if routines._outside_validity_window(routine):
+        if routines.outside_validity_window(routine):
             return True   # skip this run, keep the schedule
         await routines.append_fired_event(ctx, routine, wakeup["not_before"])
         routines.fire_routine_detached(ctx, routine)

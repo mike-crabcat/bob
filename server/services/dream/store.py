@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import timedelta
 
-from server.context import AppContext
-from server.database import Database
 from server.services.base import BaseService, iso_utc, json_dumps, json_loads, utcnow
 from server.services.dream.models import (
     PLAN_ACTIVE_STATUSES,

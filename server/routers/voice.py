@@ -225,7 +225,7 @@ async def voice_realtime(websocket: WebSocket) -> None:
 
     read_t = asyncio.create_task(ws_read_loop())
     bridge_t = asyncio.create_task(bridge_task())
-    done, pending = await asyncio.wait({read_t, bridge_t}, return_when=asyncio.FIRST_COMPLETED)
+    _, pending = await asyncio.wait({read_t, bridge_t}, return_when=asyncio.FIRST_COMPLETED)
     for t in pending:
         t.cancel()
         try:

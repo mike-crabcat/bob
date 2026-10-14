@@ -19,7 +19,8 @@ import typer
 from server.cli._helpers import *  # noqa: F403,F405
 from server.cli._helpers import __all__ as _helpers_all
 from server.cli.service_cmds import (  # noqa: F401
-    install, uninstall, start, stop, restart, status, logs, serve,
+    install as install, uninstall as uninstall, start as start, stop as stop,
+    restart as restart, status as status, logs as logs, serve as serve,
     register as _register_service_commands,
 )
 

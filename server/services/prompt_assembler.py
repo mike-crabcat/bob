@@ -605,7 +605,6 @@ async def build_chat_messages(
                     if digits:
                         mention_names[digits] = p["display_name"]
 
-        from server.repositories.history import HistoryRepository
         # Bookkeeping budget (2026-09-30): placeholder/relay rows (bg
         # flights, task notifications, wakes) are labelled and useful, but
         # they must not consume the conversational window — a morning's

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from server.services.phone_utils import normalize_phone
 from server.services.tools import tool

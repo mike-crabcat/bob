@@ -7,7 +7,6 @@ Rendered views are generated from claims via templates (no LLM).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import uuid

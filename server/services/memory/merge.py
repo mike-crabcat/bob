@@ -12,7 +12,7 @@ from server.services.memory.cleanup import (
     rewrite_claims,
     rewrite_entity_relations,
 )
-from server.services.memory.embedding import delete_embedding, _unpack_embedding
+from server.services.memory.embedding import delete_embedding, unpack_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ async def _find_candidates(
         emb_bytes = r["embedding"]
         if not emb_bytes:
             continue
-        vec = _unpack_embedding(emb_bytes)
+        vec = unpack_embedding(emb_bytes)
         entities.append((r["entity_id"], vec))
 
     # Pairwise comparison

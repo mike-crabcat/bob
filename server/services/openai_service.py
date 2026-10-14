@@ -8,13 +8,12 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable, Awaitable
+from collections.abc import Callable, Awaitable
 from httpx import Timeout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from server.context import AppContext
 from server.services import model_registry
 from server.services import tool_loop_folding
 from server.services.base import BaseService

@@ -79,3 +79,6 @@ reportUnknownLambdaType = "warning"
 reportMissingTypeArgument = "warning"
 reportMissingParameterType = "warning"
 reportMissingTypeStubs = "warning"
+# Cross-module use of _private helpers is a naming-style rule, not a bug
+# class; the eval intercept layer patches internals by design.
+reportPrivateUsage = "warning"

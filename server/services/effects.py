@@ -144,7 +144,7 @@ async def deliver(ctx: Any, effect: dict[str, Any]) -> dict[str, Any]:
     if entry is None and kind.startswith("whatsapp_"):
         # The bridge module registers these at import; a process that never
         # imported it (CLI, tests) shouldn't dead-letter a send.
-        import server.services.whatsapp_bridge_service._service  # noqa: F401
+        import server.services.whatsapp_bridge_service._service  # noqa: F401  # pyright: ignore[reportUnusedImport]
         entry = _EXECUTORS.get(kind)
     if entry is None:
         await repo.mark_failed(effect["id"], f"no executor registered for kind {kind!r}")

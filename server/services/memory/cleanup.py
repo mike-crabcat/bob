@@ -125,7 +125,7 @@ async def run_cleanup(
     deleted = 0
 
     # Step 1: delete duplicate entities (claims already point to canonical via rewrite)
-    for dup_id, canon_id in merge_into.items():
+    for dup_id in merge_into:
         await db.execute("DELETE FROM memory_entities WHERE entity_id = ?", (dup_id,))
         deleted += 1
 

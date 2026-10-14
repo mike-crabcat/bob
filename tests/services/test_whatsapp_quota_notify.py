@@ -10,9 +10,9 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock
 
+from server.services.dispatch_runner import _is_quota_error
 from server.services.whatsapp_bridge_service._service import (
     _QUOTA_NOTIFY_MIN_INTERVAL,
-    _is_quota_error,
     _notify_quota_exhausted,
     _quota_notify_last,
 )

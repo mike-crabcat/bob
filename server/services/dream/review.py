@@ -8,7 +8,6 @@ import logging
 import re
 from typing import Any
 
-from server.context import AppContext
 from server.services.base import BaseService
 from server.services.dream.models import Evidence, PlanCandidate, ResolutionCandidate
 

@@ -36,7 +36,7 @@ def whatsapp_pair(
     payload = {"method": method}
     if phone_number:
         payload["phone_number"] = phone_number
-    result = _api_call("POST", "/whatsapp/pair", payload)
+    _api_call("POST", "/whatsapp/pair", payload)
 
     # Poll for the QR/pairing code
     typer.echo("Waiting for pairing info...")

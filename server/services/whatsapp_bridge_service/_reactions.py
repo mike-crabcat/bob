@@ -151,7 +151,6 @@ class ReactionsMixin:
         # guarantees a bridge redelivery can't double-store.
         from server.repositories import Event, EventLogRepository
 
-        stored_msg_id: str | None = None
         async with self.db.transaction() as txn:
             ingress_event_id = await EventLogRepository(self.db).append(
                 Event(
@@ -172,7 +171,7 @@ class ReactionsMixin:
                     "duplicate reaction ignored (bridge redelivery): id=%s chat=%s",
                     reaction_wa_id, chat_id)
                 return
-            stored_msg_id = await SessionService(self.ctx).add_message(
+            await SessionService(self.ctx).add_message(
                 session_key, "user", content,
                 channel="whatsapp", sender_id=contact_id,
                 # Wake rows must be claimable (dispatched=0) or the runner

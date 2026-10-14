@@ -6,19 +6,19 @@ Split into:
 - ``_slash_commands``: SlashCommandsMixin (slash commands)
 - ``_service``: WhatsAppBridgeService class
 
-Re-exports ``WhatsAppBridgeService`` and ``_prepare_media`` for backward compat
+Re-exports ``WhatsAppBridgeService`` and ``prepare_media`` for backward compat
 with ``from server.services.whatsapp_bridge_service import ...``.
 """
 
 from __future__ import annotations
 
 from server.services.whatsapp_bridge_service._media import (
-    _jid_to_phone, _format_created_at, _resize_gif, _prepare_media,
+    jid_to_phone, format_created_at, _resize_gif, prepare_media,
 )
 from server.services.whatsapp_bridge_service._service import WhatsAppBridgeService
 
 
 __all__ = [
     "WhatsAppBridgeService",
-    "_jid_to_phone", "_format_created_at", "_resize_gif", "_prepare_media",
+    "jid_to_phone", "format_created_at", "_resize_gif", "prepare_media",
 ]

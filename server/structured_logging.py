@@ -197,7 +197,6 @@ def _archive_previous_days(log_dir: Path, source: str, today: str) -> None:
 
     older_dir = log_dir / "older"
     older_dir.mkdir(parents=True, exist_ok=True)
-    prefix = f"{source}.log"
     for entry in log_dir.iterdir():
         if not entry.is_file():
             continue

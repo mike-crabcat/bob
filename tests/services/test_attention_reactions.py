@@ -201,7 +201,7 @@ async def _stand_down_with_react(ctx, tmp_path, monkeypatch, *,
     with patch("server.services.attention.tier2.probe_actionability",
                new=AsyncMock(return_value={"decision": "STAND_DOWN",
                                            "react": react, "reason": "hit"})), \
-         patch("server.services.whatsapp_bridge_service._media._prepare_media",
+         patch("server.services.whatsapp_bridge_service._media.prepare_media",
                new=_prepare), \
          patch("server.services.effects.emit_and_deliver", new=_emit):
         dispatch = AsyncMock()

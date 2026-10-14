@@ -3,19 +3,17 @@
 Pure functions for phone/JID formatting, timestamp formatting, GIF resizing,
 and media-prep (resize + thumbnail). Extracted from the original
 ``whatsapp_bridge_service.py`` so callers (notably ``whatsapp_outreach_tools``)
-can import ``_prepare_media`` without pulling in the whole service class.
+can import ``prepare_media`` without pulling in the whole service class.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from server.services.phone_utils import normalize_phone
@@ -40,7 +38,7 @@ def resolve_sendable_media(workspace_dir: Any, media_path: str) -> Path | str:
     return resolved
 
 
-def _jid_to_phone(jid: str) -> str | None:
+def jid_to_phone(jid: str) -> str | None:
     """Extract phone number from WhatsApp JID and normalize to +CC format.
 
     Thin alias over the shared normalizer in ``services/phone_utils`` — kept
@@ -52,7 +50,7 @@ def _jid_to_phone(jid: str) -> str | None:
 _PERTH = ZoneInfo("Australia/Perth")
 
 
-def _format_created_at(iso_utc: str) -> str:
+def format_created_at(iso_utc: str) -> str:
     """Render a UTC ISO timestamp as Perth-local 'YYYY-MM-DD HH:MM'."""
     dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
     return dt.astimezone(_PERTH).strftime("%Y-%m-%d %H:%M")
@@ -116,7 +114,7 @@ def _resize_gif(path: str) -> str | None:
     return None
 
 
-async def _prepare_media(path: str) -> str | None:
+async def prepare_media(path: str) -> str | None:
     """Resize/convert an image to fit WhatsApp and bridge WebSocket limits. Returns path to send."""
     import mimetypes
 

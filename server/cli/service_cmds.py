@@ -7,7 +7,6 @@ import them) and registered onto the main ``app`` via :func:`register`.
 
 from __future__ import annotations
 
-import logging
 import os
 import subprocess
 from dataclasses import replace

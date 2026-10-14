@@ -202,7 +202,6 @@ async def _generic_wake_dispatch(
 
     from server.services.llm_dispatch import LLMDispatchService
     from server.services.prompt_assembler import build_chat_messages, load_workspace_prompt
-    from server.services.session_service import SessionService
     from server.services.workspace_tools import make_workspace_tools
 
     settings = ctx.settings

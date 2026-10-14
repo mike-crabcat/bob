@@ -6,7 +6,7 @@ files through bash's 30k truncation. These give him paged, numbered reads
 and exact-match edits that return a unified diff of what they did.
 
 Path policy is shared with the other workspace tools (``_resolve_path`` /
-``_resolve_writable`` in ``workspace_tools``): workspace-only, resolved
+``resolve_writable`` in ``workspace_tools``): workspace-only, resolved
 before the containment check (symlinks can't escape), and the persona view
 (``self/``) is never writable. Kill switch: ``BOB_FILE_TOOLS=off``.
 """
@@ -134,7 +134,7 @@ def _diff(before: str, after: str, shown: str) -> str:
 
 
 def make_file_tools(ctx: AppContext) -> list[Tool]:
-    from server.services.workspace_tools import _resolve_path, _resolve_writable
+    from server.services.workspace_tools import _resolve_path, resolve_writable
 
     @tool
     async def read_file(path: str, offset: int = 1, limit: int = READ_DEFAULT_LIMIT) -> str:
@@ -181,7 +181,7 @@ def make_file_tools(ctx: AppContext) -> list[Tool]:
                         replace_all: bool = False) -> str:
         """Change an existing workspace file by exact text replacement — use this instead of sed or rewriting the whole file with a heredoc. old_string must match the file exactly (whitespace and indentation included) and be unique; include a few surrounding lines if the text repeats, or set replace_all=true to change every occurrence. Copy old_string from read_file output (without the line-number prefix). Returns the unified diff of what changed. For several changes to one file, use multi_edit. The persona view (self/) is read-only."""
         try:
-            resolved = _resolve_writable(ctx, path)
+            resolved = resolve_writable(ctx, path)
         except ValueError as e:
             return f"Error: {e}"
         if not resolved.is_file():
@@ -200,7 +200,7 @@ def make_file_tools(ctx: AppContext) -> list[Tool]:
     async def multi_edit(path: str, edits: list[dict]) -> str:
         """Apply several exact-text replacements to ONE workspace file in a single call, in order, all-or-nothing: if any edit fails, the file is left untouched and the error says which edit and why. Each edit is {"old_string": ..., "new_string": ..., "replace_all": false}; later edits see the result of earlier ones. Same matching rules as edit_file. Returns one combined diff."""
         try:
-            resolved = _resolve_writable(ctx, path)
+            resolved = resolve_writable(ctx, path)
         except ValueError as e:
             return f"Error: {e}"
         if not resolved.is_file():

@@ -269,7 +269,7 @@ def _resolve_path(ctx: AppContext, path: str) -> Path:
     return resolved
 
 
-def _resolve_writable(ctx: AppContext, path: str) -> Path:
+def resolve_writable(ctx: AppContext, path: str) -> Path:
     """``_resolve_path`` plus write-side refusals: the persona view
     (``self/``) is a read-only mirror of the repo bundle — edits there are
     discarded at boot and never reach the prompt, so writing it is always

@@ -8,7 +8,6 @@ from typing import Any
 from uuid import uuid4
 
 from server.context import AppContext
-from server.database import Database
 from server.services.agentmail_client import AgentMailClient
 from server.services.base import BaseService, json_dumps, utcnow
 

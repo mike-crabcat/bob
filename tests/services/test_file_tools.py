@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from server.services.file_tools import make_file_tools
-from server.services.workspace_tools import _resolve_path, _resolve_writable
+from server.services.workspace_tools import _resolve_path, resolve_writable
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def test_persona_view_is_not_writable(ctx, ws):
     (ws / "self/bob/soul.md").write_text("soul")
     assert _resolve_path(ctx, "self/bob/soul.md")  # readable
     with pytest.raises(ValueError, match="read-only persona view"):
-        _resolve_writable(ctx, "self/bob/soul.md")
+        resolve_writable(ctx, "self/bob/soul.md")
 
 
 # ------------------------------------------------------------- read_file

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from server.context import AppContext
-from server.services.base import BaseService, due_label, iso_utc
+from server.services.base import due_label
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +268,6 @@ async def deliver_settlement(ctx: AppContext, task_id: str) -> bool:
     """The effect body: cancel the due backstop, wake the waiter with the
     provenance header + result (plan D12). Idempotent — replay-safe."""
     from server.repositories.tasks import TaskRepository
-    from server.repositories.wakeups import WakeupRepository
     from server.services.wake_service import wake_conversation
 
     task = await TaskRepository(ctx.db).get(task_id)

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from server.context import AppContext
-from server.services.base import BaseService, iso_utc, json_dumps, utcnow
+from server.services.base import BaseService, iso_utc, utcnow
 from server.services.wake_service import session_key_to_chat_id as _session_key_to_chat_id
 
 logger = logging.getLogger(__name__)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from server.services.memory.claim_service import (
     _is_valid_file_path,
-    _invalid_file_entities,
+    invalid_file_entities,
 )
 
 
@@ -92,23 +92,23 @@ class TestIsValidFilePath:
 
 class TestInvalidFileEntities:
     def test_missing_path_returns_id(self):
-        result = _invalid_file_entities({"file-abc"}, {})
+        result = invalid_file_entities({"file-abc"}, {})
         assert result == {"file-abc"}
 
     def test_valid_path_is_not_invalid(self):
-        result = _invalid_file_entities(set(), {"file-abc": "docs/readme.md"})
+        result = invalid_file_entities(set(), {"file-abc": "docs/readme.md"})
         assert result == set()
 
     def test_vague_path_is_invalid(self):
-        result = _invalid_file_entities(set(), {"file-abc": "workspace"})
+        result = invalid_file_entities(set(), {"file-abc": "workspace"})
         assert result == {"file-abc"}
 
     def test_url_path_is_valid(self):
-        result = _invalid_file_entities(set(), {"file-abc": "https://docs.google.com/..."})
+        result = invalid_file_entities(set(), {"file-abc": "https://docs.google.com/..."})
         assert result == set()
 
     def test_mixed_valid_and_invalid(self):
-        result = _invalid_file_entities(
+        result = invalid_file_entities(
             {"file-no-path"},
             {"file-good": "src/app.py", "file-bad": "project"},
         )

@@ -135,7 +135,6 @@ def make_email_tools(
     @tool
     async def email_reply(body: str, attachments: list[str] | None = None) -> str:
         """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
-        from server.services.email_delivery_service import EmailDeliveryService
 
         if isinstance(attachments, str):
             s = attachments.strip()
@@ -359,7 +358,6 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
         attachments: list[str] | None = None,
     ) -> str:
         """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
-        from server.services.email_delivery_service import EmailDeliveryService
 
         if isinstance(attachments, str):
             s = attachments.strip()

@@ -155,9 +155,9 @@ def make_self_tools(ctx: Any, *, session_key: str, is_trusted: bool = False) -> 
         payload = {"days": rows, "window_distinct_users": window_users,
                    "today_partial": True}
         if out:
-            from server.services.workspace_tools import _resolve_writable
+            from server.services.workspace_tools import resolve_writable
             try:
-                path = _resolve_writable(ctx, out)
+                path = resolve_writable(ctx, out)
             except ValueError as exc:
                 return f"error: --out {exc}\n\n{USAGE}"
             path.parent.mkdir(parents=True, exist_ok=True)

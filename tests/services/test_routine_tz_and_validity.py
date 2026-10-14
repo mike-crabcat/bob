@@ -11,7 +11,7 @@ from server.cron import next_cron_occurrence
 from server.services.routine_service import (
     RoutineService,
     _format_routine_now,
-    _outside_validity_window,
+    outside_validity_window,
 )
 from server.services.routine_tools import _routine_to_yaml
 
@@ -83,38 +83,38 @@ def test_next_cron_without_timezone_matches_legacy_behavior():
 
 
 # ---------------------------------------------------------------------------
-# _outside_validity_window — pure helper
+# outside_validity_window — pure helper
 # ---------------------------------------------------------------------------
 
 
 def test_validity_window_open_when_both_null():
     row = {"timezone": None, "valid_from": None, "valid_until": None}
-    assert _outside_validity_window(row) is False
+    assert outside_validity_window(row) is False
 
 
 def test_validity_window_excludes_before_valid_from():
     future = (datetime.now(UTC) + timedelta(days=2)).date().isoformat()
     row = {"timezone": "UTC", "valid_from": future, "valid_until": None}
-    assert _outside_validity_window(row) is True
+    assert outside_validity_window(row) is True
 
 
 def test_validity_window_includes_after_valid_from():
     past = (datetime.now(UTC) - timedelta(days=2)).date().isoformat()
     row = {"timezone": "UTC", "valid_from": past, "valid_until": None}
-    assert _outside_validity_window(row) is False
+    assert outside_validity_window(row) is False
 
 
 def test_validity_window_excludes_after_valid_until_date_only():
     # Date-only upper bound: routine still fires through end of that day in tz.
     yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
     row = {"timezone": "UTC", "valid_from": None, "valid_until": yesterday}
-    assert _outside_validity_window(row) is True
+    assert outside_validity_window(row) is True
 
 
 def test_validity_window_includes_on_valid_until_date():
     today = datetime.now(UTC).date().isoformat()
     row = {"timezone": "UTC", "valid_from": None, "valid_until": today}
-    assert _outside_validity_window(row) is False
+    assert outside_validity_window(row) is False
 
 
 def test_validity_window_tz_aware_comparison():
@@ -126,12 +126,12 @@ def test_validity_window_tz_aware_comparison():
     bound = (now_utc + timedelta(hours=5)).isoformat()
     row = {"timezone": "Australia/Sydney", "valid_from": None, "valid_until": bound}
     # In Sydney, now + 5h UTC equals now + 15h Sydney, so the bound is still in the future.
-    assert _outside_validity_window(row) is False
+    assert outside_validity_window(row) is False
 
 
 def test_validity_window_malformed_bound_treated_as_open():
     row = {"timezone": "UTC", "valid_from": "not-a-date", "valid_until": None}
-    assert _outside_validity_window(row) is False
+    assert outside_validity_window(row) is False
 
 
 # ---------------------------------------------------------------------------

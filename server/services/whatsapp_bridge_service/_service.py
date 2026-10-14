@@ -7,15 +7,12 @@ import contextlib
 import contextvars
 import json
 import logging
-import os
 import re
 import shutil
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 import websockets
 
@@ -26,8 +23,8 @@ from server.context import AppContext
 from server.services.base import BaseService, utcnow
 from server.services.openai_service import strip_citation_markers
 from server.services.whatsapp_bridge_service._media import (
-    _jid_to_phone,
-    _prepare_media,
+    jid_to_phone,
+    prepare_media,
     resolve_sendable_media,
 )
 from server.services.whatsapp_bridge_service._reactions import ReactionsMixin
@@ -53,7 +50,7 @@ _quota_notify_last: dict[str, float] = {}
 _QUOTA_NOTIFY_MIN_INTERVAL = 3600.0  # 1 hour
 
 
-from server.services.dispatch_runner import _is_quota_error, is_no_reply
+from server.services.dispatch_runner import is_no_reply
 
 
 async def _notify_quota_exhausted(wa_service: Any, chat_id: str, session_key: str) -> None:
@@ -777,7 +774,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         reactions. Returns (phone_number, contact_id, is_trusted) or None
         when the sender is dropped (unknown number / inbound disabled)."""
         phone_jid = chat_id if chat_kind == "dm" else sender_jid
-        phone_number = _jid_to_phone(phone_jid)
+        phone_number = jid_to_phone(phone_jid)
         if not phone_number:
             logger.warning(
                 "unparseable phone from jid, dropping: chat_id=%s sender_jid=%s",
@@ -945,7 +942,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         if mentioned_jids and chat_kind == "group":
             mention_map: dict[str, str] = {}
             for jid in mentioned_jids:
-                phone = _jid_to_phone(jid)
+                phone = jid_to_phone(jid)
                 if not phone:
                     continue
                 # Try session participants first (group members with display names)
@@ -980,7 +977,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             phone = sc.get("phone", "")
             # Auto-seed contact from shared vCard
             if phone:
-                normalized_phone = _jid_to_phone(phone)
+                normalized_phone = jid_to_phone(phone)
                 from server.repositories.contacts import ContactRepository
                 repo = ContactRepository(self.db)
                 existing = await repo.get_by_phone(normalized_phone)
@@ -1003,7 +1000,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         quote_meta: dict[str, Any] | None = None
         if quoted_message_id:
             quoted_name: str | None = None
-            quoted_phone = _jid_to_phone(quoted_sender_jid) if quoted_sender_jid else None
+            quoted_phone = jid_to_phone(quoted_sender_jid) if quoted_sender_jid else None
             if quoted_phone:
                 if settings.whatsapp_bridge.own_phone:
                     from server.services.phone_utils import normalize_phone
@@ -1256,7 +1253,6 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             system_content = "\n\n".join(
                 p for p in (system_content, extra_system_note, jit_note) if p)
 
-        from server.services.llm_dispatch import LLMDispatchService
         from server.services.tools import Tool
         from server.services.tool_registry import build_common_tools
         from server.services.group_tools import make_group_tools
@@ -1425,7 +1421,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                     settings.harness.workspace_dir, media_path)
                 if isinstance(resolved, str):
                     return resolved
-                prepared = await _prepare_media(str(resolved))
+                prepared = await prepare_media(str(resolved))
                 if prepared is None:
                     return "Error: failed to prepare media for sending"
                 result = await emit_and_deliver(
@@ -1517,7 +1513,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
                 logger.warning("backburner: holding ack delivery failed (dispatch=%s): %s",
                                dispatch_id, result.get("error"))
 
-        from server.services.dispatch_runner import DispatchRunner, DispatchSpec
+        from server.services.dispatch_runner import DispatchSpec
 
         async def _on_quota_exhausted() -> None:
             await _notify_quota_exhausted(wa_service, chat_id, session_key)
