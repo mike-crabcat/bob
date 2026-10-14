@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import websockets
+from websockets.asyncio.client import ClientConnection
 
 from server.services.mulaw import (
     AntiAliasedDownsampler,
@@ -467,7 +468,7 @@ class RealtimeBridge:
         self._gate_decision_task: asyncio.Task[None] | None = None
         # Prewarm state: an OpenAI websocket connected + configured by
         # prewarm() while the phone was still ringing, claimed by run().
-        self._prewarmed_ws: websockets.WebSocketClientProtocol | None = None
+        self._prewarmed_ws: ClientConnection | None = None
         self._prewarmed_session_updated: dict | None = None
         self._run_end_reason = ""
         self._timed_out = False
@@ -517,7 +518,7 @@ class RealtimeBridge:
             await self.abandon()
             raise
 
-    async def _await_session_updated(self, oai: websockets.WebSocketClientProtocol) -> dict:
+    async def _await_session_updated(self, oai: ClientConnection) -> dict:
         """Consume events (no audio flows yet, so session.updated is the only
         meaningful one) until the session config is confirmed applied."""
         async for raw in oai:
@@ -626,7 +627,7 @@ class RealtimeBridge:
             result.error_message = self._last_error
         return result
 
-    async def _run_session(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _run_session(self, oai: ClientConnection) -> None:
         """The relay/event/pending-task orchestration inside a connected,
         configured session. Shared by the prewarmed and connect-at-answer
         paths."""
@@ -716,7 +717,7 @@ class RealtimeBridge:
         self._timed_out = True
         logger.info("Realtime bridge: max duration %ss reached", self.max_duration_seconds)
 
-    async def _first_response_nudge(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _first_response_nudge(self, oai: ClientConnection) -> None:
         """Opening gate: after the listen window, make sure the agent takes a
         turn — prompt it to open if nothing conversational happened (dead line,
         or the greeting's response was cancelled as noise-triggered)."""
@@ -738,20 +739,20 @@ class RealtimeBridge:
 
     # --- Opening-gate held-response machinery ---
 
-    def _arm_gate_decision(self, oai: websockets.WebSocketClientProtocol) -> None:
+    def _arm_gate_decision(self, oai: ClientConnection) -> None:
         """One shared timer decides every held response (VAD creates them
         sequentially, so at most one is generating at a time)."""
         if self._gate_decision_task and not self._gate_decision_task.done():
             return
         self._gate_decision_task = asyncio.create_task(self._gate_decide(oai))
 
-    async def _gate_decide(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _gate_decide(self, oai: ClientConnection) -> None:
         await asyncio.sleep(self.gate_decision_seconds)
         if self._user_transcript_seen or not self._gate_held:
             return  # real speech confirmed (held output already released)
         await self._suppress_gate_held(oai)
 
-    async def _suppress_gate_held(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _suppress_gate_held(self, oai: ClientConnection) -> None:
         """Verdict: noise. Cancel the response and drop everything held."""
         held, self._gate_held = self._gate_held, {}
         for response_id, buf in held.items():
@@ -765,7 +766,7 @@ class RealtimeBridge:
         )
         await self._send(oai, {"type": "response.cancel"})
 
-    async def _release_gate_held(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _release_gate_held(self, oai: ClientConnection) -> None:
         """Verdict: human speech. Flush held output and finish its turn."""
         held, self._gate_held = self._gate_held, {}
         for buf in held.values():
@@ -780,7 +781,7 @@ class RealtimeBridge:
                 # bookkeeping now that the turn is confirmed real.
                 await self._finish_agent_turn(oai)
 
-    async def _finish_agent_turn(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _finish_agent_turn(self, oai: ClientConnection) -> None:
         """response.done bookkeeping: flush the assistant transcript as one
         labelled turn (also used to complete gate-held turns on release)."""
         self._conversational_response_done = True
@@ -795,7 +796,7 @@ class RealtimeBridge:
             # the watch is only a backstop).
             self._arm_voicemail_watch()
 
-    async def _send_session_update(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _send_session_update(self, oai: ClientConnection) -> None:
         # GA nests audio config under session.audio. The flat beta layout is
         # the fallback if the model rejects this.
         session = {
@@ -830,7 +831,7 @@ class RealtimeBridge:
         )
         await self._send(oai, {"type": "session.update", "session": session})
 
-    async def _relay_mic_to_openai(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _relay_mic_to_openai(self, oai: ClientConnection) -> None:
         while True:
             chunk = await self.audio.recv_mic_pcm16_24k()
             if chunk is None:
@@ -843,7 +844,7 @@ class RealtimeBridge:
                 "audio": base64.b64encode(chunk).decode("ascii"),
             })
 
-    async def _event_loop(self, oai: websockets.WebSocketClientProtocol) -> None:
+    async def _event_loop(self, oai: ClientConnection) -> None:
         async for raw in oai:
             try:
                 event = json.loads(raw)
@@ -857,7 +858,7 @@ class RealtimeBridge:
             if self._end_requested.is_set():
                 return
 
-    async def _dispatch_event(self, oai: websockets.WebSocketClientProtocol, etype: str, event: dict) -> None:
+    async def _dispatch_event(self, oai: ClientConnection, etype: str, event: dict) -> None:
         if etype == "session.updated":
             self._session_ready.set()
             if self.speak_first:
@@ -1007,7 +1008,7 @@ class RealtimeBridge:
     _MONOLOGUE_WORD_LIMIT = 45
     _MONOLOGUE_MAX_NUDGES = 2
 
-    async def _maybe_nudge_shorter_turns(self, oai: websockets.WebSocketClientProtocol, turn_text: str) -> None:
+    async def _maybe_nudge_shorter_turns(self, oai: ClientConnection, turn_text: str) -> None:
         """Mechanical backstop for the short-turn rule: after an assistant turn
         that ran long, append a system reminder to the session instructions and
         re-send session.update (safe between responses). Capped so instructions
@@ -1087,7 +1088,7 @@ class RealtimeBridge:
     # default; kept as a class attr so tests can compress it per-instance).
     _VOICEMAIL_REPLY_GRACE_SECONDS = _VOICEMAIL_REPLY_GRACE_SECONDS
 
-    async def _handle_function_call(self, oai: websockets.WebSocketClientProtocol, event: dict) -> None:
+    async def _handle_function_call(self, oai: ClientConnection, event: dict) -> None:
         call_id = event.get("call_id", "")
         name = event.get("name", "")
         raw_args = event.get("arguments", "{}")
@@ -1129,7 +1130,7 @@ class RealtimeBridge:
         # Nudge the model to continue now that the tool result is in.
         await self._send(oai, {"type": "response.create"})
 
-    async def _send(self, oai: websockets.WebSocketClientProtocol, payload: dict) -> None:
+    async def _send(self, oai: ClientConnection, payload: dict) -> None:
         await oai.send(json.dumps(payload))
 
     async def _emit_turn(self) -> None:

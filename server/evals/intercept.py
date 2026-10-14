@@ -39,13 +39,14 @@ right world even when cases run concurrently.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import contextvars
 import dataclasses
 import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from server.evals.world import World
@@ -268,17 +269,20 @@ def _world_only(original: Any, fake: Any) -> Any:
     """Route to ``fake`` inside a world, to the original everywhere else —
     installing the boundary must never change behaviour outside worlds
     (the pytest session, other code sharing the process)."""
-    if asyncio.iscoroutinefunction(original) or asyncio.iscoroutinefunction(fake):
-        async def wrapper(*a: Any, **k: Any) -> Any:
+    wrapper: Any
+    if inspect.iscoroutinefunction(original) or inspect.iscoroutinefunction(fake):
+        async def async_wrapper(*a: Any, **k: Any) -> Any:
             if world() is None:
                 return await original(*a, **k)
             return await fake(*a, **k)
+        wrapper = async_wrapper
     else:
-        def wrapper(*a: Any, **k: Any) -> Any:  # type: ignore[misc]
+        def sync_wrapper(*a: Any, **k: Any) -> Any:
             if world() is None:
                 return original(*a, **k)
             return fake(*a, **k)
-    wrapper._bob_eval_original = original  # type: ignore[attr-defined]
+        wrapper = sync_wrapper
+    wrapper._bob_eval_original = original
     return wrapper
 
 
@@ -474,14 +478,15 @@ def _install_misc_fakes() -> None:
 
     # Window state is class-level and keyed by session — concurrent worlds
     # share the cast's session keys, so route it per world.
-    AttentionCoordinator._windows = _Routed(AttentionCoordinator._windows,
-                                            "attention_windows")
-    AttentionCoordinator._dispatching = _Routed(AttentionCoordinator._dispatching,
-                                                "attention_dispatching")
+    setattr(AttentionCoordinator, "_windows",
+            _Routed(AttentionCoordinator._windows, "attention_windows"))
+    setattr(AttentionCoordinator, "_dispatching",
+            _Routed(AttentionCoordinator._dispatching, "attention_dispatching"))
     # Per-session dispatch locks are class-level too: without routing,
     # concurrent worlds serialise on the cast's shared session keys.
     from server.services.session_dispatch_gate import SessionDispatchGate
-    SessionDispatchGate._locks = _Routed(SessionDispatchGate._locks, "dispatch_locks")
+    setattr(SessionDispatchGate, "_locks",
+            _Routed(SessionDispatchGate._locks, "dispatch_locks"))
     # The due-notice coalescer is module-level and keyed by conversation:
     # across worlds it swallowed a later trial's reminder as a 'sibling'.
     from server.services import goal_service
@@ -536,7 +541,7 @@ def make_fixture_mcp(ctx: Any, servers: list[dict[str, Any]]) -> Any:
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|SID|CREDENTIAL|TWILIO|"
                          r"COOKIE|WEBHOOK", re.I)
-_GATEWAY: Any = None
+_gateway: Any = None
 _GATEWAY_WORLDS: dict[str, "World"] = {}
 
 
@@ -556,7 +561,7 @@ def _start_gateway() -> Any:
     tasks: dict[str, dict[str, Any]] = {}
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a: Any) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             return None
 
         def _reply(self, code: int, body: Any, ctype: str = "application/json") -> None:
@@ -606,7 +611,8 @@ def _start_gateway() -> Any:
                     return self._reply(404, {"error": "unknown task"})
                 if time.monotonic() - t["t0"] < 20:
                     return self._reply(200, {"taskUUID": tid, "status": "processing"})
-                base = f"http://127.0.0.1:{self.server.server_port}/w/{parts[1]}/runware"
+                port = cast(ThreadingHTTPServer, self.server).server_port
+                base = f"http://127.0.0.1:{port}/w/{parts[1]}/runware"
                 return self._reply(200, {"taskUUID": tid, "status": "completed",
                                          "artifactURL": f"{base}/v1/artifacts/{tid}"})
             if service == "runware" and rest.startswith("v1/artifacts/"):
@@ -703,7 +709,7 @@ def _render_artifact(task: dict) -> bytes:
 
 def gateway_url(w: "World", service: str) -> str:
     _GATEWAY_WORLDS[w.id] = w
-    return f"http://127.0.0.1:{_GATEWAY.server_port}/w/{w.id}/{service}"
+    return f"http://127.0.0.1:{_gateway.server_port}/w/{w.id}/{service}"
 
 
 def release_world(w: "World") -> None:
@@ -811,7 +817,7 @@ def install() -> None:
     _install_subagent_fake()
     _install_embedding_gate()
     _install_skill_env()
-    global _GATEWAY
-    _GATEWAY = _start_gateway()
+    global _gateway
+    _gateway = _start_gateway()
     _install_task_tracker()
     _installed = True

@@ -216,16 +216,16 @@ _SPEAK_PROVENANCES = {"task_relay", "report"}
 # — they stay rescue-eligible (see _SILENCE_OK_PROVENANCES).
 _DETACH_QUIET_PROVENANCES = {"wake_nudge", "routine", "task_relay", "report"}
 
-_LEASE_OWNER: str | None = None
+_lease_owner_id: str | None = None
 
 
 def _lease_owner() -> str:
-    global _LEASE_OWNER
-    if _LEASE_OWNER is None:
+    global _lease_owner_id
+    if _lease_owner_id is None:
         import os
         import uuid
-        _LEASE_OWNER = f"dispatch-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    return _LEASE_OWNER
+        _lease_owner_id = f"dispatch-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    return _lease_owner_id
 
 
 @dataclass

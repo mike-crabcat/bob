@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from server.services.whatsapp_bridge_service._host import BridgeHost
 
 import websockets
+from websockets.asyncio.client import ClientConnection
 
 from fastapi import HTTPException
 
@@ -132,9 +133,9 @@ def register_whatsapp_executors(fallback: "WhatsAppBridgeService | None" = None)
     WhatsApp post rides the outbox now (2026-10-08), so delivery can't
     depend on a bridge instance having been constructed first."""
     from server.services import effects as effects_svc
-    global _FALLBACK_BRIDGE
+    global _fallback_bridge
     if fallback is not None:
-        _FALLBACK_BRIDGE = fallback
+        _fallback_bridge = fallback
 
     def _bridge(ctx: Any) -> Any:
         b = getattr(ctx, "whatsapp_bridge", None)
@@ -143,8 +144,8 @@ def register_whatsapp_executors(fallback: "WhatsAppBridgeService | None" = None)
         scoped = _DELIVERY_BRIDGE.get()
         if scoped is not None:
             return scoped
-        if _FALLBACK_BRIDGE is not None:
-            return _FALLBACK_BRIDGE
+        if _fallback_bridge is not None:
+            return _fallback_bridge
         raise RuntimeError("no WhatsApp bridge on this context")
 
     async def _exec_send(ctx: Any, payload: dict[str, Any]) -> str:
@@ -167,7 +168,7 @@ def register_whatsapp_executors(fallback: "WhatsAppBridgeService | None" = None)
     effects_svc.register_executor("whatsapp_react", _exec_react)
 
 
-_FALLBACK_BRIDGE: Any = None
+_fallback_bridge: Any = None
 _DELIVERY_BRIDGE: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
     "whatsapp_delivery_bridge", default=None)
 
@@ -201,7 +202,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
 
     def __init__(self, ctx: AppContext) -> None:
         super().__init__(ctx)
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: ClientConnection | None = None
         self._task: asyncio.Task | None = None
         self._connected = False
         self._last_bridge_status: dict[str, Any] = {}

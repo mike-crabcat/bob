@@ -153,6 +153,8 @@ async def resolve_or_create_email_thread(
         origin_session_key=origin_session_key,
         last_message_at=now_iso, now_iso=now_iso)
     row = await store.get_thread(thread_id)
+    if row is None:
+        raise RuntimeError(f"email thread {thread_id} vanished right after insert")
     return row, True
 
 

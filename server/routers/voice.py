@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -80,7 +81,8 @@ async def voice_realtime(websocket: WebSocket) -> None:
     #   - persona mode: {session_id}  (Bob-initiated; loads persona + chat context)
     session_id = config.get("session_id")
 
-    on_complete: Any = None  # set below in persona mode
+    # Set below in persona mode.
+    on_complete: Callable[[str, float, list[Any] | None], Awaitable[None]] | None = None
     session_svc = None  # VoiceSessionService in persona mode
     if session_id:
         from server.services.voice_session_service import VoiceSessionService
@@ -106,11 +108,13 @@ async def voice_realtime(websocket: WebSocket) -> None:
         max_duration = rt_settings.max_call_duration_seconds
         wa_service = getattr(websocket.app.state, "whatsapp_bridge_service", None)
 
-        async def on_complete(transcript: str, duration: float, tool_calls: list | None = None) -> None:
+        async def _complete_session(transcript: str, duration: float, tool_calls: list[Any] | None = None) -> None:
             await session_svc.complete(
                 session_id, transcript, duration,
                 tool_calls=tool_calls, wa_service=wa_service,
             )
+        on_complete = _complete_session
+
     else:
         # Test mode = an arbitrary prompt on our OpenAI Realtime key PLUS the
         # realtime tool set (contact lookup included). /voice is on the

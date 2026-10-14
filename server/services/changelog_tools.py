@@ -19,19 +19,19 @@ logger = logging.getLogger(__name__)
 # Resolve once at import time: walk up from this file to find CHANGELOG.md
 _PACKAGE_DIR = Path(__file__).resolve().parent  # .../server/services
 _SERVER_DIR = _PACKAGE_DIR.parent  # .../server
-_CHANGELOG_PATH: Path | None = None
+_changelog_path: Path | None = None
 for parent in _SERVER_DIR.parents:
     candidate = parent / "CHANGELOG.md"
     if candidate.exists():
-        _CHANGELOG_PATH = candidate
+        _changelog_path = candidate
         break
-if _CHANGELOG_PATH is None:
+if _changelog_path is None:
     # Also check the package directory itself (installed editable)
     candidate = _SERVER_DIR / "CHANGELOG.md"
     if candidate.exists():
-        _CHANGELOG_PATH = candidate
+        _changelog_path = candidate
 
-_REPO_ROOT = _CHANGELOG_PATH.parent if _CHANGELOG_PATH else None
+_REPO_ROOT = _changelog_path.parent if _changelog_path else None
 
 
 def make_changelog_tools(ctx: AppContext, *, session_key: str = "") -> list[Tool]:
@@ -43,10 +43,10 @@ def make_changelog_tools(ctx: AppContext, *, session_key: str = "") -> list[Tool
         unit: str = "commits",
     ) -> str:
         """Read the Bob project changelog to find out what changed recently. Use this when the user asks what's new, what changed, what was added/fixed recently, or when you need context about recent Bob project history before answering a question. Returns changelog entries filtered by the last N days or last N commits. Default: last 3 commits. Set unit to "days" to filter by date range instead."""
-        if _CHANGELOG_PATH is None:
+        if _changelog_path is None:
             return "No CHANGELOG.md found"
 
-        content = _CHANGELOG_PATH.read_text(encoding="utf-8")
+        content = _changelog_path.read_text(encoding="utf-8")
 
         if unit == "days":
             return _filter_by_days(content, last)

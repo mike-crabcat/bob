@@ -457,7 +457,7 @@ def frame_brief(frame: str, goal: dict[str, Any], note: str = "") -> str:
         "to chain, goal_wait(minutes=…, until=…, reason=…) to pause, or "
         "nothing when branches are pending (their results wake you). "
         f"close_goal when the objective is met WITH evidence.")
-    return "\n".join(p for p in lines if p is not None)
+    return "\n".join(lines)
 
 
 async def handle_continue_wakeup(
@@ -509,7 +509,9 @@ def make_loop_tools(ctx: AppContext, session_key: str) -> list:
         # Normalise the tree to plain dicts: a raw assignment below stores
         # whatever shape this list holds, and mixed StrategyBranch/dict
         # entries would break later rounds' dict access.
-        state.strategies = [
+        # Deliberately plain dicts in a list[StrategyBranch] field (pydantic
+        # does not validate on assignment); see the note above.
+        state.strategies = [  # pyright: ignore[reportAttributeAccessIssue]
             b.model_dump() if hasattr(b, "model_dump") else dict(b)
             for b in (state.strategies or [])]
         err = mutate(state)

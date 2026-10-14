@@ -77,19 +77,19 @@ class FakeEffectSink:
         return f"fake-{len(self.delivered)}"
 
 
-_FAKE_SINK: FakeEffectSink | None = None
+_fake_sink: FakeEffectSink | None = None
 
 
 def install_fake_sink(sink: FakeEffectSink) -> None:
     if not isinstance(sink, FakeEffectSink):
         raise TypeError("replay sink must be a FakeEffectSink")
-    global _FAKE_SINK
-    _FAKE_SINK = sink
+    global _fake_sink
+    _fake_sink = sink
 
 
 def uninstall_fake_sink() -> None:
-    global _FAKE_SINK
-    _FAKE_SINK = None
+    global _fake_sink
+    _fake_sink = None
 
 
 async def emit_and_deliver(
@@ -132,11 +132,11 @@ async def deliver(ctx: Any, effect: dict[str, Any]) -> dict[str, Any]:
 
     repo = EffectRepository(ctx.db)
     kind = effect["kind"]
-    if _FAKE_SINK is not None:
+    if _fake_sink is not None:
         payload = effect["payload_json"]
         if isinstance(payload, str):
             payload = _json.loads(payload or "{}")
-        external_id = await _FAKE_SINK(ctx, kind, payload)
+        external_id = await _fake_sink(ctx, kind, payload)
         await repo.mark_delivered(effect["id"], external_result_id=external_id)
         return {"ok": True, "effect_id": effect["id"],
                 "external_result_id": external_id, "fake": True}

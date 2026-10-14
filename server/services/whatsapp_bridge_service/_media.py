@@ -75,7 +75,7 @@ def _resize_gif(path: str) -> str | None:
 
     frames = []
     durations = []
-    n_frames = img.n_frames
+    n_frames: int = getattr(img, "n_frames", 1)
     # Start by skipping every other frame, increase skip if still too large
     for skip in (1, 2, 3, 4):
         frames.clear()
@@ -86,7 +86,7 @@ def _resize_gif(path: str) -> str | None:
             w, h = frame.size
             if max(w, h) > _WHATSAPP_MAX_DIMENSION:
                 ratio = _WHATSAPP_MAX_DIMENSION / max(w, h)
-                frame = frame.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+                frame = frame.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
             frames.append(frame)
             durations.append(img.info.get("duration", 100))
 
@@ -169,7 +169,7 @@ async def prepare_media(path: str) -> str | None:
         dim = min(max(w, h), _WHATSAPP_MAX_DIMENSION)
         for quality in (85, 70, 55, 40):
             ratio = dim / max(w, h)
-            scaled = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            scaled = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
             buf = BytesIO()
             scaled.save(buf, format="JPEG", quality=quality, optimize=True)
             if buf.tell() <= _BRIDGE_MAX_PAYLOAD_BYTES:

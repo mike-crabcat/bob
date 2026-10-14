@@ -17,7 +17,7 @@ import typer
 # Bring all helpers + stdlib re-exports into the cli namespace so legacy
 # `cli.X` references keep working.
 from server.cli._helpers import *  # noqa: F403,F405
-from server.cli._helpers import __all__ as _helpers_all
+from server.cli import _helpers
 from server.cli.service_cmds import (  # noqa: F401
     install as install, uninstall as uninstall, start as start, stop as stop,
     restart as restart, status as status, logs as logs, serve as serve,
@@ -69,7 +69,8 @@ def main() -> int:
     return 0
 
 
-__all__ = list(_helpers_all) + [
+__all__ = [
     "app", "main",
     "install", "uninstall", "start", "stop", "restart", "status", "logs", "serve",
 ]
+__all__ += _helpers.__all__

@@ -82,3 +82,6 @@ reportMissingTypeStubs = "warning"
 # Cross-module use of _private helpers is a naming-style rule, not a bug
 # class; the eval intercept layer patches internals by design.
 reportPrivateUsage = "warning"
+# Defensive isinstance checks on LLM / external payloads are house style
+# (annotations say dict, runtime data may not be) — keep them visible only.
+reportUnnecessaryIsInstance = "warning"

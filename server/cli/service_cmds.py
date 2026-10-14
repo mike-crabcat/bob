@@ -162,4 +162,7 @@ def register(app: typer.Typer) -> None:
         app.command()(func)
 
 
-__all__ = [func.__name__ for func in _COMMANDS] + ["register"]
+__all__ = [
+    "install", "uninstall", "start", "stop", "restart", "status", "logs",
+    "serve", "register",
+]

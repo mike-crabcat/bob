@@ -22,15 +22,15 @@ def utcnow() -> datetime:
     import the function object, and the override is read at call time.
     """
 
-    return _CLOCK_OVERRIDE if _CLOCK_OVERRIDE is not None else datetime.now(UTC)
+    return _clock_override if _clock_override is not None else datetime.now(UTC)
 
 
-_CLOCK_OVERRIDE: datetime | None = None
+_clock_override: datetime | None = None
 
 
 def set_clock_override(value: datetime | None) -> None:
-    global _CLOCK_OVERRIDE
-    _CLOCK_OVERRIDE = value
+    global _clock_override
+    _clock_override = value
 
 
 def clear_clock_override() -> None:

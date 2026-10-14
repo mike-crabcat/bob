@@ -12,7 +12,7 @@ from server.evals.case import Check, EvalCase
 logger = logging.getLogger(__name__)
 
 _REGISTERED: list[EvalCase] = []
-_DISCOVERED = False
+_discovered = False
 
 
 def eval_case(
@@ -41,8 +41,8 @@ def eval_case(
 
 
 def _discover() -> None:
-    global _DISCOVERED
-    _DISCOVERED = True
+    global _discovered
+    _discovered = True
     for sub in ("cases", "scenarios"):
         d = Path(__file__).parent / sub
         if not d.is_dir():
@@ -54,7 +54,7 @@ def _discover() -> None:
 
 
 def get_all_cases() -> list[EvalCase]:
-    if not _DISCOVERED:
+    if not _discovered:
         _discover()
     return list(_REGISTERED)
 
