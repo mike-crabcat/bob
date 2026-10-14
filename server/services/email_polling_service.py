@@ -552,7 +552,11 @@ class EmailPollingService(BaseService):
             logger.debug("No LLM provider configured, skipping dispatch for email thread %s", thread["id"])
             return
 
-        prompt_parts: list[str] = []
+        # Context blocks stored with the email (2026-10-14: these were built
+        # into a prompt that was never sent from 2026-06-03 on, so Bob never
+        # saw attachment paths or his own earlier email).
+        prior_parts: list[str] = []
+        attachment_parts: list[str] = []
 
         # 1. Resolve agenda
         from server.services.session_agenda_service import SessionAgendaService
@@ -577,11 +581,10 @@ class EmailPollingService(BaseService):
             prior_outgoing = await EmailStore(self.db).first_from_sender(
                 thread["agentmail_thread_id"], inbox["email_address"])
             if prior_outgoing and prior_outgoing["text_body"]:
-                prompt_parts += [
-                    "## Your Previous Email (for context)",
+                prior_parts += [
+                    "[Your previous email in this thread, for context]",
                     f"Subject: {prior_outgoing['subject']}",
                     prior_outgoing["text_body"],
-                    "",
                 ]
 
         # 3. Incoming email
@@ -593,19 +596,10 @@ class EmailPollingService(BaseService):
         body = message.get("extracted_text") or message.get("text", "")
         raw_attachments = message.get("attachments") or []
 
-        prompt_parts += [
-            "## Incoming Email",
-            f"From: {sender_name} <{sender_email}>",
-            f"Subject: {subject}",
-            f"Thread ID: {thread['agentmail_thread_id']}",
-            f"Inbox: {inbox['email_address']}",
-        ]
-
         if saved_attachments:
             blocked = [a.get("filename", "") for a in raw_attachments
                        if a.get("filename") not in {s["filename"] for s in saved_attachments}]
             lines = [
-                "",
                 f"### Attachments ({len(raw_attachments)} file(s) in this message)",
                 "Auto-downloaded into your workspace at:",
                 "",
@@ -625,34 +619,22 @@ class EmailPollingService(BaseService):
                 "Use list_attachments to see all attachments across this thread, "
                 "and download_attachment to re-fetch by attachment_id if needed.",
             ]
-            prompt_parts += lines
+            attachment_parts += lines
         elif raw_attachments:
             # All filtered out as exec/code
-            prompt_parts += [
-                "",
+            attachment_parts += [
                 f"### Attachments ({len(raw_attachments)} file(s))",
                 "All attachments in this message were blocked (executables / code files).",
                 "Use list_attachments to see metadata across the thread.",
             ]
-
-        prompt_parts += [
-            "",
-            "### Body",
-            body,
-        ]
-
-        email_content = "\n".join(prompt_parts)
 
         logger.info(
             "Dispatching email to LLM session=%s new_thread=%s",
             session_key, is_new_thread,
         )
 
-        from server.services.llm_dispatch import LLMDispatchService
-        from server.services.email_tools import make_email_tools
-        from server.services.tool_registry import build_common_tools
         from server.services.session_service import SessionService
-        from server.services.prompt_assembler import load_workspace_prompt, build_chat_messages
+        from server.services.prompt_assembler import load_workspace_prompt
 
         workspace_prompt = await load_workspace_prompt(settings.harness.workspace_dir, db=self.db)
         from server.services.context_assembler import ContextAssembler
@@ -688,7 +670,12 @@ class EmailPollingService(BaseService):
 
         # Store user message immediately so queued messages are visible
         # to the next dispatch that acquires the session lock.
-        enriched_body = f"[Email from: {sender_name} <{sender_email}>]\n[Subject: {subject}]\n\n{body}"
+        enriched_body = "\n\n".join(p for p in (
+            f"[Email from: {sender_name} <{sender_email}>]\n[Subject: {subject}]",
+            "\n".join(prior_parts),
+            body,
+            "\n".join(attachment_parts),
+        ) if p)
         await SessionService(self.ctx).add_message(
             session_key, "user", enriched_body, channel="email", dispatched=0,
             sender_id=sender_email,

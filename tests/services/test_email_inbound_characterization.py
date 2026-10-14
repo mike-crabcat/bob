@@ -366,3 +366,38 @@ async def test_mcp_note_rides_the_email_system_prompt(ctx, db, monkeypatch):
     result = await _run_dispatch_and_capture(ctx, db, monkeypatch, trusted=1, result="")
     system = result["captured"]["messages"][0]["content"]
     assert "MCP-NOTE-MARKER" in system
+
+
+async def test_saved_attachments_reach_the_stored_email_turn(ctx, db, monkeypatch):
+    """2026-10-14: the attachment section was built into a prompt that was
+    never sent (since 2026-06-03), so Bob never saw where attachments were
+    saved. It now rides the stored user message."""
+    thread = await _create_thread_for_sender(ctx, db, trusted=1)
+    inbox = await db.fetch_one("SELECT * FROM email_inboxes WHERE id = ?", (thread["inbox_id"],))
+    svc, _ = _make_service(ctx)
+    tasks = _capture_create_task(monkeypatch)
+
+    async def fake_run_turn(self, messages, tools, **kwargs):
+        return ""
+
+    monkeypatch.setattr(
+        "server.services.llm_dispatch.LLMDispatchService.run_turn", fake_run_turn)
+
+    message = _message(sender='"Sender" <sender@example.com>')
+    message["attachments"] = [
+        {"filename": "invoice.pdf"}, {"filename": "setup.exe"}]
+    await svc._dispatch_to_llm(
+        thread, message, inbox, is_new_thread=False,
+        saved_attachments=[{"filename": "invoice.pdf",
+                            "path": "email/attachments/invoice.pdf",
+                            "content_type": "application/pdf", "size": 1234}])
+    await tasks[0]
+
+    row = await db.fetch_one(
+        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user'",
+        (thread["session_key"],))
+    content = row["content"]
+    assert content.startswith(
+        "[Email from: Sender <sender@example.com>]\n[Subject: Question]\n\nHello from email\n\n")
+    assert "- email/attachments/invoice.pdf  (application/pdf, 1234 bytes)" in content
+    assert "Blocked (executables / code files — never persisted):\n- setup.exe" in content
