@@ -299,7 +299,7 @@ def generate_video(rw: Runware, *, model_air: str, prompt: str, image_urls: list
     task["frameImages"] = image_urls
 
     # Seedance rejects width/height; it uses "resolution" instead.
-    if "seedance" in model_air.lower():
+    if "seedance" in model_air.lower() or "bytedance" in model_air.lower():
         task["resolution"] = "720p" if height <= 720 else "1080p"
     else:
         task["width"] = width
