@@ -5,7 +5,7 @@ something (paths dropped, dashboard exposed, Twilio webhooks unreachable).
 This is the canonical snapshot + rebuild commands + rules. **Re-read it
 before touching `tailscale serve`, and update it after every change.**
 
-Snapshot date: **2026-10-13** (tailscale 1.86.2 — **the serve/funnel CLI
+Snapshot date: **2026-10-14** (tailscale 1.86.2 — **the serve/funnel CLI
 syntax changed in 1.86**; the rebuild commands below are the new
 `--set-path` form, verified live). Re-capture the live truth any time with:
 
@@ -66,6 +66,7 @@ paths should be re-added ad hoc.
 |---|---|---|---|
 | `/` | `http://127.0.0.1:5173` | `bob-ui.service` (vite dev server) | Dashboard SPA — **must stay tailnet-only** |
 | `/blackline` | `http://127.0.0.1:8788` | `bg-blackline.service` (`skills/blackline/blackline.py`) | Document-sanitisation UI (Helen's tool) — tailnet-only by design: it holds sensitive case data |
+| `/dashboard-next` | `http://127.0.0.1:5174/dashboard-next` | `bob-dash-next` (transient user unit: `trunk serve` in `~/bob-egui/dashboard/dash-web`) | **Experiment (2026-10-14):** egui/WASM rewrite of the dashboard, running beside the React one; its API calls go to `/dashboard/api` on this vhost (Vite proxy). Remove with `tailscale serve --https=8443 --set-path=/dashboard-next off` when the experiment ends |
 
 **Incident 2026-09-23:** launching blackline, the funnel ROOT `/` was
 re-mounted from 8420 → 8788 to make the bare tailnet URL serve the UI —
@@ -133,6 +134,8 @@ tailscale funnel --bg --https=443 --set-path=/voice --yes http://127.0.0.1:8420/
 
 # tailnet-only dashboard on 8443 (serve, NOT funnel)
 tailscale serve --bg --https=8443 --set-path=/ --yes http://127.0.0.1:5173
+# egui dashboard experiment (tailnet-only)
+tailscale serve --bg --https=8443 --set-path=/dashboard-next --yes http://127.0.0.1:5174/dashboard-next
 ```
 
 (Re-check `tailscale serve --help` after upgrades — the syntax already
