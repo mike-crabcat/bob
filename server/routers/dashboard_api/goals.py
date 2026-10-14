@@ -28,7 +28,7 @@ async def list_goals(request: Request) -> dict[str, Any]:
     # show in each goal's drill-down — the goals page shows outcomes.
     rows = await GoalRepository(db).list_recent(
         limit=300, exclude_kinds=("subagent", "promise"))
-    goals = [
+    goals: list[dict[str, Any]] = [
         {
             "id": r["id"],
             "conversation_id": r["conversation_id"],

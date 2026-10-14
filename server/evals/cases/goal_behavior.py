@@ -27,6 +27,7 @@ async def _goal(w, chat, objective: str, *, kind: str = "watch",
     from server.repositories.conversations import ConversationRepository
     from server.services.goal_service import create_goal
     conv = await ConversationRepository(w.db).resolve(w.key(chat))
+    assert conv is not None, f"no conversation for {chat!r} in the world"
     # add_goal pins the requester as creator; Mike asks in every case here.
     return await create_goal(w.ctx, conversation_id=conv["id"], objective=objective,
                              kind=kind, goal_id=goal_id,

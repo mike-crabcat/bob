@@ -11,24 +11,20 @@ mechanical redaction can't judge semantic sensitivity.
 
 from __future__ import annotations
 
+import re
+
 from server.cli._helpers import *  # noqa: F403,F405
 from server.repositories.history import HistoryRepository
 
 
 app = typer.Typer(help="Replay corpus tooling (episode export + redaction)")
 
-_PHONE_RE = None
-_EMAIL_RE = None
-_URL_RE = None
+_PHONE_RE = re.compile(r"\+?\d[\d\s\-()]{7,}\d")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_URL_RE = re.compile(r"https?://\S+")
 
 
-def _redactors():
-    global _PHONE_RE, _EMAIL_RE, _URL_RE
-    import re
-    if _PHONE_RE is None:
-        _PHONE_RE = re.compile(r"\+?\d[\d\s\-()]{7,}\d")
-        _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
-        _URL_RE = re.compile(r"https?://\S+")
+def _redactors() -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
     return _PHONE_RE, _EMAIL_RE, _URL_RE
 
 

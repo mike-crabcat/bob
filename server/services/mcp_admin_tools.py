@@ -359,11 +359,11 @@ def _entity_id(name: str) -> str:
     return f"mcp_server:{name}"
 
 
-def _validated(*, fields_body: dict) -> tuple[dict | None, str]:
+def _validated(*, fields_body: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     from server.services.mcp_service import validate_mcp_server_fields
 
     fields, error = validate_mcp_server_fields(fields_body)
-    if error:
+    if error or fields is None:
         return None, error
     # This path never registers globally — strip the flag if a model
     # invented it (defensive enum handling, house rule).

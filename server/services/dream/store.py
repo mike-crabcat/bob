@@ -431,8 +431,8 @@ class DreamStore(BaseService):
         results: list[dict] = []
         for r in rows or []:
             table = "dream_plans" if r["item_type"] == "plan" else "dream_resolutions"
-            marks = ",".join("?" for _ in statuses) if statuses else None
-            if marks:
+            if statuses:
+                marks = ",".join("?" for _ in statuses)
                 row = await self.db.fetch_one(
                     f"SELECT * FROM {table} WHERE id = ? AND status IN ({marks})",
                     (r["item_id"], *statuses),

@@ -53,7 +53,7 @@ _SERVER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
 
 
 def validate_mcp_server_fields(body: dict, *,
-                               partial: bool = False) -> tuple[dict | None, str]:
+                               partial: bool = False) -> tuple[dict[str, Any] | None, str]:
     """Validate MCP server fields from an untrusted writer (dashboard API
     POST/PUT, or the LLM's register tool). Returns (fields, error) — a None
     fields payload with a non-empty error means reject. Shared so the wire

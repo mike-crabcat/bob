@@ -406,6 +406,12 @@ class World:
     def owner(self) -> Person:
         return next(p for p in self.people.values() if p.owner)
 
+    @property
+    def app_ctx(self) -> AppContext:
+        """The world's AppContext (set by open(); fakes only run after)."""
+        assert self.ctx is not None, "world not opened"
+        return self.ctx
+
     def key(self, chat: "Person | Group | str") -> str:
         if isinstance(chat, Person):
             return chat.dm_key
@@ -540,7 +546,9 @@ class World:
         }
         if media:
             payload["media"] = media
-        await self.ctx.whatsapp_bridge._handle_incoming_message(payload)
+        bridge = self.app_ctx.whatsapp_bridge
+        assert bridge is not None
+        await bridge._handle_incoming_message(payload)
         await self.settle()
         return self.turns[mark:]
 
@@ -708,7 +716,7 @@ class World:
         else:
             env = workspace_tools.build_skill_env(
                 workspace_dir=ws,
-                venv_dir=str(self.ctx.settings.harness.venv_dir.expanduser()))
+                venv_dir=str(self.app_ctx.settings.harness.venv_dir.expanduser()))
             with log.open("ab") as out:
                 proc = await asyncio.create_subprocess_exec(
                     "bash", "-c", cmd, cwd=ws, env=env, stdout=out,

@@ -65,7 +65,7 @@ async def create_mcp_server(request: Request) -> dict[str, Any]:
         return {"error": "unauthorized"}
     body = await request.json()
     fields, error = validate_mcp_server_fields(body)
-    if error:
+    if error or fields is None:
         return {"error": error}
     repo = McpServerRepository(_db(request))
     if await repo.get_by_name(fields["name"]):

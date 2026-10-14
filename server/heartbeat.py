@@ -654,12 +654,14 @@ class GrowthMonitoringTask:
 
         page_count = await ctx.db.fetch_one("PRAGMA page_count")
         page_size = await ctx.db.fetch_one("PRAGMA page_size")
+        if page_count is None or page_size is None:
+            return
         size_mb = (list(page_count.values())[0] * list(page_size.values())[0]) / (1024 * 1024)
-        counts = {}
+        counts: dict[str, int] = {}
         for table in ("event_log", "messages", "llm_call_log",
                       "effects", "turns", "goals"):
             row = await ctx.db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
-            counts[table] = row["n"]
+            counts[table] = row["n"] if row else 0
         logger.info("db growth: size=%.1fMB rows=%s", size_mb, counts)
 
 

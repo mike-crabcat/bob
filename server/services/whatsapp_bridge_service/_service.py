@@ -1611,7 +1611,7 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
         from server.repositories.history import HistoryRepository
         route = await ConversationRepository(self.db).route_for(session_key)
         jid = wa_send_jid(route["address"]) if route and route["is_active"] else None
-        if not jid:
+        if route is None or not jid:
             raise RuntimeError(f"no active route for session {session_key}")
         chat_kind = "group" if ":group:" in session_key else "dm"
         contact_id = route["contact_id"]

@@ -300,9 +300,9 @@ async def call_status(request: Request) -> dict:
     if (forged := await _reject_forged(request)) is not None:
         return forged  # type: ignore[return-value]
     form = await request.form()
-    call_sid = form.get("CallSid", "")
-    call_status = form.get("CallStatus", "")
-    call_duration = form.get("CallDuration", "")
+    call_sid = str(form.get("CallSid", ""))
+    call_status = str(form.get("CallStatus", ""))
+    call_duration = str(form.get("CallDuration", ""))
     logger.info("Call %s status: %s (duration=%s)", call_sid, call_status, call_duration)
 
     db = request.app.state.db

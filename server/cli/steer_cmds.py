@@ -29,7 +29,8 @@ def steer(
         "POST", "/dashboard/api/conversations/wake",
         {"target": target, "instruction": instruction})
     # _api_call normalizes every body into {"data": ...}
-    payload = result.get("data") if isinstance(result.get("data"), dict) else result
+    data = result.get("data")
+    payload: dict[str, Any] = data if isinstance(data, dict) else result
     if payload.get("error"):
         typer.echo(f"Error: {payload['error']}", err=True)
         for cand in payload.get("candidates") or []:

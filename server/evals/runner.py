@@ -311,7 +311,7 @@ async def _usage(w: World, trial: Trial) -> None:
         rows = await LlmCallLogRepository(w.db).usage_by_model()
     except Exception:
         return
-    pricing = model_registry.pricing(w.ctx.settings.config_dir)
+    pricing = model_registry.pricing(w.app_ctx.settings.config_dir)
     cost, priced = 0.0, True
     errors = []
     for r in rows:

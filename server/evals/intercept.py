@@ -77,6 +77,14 @@ def world() -> "World | None":
     return CURRENT_WORLD.get()
 
 
+def _w() -> "World":
+    """The active world, for fakes that only ever run inside one
+    (``_world_only`` routes everything else to the original)."""
+    w = CURRENT_WORLD.get()
+    assert w is not None, "eval fake called outside a world"
+    return w
+
+
 # --------------------------------------------------------------------------
 # observation: the run_turn probe
 # --------------------------------------------------------------------------
@@ -301,8 +309,8 @@ def _install_effect_executors() -> None:
     real_spawn = real("subagent_spawn")
 
     async def _spawn(ctx, payload):
-        sid = await world().record_spawn(payload)
-        if world().real_subagents and real_spawn is not None:
+        sid = await _w().record_spawn(payload)
+        if _w().real_subagents and real_spawn is not None:
             return await real_spawn(ctx, payload)   # cwd = the world workspace
         return sid
 
@@ -334,30 +342,30 @@ def _install_process_fakes() -> None:
         return 1, "eval: host process control is blocked inside a world"
 
     async def _spawn_systemd(ctx, name, command, log, **kwargs):
-        return world().record_bg_start(name, command, log)
+        return _w().record_bg_start(name, command, log)
 
     async def _spawn_setsid(ctx, name, command, log):
-        return world().record_bg_start(name, command, log)
+        return _w().record_bg_start(name, command, log)
 
     async def _terminate(entry: dict) -> str:
-        world().record_bg_stop(entry.get("name", ""))
+        _w().record_bg_stop(entry.get("name", ""))
         return "stopped"
 
     async def _unit_state(unit: str) -> dict[str, str]:
         # Mirrors a RemainAfterExit wake unit: running, then active(exited).
         name = unit.removeprefix(pt._UNIT_PREFIX).removesuffix(".service")
-        if world().bg_alive(name):
+        if _w().bg_alive(name):
             return {"LoadState": "loaded", "ActiveState": "active",
                     "SubState": "running", "Result": "success",
                     "ExecMainStatus": "0"}
-        code = world().bg_exit(name)
+        code = _w().bg_exit(name)
         return {"LoadState": "loaded", "ActiveState": "active",
                 "SubState": "exited",
                 "Result": "success" if code == 0 else "exit-code",
                 "ExecMainStatus": "" if code is None else str(code)}
 
     async def _entry_alive(entry: dict) -> bool:
-        return world().bg_alive(entry.get("name", ""))
+        return _w().bg_alive(entry.get("name", ""))
 
     pt._run_cmd = _world_only(pt._run_cmd, _refuse)
     pt._spawn_systemd = _world_only(pt._spawn_systemd, _spawn_systemd)
@@ -384,9 +392,9 @@ def _install_subagent_fake() -> None:
         return
 
     async def _run_claude(self, *a, **kw):
-        if world().real_subagents:
+        if _w().real_subagents:
             return await real(self, *a, **kw)
-        return world().record_claude_run(*a, **kw)
+        return _w().record_claude_run(*a, **kw)
 
     SubagentService._run_claude = _world_only(real, _run_claude)  # type: ignore[method-assign]
 
@@ -434,11 +442,11 @@ def _install_misc_fakes() -> None:
 
     async def dispatch_contact_call(self, subagent_id, task, contact_id,
                                     modality, parent_session_key, *a, **k):
-        return world().record_call(subagent_id=subagent_id, task=task,
+        return _w().record_call(subagent_id=subagent_id, task=task,
                                    contact_id=contact_id, modality=modality)
 
     async def get_state(self, entity_id, *, force_refresh=False):
-        return world().ha_states.get(entity_id)
+        return _w().ha_states.get(entity_id)
 
     real_submit, real_resume = (
         AttentionCoordinator.submit, AttentionCoordinator.resume_pending)
@@ -450,17 +458,17 @@ def _install_misc_fakes() -> None:
     # turn still holds the session lock (2026-10-08: deadlocked close_goal).
     # The task inherits the world context, so settle() waits for it.
     async def submit(self, session_key, dispatch_fn, **kwargs):
-        if world().attention_real:
+        if _w().attention_real:
             return await real_submit(self, session_key, dispatch_fn, **kwargs)
         asyncio.ensure_future(dispatch_fn())
 
     async def resume_pending(self, session_key, dispatch_fn, *a, **kwargs):
-        if world().attention_real:
+        if _w().attention_real:
             return await real_resume(self, session_key, dispatch_fn, *a, **kwargs)
         asyncio.ensure_future(dispatch_fn())
 
     def notify_typing(self, *a, **k):
-        if world().attention_real:
+        if _w().attention_real:
             return real_typing(self, *a, **k)
         return None
 
