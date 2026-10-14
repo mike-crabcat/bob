@@ -186,11 +186,13 @@ def delivering_via(bridge: Any):
 def _outbound_text(text: str) -> str:
     """Hygiene for ANY text leaving for WhatsApp: leaked tool-call markup
     and OpenAI web_search citation markers removed (both no-ops on clean
-    text, so system strings pass untouched)."""
+    text, so system strings pass untouched), then markdown converted to
+    WhatsApp markup (whatsapp_markup.to_whatsapp)."""
     from server.services.openai_service import (
         strip_citation_markers, strip_leaked_tool_xml,
     )
-    return strip_citation_markers(strip_leaked_tool_xml(text))
+    from server.services.whatsapp_markup import to_whatsapp
+    return to_whatsapp(strip_citation_markers(strip_leaked_tool_xml(text)))
 
 
 class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, ReactionsMixin):
