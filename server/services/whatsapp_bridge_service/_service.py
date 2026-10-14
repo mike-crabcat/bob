@@ -981,8 +981,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
             name = sc.get("display_name", "Unknown")
             phone = sc.get("phone", "")
             # Auto-seed contact from shared vCard
-            if phone:
-                normalized_phone = jid_to_phone(phone)
+            normalized_phone = jid_to_phone(phone) if phone else None
+            if normalized_phone:
                 from server.repositories.contacts import ContactRepository
                 repo = ContactRepository(self.db)
                 existing = await repo.get_by_phone(normalized_phone)

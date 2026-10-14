@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import logging
 import secrets
 from datetime import timedelta
@@ -239,7 +240,7 @@ class DreamStore(BaseService):
             (json_dumps(existing) or "[]", item_id),
         )
 
-    async def list_resolutions(self, statuses: list[str] | None = None, limit: int = 200) -> list[dict]:
+    async def list_resolutions(self, statuses: Sequence[str] | None = None, limit: int = 200) -> list[dict]:
         if statuses:
             marks = ",".join("?" for _ in statuses)
             rows = await self.db.fetch_all(

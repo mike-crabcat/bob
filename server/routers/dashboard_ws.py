@@ -74,7 +74,7 @@ async def dashboard_websocket(websocket: WebSocket) -> None:
 
                 if task is receive_task:
                     try:
-                        msg = json.loads(result)
+                        msg = json.loads(receive_task.result())
                     except (json.JSONDecodeError, TypeError):
                         continue
 

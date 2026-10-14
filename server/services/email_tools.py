@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import base64
 import json
 import logging
@@ -179,7 +181,7 @@ def make_email_tools(
             reply_tracker[0] = True
         if reply_body_tracker is not None:
             reply_body_tracker.append(body)
-        result = {"ok": True, "thread_id": thread_id}
+        result: dict[str, Any] = {"ok": True, "thread_id": thread_id}
         if attachment_dicts:
             result["attachments_sent"] = [a["filename"] for a in attachment_dicts]
         return json.dumps(result)

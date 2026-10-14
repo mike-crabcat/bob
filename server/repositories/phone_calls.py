@@ -179,7 +179,7 @@ class PhoneCallRepository:
         *,
         transcript: str,
         recording_path: str | None,
-        duration_seconds: int | None,
+        duration_seconds: float | None,
         outcome_json: str | None,
     ) -> None:
         await self.db.execute(

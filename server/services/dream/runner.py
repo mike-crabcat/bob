@@ -310,7 +310,7 @@ class DreamRunner(BaseService):
             if cand is None:
                 processed.append(entry["deferred_id"])
                 continue
-            if entry["item_type"] == "resolution":
+            if isinstance(cand, ResolutionCandidate):
                 await self._write_resolution(run_id, cand, entry["session_key"], stats)
             else:
                 await self._write_plan(run_id, cand, entry["session_key"], stats)
@@ -340,7 +340,8 @@ class DreamRunner(BaseService):
         ref = _parse_iso(reference.get("ts") or reference.get("updated_at") or reference.get("last_seen_at"))
         if ref is None:
             return True
-        newest = max((_parse_iso(e.at) for e in evidence), default=None)
+        stamps = [ts for e in evidence if (ts := _parse_iso(e.at)) is not None]
+        newest = max(stamps, default=None)
         return newest is not None and newest > ref
 
     @staticmethod

@@ -21,7 +21,7 @@ class EmailStore:
 
     async def insert_inbox(
         self, *, inbox_id: str, agentmail_inbox_id: str, display_name: str | None,
-        email_address: str, metadata_json: str, now_iso: str,
+        email_address: str, metadata_json: str | None, now_iso: str,
     ) -> None:
         await self.db.execute(
             """INSERT INTO email_inboxes
@@ -250,9 +250,9 @@ class EmailStore:
     async def insert_message(
         self, *, message_id: str, inbox_id: str, agentmail_message_id: str,
         thread_id: str, subject: str | None, sender_email: str | None,
-        sender_name: str | None, to_addresses_json: str, cc_addresses_json: str,
+        sender_name: str | None, to_addresses_json: str | None, cc_addresses_json: str | None,
         text_body: str | None, html_body: str | None, preview: str | None,
-        labels_json: str, has_attachments: bool, in_reply_to: str | None,
+        labels_json: str | None, has_attachments: bool, in_reply_to: str | None,
         message_timestamp: str, now_iso: str, txn: Any = None,
     ) -> None:
         conn = txn if txn is not None else self.db
@@ -272,7 +272,7 @@ class EmailStore:
              1 if has_attachments else 0, in_reply_to,
              message_timestamp, now_iso, now_iso))
 
-    async def set_attachments_json(self, message_id: str, attachments_json: str) -> None:
+    async def set_attachments_json(self, message_id: str, attachments_json: str | None) -> None:
         await self.db.execute(
             "UPDATE email_messages SET attachments_json = ? WHERE id = ?",
             (attachments_json, message_id))

@@ -82,6 +82,8 @@ async def _eval_run(category, case_ids, tier, repeats, concurrency, model,
     try:
         store = EvalStore(db)
         run = await store.get_run(result.run_id)
+        if run is None:
+            raise typer.Exit(code=1)
         typer.echo("")
         typer.echo(report.summary(run, await store.trials(result.run_id)))
     finally:

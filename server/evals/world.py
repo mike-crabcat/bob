@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from server.context import AppContext
 from server.database import Database
@@ -465,7 +465,7 @@ class World:
         from server.repositories.history import HistoryRepository
         from server.services.session_service import SessionService
         key = self.key(chat)
-        svc, hist = SessionService(self.ctx), HistoryRepository(self.db)
+        svc, hist = SessionService(self.app_ctx), HistoryRepository(self.db)
         start = self.now - ago - gap * max(len(rows) - 1, 0)
         ids = []
         for i, row in enumerate(rows):
@@ -535,7 +535,7 @@ class World:
         g = (group if isinstance(group, Group) or group is None
              else self.groups[group])
         mark = len(self.turns)
-        payload = {
+        payload: dict[str, Any] = {
             "chat_id": g.jid if g else p.jid,
             "chat_kind": "group" if g else "dm",
             "sender_jid": p.jid, "sender_name": p.name, "text": text,
@@ -557,7 +557,7 @@ class World:
                    metadata: dict | None = None) -> list[Turn]:
         from server.services.wake_service import wake_conversation
         mark = len(self.turns)
-        await wake_conversation(self.ctx, self.key(chat), content,
+        await wake_conversation(self.app_ctx, self.key(chat), content,
                                 call_category=category, metadata=metadata,
                                 provenance=provenance)
         await self.settle()
@@ -572,10 +572,10 @@ class World:
         target_key = self.key(target)
         mark = len(self.turns)
         await steering.create_request(
-            self.ctx, target_key=target_key,
-            target_label=await steering.session_label(self.ctx, target_key),
+            self.app_ctx, target_key=target_key,
+            target_label=await steering.session_label(self.app_ctx, target_key),
             instruction=instruction, origin_session_key=origin_key,
-            origin_label=await steering.session_label(self.ctx, origin_key),
+            origin_label=await steering.session_label(self.app_ctx, origin_key),
             requester_contact_id=p.contact_id)
         await self.settle()
         return self.turns[mark:]
@@ -604,6 +604,7 @@ class World:
                 display_name="Bob", email_address="bob@eval.example",
                 metadata_json="{}", now_iso=self.now.isoformat())
             inbox = await store.inbox_by_agentmail_id("bob@eval.example")
+        assert inbox is not None
         n = next(self._msg_seq)
         msg = {"message_id": f"<eval-{n}@mail.example>",
                "thread_id": thread or f"thread-eval-{n}",
@@ -613,7 +614,7 @@ class World:
                "labels": ["received", "unread"],
                "timestamp": self.now.isoformat(), "attachments": []}
         mark = len(self.turns)
-        svc = EmailPollingService(self.ctx, agentmail_client=FakeAgentMail())
+        svc = EmailPollingService(self.app_ctx, agentmail_client=cast(Any, FakeAgentMail()))
         await svc.process_incoming_message(inbox, msg)
         await self.settle()
         return self.turns[mark:]
@@ -639,7 +640,7 @@ class World:
         if advance is not None:
             await WakeupRepository(self.db).pull_forward(advance.total_seconds())
         await pump_due_effects(self.ctx)
-        await pump_due_wakeups(self.ctx)
+        await pump_due_wakeups(self.app_ctx)
         await self.settle()
         return self.turns[mark:]
 
@@ -729,7 +730,7 @@ class World:
                     await proc.wait()
                     code = 137
         job.update(alive=False, exit_code=code)
-        await process_tools.poll_bg_jobs(self.ctx)
+        await process_tools.poll_bg_jobs(self.app_ctx)
 
     def record_bg_stop(self, name: str) -> None:
         job = self.bg_jobs.get(name)

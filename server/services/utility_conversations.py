@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, TypedDict
 
 from server.context import AppContext
 from server.services.tools import tool
@@ -107,6 +108,20 @@ def make_report_to_tool(ctx: AppContext, session_key: str,
 
 # ── spec validation + rendering ───────────────────────────────────────
 
+class RouteSpec(TypedDict):
+    """A requested sensation route as the request tool normalises it; the
+    approval proposal carries the same keys."""
+    name: str
+    source: str
+    type_pattern: str
+    level: str
+    charter: str
+    hours: str
+    cooldown_s: int
+    budget_per_hour: int
+    requested_by: str
+
+
 def _validate_spec(*, name: str, source: str, type_pattern: str, level: str,
                    charter: str, hours: str, cooldown_s: int,
                    budget_per_hour: int) -> str | None:
@@ -131,7 +146,7 @@ def _validate_spec(*, name: str, source: str, type_pattern: str, level: str,
     return None
 
 
-def render_spec(spec: dict[str, Any], *, verb: str = "New") -> str:
+def render_spec(spec: Mapping[str, Any], *, verb: str = "New") -> str:
     """The spec as the approval DM renders it (proposal.summary)."""
     valves = [
         f"hours {spec['hours']}" if spec.get("hours") else "hours 24h",
@@ -237,7 +252,7 @@ async def _has_pending_approval(ctx: AppContext, name: str) -> bool:
     return bool(rows)
 
 
-def _is_narrowing(old: dict[str, Any], new: dict[str, Any]) -> bool:
+def _is_narrowing(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
     """True when the ONLY changes tighten valves (autonomous, plan Part 3).
     Adding hours where none existed narrows; changing/removing them widens.
     Charter or pattern changes always re-approve — 'narrower wording' is not
@@ -261,7 +276,7 @@ def _is_narrowing(old: dict[str, Any], new: dict[str, Any]) -> bool:
     return True
 
 
-async def _submit_for_approval(ctx: AppContext, spec: dict[str, Any],
+async def _submit_for_approval(ctx: AppContext, spec: Mapping[str, Any],
                                route_id: int, *, verb: str,
                                session_key: str) -> dict[str, Any]:
     from server.services.effects import emit_and_deliver
@@ -331,7 +346,7 @@ def make_sensation_route_tools(ctx: AppContext, session_key: str) -> list:
             UtilityConversationRepository, utility_session_key,
         )
 
-        spec = {"name": (name or "").strip().lower(),
+        spec: RouteSpec = {"name": (name or "").strip().lower(),
                 "source": (source or "").strip().lower(),
                 "type_pattern": (type_pattern or "").strip(),
                 "level": level or "action",

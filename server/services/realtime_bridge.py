@@ -23,7 +23,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -401,7 +401,7 @@ class RealtimeBridge:
 
     def __init__(
         self,
-        audio_source: AudioSource,
+        audio_source: AudioSource | None,
         *,
         api_key: str,
         model: str,
@@ -417,7 +417,9 @@ class RealtimeBridge:
         opening_listen_seconds: float = 5.0,
         gate_decision_seconds: float = 2.0,
     ) -> None:
-        self.audio = audio_source
+        # None only while prewarming an outbound call: the media stream
+        # attaches its source (phone.py) before any audio is relayed.
+        self.audio: AudioSource = cast(AudioSource, audio_source)
         self.api_key = api_key
         self.model = model
         self.instructions = instructions
@@ -641,11 +643,12 @@ class RealtimeBridge:
         if not self.speak_first:
             nudge = asyncio.create_task(self._first_response_nudge(oai))
         end_wait = asyncio.create_task(self._end_requested.wait())
-        session_tasks = [relay, events, timer, end_wait] + ([nudge] if nudge else [])
+        session_tasks: list[asyncio.Task[Any]] = [relay, events, timer, end_wait] + ([nudge] if nudge else [])
 
         try:
+            waited: set[asyncio.Task[Any]] = {relay, events, timer, end_wait}
             done, pending = await asyncio.wait(
-                {relay, events, timer, end_wait},
+                waited,
                 return_when=asyncio.FIRST_COMPLETED,
             )
         except asyncio.CancelledError:

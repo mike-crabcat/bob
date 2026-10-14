@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from server.context import AppContext
 from server.database import Database
@@ -449,7 +449,7 @@ class DreamTask:
 
         runner = DreamRunner(ctx)
 
-        def _log_failure(task: "asyncio.Task[None]") -> None:
+        def _log_failure(task: "asyncio.Task[Any]") -> None:
             if not task.cancelled() and task.exception() is not None:
                 logger.error("dream background run failed", exc_info=task.exception())
 

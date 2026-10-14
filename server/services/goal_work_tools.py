@@ -374,9 +374,9 @@ def make_goal_work_tools(ctx: AppContext, session_key: str, *,
         COMPLETE for someone else."""
         out: dict[str, Any] = {"ok": True}
         if access != "none":
-            outcomes = json.loads(await legacy_goal["list_goals"].handler())
+            outcomes = json.loads(str(await legacy_goal["list_goals"].handler()))
             out["outcomes"] = outcomes.get("goals", outcomes)
-        promises = json.loads(await legacy_task["list_tasks"].handler(status="pending"))
+        promises = json.loads(str(await legacy_task["list_tasks"].handler(status="pending")))
         def _as_goal(item: dict) -> dict:
             # One id vocabulary for the model: promises are goals.
             return {("goal_id" if k == "task_id" else k): v for k, v in item.items()}

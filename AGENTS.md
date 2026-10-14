@@ -63,7 +63,8 @@ Config directory is `/home/bob/config`
 
 - Package manager: `uv` (Python 3.12 pinned via `.python-version`); single project at the repo root
 - UI: `npm` in `ui/` — the dashboard outside docker is the vite dev server, run as the `bob-ui.service` user unit (auto-starts, logs: `journalctl --user -u bob-ui.service`)
-- Deploy (primary): `systemctl --user restart bob.service` — the unit runs `uv run` from this checkout, so a restart picks up the working tree. Run `uv run pytest tests -q` yourself before meaningful changes; nothing gates it automatically
+- Deploy (primary): `systemctl --user restart bob.service` — the unit runs `uv run` from this checkout, so a restart picks up the working tree. Run `uv run pytest tests -q` and `uv run pyright` yourself before meaningful changes; nothing gates them automatically
 - Docker instances: see README → "Bob instances (Docker)"
 - Test: `uv run pytest tests -q`
+- Types: `uv run pyright` must report 0 errors (strict mode over `server/`; config in `pyproject.toml` `[tool.pyright]`). Missing-annotation rules are warnings for now; promote a rule to error once its warning count reaches 0
 - Evals: `bob eval run --model <slug> -n 3` / `bob eval compare <a> <b>` — throwaway production-shaped worlds, never the live DB; see `docs/evals.md`

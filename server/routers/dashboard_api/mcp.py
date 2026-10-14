@@ -36,7 +36,7 @@ def _redact(row: dict) -> dict:
     return out
 
 
-def _with_status(rows: list[dict], manager) -> list[dict]:
+def _with_status(rows: list[dict[str, Any]], manager: Any) -> list[dict[str, Any]]:
     status = {s["server_id"]: s for s in (manager.status() if manager else [])}
     out = []
     for row in rows:
@@ -107,6 +107,8 @@ async def update_mcp_server(request: Request, server_id: str) -> dict[str, Any]:
     if not fields:
         return {"error": "no recognized fields to update"}
     row = await repo.update(server_id, **fields)
+    if row is None:
+        return {"error": f"no MCP server {server_id}"}
     manager = _manager(request)
     if manager is not None and row and row["enabled"]:
         await manager.refresh_server(row)

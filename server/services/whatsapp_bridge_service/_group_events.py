@@ -58,6 +58,8 @@ class GroupEventsMixin(_Host):
         for p in participants:
             p_jid = p.get("jid", "")
             phone_number = jid_to_phone(p_jid)
+            if not phone_number:
+                continue
             display_name = p.get("display_name", "")
             is_admin = 1 if p.get("is_admin") else 0
             is_super_admin = 1 if p.get("is_super_admin") else 0
@@ -83,6 +85,8 @@ class GroupEventsMixin(_Host):
         for p in participants:
             p_jid = p.get("jid", "")
             phone_number = jid_to_phone(p_jid)
+            if not phone_number:
+                continue
             display_name = p.get("display_name", "")
             contact = await self._contacts().get_by_phone(phone_number)
             if not contact:
@@ -128,6 +132,8 @@ class GroupEventsMixin(_Host):
         join_names: list[str] = []
         for jid in joined_jids:
             phone_number = jid_to_phone(jid)
+            if not phone_number:
+                continue
             # Try to get a display name from existing participants or contacts
             display_name = ""
             existing = await self._contacts().get_by_phone(phone_number)
@@ -154,6 +160,8 @@ class GroupEventsMixin(_Host):
         leave_names: list[str] = []
         for jid in left_jids:
             phone_number = jid_to_phone(jid)
+            if not phone_number:
+                continue
             existing_contact = await self._contacts().get_by_phone(phone_number)
             if existing_contact:
                 leave_names.append(existing_contact["name"] or phone_number)
@@ -176,7 +184,8 @@ class GroupEventsMixin(_Host):
         sender_name = ""
         if sender_jid:
             sender_phone = jid_to_phone(sender_jid)
-            sender_contact = await self._contacts().get_by_phone(sender_phone)
+            sender_contact = (await self._contacts().get_by_phone(sender_phone)
+                              if sender_phone else None)
             if sender_contact:
                 sender_name = sender_contact["name"]
 

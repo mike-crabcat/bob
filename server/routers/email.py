@@ -84,6 +84,8 @@ async def register_inbox(
         now_iso=now,
     )
     row = await store.get_inbox(inbox_id, include_deleted=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inbox not found")
     return _row_to_inbox(row)
 
 
@@ -136,6 +138,8 @@ async def update_inbox(
 
     await store.update_inbox_fields(str(inbox_id), values)
     row = await store.get_inbox(str(inbox_id), include_deleted=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inbox not found")
     return _row_to_inbox(row)
 
 

@@ -105,7 +105,7 @@ class DocsService(BaseService):
                 if query.lower() in doc["content"].lower()
             ]
 
-        sections: list[dict[str, str]] = []
+        sections: list[dict[str, Any]] = []
         for item in raw_sections:
             idx = item.get("index") if isinstance(item, dict) else item
             if not isinstance(idx, int) or idx < 0 or idx >= len(all_docs):

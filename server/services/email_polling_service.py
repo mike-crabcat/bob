@@ -477,7 +477,7 @@ class EmailPollingService(BaseService):
         attach_dir = workspace_dir / "email-attachments" / thread_id
         attach_dir.mkdir(parents=True, exist_ok=True)
 
-        saved: list[dict[str, str]] = []
+        saved: list[dict[str, Any]] = []
         for att in attachments:
             att_id = att.get("attachment_id", "")
             filename = att.get("filename", f"attachment_{len(saved)}")

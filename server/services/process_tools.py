@@ -612,7 +612,7 @@ async def poll_bg_jobs(ctx: AppContext) -> None:
             running = await _entry_alive(row)
             status, result, exit_code = ("exited", None, None) if not running \
                 else (None, None, None)
-        if running:
+        if running or status is None:
             continue
         await repo.mark_terminal(
             row["id"], status=status, exit_code=exit_code,

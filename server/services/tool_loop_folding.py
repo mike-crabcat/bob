@@ -25,6 +25,7 @@ to today:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 from typing import Any
 
@@ -135,7 +136,7 @@ def iteration_view(
 
 
 def _whole_tool_pairs(items: list[dict[str, Any]],
-                      rest: list[dict[str, Any]] = ()) -> list[dict[str, Any]]:
+                      rest: Sequence[dict[str, Any]] = ()) -> list[dict[str, Any]]:
     """Drop tool calls/results whose partner fell outside the slice.
 
     A fixed-position cut can land between a replayed function_call and its

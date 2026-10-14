@@ -69,6 +69,8 @@ async def create_contact(
         raise
     
     row = await ContactRepository(database).get_any(str(contact_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
     return _row_to_contact(row)
 
 
@@ -83,6 +85,33 @@ async def list_contacts(
     rows = await ContactRepository(database).list_paged(
         skip=skip, limit=limit, search=search)
     return [_row_to_contact(row) for row in rows]
+
+
+@router.get("/default", response_model=ContactResponse)
+async def get_default_contact(
+    database: Database = Depends(get_database),
+) -> ContactResponse:
+    """Get the current default contact for notifications."""
+    row = await ContactRepository(database).get_default()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No default contact configured",
+        )
+
+    return _row_to_contact(row)
+
+
+@router.delete("/default", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_default_contact(
+    database: Database = Depends(get_database),
+) -> Response:
+    """Clear the default contact."""
+    await ContactRepository(database).clear_default()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 
 @router.get("/{contact_id}", response_model=ContactResponse)
@@ -161,6 +190,8 @@ async def update_contact(
         )
 
     row = await ContactRepository(database).get_any(str(contact_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
     return _row_to_contact(row)
 
 
@@ -244,22 +275,6 @@ async def get_contacts_by_whatsapp_group(
     return [_row_to_contact(row) for row in rows]
 
 
-@router.get("/default", response_model=ContactResponse)
-async def get_default_contact(
-    database: Database = Depends(get_database),
-) -> ContactResponse:
-    """Get the current default contact for notifications."""
-    row = await ContactRepository(database).get_default()
-
-    if not row:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No default contact configured",
-        )
-
-    return _row_to_contact(row)
-
-
 @router.put("/{contact_id}/set-default", response_model=ContactResponse)
 async def set_default_contact(
     contact_id: UUID,
@@ -279,17 +294,9 @@ async def set_default_contact(
     await ContactRepository(database).set_default(str(contact_id))
 
     row = await ContactRepository(database).get_any(str(contact_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
     return _row_to_contact(row)
-
-
-@router.delete("/default", status_code=status.HTTP_204_NO_CONTENT)
-async def clear_default_contact(
-    database: Database = Depends(get_database),
-) -> Response:
-    """Clear the default contact."""
-    await ContactRepository(database).clear_default()
-
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{contact_id}/entity")

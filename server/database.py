@@ -21,7 +21,12 @@ _MIGRATION_PREFIX_RE = re.compile(r"^(\d+)")
 class Database:
     """Small async connection pool on top of aiosqlite."""
 
-    def __init__(self, db_path: Path, schema_dir: Path, pool_size: int = 4) -> None:
+    def __init__(self, db_path: Path | None, schema_dir: Path | None,
+                 pool_size: int = 4) -> None:
+        """db_path None is a configuration error caught at connect();
+        schema_dir None means this handle never migrates (read tools)."""
+        if db_path is None:
+            raise ValueError("Database needs a db_path (Settings resolves one)")
         self.db_path = db_path
         self.schema_dir = schema_dir
         self.pool_size = max(pool_size, 1)
@@ -143,6 +148,8 @@ class Database:
             applied = {row["name"] for row in await cursor.fetchall()}
             await cursor.close()
 
+            if self.schema_dir is None:
+                raise RuntimeError("this Database handle has no schema_dir; it cannot migrate")
             for schema_file in sorted(self.schema_dir.glob("*.sql"), key=_migration_sort_key):
                 if schema_file.name in applied:
                     continue

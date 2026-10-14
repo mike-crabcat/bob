@@ -12,7 +12,7 @@ app = typer.Typer(help="Contact operations")
 @app.command("create")
 def contact_create(
     name: Annotated[str, typer.Argument(help="Contact name")],
-    phone_number: Annotated[str, typer.Option("--phone-number", "--phone", "-p", help="Contact phone number")] = ...,
+    phone_number: Annotated[str, typer.Option("--phone-number", "--phone", "-p", help="Contact phone number")],
     email: Annotated[Optional[str], typer.Option("--email", "-e", help="Contact email")] = None,
     metadata_json: Annotated[Optional[str], typer.Option("--metadata-json", help="Contact metadata as JSON object")] = None,
     channel: Annotated[Optional[str], typer.Option(help="Messaging channel for routing")] = None,

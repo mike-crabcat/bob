@@ -19,6 +19,7 @@ from __future__ import annotations
 import secrets
 
 from fastapi import Request
+from starlette.requests import HTTPConnection
 from fastapi.responses import JSONResponse
 
 from server.config import Settings
@@ -55,7 +56,7 @@ _TASK_SETTLE_PREFIX = "/api/v1/tasks/"
 _TASK_SETTLE_SUFFIX = "/settle"
 
 
-def extract_api_token(request: Request) -> str:
+def extract_api_token(request: HTTPConnection) -> str:
     """Pull the API token from any of the accepted transports."""
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
@@ -67,7 +68,7 @@ def extract_api_token(request: Request) -> str:
     return request.query_params.get("secret", "")
 
 
-def api_token_valid(settings: Settings, request: Request) -> bool:
+def api_token_valid(settings: Settings, request: HTTPConnection) -> bool:
     """Single comparison path for every auth site (middleware, dashboard,
     dashboard WS, dependencies)."""
     if not settings.api_auth_enabled:

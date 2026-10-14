@@ -62,6 +62,8 @@ class AnnounceService(BaseService):
         bridge = self.ctx.whatsapp_bridge
         for session_key, plans in by_session.items():
             chat_id = _session_key_to_chat_id(session_key)
+            if chat_id is None:  # filtered above; keeps the type narrow
+                continue
 
             # Hot-session defer: don't butt into a live conversation.
             last_inbound = _parse_iso(await self.store.session_last_inbound_at(session_key))

@@ -237,6 +237,8 @@ class _TraceWriter:
             return
         from server.repositories.llm_trace import LlmTraceRepository
         try:
+            if self.log_id is None:
+                return
             count = await LlmTraceRepository(self.db).append_many(
                 llm_call_id=self.log_id, events=self._pending)
             self.written += count

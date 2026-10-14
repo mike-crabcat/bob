@@ -140,16 +140,17 @@ class ReactionsMixin(_Host):
             content = (f'[reaction removed from: "{snippet}"]' if snippet
                        else "[reaction removed from an earlier message]")
 
+        reaction: dict[str, Any] = {
+            "emoji": emoji,
+            "target_wa_message_id": target_message_id,
+            "target_snippet": snippet,
+            "target_role": target_role,
+            "sender_jid": sender_jid or None,
+            "sender_name": sender_name or None,
+        }
         metadata = {
             "wa_message_id": reaction_wa_id or None,
-            "reaction": {
-                "emoji": emoji,
-                "target_wa_message_id": target_message_id,
-                "target_snippet": snippet,
-                "target_role": target_role,
-                "sender_jid": sender_jid or None,
-                "sender_name": sender_name or None,
-            },
+            "reaction": reaction,
         }
 
         # Dedupe-first, then store, in one transaction: the event log's
@@ -204,7 +205,7 @@ class ReactionsMixin(_Host):
         await self._dispatch_reaction_turn(
             session_key=session_key, chat_id=chat_id, contact_id=contact_id,
             is_trusted=is_trusted, sender_name=sender_name,
-            reaction_meta=metadata["reaction"])
+            reaction_meta=reaction)
 
     async def _dispatch_reaction_turn(
         self, *, session_key: str, chat_id: str,
