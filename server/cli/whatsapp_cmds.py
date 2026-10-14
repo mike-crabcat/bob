@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import sys
+import time
+
+import qrcode
+
 from server.cli._helpers import *  # noqa: F403,F405
 
 # ============================================================================

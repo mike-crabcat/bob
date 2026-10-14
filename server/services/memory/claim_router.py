@@ -5,10 +5,12 @@ and fold the new information into their state — so a reply given in the
 "wrong" channel still reaches the plan (gap G4, the core failure mode).
 
 Design (plan §2.2–2.3):
-- Trigger is INLINE at the extraction post-loop, backed by a durable
-  ``memory.claims_created`` event_log row and a replay watermark — the
-  in-process event_bus is telemetry only. A crash between extraction and
-  routing is replayed by the heartbeat sweep, never lost.
+- Trigger is INLINE at the extraction post-loop. Each batch is also
+  recorded as a ``memory.claims_created`` event_log row (the in-process
+  event_bus is telemetry only). There is no replay: the heartbeat sweep and
+  its ``_route_batch`` path were retired with the legacy goal-state
+  pipeline (7936ea18), so a crash between extraction and routing loses
+  that batch's routing.
 - Routing is structural first, probed secondarily: candidate goals come from
   strategy ``refs.entities`` intersection (strong), the entity-mention index
   (strong), or human participant overlap on ``participants.contact_id``
@@ -22,8 +24,8 @@ Design (plan §2.2–2.3):
   whether a ``goal_progress`` wake is warranted (plan §1.3 contract, no
   autonomous actuation).
 
-Kill switch: ``BOB_CLAIM_ROUTER_DISABLED=1`` — extraction is unaffected and
-the watermark does not advance, so re-enabling replays the gap.
+Kill switch: ``BOB_CLAIM_ROUTER_DISABLED=1`` — extraction is unaffected;
+batches recorded while it is off are not routed later.
 """
 
 from __future__ import annotations
@@ -153,7 +155,7 @@ async def build_candidate_entities_block(db: Any, session_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Batch handling (plan §2.2 inline trigger + durable replay)
+# Batch handling (plan §2.2 inline trigger)
 # ---------------------------------------------------------------------------
 
 async def handle_extraction_batch(
@@ -162,8 +164,8 @@ async def handle_extraction_batch(
     """Durable record of the batch, then inline routing.
 
     The event_log row is appended BEFORE routing (accept-once on
-    turn_message_id). If routing is disabled or crashes, the heartbeat sweep
-    replays from the watermark once re-enabled/recovered."""
+    turn_message_id). Nothing replays it: if routing is disabled or
+    crashes, that batch is not routed."""
     from server.repositories.event_log import Event, EventLogRepository
 
     db = ctx.db
@@ -400,12 +402,6 @@ async def _entity_display_names(db: Any, entity_ids: list[str]) -> dict[str, str
     return {r["entity_id"]: r["display_name"] for r in rows or []}
 
 
-async def get_watermark(db: Any) -> str | None:
-    row = await db.fetch_one(
-        "SELECT event_id FROM claim_router_watermark WHERE id = 1")
-    return row["event_id"] if row else None
-
-
 async def recent_routing_log(db: Any, *, limit: int = 50) -> list[dict[str, Any]]:
     """Newest routing decisions — the dashboard's routing browser reads
     through here (memory tables stay owned by this package, plan §4.2)."""
@@ -416,53 +412,3 @@ async def recent_routing_log(db: Any, *, limit: int = 50) -> list[dict[str, Any]
            FROM memory_routing_log ORDER BY created_at DESC LIMIT ?""",
         (limit,))
     return [dict(r) for r in rows] if rows else []
-
-
-async def advance_watermark(db: Any, event_id: str) -> None:
-    from server.services.base import utcnow
-    await db.execute(
-        """INSERT INTO claim_router_watermark (id, event_id, updated_at)
-           VALUES (1, ?, ?)
-           ON CONFLICT (id) DO UPDATE SET event_id = excluded.event_id,
-                                          updated_at = excluded.updated_at""",
-        (event_id, utcnow().isoformat()),
-    )
-
-
-async def replay_pending(ctx: AppContext, *, limit: int = 20) -> int:
-    """Heartbeat sweep: route any claims_created events past the watermark.
-    Idempotent per (goal, stimulus) via the revise effect key, so an inline
-    delivery followed by a replay is harmless."""
-    if router_disabled():
-        return 0
-    wm = await get_watermark(ctx.db)
-    if wm is None:
-        # First run: position at the very start ("" sorts before every event
-        # id) so nothing recorded while the router was off is skipped — the
-        # plan's "re-enabling replays the gap" contract, applied to the
-        # initial enable too. The 20-events-per-tick limit throttles the
-        # backlog; pair with BOB_GOAL_STATE_SHADOW during burn-in.
-        await advance_watermark(ctx.db, "")
-        wm = ""
-
-    from server.repositories.event_log import EventLogRepository
-
-    rows = await EventLogRepository(ctx.db).events_after(
-        ROUTED_EVENT_TYPE, wm, limit=limit)
-    for ev in rows or []:
-        try:
-            payload = json.loads(ev["payload_json"] or "{}")
-            batch = await _batch_for_turn(ctx.db,
-                                          payload.get("turn_message_id", ""))
-            if batch["claim_ids"]:
-                await _route_batch(
-                    ctx, session_key=payload.get("session_key", ""),
-                    cid=payload.get("conversation_id", ""),
-                    turn_message_id=payload.get("turn_message_id", ""),
-                    batch=batch)
-        except Exception:
-            logger.exception("claim router replay failed for event %s", ev["id"])
-        # Advance per event: a failure in one batch never blocks the queue
-        # (the revise effect's own retries cover redelivery).
-        await advance_watermark(ctx.db, ev["id"])
-    return len(rows or [])
