@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, NoReturn, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -206,7 +206,7 @@ def _normalize_api_response(payload: Any) -> dict[str, Any]:
     return {"data": payload}
 
 
-def _handle_http_error(exc: HTTPError) -> None:
+def _handle_http_error(exc: HTTPError) -> NoReturn:
     error_body = exc.read().decode()
     try:
         error_data = json.loads(error_body)
@@ -217,13 +217,16 @@ def _handle_http_error(exc: HTTPError) -> None:
     raise typer.Exit(code=1) from exc
 
 
-def _handle_connection_error(exc: URLError) -> None:
+def _handle_connection_error(exc: URLError) -> NoReturn:
     typer.echo(f"Connection error: {exc.reason}", err=True)
     typer.echo("Is the bob service running? Try: bob start", err=True)
     raise typer.Exit(code=1) from exc
 
 
-def _api_call(method: str, path: str, data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def _api_call(method: str, path: str, data: Optional[dict[str, Any]] = None,
+              *, missing_ok: bool = False) -> dict[str, Any]:
+    """Call the local API. HTTP errors print and exit, except a 404 with
+    ``missing_ok`` (returns ``{"data": None}``)."""
     settings = Settings.from_env()
     url = f"http://{settings.host}:{settings.port}{path}"
     headers = {"Content-Type": "application/json"}
@@ -239,6 +242,8 @@ def _api_call(method: str, path: str, data: Optional[dict[str, Any]] = None) -> 
                 return {"data": None}
             return _normalize_api_response(json.loads(response_body.decode()))
     except HTTPError as exc:
+        if missing_ok and exc.code == 404:
+            return {"data": None}
         _handle_http_error(exc)
     except URLError as exc:
         _handle_connection_error(exc)

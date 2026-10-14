@@ -293,18 +293,6 @@ class HistoryRepository:
             f"ORDER BY created_at ASC LIMIT ?",
             tuple(params))
 
-    async def last_message_at(self, session_key: str, *, role: str | None = None) -> str | None:
-        cid = await self._cid(session_key)
-        if role:
-            row = await self.db.fetch_one(
-                "SELECT MAX(created_at) AS last_at FROM messages "
-                "WHERE conversation_id = ? AND role = ?", (cid, role))
-        else:
-            row = await self.db.fetch_one(
-                "SELECT MAX(created_at) AS last_at FROM messages "
-                "WHERE conversation_id = ?", (cid,))
-        return row["last_at"] if row else None
-
     async def has_any(self, session_key: str) -> bool:
         row = await self.db.fetch_one(
             "SELECT id FROM messages WHERE conversation_id = ? LIMIT 1",

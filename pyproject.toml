@@ -42,6 +42,7 @@ dev = [
   "pytest-asyncio>=1.3.0",
   "pytest-timeout>=2.4.0",
   "pytest-cov>=6.0",
+  "pyright==1.1.414",
 ]
 
 [project.scripts]
@@ -59,3 +60,22 @@ testpaths = ["tests"]
 markers = [
   "openclaw_live: exercises a real OpenClaw gateway/model and is skipped by default",
 ]
+
+# Type checking (2026-10-14): strict everywhere, with the "unknown type" /
+# missing-annotation family as warnings while the codebase is annotated.
+# Gate: `uv run pyright` must report 0 errors. Promote a rule to error once
+# its warning count reaches 0.
+[tool.pyright]
+include = ["server"]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "strict"
+reportUnknownMemberType = "warning"
+reportUnknownVariableType = "warning"
+reportUnknownArgumentType = "warning"
+reportUnknownParameterType = "warning"
+reportUnknownLambdaType = "warning"
+reportMissingTypeArgument = "warning"
+reportMissingParameterType = "warning"
+reportMissingTypeStubs = "warning"

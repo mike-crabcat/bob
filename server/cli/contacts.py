@@ -178,13 +178,10 @@ def contact_get_default(
 ) -> None:
     """Get the current default contact for notifications."""
 
-    try:
-        contact = _api_call("GET", "/api/v1/contacts/default")["data"]
-    except _HTTPError as e:
-        if e.response.status_code == 404:
-            typer.echo("No default contact configured.")
-            return
-        raise
+    contact = _api_call("GET", "/api/v1/contacts/default", missing_ok=True)["data"]
+    if contact is None:
+        typer.echo("No default contact configured.")
+        return
 
     if format == "json":
         _echo_json(contact)

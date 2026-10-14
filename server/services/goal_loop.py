@@ -132,9 +132,9 @@ async def _fetch_goal(ctx: AppContext, goal_id: str) -> dict[str, Any] | None:
     return await GoalRepository(ctx.db).get(goal_id)
 
 
-def _room_goal(ctx: AppContext, session_key: str) -> dict[str, Any] | None:
+async def _room_goal(ctx: AppContext, session_key: str) -> dict[str, Any] | None:
     from server.services.goal_rooms import _room_goal as _rg
-    return _rg(ctx, session_key)
+    return await _rg(ctx, session_key)
 
 
 # ---------------------------------------------------------------------------
