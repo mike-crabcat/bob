@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from server.services.base import utcnow
@@ -19,7 +19,13 @@ from server.services.whatsapp_bridge_service._media import jid_to_phone
 logger = logging.getLogger(__name__)
 
 
-class GroupEventsMixin:
+if TYPE_CHECKING:
+    from server.services.whatsapp_bridge_service._host import BridgeHost as _Host
+else:
+    _Host = object
+
+
+class GroupEventsMixin(_Host):
 
     def _contacts(self):
         from server.repositories.contacts import ContactRepository

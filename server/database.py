@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import asyncio
 from pathlib import Path
 import re
+from collections.abc import AsyncGenerator
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -74,7 +75,7 @@ class Database:
         self._connected = False
 
     @asynccontextmanager
-    async def connection(self, *, write: bool = False) -> aiosqlite.Connection:
+    async def connection(self, *, write: bool = False) -> AsyncGenerator[aiosqlite.Connection, None]:
         """Lease a connection from the pool."""
 
         if not self._connected:
@@ -99,7 +100,7 @@ class Database:
             await self._queue.put(connection)
 
     @asynccontextmanager
-    async def transaction(self, *, immediate: bool = True) -> "Transaction":
+    async def transaction(self, *, immediate: bool = True) -> AsyncGenerator["Transaction", None]:
         """Run multiple statements as one atomic unit.
 
         ``immediate=True`` issues ``BEGIN IMMEDIATE`` so the write lock is

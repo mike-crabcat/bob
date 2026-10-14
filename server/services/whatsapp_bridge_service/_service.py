@@ -11,8 +11,12 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from server.services.dispatch_runner import DispatchSpec
+    from server.services.whatsapp_bridge_service._host import BridgeHost
 
 import websockets
 
@@ -1639,3 +1643,8 @@ class WhatsAppBridgeService(BaseService, GroupEventsMixin, SlashCommandsMixin, R
 
 
 register_whatsapp_executors()
+
+if TYPE_CHECKING:
+    # Drift guard: the mixins type-check against _host.BridgeHost, which
+    # must keep matching this class.
+    _host_conforms: type[BridgeHost] = WhatsAppBridgeService

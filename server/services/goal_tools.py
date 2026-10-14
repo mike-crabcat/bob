@@ -148,7 +148,7 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
     scheduling) stay trusted-only; a group-created goal carries the
     pinned owner, and the room's capabilities scope to that creator."""
 
-    async def _version_or_current(goal_id: str, expected: int) -> int | None:
+    async def _version_or_current(goal_id: str, expected: int | None) -> int | None:
         """flash omits expected_version (2026-10-05 evals) — the CAS still
         guards writes racing this turn when we read it here."""
         if expected is not None and expected >= 0:
@@ -275,18 +275,18 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
 
         if not progress.strip() and not objective.strip():
             return json.dumps({"ok": False, "error": "pass progress and/or objective"})
-        expected_version = await _version_or_current(goal_id, expected_version)
-        if expected_version is None:
+        version = await _version_or_current(goal_id, expected_version)
+        if version is None:
             return json.dumps({"ok": False, "error": f"no goal {goal_id}"})
         payload: dict[str, Any] = {"goal_id": goal_id,
-                                   "expected_version": expected_version}
+                                   "expected_version": version}
         if progress.strip():
             payload["progress"] = progress
         if objective.strip():
             payload["objective"] = objective.strip()
         result = await emit_and_deliver(
             ctx, kind="goal_revise",
-            idempotency_key=f"goal_revise:{goal_id}:{expected_version}",
+            idempotency_key=f"goal_revise:{goal_id}:{version}",
             payload=payload)
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "failed")})
@@ -321,8 +321,8 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
         omitted, the goal's current version is used."""
         from server.services.effects import emit_and_deliver
 
-        expected_version = await _version_or_current(goal_id, expected_version)
-        if expected_version is None:
+        version = await _version_or_current(goal_id, expected_version)
+        if version is None:
             return json.dumps({"ok": False, "error": f"no goal {goal_id}"})
 
         checked = _validate_strategy_payload(state)
@@ -331,10 +331,10 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
 
         result = await emit_and_deliver(
             ctx, kind="goal_state_write",
-            idempotency_key=f"goal_state_write:{goal_id}:{expected_version}",
+            idempotency_key=f"goal_state_write:{goal_id}:{version}",
             payload={"goal_id": goal_id,
                      "strategy_json": json.dumps(checked["state"], ensure_ascii=False),
-                     "expected_version": expected_version})
+                     "expected_version": version})
         if not result.get("ok"):
             return json.dumps({"ok": False, "error": result.get("error", "failed")})
         if result.get("duplicate"):
@@ -344,7 +344,7 @@ def goal_tool_handlers(ctx: AppContext, session_key: str,
             # matches, the earlier effect is merely pending: idempotent ok.
             from server.repositories.goals import GoalRepository
             current = await GoalRepository(ctx.db).get(goal_id)
-            if current is None or current["version"] > expected_version:
+            if current is None or current["version"] > version:
                 return json.dumps({"ok": False,
                                    "error": "stale version: goal already at a newer "
                                             "version (re-read with list_goals)"})

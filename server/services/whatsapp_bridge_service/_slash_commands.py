@@ -7,13 +7,20 @@ and other instance state from the host class.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 
 
 logger = logging.getLogger(__name__)
 
 
-class SlashCommandsMixin:
+if TYPE_CHECKING:
+    from server.services.whatsapp_bridge_service._host import BridgeHost as _Host
+else:
+    _Host = object
+
+
+class SlashCommandsMixin(_Host):
     """Slash command handlers (`/patience`, `/who`, etc.)."""
 
     async def _handle_slash_command(

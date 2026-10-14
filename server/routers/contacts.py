@@ -311,7 +311,7 @@ async def get_contact_entity(
     ctx = AppContext(settings=settings, db=database)
     entity_id = canonical_contact_id(str(contact_id))
     svc = MemoryService(ctx)
-    entity = svc.read_entity(settings.harness.workspace_dir, entity_id)
+    entity = await svc.read_entity(settings.harness.workspace_dir, entity_id)
 
     if not entity:
         raise HTTPException(status_code=404, detail="No entity document found for this contact")

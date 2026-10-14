@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from server.context import AppContext
 from server.database import Database
+
+if TYPE_CHECKING:
+    from server.config import Settings
 
 
 def utcnow() -> datetime:
@@ -74,9 +77,10 @@ def due_label(due: str | None) -> str:
     an overdue promise must look different from a pending one."""
     if not due:
         return "due —"
+    parsed = _parse_ts(due)
     try:
-        past = _parse_ts(due) <= utcnow()
-    except Exception:
+        past = isinstance(parsed, datetime) and parsed <= utcnow()
+    except TypeError:  # naive vs aware
         past = False
     return f"{'OVERDUE since' if past else 'due'} {local_minute(due)}"
 

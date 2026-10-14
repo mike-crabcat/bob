@@ -46,7 +46,7 @@ class RunRepository:
 
     async def get(self, run_id: str) -> dict[str, Any] | None:
         row = await self.db.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,))
-        return _decode(row)
+        return _decode(row) if row else None
 
     async def get_by_prefix(self, prefix: str, *, kind: str) -> dict[str, Any] | None:
         """8-char ids are what the prompt renders; exactly one match or None."""
@@ -77,7 +77,7 @@ class RunRepository:
         rows = await self.db.fetch_all(
             "SELECT * FROM runs WHERE status = 'running' "
             "ORDER BY started_at DESC LIMIT ?", (limit,))
-        return [d for r in rows or [] if (d := _decode(r)) is not None]
+        return [_decode(r) for r in rows or []]
 
     async def recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         rows = await self.db.fetch_all(
@@ -85,9 +85,7 @@ class RunRepository:
         return [_decode(r) for r in rows or []]
 
 
-def _decode(row: Any) -> dict[str, Any] | None:
-    if row is None:
-        return None
+def _decode(row: Any) -> dict[str, Any]:
     d = dict(row)
     try:
         d["metadata"] = json.loads(d.get("metadata_json") or "{}") or {}

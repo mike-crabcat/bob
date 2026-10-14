@@ -722,7 +722,7 @@ class EmailPollingService(BaseService):
         inbox: dict[str, Any], is_trusted: bool,
         contact_id: str | None, reply_sent: list,
         reply_bodies: list[str],
-    ) -> list:
+    ) -> tuple[list[Any], str]:
         """The email conversation's toolset — shared verbatim by inbound
         dispatch (_dispatch_to_llm) and steered/woken turns (wake_thread)
         so the two paths can't drift."""

@@ -7,7 +7,8 @@ import asyncio
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, AsyncIterator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -95,7 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(resolved_settings)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         resolved_settings.ensure_directories()
         database = Database(
             db_path=resolved_settings.db_path,

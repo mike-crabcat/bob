@@ -22,7 +22,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,13 @@ def _snippet_of(row: dict[str, Any] | None) -> str | None:
     return first or None
 
 
-class ReactionsMixin:
+if TYPE_CHECKING:
+    from server.services.whatsapp_bridge_service._host import BridgeHost as _Host
+else:
+    _Host = object
+
+
+class ReactionsMixin(_Host):
     """Inbound emoji-reaction storage, rendering rows, and the wake rule."""
 
     _REACTION_TARGETS = ("last_user_message", "own_last_message")
