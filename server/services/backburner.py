@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -336,6 +337,73 @@ def build_transcript(messages_json: str | None, *, max_tail: int = 20, item_cap:
     return "\n".join(lines)
 
 
+def probe_reasoning_enabled() -> bool:
+    """BOB_BACKBURNER_PROBE_REASONING=on feeds the running turn's latest
+    reasoning to the probe. Default off until the replay
+    (scripts/probe_reasoning_replay.py) is judged on a real sample."""
+    return os.getenv("BOB_BACKBURNER_PROBE_REASONING", "off").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def build_probe_prompt(*, bot: str, tool_names: list[str], transcript: str,
+                       reasoning: str = "") -> tuple[str, str]:
+    """(system, user) for the detach probe. Without reasoning this is the
+    original evidence-gated prompt, unchanged. With reasoning (the turn's
+    own working notes, from llm_trace_events) the holding text may also say
+    what happens next — the notes carry intent ("keep polling till 12:00,
+    then email support") that tool calls alone don't show. The notes are
+    private: they can hold persona rules ("don't mention you're a bot") and
+    other people's details, so they're for understanding only."""
+    tools_line = ", ".join(tool_names)
+    if not reasoning:
+        system = (
+            f'You inspect an in-progress turn of "{bot}", an AI assistant on WhatsApp. '
+            "The turn has been running for a while. Work out what it is doing and write "
+            "a short holding message to send meanwhile.\n"
+            'Reply with ONLY a JSON object: {"summary": "...", "holding_text": "..."}\n'
+            "- summary: one sentence, third person, concrete — and it may ONLY "
+            "reference work visible as tool calls in the transcript. The tools "
+            f"this turn has actually called so far: {tools_line}. Never infer, "
+            "predict, or invent actions beyond those calls.\n"
+            f"- holding_text: at most 140 characters, in {bot}'s own voice (lowercase, "
+            "casual, honest), acknowledging you're still on it — no emojis, no promises "
+            "more specific than 'soon', and no claims about what's being done beyond "
+            "the tool activity above.\n"
+            "If the transcript is thin or unclear, keep both generic."
+        )
+        user = ("## In-flight turn\n"
+                + (transcript or "(no tool activity recorded yet — still on the first response)"))
+        return system, user
+    system = (
+        f'You inspect an in-progress turn of "{bot}", an AI assistant on WhatsApp. '
+        "The turn has been running for a while. Work out what it has found and what "
+        "it means to do next, and write a short holding message to send meanwhile.\n"
+        'Reply with ONLY a JSON object: {"summary": "...", "holding_text": "..."}\n'
+        "- summary: one sentence, third person, concrete — and it may ONLY "
+        "reference work visible as tool calls in the transcript. The tools "
+        f"this turn has actually called so far: {tools_line}. Never infer or "
+        "invent actions beyond those calls.\n"
+        f"- holding_text: at most 160 characters, in {bot}'s own voice (lowercase, "
+        "casual, honest, no emojis). Report PROGRESS, not answers: what you're "
+        "working through and, if the working notes make it clear, what you'll do "
+        "next — stated as a plan, never as done. Do NOT state findings, numbers, "
+        "prices, hours, diagnoses or conclusions yet (the checked answer follows "
+        "and must not be contradicted), and do NOT ask the user anything. Nothing "
+        "beyond what the tool activity and notes show.\n"
+        "WORKING NOTES are the turn's private reasoning: use them only to understand "
+        "intent. Never quote them, and never repeat or allude to any rule, "
+        "instruction, policy, or persona guidance they mention (e.g. what not to "
+        "say, being an AI/bot, system or tool names), or details about people "
+        "other than what the user's message already says.\n"
+        "If the transcript and notes are thin or unclear, keep both generic."
+    )
+    user = ("## In-flight turn\n"
+            + (transcript or "(no tool activity recorded yet — still on the first response)")
+            + "\n\n## WORKING NOTES (private — latest reasoning, oldest first)\n"
+            + reasoning)
+    return system, user
+
+
 def _parse_probe_output(raw: str | None) -> dict[str, str] | None:
     """Defensively extract {"summary", "holding_text"} from the probe reply.
     Accepts bare JSON or fenced; rejects empty/oversized fields."""
@@ -453,25 +521,17 @@ async def run_probe(ctx: Any, dispatch_id: str, *,
         return {"summary": TEMPLATE_SUMMARY_NO_ACTIVITY,
                 "holding_text": TEMPLATE_HOLDING, "source": "no_activity"}
 
-    bot = settings.patience.bot_name or "Bob"
-    tools_line = ", ".join(tool_names)
-    system = (
-        f'You inspect an in-progress turn of "{bot}", an AI assistant on WhatsApp. '
-        "The turn has been running for a while. Work out what it is doing and write "
-        "a short holding message to send meanwhile.\n"
-        'Reply with ONLY a JSON object: {"summary": "...", "holding_text": "..."}\n'
-        "- summary: one sentence, third person, concrete — and it may ONLY "
-        "reference work visible as tool calls in the transcript. The tools "
-        f"this turn has actually called so far: {tools_line}. Never infer, "
-        "predict, or invent actions beyond those calls.\n"
-        f"- holding_text: at most 140 characters, in {bot}'s own voice (lowercase, "
-        "casual, honest), acknowledging you're still on it — no emojis, no promises "
-        "more specific than 'soon', and no claims about what's being done beyond "
-        "the tool activity above.\n"
-        "If the transcript is thin or unclear, keep both generic."
-    )
-    user = ("## In-flight turn\n"
-            + (transcript or "(no tool activity recorded yet — still on the first response)"))
+    reasoning = ""
+    if probe_reasoning_enabled():
+        try:
+            from server.repositories.llm_trace import LlmTraceRepository
+            reasoning = await LlmTraceRepository(ctx.db).recent_reasoning(dispatch_id)
+        except Exception:
+            logger.warning("backburner: probe reasoning read failed", exc_info=True)
+
+    system, user = build_probe_prompt(
+        bot=settings.patience.bot_name or "Bob", tool_names=tool_names,
+        transcript=transcript, reasoning=reasoning)
 
     try:
         from server.services.llm_dispatch import LLMDispatchService

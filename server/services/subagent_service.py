@@ -60,9 +60,9 @@ _CLAUDE_AGENT_TYPE_ALIASES = {
 # local refusal, the unknown-type refusal and the brief guard).
 _SELF_WORK_GUIDANCE = (
     "Work that needs your memory, chat history, people or contacts: do it "
-    "yourself in this conversation (long turns move to the background "
-    "automatically and keep every tool), or add_goal(...) with a child "
-    "per person/item when it splits. agent_type='claude' is for code, "
+    "yourself in this conversation if it's quick, or add_goal(...) — goal "
+    "rooms run you with every tool — with a child per person/item when it "
+    "splits. agent_type='claude' is for code, "
     "files and builds in the workspace only; 'openai_voice' places calls.")
 
 # Bob-only capabilities a Claude Code worker does not have. A brief that

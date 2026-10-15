@@ -45,9 +45,9 @@ def make_subagent_tools(ctx: AppContext, session_key: str, *, is_trusted: bool =
         A subagent does NOT have your memory, chat history, people or
         contacts. Work that needs any of those (learn about the group,
         write something about members, recall what was said): do it
-        yourself here — long turns move to the background automatically and
-        keep every tool — or add_goal(...) with a child per person/item when
-        it splits. Such briefs are refused.
+        yourself here if it's quick, or hand it to add_goal(...) — goal rooms
+        run you with every tool — with a child per person/item when it
+        splits. Such briefs are refused.
 
         agent_type:
         - 'claude' (default): Claude Code CLI in the workspace — files + bash

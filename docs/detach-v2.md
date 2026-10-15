@@ -1,5 +1,7 @@
 # Detach v2 — attributed background turns (replaces capture-and-relay)
 
+> **Status 2026-10-15:** default mode is now `hold` — slow turns stay inline, the probe (reasoning-aware, `BOB_BACKBURNER_PROBE_REASONING`) sends the holding ack, a one-shot `add_goal` handoff nudge fires at 60 s, main turns cap at 300 s and foreground bash at 90 s. Detaching ran concurrent turns in one conversation and double-sent a Printful ticket (2026-10-10). `full` remains only as a rollback until detach is deleted. **Auto-handoff (2026-10-15):** a main turn that exhausts its budget writes `{reply, handoff}` in the forced wrap-up round; the dispatch runner turns the brief into a goal room (`kind=handoff`) before the turn ends, or adds it as evidence to a goal the turn already opened. Off under `full`; kill switch `BOB_AUTO_HANDOFF=off`. Final-text delivery now reads the send tool's result: markup-only text or a refused send gets the unfinished-turn notice, never a silent "delivered".
+
 **Status:** IMPLEMENTED + DEPLOYED 2026-09-12 (commit 3b809c64, suite 887
 green; plan written same day from Mike's design). Supersedes the
 capture/relay mechanics of `docs/backburner-plan.md` (mode ladder, probe,

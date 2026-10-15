@@ -91,6 +91,34 @@ class LlmTraceRepository:
             out.append(d)
         return out
 
+    async def recent_reasoning(
+        self, dispatch_id: str, *, max_chars: int = 1500,
+        before: str | None = None,
+    ) -> str:
+        """The newest reasoning parts of a dispatch, oldest-first, trimmed
+        to the most recent ``max_chars`` — the detach probe's view of what a
+        running turn intends. ``before`` (``YYYY-MM-DD HH:MM:SS``, the
+        created_at format) bounds it to what existed at an instant — the
+        probe replay reconstructs a past probe's view with it."""
+        q = ("SELECT content FROM llm_trace_events "
+             "WHERE dispatch_id = ? AND kind = 'reasoning_part' AND content != ''")
+        params: list[Any] = [dispatch_id]
+        if before:
+            q += " AND created_at <= ?"
+            params.append(before)
+        rows = await self.db.fetch_all(q + " ORDER BY seq DESC LIMIT 12", tuple(params))
+        parts: list[str] = []
+        used = 0
+        for r in rows or []:
+            text = " ".join(str(r["content"]).split())
+            if used + len(text) > max_chars:
+                if not parts:
+                    parts.append("…" + text[-max_chars:])
+                break
+            parts.append(text)
+            used += len(text)
+        return "\n".join(reversed(parts))
+
     async def count_for_call(self, call_id: str) -> int:
         row = await self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM llm_trace_events WHERE llm_call_id = ?",

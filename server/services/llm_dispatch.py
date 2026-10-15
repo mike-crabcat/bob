@@ -739,6 +739,8 @@ class LLMDispatchService(BaseService):
         budget_stats: dict[str, bool] | None = None,
         force_first_tool_choice: bool = False,
         reasoning_effort: str | None = None,
+        handoff_after_seconds: float | None = None,
+        handoff_out: dict[str, str] | None = None,
     ) -> str:
         """Chat with tool calling. Loops until LLM finishes or max iterations.
 
@@ -834,6 +836,8 @@ class LLMDispatchService(BaseService):
                 reasoning_effort=reasoning_effort,
                 on_round_complete=_on_round,
                 on_stream_event=stream_cb,
+                handoff_after_seconds=handoff_after_seconds,
+                handoff_out=handoff_out,
             )
             elapsed = time.monotonic() - t0
             if trace_writer:

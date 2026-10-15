@@ -361,16 +361,28 @@ class BackburnerSettings:
       - shadow: watchdog + detach_probe run, results logged only
       - hold:   holding ack is sent, the turn keeps waiting (no detach)
       - full:   holding ack + detach (work continues as a detached_turn
-                subagent/goal; result delivered via the wake path)
+                subagent/goal; result delivered via the wake path).
+                Default until 2026-10-15; concurrent turns in one
+                conversation double-sent a support email (2026-10-10), so
+                the default is now hold + the handoff nudge.
     sessions: comma-separated session-key allowlist; empty = all conversations.
     """
 
-    mode: str = "full"
+    mode: str = "hold"
     detach_after_seconds: float = 30.0
     probe_timeout_seconds: float = 8.0
-    max_run_seconds: float = 600.0
+    # Wall-clock budget for main conversational turns. Under hold a turn
+    # owns its conversation until it ends, so this is how long a chat can
+    # be blocked (was 1800 in ~/config/.env under full detach).
+    max_run_seconds: float = 300.0
     sessions: str = ""
     probe_model: str = ""  # empty → patience.model
+    # One-shot add_goal handoff nudge for main turns still running after
+    # this long; 0 disables (openai_service._HANDOFF_NUDGE).
+    handoff_after_seconds: float = 60.0
+    # Foreground bash cap inside main conversational turns — longer work
+    # belongs in a goal room (which keeps the 900 s cap) or run_bg_process.
+    main_turn_bash_timeout_seconds: float = 90.0
 
 
 @dataclass(slots=True)
@@ -989,10 +1001,13 @@ class Settings:
             whatsapp_bridge=whatsapp_bridge,
             patience=patience,
             backburner=BackburnerSettings(
-                mode=os.getenv("BOB_BACKBURNER_MODE", "full").strip().lower() or "full",
+                mode=os.getenv("BOB_BACKBURNER_MODE", "hold").strip().lower() or "hold",
                 detach_after_seconds=float(os.getenv("BOB_BACKBURNER_DETACH_AFTER_S", "30")),
                 probe_timeout_seconds=float(os.getenv("BOB_BACKBURNER_PROBE_TIMEOUT_S", "8")),
-                max_run_seconds=float(os.getenv("BOB_BACKBURNER_MAX_RUN_S", "600")),
+                max_run_seconds=float(os.getenv("BOB_BACKBURNER_MAX_RUN_S", "300")),
+                handoff_after_seconds=float(os.getenv("BOB_BACKBURNER_HANDOFF_AFTER_S", "60")),
+                main_turn_bash_timeout_seconds=float(
+                    os.getenv("BOB_BACKBURNER_MAIN_TURN_BASH_TIMEOUT_S", "90")),
                 sessions=os.getenv("BOB_BACKBURNER_SESSIONS", ""),
                 probe_model=os.getenv("BOB_BACKBURNER_PROBE_MODEL", ""),
             ),

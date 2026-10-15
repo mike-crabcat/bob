@@ -12,7 +12,7 @@ from collections.abc import Callable, Awaitable
 from httpx import Timeout
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import cast, Any, NoReturn
 
 from server.services import model_registry
 from server.services import tool_loop_folding
@@ -343,10 +343,84 @@ _LEGACY_TIME_STOP = (
     "remaining steps were skipped.")
 _LEGACY_ITER_STOP = "Max tool call iterations reached."
 
+# Handoff nudge (2026-10-15, backburner hold): long conversational turns
+# no longer detach into concurrent background flights — two turns in one
+# conversation sent Printful the same ticket twice (2026-10-10). Instead a
+# turn still running at handoff_after_seconds is told to hand long work to a
+# goal room and finish.
+_HANDOFF_NUDGE = (
+    "This turn has been running for over a minute. If what's left will take "
+    "more than another minute or two — waiting on something, polling, "
+    "multi-step work, or anything conditional or scheduled ('by lunch', "
+    "'until it works') — hand it off now with add_goal: give the goal "
+    "everything it needs (what's done, what's left, conditions, deadlines). "
+    "Then tell the sender in your final reply what happens next, and end "
+    "this turn. Once handed off, do not also do that work in this turn. If "
+    "you're nearly done, just finish.")
+
+# Auto-handoff wrap-up (2026-10-15 Bob cast): a main conversational turn
+# that exhausts its budget hands what's left to a goal room instead of
+# being cut off — the forced round writes the chat line AND the brief, and
+# the dispatch runner creates the goal (never the model). Without it the
+# round tried to run its ffmpeg stitch as <tool_call> text and nothing was
+# posted.
+_SELF_WRAP_FINAL_HANDOFF = (
+    "This turn's time budget is exhausted and tools are now disabled. "
+    "Whatever is left will be handed to a goal room — another run of you "
+    "with all your tools — which starts as soon as this turn ends and "
+    "reports back to this chat. Reply with ONLY a JSON object, no tool "
+    "calls and no markup:\n"
+    '{"reply": "...", "handoff": "..."}\n'
+    "- reply: one or two sentences for the chat, in your own voice — where "
+    "things stand and that you're carrying on and will post here when it's "
+    "done. If the work is actually finished, put the answer here instead.\n"
+    "- handoff: the brief for the goal room — the original request in full, "
+    "what's done (file paths, ids, results), exactly what's left, and any "
+    "conditions or deadlines. Empty string if nothing is left.")
+
+# Soft wrap nudge for main conversational turns (auto-handoff on). The
+# send-variant's "register it with add_goal(profile='promise')" made Luna
+# end the Bob cast turn early with a promise to ITSELF due an hour later
+# (2026-10-16) — a promise is a timed reminder, nobody works it meanwhile.
+_SELF_WRAP_NUDGE_HANDOFF = (
+    "You are close to this turn's time budget. Either finish now — write "
+    "your final reply as your closing text; it is delivered automatically — "
+    "or, if real work is left, hand it to add_goal (a goal room picks it up "
+    "immediately) and say so in your reply. Don't park unfinished work as a "
+    "promise to yourself: a promise is only a timed reminder and nobody works "
+    "on it meanwhile. If you simply keep going, whatever is unfinished at the "
+    "budget is handed to a goal room automatically.")
+
 _WRAP_TEXTS: tuple[str, ...] = (
     _SELF_WRAP_NUDGE, _SELF_WRAP_FINAL,
     _SELF_WRAP_NUDGE_SEND, _SELF_WRAP_FINAL_SEND,
+    _HANDOFF_NUDGE, _SELF_WRAP_FINAL_HANDOFF, _SELF_WRAP_NUDGE_HANDOFF,
 )
+
+
+def parse_handoff_wrapup(text: str) -> tuple[str, str] | None:
+    """(reply, handoff) from the handoff wrap-up round, or None when it
+    isn't the JSON shape (the caller then treats the text as a plain
+    wrap-up). Tolerates fences and surrounding prose."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`").removeprefix("json").strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        obj = json.loads(t[start:end + 1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    reply = str(cast(dict[str, Any], obj).get("reply") or "").strip()
+    handoff = str(cast(dict[str, Any], obj).get("handoff") or "").strip()
+    if not reply:
+        return None
+    return reply, handoff
 
 
 def _has_send_tool(tools: list[Any]) -> bool:
@@ -733,6 +807,8 @@ class OpenAIService(BaseService):
         reasoning_effort: str | None = None,
         on_round_complete: Callable[[int, Any, float, Any], Awaitable[None]] | None = None,
         on_stream_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        handoff_after_seconds: float | None = None,
+        handoff_out: dict[str, str] | None = None,
     ) -> str:
         """Run one agentic turn via the Responses API: the tool loop.
 
@@ -751,6 +827,17 @@ class OpenAIService(BaseService):
         tool, the nudge says to DELIVER via it (text output alone reaches
         nobody) and the final round writes text the caller is expected to
         deliver on the model's behalf.
+
+        ``handoff_after_seconds`` (main conversational turns): one-shot
+        nudge once the turn has run that long, telling the model to hand
+        remaining long work to a goal (add_goal) and finish — the inline
+        replacement for detaching (backburner hold). Stripped like the wrap
+        nudges.
+
+        ``handoff_out`` (optional out-param, main conversational turns):
+        when given, a budget-exhausted turn's forced round writes
+        {"reply", "handoff"}; the reply is returned and the brief lands in
+        ``handoff_out["brief"]`` for the caller to turn into a goal.
 
         ``budget_stats`` (optional out-param) gets ``hit_wall_clock`` /
         ``hit_iteration_cap`` set when the respective budget ended the loop —
@@ -790,6 +877,9 @@ class OpenAIService(BaseService):
         nudge_at = (t0 + time_limit_seconds * wrap.duration_fraction
                     if time_limit_seconds is not None else None)
         nudged = False
+        handoff_at = (t0 + handoff_after_seconds
+                      if handoff_after_seconds else None)
+        handoff_nudged = False
         send_tool_turn = _has_send_tool(tools)
 
         # Tool-loop folding (2026-09-10): the caller's history is exactly
@@ -828,11 +918,21 @@ class OpenAIService(BaseService):
                     # called update_agenda until the wall clock killed it).
                     request_kwargs.pop("tool_choice", None)
                 now = time.monotonic()
+                if (handoff_at is not None and not handoff_nudged and not nudged
+                        and now >= handoff_at):
+                    messages.append({"role": "system", "content": _HANDOFF_NUDGE})
+                    handoff_nudged = True
+                    logger.info(
+                        "OpenAI handoff nudge: model=%s iteration=%d "
+                        "elapsed=%.1fs dispatch_id=%s session_key=%s",
+                        resolved_model, iteration, now - t0, dispatch_id,
+                        session_key)
                 if (wrap.enabled and not nudged
                         and ((nudge_at is not None and now >= nudge_at)
                              or iteration >= max_iterations - wrap.iteration_margin)):
                     messages.append({"role": "system", "content": (
-                        _SELF_WRAP_NUDGE_SEND if send_tool_turn
+                        _SELF_WRAP_NUDGE_HANDOFF if handoff_out is not None
+                        else _SELF_WRAP_NUDGE_SEND if send_tool_turn
                         else _SELF_WRAP_NUDGE)})
                     nudged = True
                     logger.info(
@@ -859,7 +959,8 @@ class OpenAIService(BaseService):
                         base_len=base_len if use_view else None,
                         history_keep=tl.history_view_keep if tl is not None else 20,
                         send_tool_turn=send_tool_turn,
-                        on_stream_event=_round_events)
+                        on_stream_event=_round_events,
+                        handoff_out=handoff_out)
 
                 round_t0 = time.monotonic()
                 await _round_events("round_started", {"iteration": iteration})
@@ -1103,7 +1204,8 @@ class OpenAIService(BaseService):
                 base_len=base_len if use_view else None,
                 history_keep=tl.history_view_keep if tl is not None else 20,
                 send_tool_turn=send_tool_turn,
-                on_stream_event=_round_events)
+                on_stream_event=_round_events,
+                handoff_out=handoff_out)
         finally:
             # Budget nudges are turn-scoped guidance — never persist them
             # into the conversation history the caller keeps.
@@ -1218,6 +1320,7 @@ class OpenAIService(BaseService):
         base_len: int | None = None, history_keep: int = 20,
         send_tool_turn: bool = False,
         on_stream_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        handoff_out: dict[str, str] | None = None,
     ) -> str:
         """Exhaustion path: one final LLM round with tools stripped, so the
         model writes its own closing reply instead of hitting a canned stop.
@@ -1228,7 +1331,8 @@ class OpenAIService(BaseService):
         wrap text (the caller delivers the final text on the model's behalf)."""
         kwargs = {k: v for k, v in request_kwargs.items() if k != "tools"}
         messages.append({"role": "system", "content": (
-            _SELF_WRAP_FINAL_SEND if send_tool_turn else _SELF_WRAP_FINAL)})
+            _SELF_WRAP_FINAL_HANDOFF if handoff_out is not None
+            else _SELF_WRAP_FINAL_SEND if send_tool_turn else _SELF_WRAP_FINAL)})
         try:
             wire = tool_loop_folding.iteration_view(
                 messages, base_len, history_keep=history_keep) \
@@ -1254,6 +1358,17 @@ class OpenAIService(BaseService):
             logger.warning(
                 "OpenAI forced wrap-up round empty: model=%s dispatch_id=%s "
                 "session_key=%s", resolved_model, dispatch_id, session_key)
+        if handoff_out is not None and content:
+            parsed = parse_handoff_wrapup(content)
+            if parsed is None:
+                logger.warning(
+                    "OpenAI handoff wrap-up unparseable — plain wrap-up: "
+                    "dispatch_id=%s head=%r", dispatch_id, content[:120])
+            else:
+                reply, brief = parsed
+                if brief:
+                    handoff_out["brief"] = brief
+                return reply
         return content or fallback
 
     async def quick_prompt(self, prompt: str) -> str:

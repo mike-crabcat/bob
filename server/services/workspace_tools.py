@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 import asyncio
+import contextvars
 import base64
 import json
 import logging
@@ -22,6 +23,14 @@ from server.services.tools import ImageInjection, VideoInjection, tool
 logger = logging.getLogger(__name__)
 
 _BASH_TIMEOUT_SECONDS = 900
+
+# Foreground bash cap for the CURRENT turn, when tighter than the default.
+# Set by DispatchRunner inside main conversational turns (whatsapp_incoming)
+# — under backburner hold such a turn blocks its chat, so long commands
+# belong in a goal room or run_bg_process. Routines, wakes and goal rooms
+# never set it and keep the 900 s cap.
+TURN_BASH_TIMEOUT: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "turn_bash_timeout", default=None)
 _BASH_MAX_OUTPUT_CHARS = 30_000
 
 # Native video is expensive to serve (base64 payload + per-second tokens) —
@@ -460,13 +469,22 @@ def make_workspace_tools(ctx: AppContext, *, session_key: str | None = None):
                 build_skill_env(workspace_dir=str(workspace), venv_dir=str(venv_dir)),
                 settings),
         )
+        turn_cap = TURN_BASH_TIMEOUT.get()
+        timeout = min(_BASH_TIMEOUT_SECONDS, turn_cap) if turn_cap else _BASH_TIMEOUT_SECONDS
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
-                timeout=_BASH_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
+            if turn_cap and timeout < _BASH_TIMEOUT_SECONDS:
+                return (f"Error: command timed out after {timeout:.0f}s — this "
+                        "conversation turn caps foreground commands so the chat "
+                        "isn't blocked. For longer work, hand it off with "
+                        "add_goal (the goal room can run long commands), or "
+                        "start it with run_bg_process and you'll be woken when "
+                        "it exits.")
             return f"Error: command timed out after {_BASH_TIMEOUT_SECONDS}s"
 
         out = stdout.decode("utf-8", errors="replace").strip()

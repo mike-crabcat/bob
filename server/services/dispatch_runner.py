@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -80,6 +81,30 @@ def is_no_reply(text: str | None) -> bool:
 # failed email_reply would leave an error string as "final text" that the
 # rescue must not mail out.
 _SEND_RESCUE_CATEGORIES = {"whatsapp_incoming", "whatsapp_group_member_change"}
+
+# What the runner posts when a turn's final text can't be delivered as a
+# reply (only tool-call markup, or the send tool refused it). Honest and
+# generic: the turn did work but has nothing ready to show.
+_UNFINISHED_TURN_NOTICE = (
+    "sorry — i got partway through that but ran out of road before it was "
+    "ready, so nothing's posted yet. ask me to pick it back up and i'll carry "
+    "on from where i got to.")
+
+
+def auto_handoff_enabled() -> bool:
+    """BOB_AUTO_HANDOFF=off restores the plain budget wrap-up (the turn is
+    cut off with a summary; nothing carries the remaining work)."""
+    return os.getenv("BOB_AUTO_HANDOFF", "on").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _send_refusal(outcome: object) -> str | None:
+    """The send tool's refusal/failure text, or None when it delivered.
+    Send handlers report failure by RETURNING an 'Error…' string (not
+    raising) so the model can correct itself — the runner must read it."""
+    if isinstance(outcome, str) and outcome.lstrip().startswith("Error"):
+        return outcome.strip()
+    return None
 
 # Tool-narration signatures (2026-09-19 gnome-repair incident): the model
 # wrote "[tools used: send_whatsapp_message(...) → Message sent
@@ -311,6 +336,80 @@ class DispatchRunner:
         self.ctx = ctx
         self.db = ctx.db
 
+    async def _auto_handoff(self, spec: DispatchSpec, session_key: str,
+                            brief: str, reply: str, *, since_iso: str) -> str:
+        """Carry a budget-exhausted turn's remaining work into a goal room.
+
+        The runner creates the goal — never the model — BEFORE the chat
+        turn ends, so the next turn here sees it in its Work block and the
+        room is the only worker (the 2026-10-10 Printful double ticket came
+        from a second turn that couldn't see the first one's goal). A goal
+        this conversation already opened during the turn (the model took
+        the 60 s handoff nudge) gets the brief as evidence instead of a
+        twin. Returns the text to deliver: the model's reply line, or the
+        unfinished-turn notice if no goal could be made (the reply would
+        otherwise promise work nobody is doing)."""
+        from server.repositories.conversations import ConversationRepository
+        from server.repositories.goals import GoalRepository
+
+        try:
+            repo = GoalRepository(self.db)
+            origin = await ConversationRepository(self.db).resolve_cid(session_key)
+            fresh = [g for g in await repo.list_active(origin_conversation_id=origin)
+                     if str(g.get("created_at") or "") >= since_iso]
+            if fresh:
+                await repo.append_known_line(
+                    fresh[0]["id"],
+                    ("Handoff brief (the commissioning turn ran out of time): "
+                     + brief)[:600])
+                logger.info(
+                    "auto-handoff: brief added to goal %s opened this turn "
+                    "(session=%s, dispatch=%s)", fresh[0]["id"][:8],
+                    session_key, spec.dispatch_id)
+                return reply
+
+            from uuid import uuid4
+
+            from server.repositories.history import HistoryRepository
+            # side-effect import: registers the goal_create executor
+            from server.services import goal_tools  # noqa: F401  # pyright: ignore[reportUnusedImport]
+            from server.services.effects import emit_and_deliver
+            route = await ConversationRepository(self.db).route_for(session_key)
+            creator = ((route or {}).get("contact_id") or spec.contact_id
+                       or await HistoryRepository(self.db).latest_human_sender(session_key))
+            goal_id = str(uuid4())
+            objective = (
+                "Handed off from a chat turn that ran out of time — the requester "
+                "was told you're carrying on and will post the result in that "
+                "chat. Brief from that turn:\n\n" + brief)
+            created = await emit_and_deliver(
+                self.ctx, kind="goal_create",
+                idempotency_key=f"goal_create:{goal_id}",
+                payload={
+                    "conversation_id": session_key,
+                    "objective": objective[:4000],
+                    "kind": "handoff",
+                    "deadline": None,
+                    "parent_goal_id": None,
+                    "strategy": None,
+                    "goal_id": goal_id,
+                    "creator_contact_id": creator,
+                })
+            if not created.get("ok"):
+                logger.warning(
+                    "auto-handoff: goal create failed: %s (session=%s, dispatch=%s)",
+                    created.get("error"), session_key, spec.dispatch_id)
+                return _UNFINISHED_TURN_NOTICE
+            logger.info(
+                "auto-handoff: budget-exhausted turn handed to goal %s "
+                "(session=%s, dispatch=%s, brief=%d chars)", goal_id[:8],
+                session_key, spec.dispatch_id, len(brief))
+            return reply
+        except Exception:
+            logger.exception("auto-handoff failed (session=%s, dispatch=%s)",
+                             session_key, spec.dispatch_id)
+            return _UNFINISHED_TURN_NOTICE
+
     async def run(self, spec: DispatchSpec) -> str:
         from server.repositories.history import HistoryRepository
         from server.services.llm_dispatch import LLMDispatchService
@@ -420,6 +519,17 @@ class DispatchRunner:
             # one, a hung call holds the session lock forever. Enforced
             # between iterations — the in-flight round always completes.
             is_main_turn = spec.call_category == "whatsapp_incoming"
+            # Auto-handoff (2026-10-15): a main turn that exhausts its budget
+            # writes a brief in its forced wrap-up round; the runner turns it
+            # into a goal room after the LLM phase (see _auto_handoff).
+            # Not under backburner full: a detached flight never returns
+            # here, so its reply would promise a handoff nobody creates.
+            from server.services import backburner as _bb
+            handoff_out: dict[str, str] | None = (
+                {} if (is_main_turn and auto_handoff_enabled()
+                       and _bb.mode(self.ctx.settings) != "full") else None)
+            from server.services.base import utcnow
+            turn_started_iso = utcnow().isoformat()
             time_limit = (self.ctx.settings.backburner.max_run_seconds
                           if is_main_turn else None)
             # Iteration cap for the same turns: a GLM tool odyssey at ~10s a
@@ -429,6 +539,19 @@ class DispatchRunner:
             iteration_cap = 35 if is_main_turn else 100
 
             async def _llm() -> str:
+                # Foreground bash cap for this turn's tool calls only; reset
+                # on exit because _llm may be awaited in a long-lived task
+                # (the inline path) as well as in its own bb-llm task.
+                from server.services.workspace_tools import TURN_BASH_TIMEOUT
+                cap_token = TURN_BASH_TIMEOUT.set(
+                    (self.ctx.settings.backburner.main_turn_bash_timeout_seconds or None)
+                    if is_main_turn else None)
+                try:
+                    return await _llm_inner()
+                finally:
+                    TURN_BASH_TIMEOUT.reset(cap_token)
+
+            async def _llm_inner() -> str:
                 return await LLMDispatchService(self.ctx).run_turn(
                     messages, spec.tools,
                     model=model_arg,
@@ -437,6 +560,10 @@ class DispatchRunner:
                     dispatch_id=spec.dispatch_id,
                     contact_id=spec.contact_id,
                     time_limit_seconds=time_limit,
+                    handoff_after_seconds=(
+                        self.ctx.settings.backburner.handoff_after_seconds or None
+                        if is_main_turn else None),
+                    handoff_out=handoff_out,
                     max_iterations=iteration_cap,
                 )
 
@@ -528,6 +655,11 @@ class DispatchRunner:
                     except Exception:
                         logger.warning("turn-settled hook failed (session=%s)",
                                        session_key, exc_info=True)
+
+            if handoff_out and handoff_out.get("brief"):
+                result = await self._auto_handoff(
+                    spec, session_key, handoff_out["brief"], result,
+                    since_iso=turn_started_iso)
 
             # Final-text delivery (docs/final-text-delivery-plan.md,
             # 2026-10-01): a human-stimulus turn's final text IS the reply —
@@ -648,14 +780,56 @@ class DispatchRunner:
                 if send_tool is not None:
                     try:
                         deliverable = _strip_narration(result) if narrated else result
-                        await send_tool.handler(deliverable)
-                        logger.info(
-                            "final-text delivery: %s turn delivered via the "
-                            "runner (session=%s, dispatch=%s)%s",
-                            spec.call_category,
-                            session_key, spec.dispatch_id,
-                            " [narration stripped after failed retry]"
-                            if narrated else "")
+                        # Markup-only final text (2026-10-15 Bob cast: the
+                        # budget wrap-up round, tools stripped, wrote its
+                        # ffmpeg stitch as <tool_call> XML): there is no
+                        # message in it, so say so honestly instead.
+                        from server.services.openai_service import strip_leaked_tool_xml
+                        markup_only = not strip_leaked_tool_xml(deliverable).strip()
+                        if markup_only:
+                            logger.warning(
+                                "final-text delivery: final text was only tool-call "
+                                "markup — sending the unfinished-turn notice "
+                                "(session=%s, dispatch=%s, head=%r)",
+                                session_key, spec.dispatch_id, deliverable.strip()[:120])
+                            deliverable = _UNFINISHED_TURN_NOTICE
+                        outcome = await send_tool.handler(deliverable)
+                        refusal = _send_refusal(outcome)
+                        if refusal is None:
+                            logger.info(
+                                "final-text delivery: %s turn delivered via the "
+                                "runner (session=%s, dispatch=%s)%s",
+                                spec.call_category,
+                                session_key, spec.dispatch_id,
+                                " [narration stripped after failed retry]" if narrated
+                                else " [unfinished-turn notice]" if markup_only else "")
+                        elif "duplicate blocked" in refusal:
+                            # correct refusal: the answer already went out
+                            logger.info(
+                                "final-text delivery: duplicate of an earlier send, "
+                                "not re-sent (session=%s, dispatch=%s)",
+                                session_key, spec.dispatch_id)
+                        else:
+                            # The tool refused or failed — the reply did NOT go
+                            # out. Never log that as delivered (it was, silently,
+                            # until 2026-10-15); one honest notice instead.
+                            logger.warning(
+                                "final-text delivery REFUSED by %s: %s (session=%s, "
+                                "dispatch=%s)", spec.send_tool_name, refusal[:200],
+                                session_key, spec.dispatch_id)
+                            if deliverable != _UNFINISHED_TURN_NOTICE:
+                                retry = _send_refusal(
+                                    await send_tool.handler(_UNFINISHED_TURN_NOTICE))
+                                if retry is None:
+                                    logger.info(
+                                        "final-text delivery: unfinished-turn notice "
+                                        "sent instead (session=%s, dispatch=%s)",
+                                        session_key, spec.dispatch_id)
+                                else:
+                                    logger.error(
+                                        "final-text delivery: unfinished-turn notice "
+                                        "also refused: %s (session=%s, dispatch=%s)",
+                                        retry[:200], session_key, spec.dispatch_id)
                     except Exception:
                         logger.exception(
                             "final-text delivery failed (session=%s, dispatch=%s)",
