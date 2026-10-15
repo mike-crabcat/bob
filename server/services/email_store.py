@@ -107,6 +107,26 @@ class EmailStore:
             (agentmail_thread_id,))
         return dict(row) if row else None
 
+    async def thread_for_message_ids(
+        self, inbox_id: str, message_ids: list[str],
+    ) -> dict[str, Any] | None:
+        """The live thread holding the newest of ``message_ids`` (RFC
+        Message-IDs from an inbound In-Reply-To/References), or None.
+        AgentMail sometimes opens a fresh thread for a reply that names one
+        of ours in its headers (Printful/Zendesk, 2026-10-10)."""
+        if not message_ids:
+            return None
+        marks = ",".join("?" * len(message_ids))
+        row = await self.db.fetch_one(
+            f"""SELECT et.* FROM email_messages em
+                JOIN email_threads et
+                  ON et.agentmail_thread_id = em.thread_id AND et.inbox_id = em.inbox_id
+                WHERE em.inbox_id = ? AND em.agentmail_message_id IN ({marks})
+                  AND et.deleted_at IS NULL
+                ORDER BY em.message_timestamp DESC LIMIT 1""",
+            (inbox_id, *message_ids))
+        return dict(row) if row else None
+
     async def get_thread(
         self, thread_id: str, *, include_deleted: bool = False,
     ) -> dict[str, Any] | None:

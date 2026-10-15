@@ -395,6 +395,10 @@ erDiagram
 
 **`email_threads`** — The bridge between an email thread and the session model: one AgentMail thread maps to one `session_key` (`agent:main:email:thread:<agentmail_thread_id>`), optionally identified with a contact. Without this every reply would start a fresh context. `agenda` holds a custom handling agenda for the thread (seeded on first message, else the default email agenda), and `origin_session_key` routes results to a second session when the thread was started from one (cleared after dispatch so later replies stay in-thread). Thread rows are canonicalized at send as well as at ingest — outbound-first threads get their row before the first reply is sent.
 
+*Reply re-threading.* AgentMail sometimes opens a fresh thread id for a reply to one of ours (every Printful/Zendesk support reply did, 2026-10-10, splitting one ticket into six origin-less sessions). At ingest, a message whose AgentMail thread id is unknown is filed under the thread of any stored message its `In-Reply-To`/`References` names, so `email_messages.thread_id` is the *canonical* thread id, not always AgentMail's; the raw id rides the `message.received` event payload as `agentmail_thread_id_raw`. Kill switch `BOB_EMAIL_REPLY_THREADING=off`.
+
+*Automated mail.* Surveys, out-of-office replies, bulk/list mail and no-reply senders are stored but get no turn (`automated_email_reason`; kill switch `BOB_EMAIL_AUTOMATED_SUPPRESS=off`). `Auto-Submitted: auto-generated` is deliberately *not* a signal — Zendesk stamps it on human agent replies too.
+
 ---
 
 ## Calendars and Events

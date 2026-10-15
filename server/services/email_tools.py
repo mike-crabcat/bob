@@ -136,7 +136,7 @@ def make_email_tools(
 
     @tool
     async def email_reply(body: str, attachments: list[str] | None = None) -> str:
-        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
+        """Send a reply to the current email thread. Always use this tool to respond — do not just generate text output. Sign as Bob — when acting for someone, "Bob, on behalf of <name>"; never sign as them. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
 
         if isinstance(attachments, str):
             s = attachments.strip()
@@ -359,7 +359,7 @@ def make_email_send_tools(ctx: AppContext, *, session_key: str | None = None) ->
         agenda: str,
         attachments: list[str] | None = None,
     ) -> str:
-        """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
+        """Send a new email to start a conversation with someone. Use this to proactively reach out to a contact by email (follow up, schedule, begin a discussion). The agenda describes the purpose and guides all future responses in this thread. The recipient email address must be known. You write as Bob from your own inbox: sign as Bob, and when acting for someone say so ("Bob, on behalf of <name>") — never sign with their name or claim their accounts. Optionally attach files by providing their paths as a list (workspace-relative or absolute). Attachments are capped: 8 MB per file and ~10 MB combined — anything larger must be uploaded via the share-files skill with the download link in the email body instead."""
 
         if isinstance(attachments, str):
             s = attachments.strip()

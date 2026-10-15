@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from server.context import AppContext
@@ -67,6 +68,17 @@ Use the email_reply tool to send a reply, or email_skip if no response is needed
 """
 
 
+# Shared by every email turn (inbound + steer/wake). The identity half exists
+# because Bob signed Printful support mail "Mike" (2026-10-10), which muddled
+# their account lookup and read as him being the account owner.
+EMAIL_TURN_PROMPT = """\
+You are managing an email conversation. Use the available tools to respond.
+
+Who you are in email: you are Bob, writing from your own inbox. Sign every email as Bob. When you act for someone (usually your owner), say so plainly — e.g. "Bob, on behalf of <their name>" — and never sign with their name or write as if you were them. You hold no accounts yourself: when the other side needs the account owner (identity checks, verification or security questions, "email us from the registered address"), say the owner will contact them directly, and report that back (finish_email_thread when this thread carries a task).
+
+Automated mail — satisfaction surveys, notifications, receipts, out-of-office replies — needs no reply: call email_skip().\
+"""
+
 _FROM_RE = re.compile(
     r'^"(?P<name1>[^"]*)"\s*<(?P<email1>[^>]+)>'
     r"|^(?P<name2>[^<]+?)\s*<(?P<email2>[^>]+)>"
@@ -89,6 +101,74 @@ def _parse_from(value: Any) -> tuple[str, str]:
     if m.group("bare"):
         return m.group("bare"), ""
     return (m.group("email1") or m.group("email2") or ""), (m.group("name1") or m.group("name2") or "")
+
+
+_MESSAGE_ID_RE = re.compile(r"<[^<>\s]+>")
+
+
+def _header_message_ids(message: dict[str, Any]) -> list[str]:
+    """RFC Message-IDs named by a message's In-Reply-To and References.
+    AgentMail gives in_reply_to as a (sometimes space-joined) string and
+    references as a list."""
+    refs: Any = message.get("references") or []
+    raws: list[Any] = [message.get("in_reply_to") or ""]
+    raws.extend(cast(list[Any], refs) if isinstance(refs, list) else [refs])
+    ids: list[str] = []
+    for raw in raws:
+        for mid in _MESSAGE_ID_RE.findall(str(raw)):
+            if mid not in ids:
+                ids.append(mid)
+    return ids
+
+
+_NO_REPLY_LOCALPART_RE = re.compile(
+    r"^(no-?reply|do-?not-?reply|mailer-daemon|postmaster|bounces?)([+._-]|$)", re.I)
+_SURVEY_SUBJECT_RE = re.compile(
+    r"rate (our|your|the) (support|service|experience|conversation)"
+    r"|how did we do|how'?d (we|it) go|customer satisfaction|satisfaction survey"
+    r"|feedback survey|(take|complete) (our|a|this) (short |quick )?survey", re.I)
+_SURVEY_BODY_RE = re.compile(r"/survey_responses/|/hc/[^\s]*/survey", re.I)
+
+
+def automated_email_reason(message: dict[str, Any], *, sender_trusted: bool) -> str | None:
+    """Why an inbound email is machine mail that needs no Bob turn, or None.
+
+    Conservative on purpose: Zendesk stamps ``Auto-Submitted: auto-generated``
+    and ``X-Auto-Response-Suppress`` on HUMAN agent replies too (Printful,
+    2026-10-10), so neither is a signal here — only RFC 3834 ``auto-replied``
+    (out-of-office) is. Survey wording is only trusted from non-trusted
+    senders. Kill switch: BOB_EMAIL_AUTOMATED_SUPPRESS=off."""
+    if os.getenv("BOB_EMAIL_AUTOMATED_SUPPRESS", "on").strip().lower() in (
+            "0", "false", "no", "off"):
+        return None
+    raw_headers: Any = message.get("headers") or {}
+    headers: dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        for k, v in cast(dict[Any, Any], raw_headers).items():
+            headers[str(k).lower()] = str(v).strip().lower()
+    if headers.get("auto-submitted", "").startswith("auto-replied"):
+        return "auto-replied (out-of-office)"
+    if headers.get("precedence", "") in ("bulk", "junk", "list", "auto_reply"):
+        return f"precedence: {headers['precedence']}"
+    if "x-autoreply" in headers or "x-autorespond" in headers:
+        return "x-autoreply header"
+    sender_email, _ = _parse_from(message.get("from"))
+    if _NO_REPLY_LOCALPART_RE.match(sender_email.split("@", 1)[0]):
+        return f"no-reply sender {sender_email}"
+    if not sender_trusted:
+        if _SURVEY_SUBJECT_RE.search(str(message.get("subject") or "")):
+            return "survey subject"
+        body = str(message.get("extracted_text") or message.get("text") or "")
+        if _SURVEY_BODY_RE.search(body):
+            return "survey link"
+    return None
+
+
+def reply_threading_enabled() -> bool:
+    """Kill switch: BOB_EMAIL_REPLY_THREADING=off files every message under
+    AgentMail's own thread id, as before 2026-10-15."""
+    return os.getenv("BOB_EMAIL_REPLY_THREADING", "on").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _build_session_key(thread_id: str) -> str:
@@ -311,7 +391,8 @@ class EmailPollingService(BaseService):
                             ))
             return False
 
-        thread_id = message.get("thread_id", agentmail_message_id)
+        raw_thread_id = message.get("thread_id", agentmail_message_id)
+        thread_id = await self._canonical_thread_id(store, inbox, message, raw_thread_id)
         now = utcnow()
 
         sender_email, sender_name = _parse_from(message.get("from"))
@@ -355,6 +436,7 @@ class EmailPollingService(BaseService):
                 payload={
                     "email_message_id": message_id,
                     "thread_id": thread_id,
+                    "agentmail_thread_id_raw": raw_thread_id,
                     "sender_email": sender_email,
                     "subject": message.get("subject"),
                     "backfill": backfill,
@@ -426,6 +508,28 @@ class EmailPollingService(BaseService):
             ))
 
         return True
+
+    async def _canonical_thread_id(
+        self, store: Any, inbox: dict[str, Any],
+        message: dict[str, Any], raw_thread_id: str,
+    ) -> str:
+        """The thread id to file this message under. AgentMail's own id when
+        we already track it; otherwise the thread of any message its
+        In-Reply-To/References names — AgentMail opened a fresh thread per
+        Printful (Zendesk) reply on 2026-10-10, which split one support
+        conversation into six sessions with no origin/agenda."""
+        if not reply_threading_enabled():
+            return raw_thread_id
+        if await store.thread_by_agentmail(inbox["id"], raw_thread_id) is not None:
+            return raw_thread_id
+        parent = await store.thread_for_message_ids(inbox["id"], _header_message_ids(message))
+        if parent is None or parent["agentmail_thread_id"] == raw_thread_id:
+            return raw_thread_id
+        logger.info(
+            "email: re-threaded message %s from AgentMail thread %s into %s via reply headers",
+            str(message.get("message_id", "?"))[:30], raw_thread_id[:8],
+            parent["agentmail_thread_id"][:8])
+        return str(parent["agentmail_thread_id"])
 
     async def _resolve_or_create_thread(
         self,
@@ -526,8 +630,21 @@ class EmailPollingService(BaseService):
         is_new_thread: bool = False,
         saved_attachments: list[dict[str, str]] | None = None,
     ) -> None:
-        """Fire-and-forget wrapper that logs dispatch errors instead of raising."""
+        """Fire-and-forget wrapper that logs dispatch errors instead of raising.
+        Machine mail (surveys, out-of-office, bulk) stops here: stored and
+        readable via email_thread_read, but no turn."""
         try:
+            sender_email, _ = _parse_from(message.get("from"))
+            from server.repositories.contacts import ContactRepository
+            sender = await ContactRepository(self.db).get_by_email(sender_email) if sender_email else None
+            reason = automated_email_reason(
+                message, sender_trusted=bool(sender and sender.get("is_trusted")))
+            if reason:
+                logger.info(
+                    "email: no turn for automated message %s in thread %s (%s)",
+                    str(message.get("message_id", "?"))[:30],
+                    str(thread.get("agentmail_thread_id", "?"))[:8], reason)
+                return
             await self._dispatch_to_llm(
                 thread, message, inbox,
                 is_new_thread=is_new_thread,
@@ -655,7 +772,7 @@ class EmailPollingService(BaseService):
         # Bob Events §1.4: goals held by this thread's conversation.
         goals_prompt = await ContextAssembler(self.ctx).goals_block(session_key)
 
-        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, "You are managing an email conversation. Use the available tools to respond.", memory_prompt, goals_prompt) if p)
+        system_content = "\n\n".join(p for p in (workspace_prompt, agenda_text, participants_prompt, EMAIL_TURN_PROMPT, memory_prompt, goals_prompt) if p)
 
         # If this thread was initiated from another session, inject outreach prompt + result tool
         origin_session_key = thread.get("origin_session_key")
@@ -837,8 +954,7 @@ class EmailPollingService(BaseService):
 
         system_content = "\n\n".join(p for p in (
             workspace_prompt, agenda_text, participants_prompt,
-            "You are managing an email conversation. Use the available "
-            "tools to respond.", memory_prompt, goals_prompt) if p)
+            EMAIL_TURN_PROMPT, memory_prompt, goals_prompt) if p)
 
         reply_sent = [False]
         reply_bodies: list[str] = []
