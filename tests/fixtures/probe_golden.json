@@ -1,56 +1,78 @@
 {
-  "description": "Golden labels for the Tier 2 attention probe (group chatter actionability). Context strings mirror what _build_context produces. Curate with `bob replay export-probe-candidates`; score with `bob replay probe-matrix`.",
-  "bot_name": "Bob",
-  "cases": [
-    {
-      "name": "banter_reaction",
-      "context": "Recent group messages:\nPerson A: lol\nPerson B: haha yeah that was wild",
-      "label": "STAND_DOWN"
-    },
-    {
-      "name": "addressed_to_other_person",
-      "context": "Recent group messages:\nPerson A: hey Sarah what time are you getting here?",
-      "label": "STAND_DOWN"
-    },
-    {
-      "name": "emoji_only",
-      "context": "Recent group messages:\nPerson A: \ud83d\ude02\ud83d\ude02",
-      "label": "STAND_DOWN"
-    },
-    {
-      "name": "direct_group_question",
-      "context": "Recent group messages:\nPerson A: does anyone know how to reset the router?",
-      "label": "ACT"
-    },
-    {
-      "name": "followup_to_bob_thread",
-      "context": "Recent group messages:\nBob: I've booked the court for 7pm Thursday.\nPerson A: can you make it 8 instead?",
-      "label": "ACT"
-    },
-    {
-      "name": "unanswered_question_to_bob",
-      "context": "Recent group messages:\nPerson A: Bob can you check the weather for Saturday\nPerson B: also bring snacks everyone",
-      "label": "ACT"
-    },
-    {
-      "name": "third_party_names_as_topics",
-      "context": "Recent group messages:\nPerson A: Audrey and Mabel both like swimming, can we find a pool session this weekend?",
-      "label": "ACT"
-    },
-    {
-      "name": "mid_thought_fragment",
-      "context": "Recent group messages:\nPerson A: so what I was thinking is\nPerson A: hang on",
-      "label": "WAIT"
-    },
-    {
-      "name": "active_multiparty_thread",
-      "context": "Recent group messages:\nPerson A: pizza or thai tonight?\nPerson B: thai\nPerson C: wait didn't we do thai last week\nPerson B: did we?",
-      "label": "WAIT"
-    },
-    {
-      "name": "factual_query_general",
-      "context": "Recent group messages:\nPerson A: what's the capital of Mongolia? no googling",
-      "label": "ACT"
-    }
-  ]
+ "description": "Golden labels for the Tier 2 attention probe (group chatter actionability). Context strings mirror what _build_context produces. Curate with `bob replay export-probe-candidates`; score with `bob replay probe-matrix`.",
+ "bot_name": "Bob",
+ "cases": [
+  {
+   "name": "banter_reaction",
+   "context": "Recent group messages:\nPerson A: lol\nPerson B: haha yeah that was wild",
+   "label": "STAND_DOWN"
+  },
+  {
+   "name": "addressed_to_other_person",
+   "context": "Recent group messages:\nPerson A: hey Sarah what time are you getting here?",
+   "label": "STAND_DOWN"
+  },
+  {
+   "name": "emoji_only",
+   "context": "Recent group messages:\nPerson A: 😂😂",
+   "label": "STAND_DOWN"
+  },
+  {
+   "name": "direct_group_question",
+   "context": "Recent group messages:\nPerson A: does anyone know how to reset the router?",
+   "label": "ACT"
+  },
+  {
+   "name": "followup_to_bob_thread",
+   "context": "Recent group messages:\nBob: I've booked the court for 7pm Thursday.\nPerson A: can you make it 8 instead?",
+   "label": "ACT"
+  },
+  {
+   "name": "unanswered_question_to_bob",
+   "context": "Recent group messages:\nPerson A: Bob can you check the weather for Saturday\nPerson B: also bring snacks everyone",
+   "label": "ACT"
+  },
+  {
+   "name": "third_party_names_as_topics",
+   "context": "Recent group messages:\nPerson A: Audrey and Mabel both like swimming, can we find a pool session this weekend?",
+   "label": "ACT"
+  },
+  {
+   "name": "mid_thought_fragment",
+   "context": "Recent group messages:\nPerson A: so what I was thinking is\nPerson A: hang on",
+   "label": "WAIT"
+  },
+  {
+   "name": "active_multiparty_thread",
+   "context": "Recent group messages:\nPerson A: pizza or thai tonight?\nPerson B: thai\nPerson C: wait didn't we do thai last week\nPerson B: did we?",
+   "label": "WAIT"
+  },
+  {
+   "name": "factual_query_general",
+   "context": "Recent group messages:\nPerson A: what's the capital of Mongolia? no googling",
+   "label": "ACT"
+  },
+  {
+   "name": "approval_of_bob_question_live",
+   "note": "live 2026-10-17 Bob cast: Bob asked 'Approve that wording…?', Mike 'Yep that's fine' — probe stood down (0.77), approval never reached Bob",
+   "context": "## Engagement state\nBob last spoke 0 message(s) ago (about 1 minutes ago).\n## Recent conversation\nMike: Draft the script for a new episode that starts with your return to pod casting (away 6 months). In that time you were upgraded from an openclaw to a new standalone agent. Can answer questions about te\nBob: *Bobcast: “Back from the Stack”*  \n*Approx. 5 minutes, including pauses; about 680 spoken words.*\n\nSiri: [warmly] Six months away, and you return with a new body, new brains, and—presumably—the same a\nMike: The tech stack part is a bit useless so cut that. You’ve been running various projects to test capability: merch store, radio, Bob law, creating cards games etc.  you also have a new eval suite. \n\nSom\nBob: *Bobcast: “Six Months Later”*  \n*Approx. 5 minutes at a conversational pace, including pauses.*\n\nSiri: [warmly] Six months off the air, and Bob’s back. Since we last heard from you, you’ve gone from O\nMike: Ok good. Lock that script in. Does the skill cover how to store episode scripts and assets?\nBob: Script locked as the approved version in this thread. The skill only says to work in `scratch/bobcast/` and track clips via a manifest; it doesn’t define a durable archive for episode scripts and asse\nMike: Ok upgrade skill to handle the ongoing production of episodes\nBob: Updated the skill with versioned episode archives for approved scripts, manifests, clips, renders, production notes and an episode index; scratch is staging. The script is locked in this thread, but I\nMike: All episodes need to share a show intro audio (bit of a tune and spoken show intro: Bob cast title and purpose). Create cansdidate intro with speech by Siri character.\nBob: Suggested Siri line: “This is Bobcast: conversations with Bob about curious ideas, useful discoveries, and the occasional avoidable shipwreck.” Approve that wording, or tell me what the show’s purpose\n## Pending unprocessed messages\nMike: Yep that’s fine\n## Decision\nShould Bob respond to the pending batch? Reply with the JSON decision object.",
+   "label": "ACT"
+  },
+  {
+   "name": "short_answer_to_bob_choice",
+   "context": "## Engagement state\nBob last spoke 0 message(s) ago (about 1 minutes ago).\n## Recent conversation\nPerson A: can you book the tennis court for thursday?\nBob: Court's free at 7pm or 8pm Thursday — which one?\n## Pending unprocessed messages\nPerson A: 8 thanks\n## Decision\nShould Bob respond to the pending batch? Reply with the JSON decision object.",
+   "label": "ACT"
+  },
+  {
+   "name": "yep_answers_other_person_live",
+   "note": "live 2026-10-14 Leeming Boys: Bob had just quipped, but 'Yep I'm in' answers Sean's beer invite",
+   "context": "## Engagement state\nBob last spoke 0 message(s) ago (about 0 minutes ago).\n## Recent conversation\nBob: Day 1 is Wednesday 9 December 2026 at Optus Stadium, according to the venue’s listing.\nSean: [GIF]\nSean: I have all of December off work... Soooo yes\nRyan: [reaction 😮 to: \"I have all of December off work... Soooo yes\"]\nRyan: [reaction ❤️ to: \"[GIF]\"]\nSean: Ah actually I need to check to make sure that's not the day I fly to Sydney.\nSean: Nope all good. Fly Thursday arvo. So as long as I'm not too fuckeyed to get myself to the airport the next day, I'm in 😅\nRyan: [reaction 👍 to: \"Nope all good. Fly Thursday arvo. So as long as I'm not too fuckeyed to get myse…\"]\nSean: Speaking of beers tho... Anyone up for a beer after work tomorrow?\nBob: I’m tragically no use for the actual beer, but I can provide remote heckling. 🥃\n## Pending unprocessed messages\nTrevor Lee: Yep I'm in\n## Decision\nShould Bob respond to the pending batch? Reply with the JSON decision object.",
+   "label": "STAND_DOWN"
+  },
+  {
+   "name": "ok_between_others_after_bob",
+   "context": "## Engagement state\nBob last spoke 1 message(s) ago (about 2 minutes ago).\n## Recent conversation\nBob: Forecast for Saturday is 24° and sunny.\nPerson B: Person A, can you grab the esky on the way?\n## Pending unprocessed messages\nPerson A: ok sure\n## Decision\nShould Bob respond to the pending batch? Reply with the JSON decision object.",
+   "label": "STAND_DOWN"
+  }
+ ]
 }

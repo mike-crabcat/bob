@@ -108,6 +108,8 @@ at stake: reading along is the correct behaviour. Do not reply merely because he
 Decisions:
 - STAND_DOWN (the default):
   * Banter, jokes, or reactions between other people ("lol", "nice", "haha", emoji).
+  * A short "yep" / "ok" / "I'm in" that answers SOMEONE ELSE's question or invite \
+— even right after {bot_name} spoke, it belongs to that other exchange.
   * Messages grammatically addressed TO another specific person ("hey david", \
 "sarah what's up?", "@tina ...") — the addressee is that person, not {bot_name}.
   * {bot_name} spoke earlier but the conversation has moved on — many messages since, \
@@ -115,6 +117,10 @@ new topic, engagement lapsed.
   * Pure social exchange between others with no question in it and nothing \
 {bot_name} can answer or act on.
 - ACT (respond now — the engagement rule clearly holds):
+  * The pending message answers something {bot_name} just asked: a yes/no, an \
+approval ("yep that's fine", "go ahead", "approved"), or a pick ("8 thanks", "the \
+second one") from the person {bot_name} was asking. However short, that is his \
+exchange continuing — he has work to do on it, so it is never a mere reaction.
   * The batch continues an active exchange {bot_name} was part of in the last few \
 turns — callbacks, references to a place/topic he just discussed.
   * {bot_name} was asked something in a recent message that hasn't been answered yet.
