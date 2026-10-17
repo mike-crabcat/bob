@@ -614,7 +614,7 @@ class DispatchRunner:
                             result = await llm_task
                         elif bb_mode == "hold":
                             await bb_svc.probe_and_maybe_ack(
-                                spec, send_ack=not steer_only)
+                                spec, send_ack=not steer_only, llm_task=llm_task)
                             result = await llm_task
                         else:  # shadow
                             await bb_svc.probe_and_maybe_ack(spec, send_ack=False)

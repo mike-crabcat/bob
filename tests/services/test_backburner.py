@@ -502,6 +502,40 @@ async def test_task_finishing_during_probe_never_detaches(ctx, bb, monkeypatch):
     assert await _subagent_rows(ctx) == []
 
 
+async def test_hold_ack_skipped_when_turn_finished_during_probe(ctx, bb, monkeypatch):
+    """hold mode got the same race as detach (2026-10-17 Bob Security Guard):
+    the turn finished 0.7 s after the watchdog, the probe then sent its ack
+    and the reply landed 20 ms later — two near-identical answers."""
+    from server.services.llm_dispatch import LLMDispatchService
+
+    async def _probe(self, messages, **kwargs):
+        return '{"summary": "s", "holding_text": "no sign of jamie yet"}'
+
+    monkeypatch.setattr(LLMDispatchService, "prompt", _probe)
+    await _seed_active_turn(ctx, "disp-hold-done")
+    acks: list[str] = []
+
+    async def _hold(text: str) -> None:
+        acks.append(text)
+
+    done_task = asyncio.create_task(asyncio.sleep(0))
+    await done_task
+    await BackburnerService(ctx).probe_and_maybe_ack(
+        _spec(hold=_hold, dispatch_id="disp-hold-done"), send_ack=True,
+        llm_task=done_task)
+    assert acks == []
+
+    running = asyncio.create_task(asyncio.sleep(5))
+    try:
+        await _seed_active_turn(ctx, "disp-hold-running")
+        await BackburnerService(ctx).probe_and_maybe_ack(
+            _spec(hold=_hold, dispatch_id="disp-hold-running"), send_ack=True,
+            llm_task=running)
+    finally:
+        running.cancel()
+    assert acks == ["no sign of jamie yet"]
+
+
 async def test_post_detach_send_delivers_attributed(ctx, bb):
     """v2: a flight's send DELIVERS (real effect emitted) and is attributed —
     history row with provenance bg_send + the task id, tee kept for the

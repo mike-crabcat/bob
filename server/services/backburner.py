@@ -570,9 +570,18 @@ class BackburnerService(BaseService):
     """Detach orchestration: probe/ack (shadow+hold modes) and the full
     detach sequence + supervisor (full mode)."""
 
-    async def probe_and_maybe_ack(self, spec: Any, *, send_ack: bool) -> dict[str, str] | None:
+    async def probe_and_maybe_ack(self, spec: Any, *, send_ack: bool,
+                                  llm_task: asyncio.Task[Any] | None = None,
+                                  ) -> dict[str, str] | None:
         """shadow/hold modes: run the probe, log it, optionally send the
-        holding ack — the turn keeps waiting inline (no detach)."""
+        holding ack — the turn keeps waiting inline (no detach).
+
+        ``llm_task`` is the running turn. If it finished while the probe ran
+        the ack is skipped: its reply is about to be delivered, and an ack
+        on top reads as a duplicate answer (2026-10-17 Bob Security Guard:
+        the turn finished 0.7 s after the 30 s watchdog, the probe sent
+        "no sign of jamie yet…" and the reply followed 20 ms later). The
+        same race guard detach() has had since 2026-08-31."""
         info = await run_probe(self.ctx, spec.dispatch_id,
                                session_key=spec.session_key, contact_id=spec.contact_id)
         logger.info(
@@ -580,6 +589,12 @@ class BackburnerService(BaseService):
             "summary=%r holding=%r source=%s",
             mode(self.ctx.settings), spec.session_key, spec.dispatch_id,
             info["summary"], info["holding_text"], info["source"])
+        if send_ack and llm_task is not None and llm_task.done():
+            logger.info(
+                "backburner[%s]: holding ack skipped — turn finished during "
+                "probe (session=%s, dispatch=%s)", mode(self.ctx.settings),
+                spec.session_key, spec.dispatch_id)
+            return info
         if send_ack and not spec.message_was_sent[0] and spec.hold_sender is not None:
             try:
                 await spec.hold_sender(info["holding_text"])
