@@ -872,9 +872,25 @@ class DispatchRunner:
             # turn that delivered nothing gets its payload sent by the
             # runner: silence on a must-speak turn is a misread, never
             # intent (the supervisor only wakes non-quiet results).
+            # Background-JOB exit wakes (2026-10-09) ride task_relay so a job's
+            # result reaches the chat, but an explicit NO_REPLY there is
+            # intent, not a misread: on 2026-10-17 the hourly radio bulletin
+            # job finished, the turn rightly said NO_REPLY, and this rescue
+            # posted the raw wake — internal instructions and all — to Bob's
+            # Pirate Radio. The rescue stays for flight relays and for job
+            # wakes that end with no text at all.
+            silent_by_choice = (
+                is_no_reply(result)
+                and await history_repo.relay_is_bg_job_exit(claimed_ids))
+            if silent_by_choice and "task_relay" in provenances and not spec.sent_texts:
+                logger.info(
+                    "relay dead-man: background-job wake answered NO_REPLY — "
+                    "silence kept (session=%s, dispatch=%s)",
+                    session_key, spec.dispatch_id)
             if ("task_relay" in provenances
                     and not spec.sent_texts
-                    and spec.send_tool_name):
+                    and spec.send_tool_name
+                    and not silent_by_choice):
                 payload = await history_repo.relay_payload(claimed_ids)
                 if payload:
                     send_tool = next(

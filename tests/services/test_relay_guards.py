@@ -158,6 +158,49 @@ async def test_relay_no_reply_dead_man_delivers_payload(
         "Reply sent to Andrew with the deep-dive sources: METR report et al."]
 
 
+_BULLETIN_WAKE = (
+    "[bg process news-bulletin-20261017-11] exit_code=0 result=success\n"
+    "queued announcement, airs after the current item (queue now 1 deep): "
+    "\u201cIt\u2019s 11am Perth time. You\u2019re listening to Bob\u2019s Pirate Radio. "
+    "Here\u2019s the news. T\u201d\n\n"
+    "This background process you started has finished. If it produced an "
+    "artifact the user asked for, send it now. If it failed, tell the user "
+    "plainly and decide whether to retry.\n\n"
+    "Your final text is POSTED to this chat. Images or files must go out with "
+    "send_whatsapp_message(media_path=\u2026) \u2014 text alone can't attach "
+    "anything, so never say 'attached' without sending it.")
+
+
+async def test_bg_job_wake_no_reply_stays_silent(ctx, db, stub_llm, stub_history):
+    """2026-10-17 Bob's Pirate Radio: the hourly bulletin job finished, the
+    woken turn rightly answered NO_REPLY, and the dead-man rescue posted the
+    raw wake — internal instructions included — to the group."""
+    key = "test:relay:bgjob-silent"
+    await SessionService(ctx).add_message(
+        key, "user", _BULLETIN_WAKE, dispatched=0, provenance="task_relay",
+        metadata={"bg_job_id": 230, "bg_job_name": "news-bulletin-20261017-11"})
+    spec, send_tool = _spec(key)
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert send_tool.delivered == []
+
+
+async def test_bg_job_wake_with_no_text_still_rescued(ctx, db, stub_llm, stub_history):
+    """Only an explicit NO_REPLY is intent — a job wake whose turn returns
+    nothing at all is still the swallowed-result case the rescue exists for."""
+    stub_llm["reply"] = ""
+    key = "test:relay:bgjob-empty"
+    await SessionService(ctx).add_message(
+        key, "user", "[bg process build-42] exit_code=0 result=success\nrender.png written",
+        dispatched=0, provenance="task_relay", metadata={"bg_job_id": 42})
+    spec, send_tool = _spec(key)
+
+    await DispatchRunner(ctx).run(spec)
+
+    assert len(send_tool.delivered) == 1
+
+
 async def test_relay_delivered_turn_no_dead_man(
         ctx, db, stub_llm, stub_history):
     """A fallback turn that speaks (via the normal rescue) must not ALSO get

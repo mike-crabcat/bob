@@ -446,6 +446,20 @@ class HistoryRepository:
             tuple(message_ids))
         return [str(r["provenance"] or "") for r in rows]
 
+    async def relay_is_bg_job_exit(self, message_ids: list[str]) -> bool:
+        """True when the newest task_relay row among a dispatch's claimed ids
+        is a background-JOB exit wake (process_tools._deliver_exit_wake
+        stamps metadata.bg_job_id), not a backburner flight relay."""
+        if not message_ids:
+            return False
+        marks = ",".join("?" for _ in message_ids)
+        row = await self.db.fetch_one(
+            f"SELECT json_extract(metadata, '$.bg_job_id') AS job FROM messages "
+            f"WHERE id IN ({marks}) AND provenance = 'task_relay' "
+            "ORDER BY created_at DESC LIMIT 1",
+            tuple(message_ids))
+        return bool(row and row["job"] is not None)
+
     async def relay_payload(self, message_ids: list[str]) -> str:
         """Newest task_relay row among a dispatch's claimed ids, trimmed of
         the relay boilerplate — the fallback body for the dispatch runner's
